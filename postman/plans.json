@@ -1,0 +1,172 @@
+{
+  "info": {
+    "name": "Workout Plans (Single-Entity JSONB)",
+    "_postman_id": "36b62f9d-7a08-44f0-9dd4-6d8100c1babc",
+    "description": "Endpoints for creating, reading, activating, and patching workout plans stored as JSONB.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Create Plan (from weekly seed)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+          { "key": "Content-Type", "value": "application/json", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans" ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Push/Pull – Week 1\",\n  \"userId\": \"{{userId}}\",\n  \"coachId\": \"{{coachId}}\",\n  \"active\": true,\n  \"metadata\": { \"phase\": 1, \"goal\": \"hypertrophy\" },\n  \"weekly\": {\n    \"saturday\": {\n      \"id\": \"saturday\",\n      \"name\": \"Push Day 1 (Chest & Triceps)\",\n      \"exercises\": [\n        { \"id\":\"ex1\",\"name\":\"Machine Flat Chest Press\",\"targetSets\":3,\"targetReps\":\"8\",\"rest\":90,\"img\":\"/uploads/20/container/img-1.png\",\"video\":\"/uploads/20/container/vid-1.mp4\",\"desc\":\"Flat chest press on the machine.\" },\n        { \"id\":\"ex2\",\"name\":\"Cable Crossover Press\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":75,\"img\":\"/uploads/55/container/img-1.png\",\"video\":\"/uploads/55/container/vid-1.mp4\",\"desc\":\"Cable machine crossover press.\" },\n        { \"id\":\"ex3\",\"name\":\"Machine Incline Chest Press\",\"targetSets\":3,\"targetReps\":\"12\",\"rest\":90,\"img\":\"/uploads/27/container/img-1.png\",\"video\":\"/uploads/27/container/vid-1.mp4\",\"desc\":\"Incline chest press on the machine.\" },\n        { \"id\":\"ex4\",\"name\":\"Dumbbell Lateral Raises\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":60,\"img\":\"/uploads/79/container/img-1.png\",\"video\":\"/uploads/79/container/vid-1.mp4\",\"desc\":\"Dumbbell lateral raises.\" },\n        { \"id\":\"ex5\",\"name\":\"Tricep Pushdown Rope\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":60,\"img\":\"/uploads/56/container/img-1.png\",\"video\":\"/uploads/56/container/vid-1.mp4\",\"desc\":\"Tricep pushdown using rope attachment.\" },\n        { \"id\":\"ex6\",\"name\":\"Tricep Extension V Bar\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":60,\"img\":\"/uploads/154/container/img-1.png\",\"video\":\"/uploads/154/container/vid-1.mp4\",\"desc\":\"Tricep extension with V bar.\" }\n      ]\n    },\n    \"sunday\": {\n      \"id\": \"sunday\",\n      \"name\": \"Pull Day 1 (Back & Biceps)\",\n      \"exercises\": [\n        { \"id\":\"ex7\",\"name\":\"Machine Wide Grip Row\",\"targetSets\":3,\"targetReps\":\"8\",\"rest\":90,\"img\":\"/uploads/118/container/img-1.png\",\"video\":\"/uploads/118/container/vid-1.mp4\",\"desc\":\"Wide grip row on machine.\" },\n        { \"id\":\"ex8\",\"name\":\"Seated Row Close Grip\",\"targetSets\":3,\"targetReps\":\"12\",\"rest\":90,\"img\":\"/uploads/118/container/img-1.png\",\"video\":\"/uploads/118/container/vid-1.mp4\",\"desc\":\"Seated row with close grip.\" },\n        { \"id\":\"ex9\",\"name\":\"Lat Pulldown\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":90,\"img\":\"/uploads/117/container/img-1.png\",\"video\":\"/uploads/117/container/vid-1.mp4\",\"desc\":\"Lat pulldown on machine.\" },\n        { \"id\":\"ex10\",\"name\":\"Reverse Fly Machine\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":90,\"img\":\"/uploads/216/container/img-1.png\",\"video\":\"/uploads/216/container/vid-1.mp4\",\"desc\":\"Reverse fly machine.\" },\n        { \"id\":\"ex11\",\"name\":\"Cable Biceps Curl\",\"targetSets\":3,\"targetReps\":\"15\",\"rest\":60,\"img\":\"/uploads/156/container/img-1.png\",\"video\":\"/uploads/156/container/vid-1.mp4\",\"desc\":\"Cable bicep curls.\" },\n        { \"id\":\"ex12\",\"name\":\"Wide Grip Barbell Shrugs\",\"targetSets\":2,\"targetReps\":\"15\",\"rest\":60,\"img\":\"/uploads/38/container/img-1.png\",\"video\":\"/uploads/38/container/vid-1.mp4\",\"desc\":\"Wide grip barbell shrugs.\" },\n        { \"id\":\"ex13\",\"name\":\"Back Extension\",\"targetSets\":4,\"targetReps\":\"20\",\"rest\":90,\"img\":\"/fitness/back-extension.jpg\",\"video\":\"https://example.com/back-extension\",\"desc\":\"Back extension on machine.\" }\n      ]\n    }\n  }\n}\n"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "let json;",
+              "try { json = pm.response.json(); } catch (e) { json = null; }",
+              "if (json && json.id) {",
+              "  pm.collectionVariables.set('planId', json.id);",
+              "}",
+              "if (json && json.program && json.program.days && json.program.days.length) {",
+              "  const d0 = json.program.days[0];",
+              "  if (d0 && d0.id) pm.collectionVariables.set('dayId', d0.id);",
+              "  if (d0 && d0.exercises && d0.exercises[0]) pm.collectionVariables.set('exerciseId', d0.exercises[0].id);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get Active Plan (by userId)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/active?userId={{userId}}",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "active" ],
+          "query": [
+            { "key": "userId", "value": "{{userId}}" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Plan by ID",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/{{planId}}",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "{{planId}}" ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Set Plan Active / Inactive",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+          { "key": "Content-Type", "value": "application/json", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/{{planId}}/active",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "{{planId}}", "active" ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"isActive\": true\n}\n"
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Patch Exercise Media (img/video/desc)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+          { "key": "Content-Type", "value": "application/json", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}/exercise/{{exerciseId}}/media",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "{{planId}}", "day", "{{dayId}}", "exercise", "{{exerciseId}}", "media" ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"img\": \"/uploads/updated/path.png\",\n  \"video\": \"https://cdn.example.com/vids/updated.mp4\",\n  \"desc\": \"Updated description here\"\n}\n"
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Reorder Exercises in Day",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+          { "key": "Content-Type", "value": "application/json", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}/reorder",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "{{planId}}", "day", "{{dayId}}", "reorder" ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ids\": [\"ex4\", \"ex1\", \"ex2\", \"ex3\", \"ex5\", \"ex6\"]\n}\n"
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Replace Day Payload",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+          { "key": "Content-Type", "value": "application/json", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}",
+          "host": [ "{{baseUrl}}" ],
+          "path": [ "plans", "{{planId}}", "day", "{{dayId}}" ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"saturday\",\n  \"name\": \"Push Day 1 (Chest, Triceps) — Updated\",\n  \"exercises\": [\n    { \"id\":\"ex1\",\"name\":\"Machine Flat Chest Press\",\"targetSets\":4,\"targetReps\":\"6-8\",\"rest\":120,\"img\":null,\"video\":null,\"desc\":\"Heavier sets.\",\"gallery\":[],\"sort\":0 },\n    { \"id\":\"ex4\",\"name\":\"Dumbbell Lateral Raises\",\"targetSets\":3,\"targetReps\":\"12-15\",\"rest\":60,\"img\":null,\"video\":null,\"desc\":null,\"gallery\":[],\"sort\":1 }\n  ]\n}\n"
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8018/api/v1" },
+    { "key": "authToken", "value": "accessToken" },
+    { "key": "userId", "value": "00000000-0000-0000-0000-000000000001" },
+    { "key": "coachId", "value": "00000000-0000-0000-0000-000000000002" },
+    { "key": "planId", "value": "" },
+    { "key": "dayId", "value": "saturday" },
+    { "key": "exerciseId", "value": "ex1" }
+  ]
+}

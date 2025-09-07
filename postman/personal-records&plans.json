@@ -1,0 +1,339 @@
+{
+  "info": {
+    "name": "fitness app",
+    "_postman_id": "b6d3a1ac-7f7d-423d-9b0e-1731a7ffab9a",
+    "description": "Collection for testing Personal Records API with multi-set per day and auto-generated UUIDs for sets.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Personal Records",
+      "items": [
+        {
+          "name": "Create Daily PR (multi-sets)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/prs", "host": ["{{baseUrl}}"], "path": ["prs"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"records\": [\n    { \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"weight\": 95, \"reps\": 6, \"done\": true, \"setNumber\": 2 }\n  ]\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": \"uuid-daily-record\",\n  \"userId\": \"uuid-user\",\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"records\": [\n    { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"id\": \"uuid-set-2\", \"weight\": 95, \"reps\": 6, \"done\": true, \"setNumber\": 2 }\n  ],\n  \"createdAt\": \"2025-09-07T10:00:00.000Z\",\n  \"updatedAt\": \"2025-09-07T10:00:00.000Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Upsert Single Set (attempt)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/prs/attempt", "host": ["{{baseUrl}}"], "path": ["prs", "attempt"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"set\": { \"weight\": 105, \"reps\": 3, \"done\": true, \"setNumber\": 3 }\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"id\": \"uuid-daily-record\",\n  \"userId\": \"uuid-user\",\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"records\": [\n    { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"id\": \"uuid-set-2\", \"weight\": 95, \"reps\": 6, \"done\": true, \"setNumber\": 2 },\n    { \"id\": \"uuid-set-3\", \"weight\": 105, \"reps\": 3, \"done\": true, \"setNumber\": 3 }\n  ],\n  \"createdAt\": \"2025-09-07T10:00:00.000Z\",\n  \"updatedAt\": \"2025-09-07T11:00:00.000Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List Daily Records",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/prs?exerciseName=Bench%20Press&from=2025-09-01&to=2025-09-30&sortBy=date&sortOrder=DESC",
+              "host": ["{{baseUrl}}"],
+              "path": ["prs"],
+              "query": [
+                { "key": "exerciseName", "value": "Bench Press" },
+                { "key": "from", "value": "2025-09-01" },
+                { "key": "to", "value": "2025-09-30" },
+                { "key": "sortBy", "value": "date" },
+                { "key": "sortOrder", "value": "DESC" }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"total\": 1,\n  \"items\": [\n    {\n      \"id\": \"uuid-daily-record\",\n      \"exerciseName\": \"Bench Press\",\n      \"date\": \"2025-09-07\",\n      \"records\": [\n        { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n        { \"id\": \"uuid-set-2\", \"weight\": 95, \"reps\": 6, \"done\": true, \"setNumber\": 2 },\n        { \"id\": \"uuid-set-3\", \"weight\": 105, \"reps\": 3, \"done\": true, \"setNumber\": 3 }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Daily Record by ID",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/prs/{{prId}}", "host": ["{{baseUrl}}"], "path": ["prs", "{{prId}}"] }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"id\": \"uuid-daily-record\",\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"records\": [\n    { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"id\": \"uuid-set-2\", \"weight\": 95, \"reps\": 6, \"done\": true, \"setNumber\": 2 },\n    { \"id\": \"uuid-set-3\", \"weight\": 105, \"reps\": 3, \"done\": true, \"setNumber\": 3 }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Daily Record (replace records)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/prs/{{prId}}", "host": ["{{baseUrl}}"], "path": ["prs", "{{prId}}"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"records\": [\n    { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"id\": \"uuid-set-2\", \"weight\": 97, \"reps\": 6, \"done\": true, \"setNumber\": 2 },\n    { \"id\": \"uuid-set-3\", \"weight\": 107, \"reps\": 2, \"done\": true, \"setNumber\": 3 }\n  ]\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"id\": \"uuid-daily-record\",\n  \"exerciseName\": \"Bench Press\",\n  \"date\": \"2025-09-07\",\n  \"records\": [\n    { \"id\": \"uuid-set-1\", \"weight\": 100, \"reps\": 5, \"done\": true, \"setNumber\": 1 },\n    { \"id\": \"uuid-set-2\", \"weight\": 97, \"reps\": 6, \"done\": true, \"setNumber\": 2 },\n    { \"id\": \"uuid-set-3\", \"weight\": 107, \"reps\": 2, \"done\": true, \"setNumber\": 3 }\n  ],\n  \"updatedAt\": \"2025-09-07T12:00:00.000Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete Daily Record",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/prs/{{prId}}", "host": ["{{baseUrl}}"], "path": ["prs", "{{prId}}"] }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{ \"ok\": true }"
+            }
+          ]
+        },
+        {
+          "name": "Stats - Overview",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/prs/stats/overview?windowDays=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["prs", "stats", "overview"],
+              "query": [{ "key": "windowDays", "value": "30" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"totals\": {\n    \"exercisesTracked\": 1,\n    \"attempts\": 3,\n    \"allTimePrs\": 1,\n    \"recentPrs\": 1,\n    \"currentStreakDays\": 2\n  },\n  \"bests\": [ { \"name\": \"Bench Press\", \"e1rm\": 120.5 } ],\n  \"improvements\": [ { \"name\": \"Bench Press\", \"recent_max\": 120.5, \"alltime_max\": 120.5, \"pct_change\": 0 } ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Stats - e1RM Series",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/prs/stats/e1rm-series?exerciseName=Bench%20Press&bucket=week&windowDays=90",
+              "host": ["{{baseUrl}}"],
+              "path": ["prs", "stats", "e1rm-series"],
+              "query": [
+                { "key": "exerciseName", "value": "Bench Press" },
+                { "key": "bucket", "value": "week" },
+                { "key": "windowDays", "value": "90" }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "[ { \"bucket\": \"2025-09-01\", \"e1rm\": 120.5 } ]"
+            }
+          ]
+        },
+        {
+          "name": "Stats - Top Sets",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/prs/stats/top-sets?exerciseName=Bench%20Press&top=3",
+              "host": ["{{baseUrl}}"],
+              "path": ["prs", "stats", "top-sets"],
+              "query": [
+                { "key": "exerciseName", "value": "Bench Press" },
+                { "key": "top", "value": "3" }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"byWeight\": [ { \"weight\": 107, \"reps\": 2, \"date\": \"2025-09-07\" } ],\n  \"byReps\": [ { \"weight\": 95, \"reps\": 7, \"date\": \"2025-09-07\" } ],\n  \"byE1rm\": [ { \"weight\": 107, \"reps\": 2, \"e1rm\": 120.5, \"date\": \"2025-09-07\" } ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "History - Attempts",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/prs/history?exerciseName=Bench%20Press",
+              "host": ["{{baseUrl}}"],
+              "path": ["prs", "history"],
+              "query": [{ "key": "exerciseName", "value": "Bench Press" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "[\n  { \"date\": \"2025-09-07\", \"weight\": 100, \"reps\": 5, \"e1rm\": 116.7, \"setIndex\": 1 },\n  { \"date\": \"2025-09-07\", \"weight\": 95, \"reps\": 6, \"e1rm\": 114, \"setIndex\": 2 },\n  { \"date\": \"2025-09-07\", \"weight\": 107, \"reps\": 2, \"e1rm\": 114.1, \"setIndex\": 3 }\n]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Plans",
+      "item": [
+        {
+          "name": "Create Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans", "host": ["{{baseUrl}}"], "path": ["plans"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Push Pull Week 1\",\n  \"userId\": \"{{userId}}\",\n  \"coachId\": \"{{coachId}}\",\n  \"active\": true,\n  \"weekly\": {\n    \"saturday\": {\n      \"id\": \"saturday\",\n      \"name\": \"Push Day 1 (Chest & Triceps)\",\n      \"exercises\": [\n        { \"id\":\"ex1\",\"name\":\"Machine Flat Chest Press\",\"targetSets\":3,\"targetReps\":\"8\",\"rest\":90 }\n      ]\n    }\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Active Plan",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}", "type": "text" }],
+            "url": {
+              "raw": "{{baseUrl}}/plans/active?userId={{userId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["plans", "active"],
+              "query": [{ "key": "userId", "value": "{{userId}}" }]
+            }
+          }
+        },
+        {
+          "name": "Set Plan Active",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/active", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "active"] },
+            "body": { "mode": "raw", "raw": "{ \"isActive\": true }" }
+          }
+        },
+        {
+          "name": "Patch Exercise Media",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}/exercise/{{exerciseId}}/media", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "day", "{{dayId}}", "exercise", "{{exerciseId}}", "media"] },
+            "body": { "mode": "raw", "raw": "{ \"img\": \"/uploads/new.png\", \"video\": \"https://cdn.example.com/new.mp4\", \"desc\": \"Updated exercise\" }" }
+          }
+        },
+        {
+          "name": "Reassign Plan",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/reassign", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "reassign"] },
+            "body": { "mode": "raw", "raw": "{ \"newUserId\": \"00000000-0000-0000-0000-0000000000AA\", \"newCoachId\": \"00000000-0000-0000-0000-0000000000BB\", \"setActiveForNewUser\": true }" }
+          }
+        },
+        {
+          "name": "Reorder Exercises",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}/reorder", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "day", "{{dayId}}", "reorder"] },
+            "body": { "mode": "raw", "raw": "{ \"ids\": [\"ex1\",\"ex2\",\"ex3\"] }" }
+          }
+        },
+        {
+          "name": "Replace Day",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "day", "{{dayId}}"] },
+            "body": { "mode": "raw", "raw": "{ \"id\": \"saturday\", \"dayOfWeek\": \"saturday\", \"name\": \"Push Day Updated\", \"exercises\": [{ \"id\":\"ex1\",\"name\":\"Flat Bench\",\"targetSets\":4,\"targetReps\":\"6-8\" }] }" }
+          }
+        },
+        {
+          "name": "Upsert Days (Add/Replace)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/days", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "days"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"replaceIfExists\": true,\n  \"days\": [\n    {\n      \"id\": \"monday\",\n      \"dayOfWeek\": \"monday\",\n      \"name\": \"Leg Day\",\n      \"exercises\": [\n        { \"id\":\"ex21\",\"name\":\"Squat\",\"targetSets\":4,\"targetReps\":\"6-10\",\"rest\":120 },\n        { \"id\":\"ex22\",\"name\":\"Leg Press\",\"targetSets\":3,\"targetReps\":\"10-12\",\"rest\":90 }\n      ]\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Day",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/plans/{{planId}}/day/{{dayId}}", "host": ["{{baseUrl}}"], "path": ["plans", "{{planId}}", "day", "{{dayId}}"] }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8081/api/v1" },
+    { "key": "prId", "value": "uuid-daily-record" }
+  ]
+}

@@ -10,9 +10,9 @@ import { LoggingValidationPipe } from 'common/translationPipe';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 import { UsersModule } from './user/user.module';
 import { AssetModule } from './asset/asset.module';
-import { WorkoutsModule } from './workouts/workouts.module';
 import { SessionsModule } from './sessions/sessions.module';
 import { PersonalRecordsModule } from './personal-records/personal-records.module';
+import { PlansModule } from './plans/plans.module';
 
 @Module({
   imports: [
@@ -42,9 +42,9 @@ import { PersonalRecordsModule } from './personal-records/personal-records.modul
     AuthModule,
     UsersModule,
     AssetModule,
-    WorkoutsModule,
     SessionsModule,
     PersonalRecordsModule,
+    PlansModule,
   ],
   controllers: [AppController],
   providers: [AppService, LoggingValidationPipe, QueryFailedErrorFilter],

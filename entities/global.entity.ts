@@ -23,6 +23,30 @@ export enum UserStatus {
   ACTIVE = 'active',
   SUSPENDED = 'suspended',
 }
+export interface ProgramExercise {
+  id: string; // client-side id
+  name: string;
+  desc?: string | null;
+  targetSets: number; // e.g. 3
+  targetReps: RepsPattern; // "8" | "12-15"
+  restSeconds?: number | null; // if null use user's default
+  img?: string | null; // URL
+  video?: string | null; // URL
+  gallery?: string[]; // extra media URLs
+  sort?: number; // order inside the day (0..n)
+}
+
+export interface ProgramDay {
+  id: string; // "saturday"
+  dayOfWeek: DayOfWeek; // enum for consistency
+  name: string; // "Push Day 1 (Chest & Triceps)"
+  exercises: ProgramExercise[];
+}
+
+export interface WeeklyProgram {
+  // store as array for stable ordering & simpler mapping
+  days: ProgramDay[]; // 0..6 items, each with a unique dayOfWeek
+}
 
 export type RepsPattern = string; // e.g. "8", "12-15", "1 minute"
 
@@ -115,36 +139,9 @@ export class UserCoach {
   @UpdateDateColumn() updatedAt!: Date;
 }
 
-@Entity('exercise_catalog')
-@Unique(['name'])
-export class Exercise {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
-
-  @Index()
-  @Column({ type: 'varchar', length: 200 })
-  name!: string;
-
-  @Column({ type: 'text', nullable: true })
-  desc!: string | null;
-
-  // Default media (your UI also shows per-plan overrides)
-  @Column({ type: 'text', nullable: true })
-  img!: string | null;
-
-  @Column({ type: 'text', nullable: true })
-  video!: string | null;
-
-  // Additional images/videos if you want (URLs)
-  @Column({ type: 'text', array: true, default: () => 'ARRAY[]::text[]' })
-  gallery!: string[];
-
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
-}
-
 @Entity('workout_plans')
-export class WorkoutPlan {
+@Unique(['userId', 'isActive']) // soft-guard: at most one active per user
+export class WorkoutPlan extends CoreEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
@@ -160,7 +157,6 @@ export class WorkoutPlan {
   @Column('uuid')
   userId!: string;
 
-  // Owner/editor coach — this is your authorization anchor
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'coachId' })
   coach!: User | null;
@@ -172,103 +168,13 @@ export class WorkoutPlan {
   @Column({ type: 'boolean', default: false })
   isActive!: boolean;
 
-  // e.g., {"goal":"hypertrophy","phase":1}
+  // Freeform plan meta (goal, phase, mesocycle, notes…)
   @Column({ type: 'jsonb', default: {} })
   metadata!: Record<string, any>;
 
-  @OneToMany(() => WorkoutDay, d => d.plan, {
-    cascade: ['insert', 'update'],
-    eager: true,
-  })
-  days!: WorkoutDay[];
-
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
-}
-
-@Entity('workout_days')
-@Unique(['plan', 'dayOfWeek'])
-export class WorkoutDay {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
-
-  @ManyToOne(() => WorkoutPlan, p => p.days, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'planId' })
-  plan!: WorkoutPlan;
-
-  @Index()
-  @Column('uuid')
-  planId!: string;
-
-  @Index()
-  @Column({ type: 'enum', enum: DayOfWeek })
-  dayOfWeek!: DayOfWeek;
-
-  @Column({ type: 'varchar', length: 200 })
-  name!: string; // e.g., "Push Day 1 (Chest & Triceps)"
-
-  @OneToMany(() => WorkoutExercise, ex => ex.day, {
-    cascade: ['insert', 'update'],
-    eager: true,
-  })
-  exercises!: WorkoutExercise[];
-
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
-}
-
-@Entity('workout_day_exercises')
-export class WorkoutExercise {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
-
-  @ManyToOne(() => WorkoutDay, d => d.exercises, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'dayId' })
-  day!: WorkoutDay;
-
-  @Index()
-  @Column('uuid')
-  dayId!: string;
-
-  // (Optional) link to global catalog item; can be null for ad-hoc custom exercises
-  @ManyToOne(() => Exercise, { nullable: true, onDelete: 'SET NULL' })
-  @JoinColumn({ name: 'exerciseId' })
-  exercise!: Exercise | null;
-
-  @Index()
-  @Column({ type: 'uuid', nullable: true })
-  exerciseId!: string | null;
-
-  // Inline name/desc/media — copied from catalog or customized by coach
-  @Index()
-  @Column({ type: 'varchar', length: 200 })
-  name!: string;
-
-  @Column({ type: 'text', nullable: true })
-  desc!: string | null;
-
-  @Column({ type: 'int', default: 3 })
-  targetSets!: number;
-
-  @Column({ type: 'varchar', length: 40, default: '10' })
-  targetReps!: RepsPattern;
-
-  @Column({ type: 'int', nullable: true })
-  restSeconds!: number | null; // if null, fall back to user's defaultRestSeconds
-
-  @Column({ type: 'text', nullable: true })
-  img!: string | null;
-
-  @Column({ type: 'text', nullable: true })
-  video!: string | null;
-
-  // Optional extra media (URLs). Postgres text[] is simple and fast.
-  @Column({ type: 'text', array: true, default: () => 'ARRAY[]::text[]' })
-  gallery!: string[];
-
-  // Sort order within the day
-  @Column({ type: 'int', default: 0 })
-  sort!: number;
+  @Index({ spatial: false })
+  @Column({ type: 'jsonb' })
+  program!: WeeklyProgram;
 
   @CreateDateColumn() createdAt!: Date;
   @UpdateDateColumn() updatedAt!: Date;
@@ -425,59 +331,52 @@ export class PersonalRecordAttempt {
   createdAt!: Date;
 }
 
-export type WeeklyProgramSeed = {
-  [k in DayOfWeek]?: {
-    id: string; // not stored, just for mapping
-    name: string;
-    exercises: Array<{
-      id: string;
-      name: string;
-      targetSets: number;
-      targetReps: RepsPattern;
-      rest: number | null; // seconds
-      img?: string;
-      video?: string;
-      desc?: string;
-      gallery?: string[];
-    }>;
-  };
-};
-
-export function buildPlanFromSeed(opts: { planName: string; userId: string; coachId?: string | null; weekly: WeeklyProgramSeed; active?: boolean }): WorkoutPlan {
-  const plan = new WorkoutPlan();
-  plan.name = opts.planName;
-  plan.userId = opts.userId;
-  plan.coachId = opts.coachId ?? null;
-  plan.isActive = !!opts.active;
-  plan.metadata = {};
-  plan.days = [];
-
+export function buildProgramFromSeed(
+  seed: Partial<
+    Record<
+      DayOfWeek,
+      {
+        id: string;
+        name: string;
+        exercises: Array<{
+          id: string;
+          name: string;
+          targetSets: number;
+          targetReps: RepsPattern;
+          rest?: number | null;
+          img?: string;
+          video?: string;
+          desc?: string;
+          gallery?: string[];
+        }>;
+      }
+    >
+  >,
+): WeeklyProgram {
   const order: DayOfWeek[] = [DayOfWeek.SATURDAY, DayOfWeek.SUNDAY, DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY];
 
+  const days: ProgramDay[] = [];
   for (const dow of order) {
-    const d = opts.weekly[dow];
+    const d = seed[dow];
     if (!d) continue;
 
-    const day = new WorkoutDay();
-    day.dayOfWeek = dow;
-    day.name = d.name;
-    day.exercises = d.exercises.map((ex, i) => {
-      const wex = new WorkoutExercise();
-      wex.name = ex.name;
-      wex.desc = ex.desc ?? null;
-      wex.targetSets = ex.targetSets ?? 3;
-      wex.targetReps = ex.targetReps ?? '10';
-      wex.restSeconds = Number.isFinite(ex.rest as any) ? (ex.rest as number) : null;
-      wex.img = ex.img ?? null;
-      wex.video = ex.video ?? null;
-      wex.gallery = ex.gallery ?? [];
-      wex.sort = i;
-      wex.exerciseId = null; // if you map to catalog later, set this
-      return wex;
+    days.push({
+      id: d.id,
+      dayOfWeek: dow,
+      name: d.name,
+      exercises: d.exercises.map((ex, i) => ({
+        id: ex.id,
+        name: ex.name,
+        desc: ex.desc ?? null,
+        targetSets: ex.targetSets ?? 3,
+        targetReps: ex.targetReps ?? '10',
+        restSeconds: Number.isFinite(ex.rest as any) ? (ex.rest as number) : null,
+        img: ex.img ?? null,
+        video: ex.video ?? null,
+        gallery: ex.gallery ?? [],
+        sort: i,
+      })),
     });
-
-    plan.days.push(day);
   }
-
-  return plan;
+  return { days };
 }
