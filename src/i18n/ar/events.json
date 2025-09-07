@@ -1,0 +1,451 @@
+{
+  "refresh_token_expired": "انتهت صلاحية رمز التحديث الخاص بك. الرجاء تسجيل الدخول مرة أخرى.",
+  "equipment": {
+    "not_found_for_venue": "لم يتم العثور على الجهاز برقم التعريف {serviceId} للمكان برقم التعريف {venueId}",
+    "updated": "تم التحديث بنجاح"
+  },
+  "period_already_reserved": "الفترة المحددة في تاريخ {date} محجوزة بالفعل.",
+  "otp_valid": "رمز التحقق صحيح.",
+  "price_must_be_Number": "يجب أن يكون السعر رقمًا صالحًا.",
+  "refresh_token_required": "رمز التحديث مطلوب.",
+  "code_must_be_unique": "يجب أن يكون الكود فريدًا.",
+  "website_settings_not_found": "إعدادات الموقع بالمعرف {id} غير موجودة.",
+  "service_not_exist": "الخدمة غير موجودة.",
+  "check_your_email_for_verification": "يرجى التحقق من بريدك الإلكتروني لتفعيل حسابك.",
+  "some_policies_not_found" : "بعض السياسات غير موجودة في قائمة السياسات",
+
+  "success": "تم التسجيل بنجاح!",
+
+  "otp_sent2": "تم إرسال OTP إلى بريدك الإلكتروني، يرجى التحقق من حسابك",
+  "user_not_found": "المستخدم غير موجود!",
+  "user_already_verified": "تم التحقق من المستخدم بالفعل!",
+  "account_verified_successfully": "تم التحقق من الحساب بنجاح. يمكنك الآن تسجيل الدخول.",
+  "user_not_found_repeat": "المستخدم غير موجود!",
+  "user_already_verified_or_invalid_request": "المستخدم تم التحقق منه بالفعل أو الطلب غير صالح!",
+  "new_otp_sent": "تم إرسال OTP جديدة إلى بريدك الإلكتروني. يرجى التحقق من حسابك.",
+
+  "startDateRequired": "تاريخ البداية مطلوب.",
+  "startDateMustBeDate": "يجب أن يكون تاريخ البداية تاريخًا صالحًا.",
+  "endDateRequired": "تاريخ النهاية مطلوب.",
+  "endDateMustBeDate": "يجب أن يكون تاريخ النهاية تاريخًا صالحًا.",
+
+  "pages_setting_empty": "يجب إدخال إعدادات الصفحات.",
+  "pages_setting_invalid_array": "إعدادات الصفحات يجب أن تكون مصفوفة.",
+  "pages_setting_invalid_object": "كل عنصر في إعدادات الصفحات يجب أن يكون كائنًا صحيحًا.",
+  "terms_conditions_empty": "يجب إدخال الشروط والأحكام.",
+  "terms_conditions_invalid_object": "يجب أن تكون الشروط والأحكام كائن JSON صحيح.",
+  "faq_empty": "يجب إدخال الأسئلة الشائعة.",
+  "faq_invalid_array": "الأسئلة الشائعة يجب أن تكون مصفوفة.",
+  "faq_invalid_object": "كل عنصر في الأسئلة الشائعة يجب أن يكون كائنًا صحيحًا.",
+
+  "model_id_invalid": "يجب أن يكون معرف النموذج رقمًا أو نصًا يمثل رقمًا.",
+  "model_id_required": "يجب إدخال معرف النموذج.",
+  "name_invalid": "يجب أن يكون الاسم نصًا.",
+  "name_required": "يجب إدخال الاسم.",
+  "file_name_invalid": "يجب أن يكون اسم الملف نصًا.",
+  "mime_type_invalid": "يجب أن يكون نوع MIME نصًا.",
+  "disk_invalid": "يجب أن يكون القرص نصًا.",
+  "size_invalid": "يجب أن يكون الحجم رقمًا أو نصًا يمثل رقمًا.",
+  "manipulations_invalid": "يجب أن يكون التعديلات كائن JSON صحيح.",
+  "custom_properties_invalid": "يجب أن تكون الخصائص المخصصة كائن JSON صحيح.",
+  "order_invalid": "يجب أن يكون الترتيب رقمًا أو نصًا يمثل رقمًا.",
+  "order_required": "يجب إدخال الترتيب.",
+  "folder_invalid": "يجب أن يكون المجلد نصًا.",
+  "folder_required": "يجب إدخال اسم المجلد.",
+  "collection_invalid": "يجب أن تكون المجموعة نصًا.",
+  "collection_required": "يجب إدخال اسم المجموعة.",
+
+  "feature_not_found": "الميزة ذات المعرف {featureId} غير موجودة.",
+  "feature_not_found_for_venue": "الميزة ذات المعرف {featureId} غير موجودة للقاعات ذات المعرف {venueId}.",
+  "feature_removed_from_venue": "تمت إزالة الميزة ذات المعرف {featureId} من القاعات ذات المعرف {venueId}.",
+  "feature_added_to_venue": "تمت إضافة الميزة ذات المعرف {featureId} إلى القاعات ذات المعرف {venueId}.",
+
+  "file_required": "الملف مطلوب.",
+  "media_not_found_by_id": "لم يتم العثور على الوسائط بالمعرف {id}.",
+  "media_not_found_by_filename": "لم يتم العثور على الوسائط باسم الملف {fileName}.",
+  "media_deleted_success": "تم حذف الوسائط بنجاح.",
+
+  "permissions_array_required": "يجب إدخال مصفوفة الأذونات.",
+  "permission_name_invalid": "يجب أن يكون اسم الإذن نصًا.",
+  "permission_name_required": "يجب إدخال اسم الإذن.",
+  "role_already_exists": "الدور ({name}) موجود بالفعل.",
+  "role_not_found": "الدور غير موجود.",
+  "role_name_unique": "يجب أن يكون اسم الدور فريدًا.",
+  "permissions_not_found": "بعض الأذونات غير موجودة.",
+  "invalid_permissions": "إذن واحد أو أكثر غير صالح.",
+
+  "permissions_already_exist": "بعض الأذونات موجودة بالفعل.",
+  "permission_name_unique": "يجب أن يكون اسم الإذن فريدًا.",
+
+  "role_required1": "يجب إدخال الدور.",
+  "role_invalid1": "يجب أن يكون الدور واحدًا من القيم المسموحة.",
+  "permissions_array_invalid": "يجب أن تكون الأذونات في شكل مصفوفة.",
+  "permission_must_be_number": "يجب أن يكون كل إذن رقمًا صحيحًا.",
+  "permission_ids_array_invalid": "يجب أن تكون معرفات الأذونات في شكل مصفوفة من الأرقام.",
+  "permission_ids_required": "يجب إدخال معرفات الأذونات.",
+  "permission_ids_min_size": "يجب إدخال معرف إذن واحد على الأقل.",
+  "permission_id_must_be_number": "يجب أن يكون كل معرف إذن رقمًا صحيحًا.",
+  "permission_id_must_be_positive": "يجب أن يكون كل معرف إذن رقمًا موجبًا.",
+  "date_range_overlap": "نطاق التاريخ يتداخل مع إدخال موجود لهذا المكان.",
+  "dateFromMustBeValid": "يجب أن يكون تاريخ البداية صالحًا",
+  "dateFromRequired": "تاريخ البداية مطلوب",
+  "dateToMustBeValid": "يجب أن يكون تاريخ النهاية صالحًا",
+  "dateToRequired": "تاريخ النهاية مطلوب",
+  "media_not_found": "الوسائط ذات المعرف {icon_media_id} غير موجودة.",
+  "policyNameMustBeObject": "يجب أن يكون اسم السياسة كائن JSON",
+  "policyNameRequired": "اسم السياسة مطلوب",
+  "policyDescriptionMustBeObject": "يجب أن يكون وصف السياسة كائن JSON",
+  "policyDescriptionRequired": "وصف السياسة مطلوب",
+  "policyIdMustBeNumber": "يجب أن يكون معرف السياسة رقمًا",
+  "policyIdRequired": "معرف السياسة مطلوب",
+
+  "events.feature_name_required": "يجب إدخال اسم الميزة.",
+  "events.feature_name_invalid": "اسم الميزة يجب أن يكون كائن JSON.",
+  "events.icon_media_id_invalid": "رقم تعريف الأيقونة يجب أن يكون رقمًا صحيحًا.",
+  "events.feature_id_required": "يجب إدخال رقم الميزة.",
+  "events.feature_id_invalid": "رقم الميزة يجب أن يكون رقمًا صحيحًا.",
+
+  "policy_not_found": "السياسة ذات المعرف {policy_id} غير موجودة.",
+  "policy_not_found_for_venue": "السياسة ذات المعرف {policyId} غير موجودة للمكان ذو المعرف {venueId}.",
+  "policy_removed_from_venue": "تمت إزالة السياسة ذات المعرف {policyId} من المكان ذو المعرف {venueId}.",
+
+  "user_not_exist": "المستخدم المحدد غير موجود.",
+  "venue_not_exist": "المكان المطلوب غير موجود.",
+  "package_not_exist": "الباقة المحددة غير متوفرة.",
+  "venue_already_reserved": "المكان محجوز بالفعل من {from_time} إلى {to_time} في {check_in}. يرجى اختيار وقت آخر.",
+
+  "venue_not_found2": "المكان ذو المعرف {venue_id} غير موجود.",
+  "userIdRequired": "معرف المستخدم مطلوب",
+  "userIdMustBeNumber": "يجب أن يكون معرف المستخدم رقمًا",
+  "venueIdRequired": "معرف القاعة مطلوب",
+  "venueIdMustBeNumber": "يجب أن يكون معرف القاعة رقمًا",
+  "questionMustBeObject": "يجب أن يكون السؤال كائن JSON",
+  "questionRequired": "السؤال مطلوب",
+  "answerMustBeObject": "يجب أن تكون الإجابة كائن JSON",
+  "answerRequired": "الإجابة مطلوبة",
+  "packageIdRequired": "معرف الباقة مطلوب",
+  "packageIdMustBeNumber": "يجب أن يكون معرف الباقة رقمًا",
+  "packageDetailsRequired": "تفاصيل الباقة مطلوبة",
+  "reservationStatusRequired": "حالة الحجز مطلوبة",
+  "invalidReservationStatus": "حالة الحجز غير صالحة",
+  "checkInDateRequired": "تاريخ تسجيل الدخول مطلوب",
+  "checkInMustBeDate": "يجب أن يكون تاريخ تسجيل الدخول تاريخًا صحيحًا",
+  "checkOutDateRequired": "تاريخ تسجيل الخروج مطلوب",
+  "checkOutMustBeDate": "يجب أن يكون تاريخ تسجيل الخروج تاريخًا صحيحًا",
+  "startTimeRequired": "وقت البدء مطلوب",
+  "startTimeMustBeString": "يجب أن يكون وقت البدء نصًا صالحًا بصيغة (HH:MM:SS)",
+  "endTimeRequired": "وقت الانتهاء مطلوب",
+  "endTimeMustBeString": "يجب أن يكون وقت الانتهاء نصًا صالحًا بصيغة (HH:MM:SS)",
+  "totalPriceRequired": "السعر الإجمالي مطلوب",
+  "totalPriceMustBeNumber": "يجب أن يكون السعر الإجمالي رقمًا",
+  "paymentMethodRequired": "طريقة الدفع مطلوبة",
+  "paymentMethodMustBeString": "يجب أن تكون طريقة الدفع نصًا صحيحًا",
+
+  "packageNameRequired": "اسم الباقة مطلوب",
+  "packageNameMustBeObject": "يجب أن يكون اسم الباقة كائنًا",
+
+  "serviceIdRequired": "معرف الخدمة مطلوب",
+  "serviceIdMustBeNumber": "يجب أن يكون معرف الخدمة رقمًا",
+  "priceRequired": "السعر مطلوب",
+  "priceMustBeNumber": "يجب أن يكون السعر رقمًا",
+
+  "equipment_not_found2": "المعدة المحددة غير موجودة.",
+  "package_not_found": "الباقة المحددة غير موجودة.",
+
+  "equipmentIdRequired": "معرف المعدة مطلوب",
+  "equipmentIdMustBeNumber": "يجب أن يكون معرف المعدة رقمًا",
+  "countRequired": "العدد مطلوب",
+  "countMustBeNumber": "يجب أن يكون العدد رقمًا",
+
+  ".": "لا يوجد مستخدم بهذا البريد الإلكتروني.",
+  "password_reset_link_sent": "تم إرسال رابط إعادة تعيين كلمة المرور إلى بريدك الإلكتروني.",
+  "password_mismatch": "كلمة المرور الجديدة وتأكيد كلمة المرور غير متطابقين.",
+  "password_reset_success": "تم إعادة تعيين كلمة المرور بنجاح.",
+  "email_already_exists": "البريد الإلكتروني موجود بالفعل.",
+  "invalid_credentials": "بيانات الاعتماد غير صالحة.",
+  "account_inactive": "حسابك غير نشط. يرجى الاتصال بالدعم.",
+  "invalid_email_or_password": "بريد إلكتروني أو كلمة مرور غير صالحة.",
+  "invalid_object_id": "هذا ليس معرف MongoDB صالحًا.",
+  "not_found_in_database": "هذا السجل غير موجود في قاعدة البيانات.",
+  "invalid_role": "دور غير صالح. يجب أن يكون الدور إما 'admin' أو 'user'.",
+  "invalid_status": "حالة غير صالحة. يجب أن تكون الحالة إما 'active' أو 'inActive'.",
+  "invalid_refresh_token": "رمز التحديث غير صالح.",
+  "._generic": "المستخدم غير موجود.",
+  "invalid_or_missing_token": "الرمز غير صالح أو مفقود.",
+  "invalid_token": "الرمز غير صالح.",
+  "sign_in_required": "يجب عليك تسجيل الدخول للوصول إلى هذا المسار.",
+  "permission_denied": "ليس لديك الصلاحية للوصول إلى هذا المورد.",
+  "invalid_or_expired_token": "الرمز غير صالح أو منتهي الصلاحية.",
+  "vendor_no_found": "البائع ذو المعرف {id} غير موجود.",
+  "vendor_deleted": "تم حذف البائع ذو المعرف {id} بنجاح.",
+  "user_inactive": "حسابك غير نشط حاليًا. يرجى الاتصال بالدعم للحصول على المساعدة.",
+  "phone_already_exists": "رقم الهاتف هذا موجود بالفعل.",
+  "try_after_5min": "يرجى الانتظار لمدة {remainingTime} ثانية قبل طلب رمز تحقق آخر.",
+  "otp_sent": "تم إرسال رمز التحقق إلى بريدك الإلكتروني. يرجى التحقق من صندوق الوارد.",
+  "invalid_or_expired_otp": "رمز التحقق غير صالح أو منتهي الصلاحية.",
+  "current_password_required": "كلمة المرور الحالية مطلوبة.",
+  "current_password_incorrect": "كلمة المرور الحالية غير صحيحة.",
+
+  "venue_not_found": "المكان المحدد غير موجود.",
+  "gallery_not_found": "المعرض ذو المعرف {id} غير موجود.",
+
+  "full_name": "يجب أن يكون الاسم الكامل نصًا.",
+  "full_name_required": "الاسم الكامل مطلوب.",
+  "email_invalid": "تنسيق البريد الإلكتروني غير صالح.",
+  "email_required": "البريد الإلكتروني مطلوب.",
+  "phone_required": "رقم الهاتف مطلوب.",
+  "password_invalid": "يجب أن تكون كلمة المرور نصًا.",
+  "password_required": "كلمة المرور مطلوبة.",
+  "role_invalid": "يجب أن يكون الدور واحدًا من التالي: ( مستخدم، فيندور , مشرف )",
+  "role_required": "الدور مطلوب.",
+  "status_invalid": "يجب أن تكون الحالة إما نشطة أو غير نشطة.",
+  "avatar_invalid": "يجب أن يكون الصورة الرمزية نصًا.",
+  "notFound": "هذا السجل بالمعرف  غير موجود.",
+
+  "venueIdMustBePositive": "يجب أن يكون معرف القاعة رقمًا موجبًا",
+  "imgsMustBeArray": "يجب أن تكون الصور في شكل مصفوفة",
+  "imgsMinOneRequired": "يجب تحميل صورة واحدة على الأقل",
+  "imgsMustBeString": "يجب أن يكون كل عنصر في المصفوفة نصًا (رابط URL)",
+
+  "validation": {
+    "name": { "minLength": "يجب أن يكون الاسم على الأقل 3 أحرف." },
+    "email": { "required": "البريد الإلكتروني مطلوب." },
+    "password": { "minLength": "يجب أن تكون كلمة المرور على الأقل 3 أحرف." },
+    "role": {
+      "invalid": "يجب أن تكون الصلاحية إما 'مدير' أو 'مستخدم'."
+    },
+    "status": {
+      "invalid": "يجب أن تكون الحالة إما 'مفعل' أو 'غير مفعل'."
+    },
+    "vendor": {
+      "multilingual": {
+        "en": "الحقل الإنجليزي يجب أن يكون نصًا.",
+        "ar": "الحقل العربي يجب أن يكون نصًا."
+      },
+      "property_name": {
+        "object": "اسم العقار يجب أن يكون كائنًا."
+      },
+      "occasion_type": {
+        "object": "نوع المناسبة يجب أن يكون كائنًا."
+      },
+      "operating_system": {
+        "string": "نظام التشغيل يجب أن يكون نصًا."
+      },
+      "joined_date": {
+        "date": "تاريخ الانضمام يجب أن يكون تاريخًا صالحًا."
+      },
+      "overall_revenue": {
+        "number": "إجمالي الإيرادات يجب أن يكون رقمًا."
+      },
+      "location": {
+        "object": "الموقع يجب أن يكون كائنًا.",
+        "string": "الموقع يجب أن يكون نصًا."
+      },
+      "address": {
+        "object": "العنوان يجب أن يكون كائنًا."
+      },
+      "mobile": {
+        "string": "رقم الجوال يجب أن يكون نصًا."
+      },
+      "email": {
+        "string": "البريد الإلكتروني يجب أن يكون نصًا."
+      },
+      "contact_person": {
+        "object": "الشخص المسؤول يجب أن يكون كائنًا."
+      }
+    },
+    "user": {
+      "name": {
+        "string": "يجب أن يكون الاسم نصًا.",
+        "minLength": "يجب أن يكون الاسم على الأقل 3 أحرف."
+      },
+      "email": {
+        "email": "صيغة البريد الإلكتروني غير صالحة."
+      },
+      "password": {
+        "string": "يجب أن تكون كلمة المرور نصًا.",
+        "minLength": "يجب أن تكون كلمة المرور على الأقل 3 أحرف."
+      },
+      "role": {
+        "enum": "يجب أن تكون الصلاحية إما 'admin' أو 'user'."
+      },
+      "avatar": {
+        "string": "يجب أن يكون الصورة الرمزية نصًا."
+      },
+      "status": {
+        "enum": "يجب أن تكون الحالة إما 'active' أو 'inactive'."
+      },
+      "phone": {
+        "string": "يجب أن يكون الهاتف نصًا."
+      },
+      "gender": {
+        "enum": "يجب أن يكون الجنس إما 'male' أو 'female' أو 'none'."
+      }
+    },
+    "finance": {
+      "vendorName.object": "يجب أن يكون vendorName كائنًا يحتوي على خصائص 'en' و 'ar'",
+      "vendorName.required": "vendorName مطلوب",
+      "balance.number": "يجب أن يكون balance رقمًا",
+      "balance.required": "balance مطلوب",
+      "balanceWithdrawn.number": "يجب أن يكون balanceWithdrawn رقمًا",
+      "balanceWithdrawn.required": "balanceWithdrawn مطلوب",
+      "remainingBalance.number": "يجب أن يكون remainingBalance رقمًا",
+      "remainingBalance.required": "remainingBalance مطلوب",
+      "bankName.string": "يجب أن يكون bankName نصًا",
+      "bankName.required": "bankName مطلوب",
+      "accountNumber.string": "يجب أن يكون accountNumber نصًا",
+      "accountNumber.required": "accountNumber مطلوب",
+      "iban.string": "يجب أن يكون iban نصًا",
+      "iban.required": "iban مطلوب",
+      "balanceAfterTransaction.number": "يجب أن يكون balanceAfterTransaction رقمًا",
+      "balanceAfterTransaction.required": "balanceAfterTransaction مطلوب",
+      "balanceBeforeTransaction.number": "يجب أن يكون balanceBeforeTransaction رقمًا",
+      "balanceBeforeTransaction.required": "balanceBeforeTransaction مطلوب",
+      "to.string": "يجب أن يكون to نصًا",
+      "to.required": "to مطلوب",
+      "invalid": "معلمات التقسيم غير صالحة. يجب أن تكون \"page\" و \"limit\" أرقامًا موجبة.",
+      "deleted": "تم حذف سجل التمويل بالمعرف {id} بنجاح."
+    },
+    "date_required": "التاريخ مطلوب.",
+    "venue_name_required": "اسم المكان مطلوب.",
+    "event_type_required": "نوع الحدث مطلوب.",
+    "booking_price_required": "سعر الحجز مطلوب.",
+    "venue_name_error": "يجب أن يكون اسم المكان نصًا وأقل من 100 حرف.",
+    "event_type_error": "يجب أن يكون نوع الحدث نصًا وأقل من 50 حرفًا.",
+    "booking_price_error": "يجب أن يكون سعر الحجز رقمًا موجبًا."
+  },
+
+  "user_id_integer": "يجب أن يكون معرف المستخدم رقمًا صحيحًا.",
+  "user_id_required": "معرف المستخدم مطلوب.",
+  "vendor_id_integer": "يجب أن يكون معرف البائع رقمًا صحيحًا.",
+  "code_string": "يجب أن يكون الكود نصًا.",
+  "code_required": "الكود مطلوب.",
+  "description_string": "يجب أن يكون الوصف نصًا.",
+  "description_required": "الوصف مطلوب.",
+  "invalid_status_in_tickets": "قيمة الحالة غير صالحة.",
+  "body_string": "يجب أن يكون المحتوى نصًا.",
+  "body_required": "المحتوى مطلوب.",
+  "user.not_found": "المستخدم المحدد غير موجود.",
+  "vendor.not_found": "المورد المحدد غير موجود.",
+  "record.not_found": "السجل بالمعرف المحدد غير موجود.",
+  "field_not_found": "الحقل {field} غير موجود في الكيان هذا.",
+  "duplicate_key": "قيمة مفتاح مكررة تنتهك القيد الفريد.",
+  "record_exists": "سجل موجود بالفعل بنفس المفتاح الأساسي.",
+  "invalid_pagination": "معلمات الترقيم غير صالحة.",
+  "invalid_sort_order": "يمكن أن يكون sortOrder فقط ASC أو DESC.",
+  "non_existent_fields": "الحقل/الحقول التالية غير موجودة في قاعدة البيانات: {fields}.",
+  "non_existent_relation_fields": "الحقل/الحقول التالية غير موجودة في قاعدة البيانات: {fields}، هذا علاقة.",
+  "invalid_enum_value": "قيمة غير صالحة للحقل {field}. القيم المسموح بها: {values}.",
+  "invalid_relations": "علاقات غير صالحة: {relations}.",
+  "invalid_sort_by": "حقل sortBy غير صالح: {sortBy}.",
+  "invalid_exclude_fields": "حقول غير صالحة في fieldsExclude: {fields}.",
+  "record_not_found": "السجل ذو المعرف {id} غير موجود.",
+  "record_deleted": "تم حذف السجل ذو المعرف {id} بنجاح.",
+
+  "vendor_not_found": "لم يتم العثور على البائع بالمعرف {vendor_id}.",
+  "only_vendors_can_create": "يمكن للبائعين فقط إنشاء العقارات.",
+  "city_not_found": "لم يتم العثور على المدينة بالمعرف {city_id}.",
+  "property_not_found": "لم يتم العثور على العقار بالمعرف {id}.",
+  "country_name_unique": "يجب أن يكون اسم الدولة فريدًا.",
+  "country_name_unique_with_value": "يجب أن يكون اسم الدولة ({name}) فريدًا.",
+  "countries_added": "تمت إضافة {count} دولة بنجاح.",
+  "city_name_unique": "اسم المدينة ( {cityName} ) يجب أن يكون فريدًا.",
+  "city_country_not_found": "الدولة التي تحمل هذا المعرف ( {countryId} ) غير موجودة.",
+  "cities_added_successfully": "تم إضافة {citiesCount} مدينة بنجاح.",
+  "cannot_delete_or_update": "لا يمكن حذف أو تحديث هذا السجل لأنه مُرتبط بسجلات أخرى.",
+  "unexpected_database_error": "حدث خطأ غير متوقع في قاعدة البيانات.",
+
+  "city.name_string": "يجب أن يكون الاسم نص.",
+  "city.name_required": "الاسم مطلوب.",
+  "city.country_id_required": "معرف البلد مطلوب.",
+  "city.cities_array": "يجب أن تكون المدن مصفوفة.",
+  "country.name_string": "يجب أن يكون الاسم سلسلة نصية.",
+  "country.name_required": "الاسم مطلوب.",
+  "country.description_string": "يجب أن تكون الوصف سلسلة نصية.",
+
+  "property.name_valid_object": "يجب أن يكون الاسم كائنًا صالحًا.",
+  "property.name_required": "الاسم مطلوب.",
+  "property.description_valid_object": "يجب أن يكون الوصف كائنًا صالحًا.",
+  "property.description_required": "الوصف مطلوب.",
+  "property.file_string": "يجب أن يكون الملف سلسلة نصية.",
+  "property.file_required": "الملف مطلوب.",
+  "property.vendor_id_number": "يجب أن يكون معرف البائع رقمًا.",
+  "property.vendor_id_required": "معرف البائع مطلوب.",
+  "property.city_id_number": "يجب أن يكون معرف المدينة رقمًا.",
+  "property.city_id_required": "معرف المدينة مطلوب.",
+  "property.venue_id_number": "يجب أن يكون معرف المكان رقمًا.",
+  "missing_table_in_from_clause": "الاستعلام يفتقد إلى جدول ضروري في جملة FROM. يرجى التأكد من تضمين جميع الجداول المرجعية.",
+
+  "venue.occasion_type_not_found": "نوع المناسبة غير موجود",
+  "venue.property_not_found": "العقار غير موجود",
+  "venue.venue_not_found": "المكان بالمعرف {id} غير موجود",
+  "venue.venue_not_found_by_id": "المكان بالمعرف {venueId} غير موجود",
+  "venue.feature_not_found": "الميزة بالمعرف {featureId} غير موجودة",
+
+  "venue_name_invalid": "اسم المكان غير صالح.",
+  "venue_description_invalid": "وصف المكان غير صالح.",
+  "venue_operating_system_invalid": "نظام التشغيل غير صالح.",
+  "venue_lat_invalid": "يجب أن تكون إحداثيات العرض عددًا.",
+  "venue_lng_invalid": "يجب أن تكون إحداثيات الطول عددًا.",
+  "venue_phone_invalid": "رقم الهاتف غير صالح.",
+  "venue_email_invalid": "البريد الإلكتروني غير صالح.",
+  "venue_contact_person_invalid": "الشخص المسؤول غير صالح.",
+  "venue_opens_at_invalid": "وقت الافتتاح غير صالح.",
+  "venue_closes_at_invalid": "وقت الإغلاق غير صالح.",
+  "venue_area_invalid": "المساحة يجب أن تكون عددًا.",
+  "venue_max_capacity_invalid": "السعة القصوى يجب أن تكون عددًا.",
+  "venue_min_capacity_invalid": "السعة الدنيا يجب أن تكون عددًا.",
+  "venue_is_fixed_setup_invalid": "يجب أن يكون خيار الإعداد الثابت قيمة منطقية.",
+  "venue_u_shape_invalid": "يجب أن يكون خيار الشكل U قيمة منطقية.",
+  "venue_theatre_style_invalid": "يجب أن يكون خيار نمط المسرح قيمة منطقية.",
+  "venue_round_table_invalid": "يجب أن يكون خيار الطاولة المستديرة قيمة منطقية.",
+  "venue_classroom_invalid": "يجب أن يكون خيار الفصل الدراسي قيمة منطقية.",
+  "venue_property_id_invalid": "يجب أن يكون معرف الملكية موجودًا ويجب أن يكون عددًا.",
+  "occasion_type_id_invalid": "يجب أن يكون معرف نوع المناسبة موجودًا ويجب أن يكون عددًا.",
+
+  "service_name_invalid": "اسم الخدمة غير صالح",
+  "service_name_required": "اسم الخدمة مطلوب",
+  "service_icon_invalid": "معرف الأيقونة غير صالح",
+  "venue_package_service_invalid": "معرف خدمة الباقة غير صالح",
+  "service_is_predefined_invalid": "القيمة غير صالحة لمعرف الخدمة",
+  "service_id_invalid": "معرف الخدمة غير صالح",
+  "service_id_required": "معرف الخدمة مطلوب",
+  "service_price_invalid": "السعر غير صالح",
+  "service_price_required": "السعر مطلوب",
+  "venue_id_invalid": "معرف القاعة غير صالح",
+  "venue_id_required": "معرف القاعة مطلوب",
+  "media.not_found": "الوسائط بالمعرف {id} غير موجودة.",
+  "venue": {
+    "not_found": "القاعة بالمعرف {id} غير موجودة"
+  },
+  "service": {
+    "not_found": "الخدمة بالمعرف {id} غير موجودة",
+    "not_found_for_venue": "الخدمة بالمعرف {serviceId} غير موجودة للقاعة بالمعرف {venueId}",
+    "removed_from_venue": "تمت إزالة الخدمة بالمعرف {serviceId} من القاعة بالمعرف {venueId}",
+    "already_associated": "هذه الخدمة مرتبطة بالفعل بسجل موجود. معرف الخدمة: {serviceId}, معرف المكان: {venueId}."
+  },
+
+  "createequipment": {
+    "name": "يجب أن يكون الاسم كائنًا صالحًا.",
+    "icon_media_id": "يجب أن يكون معرف الأيقونة رقمًا.",
+    "is_predefined": "يجب أن تكون العلامة مسبقة التعريف قيمة منطقية."
+  },
+  "addequipment": {
+    "equipment_id": "يجب أن يكون معرف المعدات رقمًا.",
+    "equipment_id_required": "معرف المعدات مطلوب.",
+    "count": "يجب أن تكون الكمية رقمًا.",
+    "count_required": "الكمية مطلوبة.",
+    "price": "يجب أن يكون السعر رقمًا.",
+    "price_required": "السعر مطلوب.",
+    "price_per": "يجب أن يكون السعر لكل وحدة نصًا.",
+    "price_per_required": "السعر لكل وحدة مطلوب."
+  },
+
+  "equipment_not_found": "لم يتم العثور على المعدات بالمعرف {equipmentId}",
+  "venue_equipment_not_found": "لم يتم العثور على تجهيزات القاعة بالمعرف {id}",
+  "venue_equipment_deleted": "تم حذف تجهيزات القاعة بالمعرف {id} بنجاح.",
+  "occasion_type": {
+    "name_required": "يجب ألا يكون الاسم فارغًا.",
+    "name_invalid": "يجب أن يكون الاسم كائن JSON."
+  }
+}

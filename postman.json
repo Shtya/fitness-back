@@ -1,0 +1,329 @@
+{
+  "info": {
+    "_postman_id": "6f7a7e9a-7e83-4c13-9e2a-collection-mw",
+    "name": "MW Fitness API (Users/Workouts/Sessions/PRs)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Postman collection for Users, Workouts, Sessions, and PRs endpoints."
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Mohammed Shat\",\n  \"email\": \"mohammed@example.com\",\n  \"password\": \"Secret123!\",\n  \"role\": \"client\",\n  \"defaultRestSeconds\": 90\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Login succeeded', function () {", "  pm.response.to.have.status(200);", "});", "try {", "  const json = pm.response.json();", "  if (json.accessToken) pm.environment.set('accessToken', json.accessToken);", "  if (json.refreshToken) pm.environment.set('refreshToken', json.refreshToken);", "  if (json.user && json.user.id) pm.environment.set('userId', json.user.id);", "} catch (e) {}"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"mohammed@example.com\",\n  \"password\": \"Secret123!\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          }
+        },
+        {
+          "name": "Refresh Tokens",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Refresh tokens succeeded', function () {", "  pm.response.to.have.status(200);", "});", "try {", "  const json = pm.response.json();", "  if (json.accessToken) pm.environment.set('accessToken', json.accessToken);", "  if (json.refreshToken) pm.environment.set('refreshToken', json.refreshToken);", "} catch (e) {}"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] }
+          }
+        },
+        {
+          "name": "Me (Current User)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] }
+          }
+        },
+        {
+          "name": "Update Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Dr. Mohammed Shat\",\n  \"defaultRestSeconds\": 120,\n  \"activePlanId\": null\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/profile", "host": ["{{baseUrl}}"], "path": ["auth", "profile"] }
+          }
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"mohammed@example.com\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/forgot-password", "host": ["{{baseUrl}}"], "path": ["auth", "forgot-password"] }
+          }
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"mohammed@example.com\",\n  \"otp\": \"123456\",\n  \"newPassword\": \"NewSecret123!\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/reset-password", "host": ["{{baseUrl}}"], "path": ["auth", "reset-password"] }
+          }
+        },
+        {
+          "name": "Protected (example)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/auth/protected", "host": ["{{baseUrl}}"], "path": ["auth", "protected"] }
+          }
+        },
+        {
+          "name": "Admin • List Users",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/auth/users?page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "users"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Admin • Delete User",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/auth/user/{{userId}}", "host": ["{{baseUrl}}"], "path": ["auth", "user", "{{userId}}"] }
+          }
+        },
+        {
+          "name": "Admin • Set Status",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"active\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/status/{{userId}}", "host": ["{{baseUrl}}"], "path": ["auth", "status", "{{userId}}"] }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/auth/logout", "host": ["{{baseUrl}}"], "path": ["auth", "logout"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "GET /users/me",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "url": { "raw": "{{baseUrl}}/users/me", "host": ["{{baseUrl}}"], "path": ["users", "me"] }
+          }
+        },
+        {
+          "name": "PATCH /users/me  (update defaultRestSeconds)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"defaultRestSeconds\": 120\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/users/me", "host": ["{{baseUrl}}"], "path": ["users", "me"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Workouts",
+      "item": [
+        {
+          "name": "GET /workouts/active-plan  (client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "url": { "raw": "{{baseUrl}}/workouts/active-plan", "host": ["{{baseUrl}}"], "path": ["workouts", "active-plan"] }
+          }
+        },
+        {
+          "name": "GET /workouts/plans/of/:clientId  (coach/admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workouts/plans/of/{{clientId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["workouts", "plans", "of", "{{clientId}}"]
+            }
+          }
+        },
+        {
+          "name": "POST /workouts/plan/seed  (coach/admin) — build from weeklyProgram",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"planName\": \"Coach Plan • Sep 2025\",\n  \"userId\": \"{{clientId}}\",\n  \"coachId\": \"{{coachId}}\",\n  \"active\": true,\n  \"weekly\": {\n    \"saturday\": {\n      \"id\": \"saturday\",\n      \"name\": \"Push Day 1 (Chest & Triceps)\",\n      \"exercises\": [\n        {\n          \"id\": \"ex1\",\n          \"name\": \"Machine Flat Chest Press\",\n          \"targetSets\": 3,\n          \"targetReps\": \"8\",\n          \"rest\": 90,\n          \"img\": \"/uploads/20/container/img-1.png\",\n          \"video\": \"/uploads/20/container/vid-1.mp4\",\n          \"desc\": \"Flat chest press on the machine.\",\n          \"gallery\": []\n        },\n        {\n          \"id\": \"ex2\",\n          \"name\": \"Cable Crossover Press\",\n          \"targetSets\": 3,\n          \"targetReps\": \"15\",\n          \"rest\": 75,\n          \"img\": \"/uploads/55/container/img-1.png\",\n          \"video\": \"/uploads/55/container/vid-1.mp4\",\n          \"desc\": \"Cable machine crossover press.\",\n          \"gallery\": []\n        }\n      ]\n    },\n    \"sunday\": {\n      \"id\": \"sunday\",\n      \"name\": \"Pull Day 1 (Back & Biceps)\",\n      \"exercises\": [\n        {\n          \"id\": \"ex7\",\n          \"name\": \"Machine Wide Grip Row\",\n          \"targetSets\": 3,\n          \"targetReps\": \"8\",\n          \"rest\": 90,\n          \"img\": \"/uploads/118/container/img-1.png\",\n          \"video\": \"/uploads/118/container/vid-1.mp4\",\n          \"desc\": \"Wide grip row on machine.\",\n          \"gallery\": []\n        }\n      ]\n    },\n    \"monday\": { \"id\": \"monday\", \"name\": \"Rest Day\", \"exercises\": [] },\n    \"tuesday\": {\n      \"id\": \"tuesday\",\n      \"name\": \"Leg Day\",\n      \"exercises\": [\n        {\n          \"id\": \"ex14\",\n          \"name\": \"Leg Extension\",\n          \"targetSets\": 3,\n          \"targetReps\": \"20\",\n          \"rest\": 90,\n          \"img\": \"/uploads/116/container/img-1.png\",\n          \"video\": \"/uploads/116/container/vid-1.mp4\",\n          \"desc\": \"Leg extension machine.\",\n          \"gallery\": []\n        }\n      ]\n    },\n    \"wednesday\": {\n      \"id\": \"wednesday\",\n      \"name\": \"Push Day 2 (Chest, Shoulders & Triceps)\",\n      \"exercises\": [\n        {\n          \"id\": \"ex20\",\n          \"name\": \"Smith Machine Flat Chest Press\",\n          \"targetSets\": 3,\n          \"targetReps\": \"10\",\n          \"rest\": 90,\n          \"img\": \"/uploads/227/container/img-1.png\",\n          \"video\": \"/uploads/227/container/vid-1.mp4\",\n          \"desc\": \"Smith machine flat chest press.\",\n          \"gallery\": []\n        }\n      ]\n    },\n    \"thursday\": {\n      \"id\": \"thursday\",\n      \"name\": \"Pull Day 2 (Back & Biceps)\",\n      \"exercises\": [\n        {\n          \"id\": \"ex27\",\n          \"name\": \"Reverse Grip Seated Row\",\n          \"targetSets\": 3,\n          \"targetReps\": \"10\",\n          \"rest\": 90,\n          \"img\": \"/uploads/118/container/img-1.png\",\n          \"video\": \"/uploads/118/container/vid-1.mp4\",\n          \"desc\": \"Reverse grip seated row.\",\n          \"gallery\": []\n        }\n      ]\n    }\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/workouts/plan/seed", "host": ["{{baseUrl}}"], "path": ["workouts", "plan", "seed"] }
+          }
+        },
+        {
+          "name": "PATCH /workouts/plan/:planId/activate  (coach/admin)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"active\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/workouts/plan/{{planId}}/activate",
+              "host": ["{{baseUrl}}"],
+              "path": ["workouts", "plan", "{{planId}}", "activate"]
+            }
+          }
+        },
+        {
+          "name": "PATCH /workouts/exercise/:exerciseId  (coach/admin) — update one exercise",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cable Crossover Press (Wide)\",\n  \"desc\": \"Elbows slightly bent, focus on chest squeeze.\",\n  \"targetSets\": 4,\n  \"targetReps\": \"12-15\",\n  \"restSeconds\": 75,\n  \"img\": \"/uploads/55/container/img-2.png\",\n  \"video\": \"/uploads/55/container/vid-2.mp4\",\n  \"gallery\": [\"/uploads/55/container/img-2.png\", \"/uploads/55/container/img-3.png\"],\n  \"sort\": 2\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/workouts/exercise/{{exerciseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["workouts", "exercise", "{{exerciseId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sessions",
+      "item": [
+        {
+          "name": "GET /sessions/my",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "url": { "raw": "{{baseUrl}}/sessions/my", "host": ["{{baseUrl}}"], "path": ["sessions", "my"] }
+          }
+        },
+        {
+          "name": "POST /sessions  — log a completed session",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-09-01\",\n  \"name\": \"Upper Push (W3•D2)\",\n  \"planId\": \"{{planId}}\",\n  \"volume\": 13240,\n  \"duration\": \"00:48\",\n  \"setsDone\": 13,\n  \"setsTotal\": 13,\n  \"performedSets\": [\n    { \"exName\": \"Machine Flat Chest Press\", \"set\": 1, \"weight\": 60, \"reps\": 8, \"pr\": false },\n    { \"exName\": \"Machine Flat Chest Press\", \"set\": 2, \"weight\": 60, \"reps\": 8, \"pr\": false },\n    { \"exName\": \"Cable Crossover Press\", \"set\": 1, \"weight\": 25, \"reps\": 15, \"pr\": true }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/sessions", "host": ["{{baseUrl}}"], "path": ["sessions"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "PRs",
+      "item": [
+        {
+          "name": "GET /prs/my",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-user-id", "value": "{{userId}}", "type": "text" },
+              { "key": "x-user-role", "value": "{{userRole}}", "type": "text" }
+            ],
+            "url": { "raw": "{{baseUrl}}/prs/my", "host": ["{{baseUrl}}"], "path": ["prs", "my"] }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8081/api/v1" },
+    { "key": "userId", "value": "00000000-0000-0000-0000-000000000001" },
+    { "key": "userRole", "value": "coach" },
+    { "key": "clientId", "value": "00000000-0000-0000-0000-000000000002" },
+    { "key": "coachId", "value": "00000000-0000-0000-0000-000000000003" },
+    { "key": "planId", "value": "00000000-0000-0000-0000-000000000004" },
+    { "key": "exerciseId", "value": "00000000-0000-0000-0000-000000000005" }
+  ]
+}
