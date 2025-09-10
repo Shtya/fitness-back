@@ -8,8 +8,7 @@ import { User, UserRole, UserStatus } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
 import { ConfigService } from '@nestjs/config';
 import { MailService } from 'common/nodemailer';
-import { SessionsService } from 'src/sessions/sessions.service';
-
+ 
 @Injectable()
 export class AuthService {
   constructor(

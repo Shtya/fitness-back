@@ -55,3 +55,5 @@ pids
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 src/firebase/venuat-6f346-firebase-adminsdk-fbsvc-b2ce39bdcd.json
+
+.vercel

@@ -1,7 +1,6 @@
 // src/entities/global.entity.ts
-import { Entity, PrimaryGeneratedColumn, Column, Index, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, ManyToOne, OneToMany, OneToOne, JoinColumn, Unique } from 'typeorm';
+import { Entity, Column, Index, ManyToOne, OneToMany, Unique } from 'typeorm';
 import { Asset } from './assets.entity';
-import { CoreEntity } from './core.entity';
 
 export enum UserRole {
   CLIENT = 'client',
@@ -43,12 +42,23 @@ export interface ProgramDay {
   exercises: ProgramExercise[];
 }
 
-export interface WeeklyProgram {
-  // store as array for stable ordering & simpler mapping
-  days: ProgramDay[]; // 0..6 items, each with a unique dayOfWeek
-}
+export type RepsPattern = string;
 
-export type RepsPattern = string; // e.g. "8", "12-15", "1 minute"
+import { PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, BaseEntity, DeleteDateColumn } from 'typeorm';
+
+export abstract class CoreEntity extends BaseEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  created_at: Date;
+
+  @UpdateDateColumn({ type: 'timestamptz' })
+  updated_at: Date;
+
+  @DeleteDateColumn({ type: 'timestamptz', nullable: true })
+  deleted_at: Date | null;
+}
 
 @Entity('users')
 @Unique(['email'])
@@ -91,292 +101,203 @@ export class User extends CoreEntity {
   @Column({ type: 'uuid', nullable: true })
   activePlanId!: string | null;
 
-  @OneToMany(() => WorkoutPlan, plan => plan.user, { cascade: ['insert', 'update'] })
-  plans!: WorkoutPlan[];
+  // coach -> many plans (as coach)
+  @OneToMany(() => Plan, p => p.coach)
+  plansCoached: Plan[];
 
-  @OneToMany(() => UserCoach, uc => uc.client, { cascade: ['insert', 'update'] })
-  coaches!: UserCoach[];
+  // client -> many plans assigned to this user
+  @OneToMany(() => Plan, p => p.athlete)
+  plansAssigned: Plan[];
 
-  @OneToMany(() => UserCoach, uc => uc.coach, { cascade: ['insert', 'update'] })
-  clients!: UserCoach[];
+  @OneToMany(() => WorkoutSession, s => s.user)
+  sessions: WorkoutSession[];
 
-  @OneToMany(() => PersonalRecord, pr => pr.user, { cascade: ['insert', 'update'] })
-  prs!: PersonalRecord[];
-
-  @OneToMany(() => WorkoutSession, s => s.user, { cascade: ['insert', 'update'] })
-  sessions!: WorkoutSession[];
+  @OneToMany(() => ExercisePR, pr => pr.user)
+  prs: ExercisePR[];
 
   @OneToMany(() => Asset, upload => upload.user)
   uploads: Asset[];
 }
 
-@Entity('user_coach')
-@Unique(['coach', 'client'])
-export class UserCoach {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+@Entity('plans')
+@Unique('uq_active_plan_per_user', ['athlete', 'isActive'])
+export class Plan extends CoreEntity {
+  @Column({ type: 'varchar', length: 180 })
+  name: string;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'coachId' })
-  coach!: User;
-
-  @Index()
-  @Column('uuid')
-  coachId!: string;
-
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'clientId' })
-  client!: User;
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
 
   @Index()
-  @Column('uuid')
-  clientId!: string;
+  @Column({ type: 'boolean', default: true })
+  isActive: boolean;
 
-  @Column({ type: 'jsonb', default: {} })
-  meta!: Record<string, any>;
+  @Column({ type: 'date', nullable: true })
+  startDate?: string | null;
 
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
+  @Column({ type: 'date', nullable: true })
+  endDate?: string | null;
+
+  // coach who owns this plan
+  @ManyToOne(() => User, u => u.plansCoached, { onDelete: 'SET NULL', nullable: true })
+  coach?: User | null;
+
+  // athlete assigned
+  @Index()
+  @ManyToOne(() => User, u => u.plansAssigned, { onDelete: 'CASCADE' })
+  athlete: User;
+
+  @OneToMany(() => PlanDay, d => d.plan, { cascade: true })
+  days: PlanDay[];
 }
 
-@Entity('workout_plans')
-@Unique(['userId', 'isActive']) // soft-guard: at most one active per user
-export class WorkoutPlan extends CoreEntity {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+@Entity('plan_days')
+@Index(['plan', 'day'], { unique: true })
+export class PlanDay extends CoreEntity {
+  @ManyToOne(() => Plan, p => p.days, { onDelete: 'CASCADE' })
+  plan: Plan;
+
+  // UI label e.g. "Push A", "Legs", etc.
+  @Column({ type: 'varchar', length: 120 })
+  name: string;
+
+  @Column({ type: 'enum', enum: DayOfWeek })
+  day: DayOfWeek;
+
+  @Column({ type: 'int', default: 0 })
+  orderIndex: number;
+
+  @OneToMany(() => PlanExercise, e => e.day, { cascade: true })
+  exercises: PlanExercise[];
+}
+
+@Entity('plan_exercises')
+@Index(['day', 'orderIndex'])
+export class PlanExercise extends CoreEntity {
+  @ManyToOne(() => PlanDay, d => d.exercises, { onDelete: 'CASCADE' })
+  day: PlanDay;
 
   @Index()
-  @Column({ type: 'varchar', length: 180 })
-  name!: string; // e.g., "6-week Push/Pull/Legs"
+  @Column({ type: 'varchar', length: 160 })
+  name: string;
 
-  @ManyToOne(() => User, u => u.plans, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user!: User;
+  // same field your UI expects
+  @Column({ type: 'varchar', length: 50, default: '10' })
+  targetReps: string;
 
-  @Index()
-  @Column('uuid')
-  userId!: string;
+  // optional media shown in the UI
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  img?: string | null;
 
-  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
-  @JoinColumn({ name: 'coachId' })
-  coach!: User | null;
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  video?: string | null;
 
-  @Index()
-  @Column({ type: 'uuid', nullable: true })
-  coachId!: string | null;
-
-  @Column({ type: 'boolean', default: false })
-  isActive!: boolean;
-
-  // Freeform plan meta (goal, phase, mesocycle, notes…)
-  @Column({ type: 'jsonb', default: {} })
-  metadata!: Record<string, any>;
-
-  @Index({ spatial: false })
-  @Column({ type: 'jsonb' })
-  program!: WeeklyProgram;
-
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
+  @Column({ type: 'int', default: 0 })
+  orderIndex: number;
 }
 
 @Entity('workout_sessions')
-export class WorkoutSession {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
-
+@Index(['user', 'date'], { unique: false })
+export class WorkoutSession extends CoreEntity {
   @ManyToOne(() => User, u => u.sessions, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user!: User;
+  user: User;
 
-  @Index()
-  @Column('uuid')
-  userId!: string;
+  // optional pointer to originating plan
+  @ManyToOne(() => Plan, p => p.id, { onDelete: 'SET NULL', nullable: true })
+  plan?: Plan | null;
 
-  @ManyToOne(() => WorkoutPlan, { nullable: true, onDelete: 'SET NULL' })
-  @JoinColumn({ name: 'planId' })
-  plan!: WorkoutPlan | null;
+  // snapshot fields
+  @Column({ type: 'varchar', length: 160 })
+  name: string; // e.g., "Push A", "Legs", etc.
 
-  @Index()
-  @Column({ type: 'uuid', nullable: true })
-  planId!: string | null;
+  @Column({ type: 'enum', enum: DayOfWeek })
+  day: DayOfWeek;
 
-  @Column({ type: 'date' })
-  date!: string; // 'YYYY-MM-DD' (matches your UI)
-
-  @Column({ type: 'varchar', length: 120 })
-  name!: string; // e.g., "Upper Push (W3•D2)"
-
-  @Column({ type: 'int', default: 0 })
-  volume!: number; // e.g., kg·reps
-
-  @Column({ type: 'varchar', length: 10, default: '00:00' })
-  duration!: string; // "HH:MM" or "MM:SS"
-
-  @Column({ type: 'int', default: 0 })
-  setsDone!: number;
-
-  @Column({ type: 'int', default: 0 })
-  setsTotal!: number;
-
-  // Snapshot of what was done (per-set details)
-  @Column({ type: 'jsonb', default: [] })
-  performedSets!: Array<{
-    exName: string;
-    set: number;
-    weight: number;
-    reps: number;
-    pr: boolean;
-  }>;
-
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
-}
-
-export type PersonalSetRecord = {
-  id: string; // uuid you generate per set client- or server-side
-  weight: number; // kg
-  reps: number; // reps count
-  done: boolean; // whether the set was completed
-  setNumber: number; // 1-based ordering within the day
-};
-
-@Entity('personal_records')
-@Unique(['user', 'exerciseName', 'date'])
-export class PersonalRecord {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
-
-  @ManyToOne(() => User, u => u.prs, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user!: User;
-
-  @Index()
-  @Column('uuid')
-  userId!: string;
-
-  // We store by exercise name to avoid strict coupling to catalog ids
-  @Index()
-  @Column({ type: 'varchar', length: 200 })
-  exerciseName!: string;
-
-  @Column({ type: 'jsonb', default: [] })
-  records!: PersonalSetRecord[];
-
+  // logical workout date (YYYY-MM-DD)
   @Index()
   @Column({ type: 'date' })
-  date!: string; // 'YYYY-MM-DD'
+  date: string;
 
-  @CreateDateColumn() createdAt!: Date;
-  @UpdateDateColumn() updatedAt!: Date;
-}
+  @Column({ type: 'timestamptz', nullable: true })
+  startedAt?: Date | null;
 
-@Entity('personal_record_attempts')
-@Index(['userId', 'exerciseName', 'date'])
-@Index(['userId', 'exerciseName', 'date', 'setIndex'])
-export class PersonalRecordAttempt {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+  @Column({ type: 'timestamptz', nullable: true })
+  endedAt?: Date | null;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user!: User;
-
-  @Index()
-  @Column('uuid')
-  userId!: string;
-
-  @Index()
-  @Column({ type: 'varchar', length: 200 })
-  exerciseName!: string;
-
-  /** FK to the daily multi-sets row in personal_records */
-  @ManyToOne(() => PersonalRecord, { onDelete: 'CASCADE', nullable: true })
-  @JoinColumn({ name: 'recordId' })
-  record!: PersonalRecord | null;
-
-  @Index()
-  @Column({ type: 'uuid', nullable: true })
-  recordId!: string | null;
-
-  /** Mirrors records[].id so we can identify the exact set inside the JSON array */
-  @Index()
-  @Column({ type: 'uuid', nullable: true })
-  recordSetId!: string | null;
-
-  /** 1-based set order within the day */
+  // convenience: duration in seconds (compute when closing)
   @Column({ type: 'int', nullable: true })
-  setIndex!: number | null;
+  durationSec?: number | null;
 
-  @Column({ type: 'int' })
-  weight!: number;
+  @OneToMany(() => SessionSet, s => s.session, { cascade: true })
+  sets: SessionSet[];
+}
 
-  @Column({ type: 'int' })
-  reps!: number;
+@Entity('session_sets')
+@Index(['session', 'exerciseName', 'setNumber'])
+@Index(['exerciseName', 'date']) // for exercise history queries
+export class SessionSet extends CoreEntity {
+  @ManyToOne(() => WorkoutSession, s => s.sets, { onDelete: 'CASCADE' })
+  session: WorkoutSession;
 
-  @Column({ type: 'float' })
-  e1rm!: number; // Epley 1RM
-
+  // denormalize: keep date for fast per-exercise history
   @Column({ type: 'date' })
-  date!: string; // 'YYYY-MM-DD'
+  date: string; // matches session.date
+
+  // denormalize: text exercise key for stats (not tied to plan)
+  @Column({ type: 'varchar', length: 160 })
+  exerciseName: string;
+
+  // optional link to plan exercise (if session created from plan)
+  @Column({ type: 'uuid', nullable: true })
+  planExerciseId?: string | null;
+
+  @Column({ type: 'int', default: 1 })
+  setNumber: number;
+
+  @Column({ type: 'numeric', precision: 7, scale: 2, default: 0 })
+  weight: string; // use string for numeric columns in TypeORM
+
+  @Column({ type: 'int', default: 0 })
+  reps: number;
 
   @Column({ type: 'boolean', default: false })
-  isPr!: boolean; // true if this set updated the all-time best
+  done: boolean;
 
-  // Optionally link back to a session if you have it
-  @Column({ type: 'uuid', nullable: true })
-  sessionId!: string | null;
+  @Column({ type: 'int', nullable: true })
+  restSeconds?: number | null;
 
-  @CreateDateColumn()
-  createdAt!: Date;
+  // optional perceived effort (RPE/RIR)
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  effort?: string | null;
+
+  // computed/stored e1RM for fast stats
+  @Column({ type: 'int', nullable: true })
+  e1rm?: number | null;
+
+  // flagged when this set created a PR for the exercise
+  @Column({ type: 'boolean', default: false })
+  isPr: boolean;
 }
 
-export function buildProgramFromSeed(
-  seed: Partial<
-    Record<
-      DayOfWeek,
-      {
-        id: string;
-        name: string;
-        exercises: Array<{
-          id: string;
-          name: string;
-          targetSets: number;
-          targetReps: RepsPattern;
-          rest?: number | null;
-          img?: string;
-          video?: string;
-          desc?: string;
-          gallery?: string[];
-        }>;
-      }
-    >
-  >,
-): WeeklyProgram {
-  const order: DayOfWeek[] = [DayOfWeek.SATURDAY, DayOfWeek.SUNDAY, DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY];
+@Entity('exercise_prs')
+@Unique('uq_user_exercise', ['user', 'exerciseName'])
+@Index(['user', 'exerciseName'])
+export class ExercisePR extends CoreEntity {
+  @ManyToOne(() => User, u => u.prs, { onDelete: 'CASCADE' })
+  user: User;
 
-  const days: ProgramDay[] = [];
-  for (const dow of order) {
-    const d = seed[dow];
-    if (!d) continue;
+  @Column({ type: 'varchar', length: 160 })
+  exerciseName: string;
 
-    days.push({
-      id: d.id,
-      dayOfWeek: dow,
-      name: d.name,
-      exercises: d.exercises.map((ex, i) => ({
-        id: ex.id,
-        name: ex.name,
-        desc: ex.desc ?? null,
-        targetSets: ex.targetSets ?? 3,
-        targetReps: ex.targetReps ?? '10',
-        restSeconds: Number.isFinite(ex.rest as any) ? (ex.rest as number) : null,
-        img: ex.img ?? null,
-        video: ex.video ?? null,
-        gallery: ex.gallery ?? [],
-        sort: i,
-      })),
-    });
-  }
-  return { days };
+  @Column({ type: 'int' })
+  bestE1rm: number;
+
+  @Column({ type: 'numeric', precision: 7, scale: 2, nullable: true })
+  weightAtBest?: string | null;
+
+  @Column({ type: 'int', nullable: true })
+  repsAtBest?: number | null;
+
+  @Column({ type: 'date', nullable: true })
+  dateOfBest?: string | null;
 }
