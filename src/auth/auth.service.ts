@@ -69,11 +69,11 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
+		console.log("user");
     const user = await this.userRepo.createQueryBuilder('user').addSelect('user.password').where('user.email = :email', { email: dto.email }).getOne();
 
     if (!user || !(await bcrypt.compare(dto.password, user.password))) throw new UnauthorizedException('Incorrect email or password');
-
-    console.log(user);
+ 
     if (user.status !== UserStatus.ACTIVE) {
       // Block login for pending/suspended users
       throw new UnauthorizedException(user.status === UserStatus.PENDING ? 'Your account is pending approval.' : 'Your account is suspended.');

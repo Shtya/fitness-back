@@ -1,0 +1,126 @@
+{
+  "info": {
+    "name": "Plan Exercises API",
+    "_postman_id": "d5a3c1f7-12e4-4e7c-8f21-abc123456789",
+    "description": "CRUD for Plan Exercises with upload of image & video.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "List Exercises",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises?page=1&limit=10&search=",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises"],
+          "query": [
+            { "key": "page", "value": "1" },
+            { "key": "limit", "value": "10" },
+            { "key": "search", "value": "" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Exercise by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises/:id",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises", ":id"]
+        }
+      }
+    },
+    {
+      "name": "Create Exercise (multipart)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "name", "value": "Machine Wide Grip Row", "type": "text" },
+            { "key": "targetReps", "value": "8", "type": "text" },
+            { "key": "desc", "value": "Wide grip row on machine.", "type": "text" },
+            { "key": "equipment", "value": "Machine", "type": "text" },
+            { "key": "targetSets", "value": "3", "type": "text" },
+            { "key": "restSeconds", "value": "90", "type": "text" },
+            { "key": "status", "value": "Active", "type": "text" },
+            { "key": "primaryMuscles", "value": "[\"Back\",\"Lats\"]", "type": "text" },
+            { "key": "secondaryMuscles", "value": "[\"Rear Delts\",\"Biceps\"]", "type": "text" },
+            { "key": "alternatives", "value": "[\"ex8\",\"ex9\"]", "type": "text" },
+            { "key": "img", "type": "file", "src": "" },
+            { "key": "video", "type": "file", "src": "" }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises"]
+        }
+      }
+    },
+    {
+      "name": "Update Exercise (multipart)",
+      "request": {
+        "method": "PUT",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "desc", "value": "Updated description for this exercise.", "type": "text" },
+            { "key": "targetSets", "value": "4", "type": "text" },
+            { "key": "restSeconds", "value": "100", "type": "text" },
+            { "key": "primaryMuscles", "value": "[\"Back\",\"Lats\"]", "type": "text" },
+            { "key": "secondaryMuscles", "value": "[\"Biceps\"]", "type": "text" },
+            { "key": "status", "value": "Active", "type": "text" },
+            { "key": "img", "type": "file", "src": "" },
+            { "key": "video", "type": "file", "src": "" }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises/:id",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises", ":id"]
+        }
+      }
+    },
+    {
+      "name": "Set Status",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"Inactive\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises/:id/status",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises", ":id", "status"]
+        }
+      }
+    },
+    {
+      "name": "Delete Exercise",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/plan-exercises/:id",
+          "host": ["{{baseUrl}}"],
+          "path": ["plan-exercises", ":id"]
+        }
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8081/api/v1" }
+  ]
+}

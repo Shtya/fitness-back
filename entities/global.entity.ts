@@ -1,5 +1,5 @@
 // src/entities/global.entity.ts
-import { Entity, Column, Index, ManyToOne, OneToMany, Unique } from 'typeorm';
+import { Entity, Column, Index, ManyToOne, OneToMany, Unique, JoinColumn } from 'typeorm';
 import { Asset } from './assets.entity';
 
 export enum UserRole {
@@ -71,6 +71,12 @@ export class User extends CoreEntity {
   @Column({ type: 'varchar', length: 190 })
   email!: string;
 
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  phone?: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  membership?: string | null; // 'Basic' | 'Gold' | 'Platinum' | '-'
+
   @Column()
   password: string;
 
@@ -105,9 +111,11 @@ export class User extends CoreEntity {
   @OneToMany(() => Plan, p => p.coach)
   plansCoached: Plan[];
 
-  // client -> many plans assigned to this user
-  @OneToMany(() => Plan, p => p.athlete)
-  plansAssigned: Plan[];
+  @OneToMany(() => PlanAssignment, a => a.athlete)
+  planAssignments!: PlanAssignment[];
+  // @OneToMany(() => PlanAssignment, a => a.athlete)
+  // plansAssigned!: PlanAssignment 
+
 
   @OneToMany(() => WorkoutSession, s => s.user)
   sessions: WorkoutSession[];
@@ -120,55 +128,89 @@ export class User extends CoreEntity {
 }
 
 @Entity('plans')
-@Unique('uq_active_plan_per_user', ['athlete', 'isActive'])
 export class Plan extends CoreEntity {
   @Column({ type: 'varchar', length: 180 })
-  name: string;
+  name!: string;
 
   @Column({ type: 'text', nullable: true })
-  notes?: string | null;
+  notes!: string | null;
 
+  // Optional: template “on/off”. Assignments control athlete activity.
   @Index()
   @Column({ type: 'boolean', default: true })
-  isActive: boolean;
+  isActive!: boolean;
 
-  @Column({ type: 'date', nullable: true })
-  startDate?: string | null;
-
-  @Column({ type: 'date', nullable: true })
-  endDate?: string | null;
-
-  // coach who owns this plan
   @ManyToOne(() => User, u => u.plansCoached, { onDelete: 'SET NULL', nullable: true })
-  coach?: User | null;
+  coach!: User | null;
 
-  // athlete assigned
-  @Index()
-  @ManyToOne(() => User, u => u.plansAssigned, { onDelete: 'CASCADE' })
-  athlete: User;
-
+  // Program content (what you build once and reuse)
   @OneToMany(() => PlanDay, d => d.plan, { cascade: true })
-  days: PlanDay[];
+  days!: PlanDay[];
+
+  // Extra: meals / instructions (JSONB so you’re flexible)
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  meals!: any[]; // [{ time:'08:00', items:[...], kcals: ... }, ...]
+
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  instructions!: any[];  
+
+  // Who it’s assigned to
+  @OneToMany(() => PlanAssignment, a => a.plan, { cascade: true })
+  assignments!: PlanAssignment[];
+
+	@ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+@JoinColumn({ name: 'athleteId' }) // optional: custom column name
+athlete: User;
+}
+
+@Entity('plan_assignments')
+@Unique(['plan', 'athlete']) // same plan not assigned twice to same athlete
+@Index('uq_one_active_plan_per_user', ['athlete'], { unique: true, where: 'is_active = true' }) // Postgres partial index
+export class PlanAssignment extends CoreEntity {
+  @ManyToOne(() => Plan, p => p.assignments, { onDelete: 'CASCADE' })
+  plan!: Plan;
+
+  @ManyToOne(() => User, u => u.planAssignments, { onDelete: 'CASCADE' })
+  athlete!: User;
+
+  @Index()
+  @Column({ name: 'is_active', type: 'boolean', default: true })
+  isActive!: boolean;
+
+  @Column({ type: 'date', nullable: true })
+  startDate!: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  endDate!: string | null;
+
+  // Optional label or notes per athlete
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  label!: string | null;
 }
 
 @Entity('plan_days')
-@Index(['plan', 'day'], { unique: true })
+@Index(['plan', 'day'], { unique: true }) // 1 config per weekday per plan. If you want Push A / Push B both on Saturday, drop “unique”.
 export class PlanDay extends CoreEntity {
   @ManyToOne(() => Plan, p => p.days, { onDelete: 'CASCADE' })
-  plan: Plan;
+  plan!: Plan;
 
-  // UI label e.g. "Push A", "Legs", etc.
   @Column({ type: 'varchar', length: 120 })
-  name: string;
+  name!: string; // "Push Day 1 (Chest & Triceps)"
 
   @Column({ type: 'enum', enum: DayOfWeek })
-  day: DayOfWeek;
+  day!: DayOfWeek;
 
   @Column({ type: 'int', default: 0 })
-  orderIndex: number;
+  orderIndex!: number;
 
   @OneToMany(() => PlanExercise, e => e.day, { cascade: true })
-  exercises: PlanExercise[];
+  exercises!: PlanExercise[];
+}
+
+
+export enum ExerciseStatus {
+  ACTIVE = 'Active',
+  INACTIVE = 'Inactive',
 }
 
 @Entity('plan_exercises')
@@ -194,6 +236,37 @@ export class PlanExercise extends CoreEntity {
 
   @Column({ type: 'int', default: 0 })
   orderIndex: number;
+
+  // description
+  @Column({ type: 'text', nullable: true })
+  desc?: string | null;
+
+  // muscles (store as JSON array of strings)
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  primaryMuscles: string[];
+
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  secondaryMuscles: string[];
+
+  // equipment (simple text is enough)
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  equipment?: string | null;
+
+  // sets & rest (you already have targetReps)
+  @Column({ type: 'int', default: 3 })
+  targetSets: number;
+
+  @Column({ type: 'int', default: 90 })
+  restSeconds: number;
+
+  // alternatives: store **only exercise IDs** (UUIDs or strings).
+  // If your IDs are UUIDs, keep 'uuid' type; if not guaranteed, use varchar.
+  @Column('varchar', { array: true, default: '{}' })
+  alternatives: string[];
+
+  // status
+  @Column({ type: 'enum', enum: ExerciseStatus, default: ExerciseStatus.ACTIVE })
+  status: ExerciseStatus;
 }
 
 @Entity('workout_sessions')

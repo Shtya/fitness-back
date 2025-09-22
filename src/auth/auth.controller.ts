@@ -1,3 +1,5 @@
+
+
 import { Controller, Post, Get, Put, Delete, Body, Res, Req, UseGuards, Query, Param, BadRequestException } from '@nestjs/common';
 import { Response, Request } from 'express';
 
@@ -7,6 +9,7 @@ import { Roles } from './decorators/roles.decorator';
 import { RolesGuard } from './guard/roles.guard';
 import { UserRole, UserStatus } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, RefreshDto, PagedQueryDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
+import { CRUD } from 'common/crud.service';
 
 @Controller('auth')
 export class AuthController {
@@ -57,8 +60,19 @@ export class AuthController {
   @Get('users')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  async listUsers(@Query() q: PagedQueryDto) {
-    return this.authService.getAllUsers(q.page, q.limit);
+  async listUsers(@Query() query: any) {
+		return CRUD.findAll(
+					this.authService.userRepo,
+					'user',
+					query.search,
+					query.page,
+					query.limit,
+					query.sortBy,
+					query.sortOrder,
+					[],
+					['email' , "name" , "phone"],
+					{},
+				);
   }
 
   @Delete('user/:id')

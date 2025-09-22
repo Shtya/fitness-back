@@ -1,12 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import {
-  WorkoutSession,
-  SessionSet,
-  ExercisePR,
-  User,
-  DayOfWeek,
-} from 'entities/global.entity';
+import { WorkoutSession, SessionSet, ExercisePR, User, DayOfWeek } from 'entities/global.entity';
 import { Repository } from 'typeorm';
 
 function epley(weight: number, reps: number) {
@@ -70,12 +64,7 @@ export class PrsService {
     return await this.sessions.save(s);
   }
 
-  async upsertDay(
-    userId: string,
-    exerciseName: string,
-    dateISO: string,
-    records: Array<{ id?: string; setNumber: number; weight: number; reps: number; done: boolean }>,
-  ) {
+  async upsertDay(userId: string, exerciseName: string, dateISO: string, records: Array<{ id?: string; setNumber: number; weight: number; reps: number; done: boolean }>) {
     const session = await this.findOrCreateSession(userId, dateISO);
 
     const saved: Array<{
@@ -131,7 +120,7 @@ export class PrsService {
       }
 
       // compute e1rm
-      const e1 = (weightNum > 0 && repsNum > 0) ? epley(weightNum, repsNum) : null;
+      const e1 = weightNum > 0 && repsNum > 0 ? epley(weightNum, repsNum) : null;
       entity.e1rm = e1;
 
       const savedEntity = await this.sets.save(entity);
@@ -156,8 +145,7 @@ export class PrsService {
     });
     if (pr) {
       for (const r of saved) {
-        r.isPr = r.e1rm != null && r.e1rm >= (pr.bestE1rm || 0) &&
-                 r.weight > 0 && r.reps > 0;
+        r.isPr = r.e1rm != null && r.e1rm >= (pr.bestE1rm || 0) && r.weight > 0 && r.reps > 0;
       }
     }
 
@@ -246,5 +234,209 @@ export class PrsService {
         await this.sets.save(r);
       }
     }
+  }
+
+  async getLastExercise(
+    userId: string,
+    exerciseName: string,
+    opts?: { onOrBefore?: string; sameWeekday?: boolean },
+  ): Promise<{
+    exerciseName: string;
+    date: string | null;
+    day: DayOfWeek | null;
+    records: Array<{
+      id: string;
+      setNumber: number;
+      weight: number;
+      reps: number;
+      done: boolean;
+      e1rm: number | null;
+      isPr: boolean;
+    }>;
+  }> {
+    await this.ensureUser(userId);
+
+    const onOrBefore = opts?.onOrBefore;
+    const sameWeekday = !!opts?.sameWeekday;
+    const dayFilter = sameWeekday ? jsDateToDayOfWeekEnum(onOrBefore || new Date().toISOString()) : null;
+
+    // Pull all rows sorted by date desc then setNumber asc
+    let qb = this.sets.createQueryBuilder('s').leftJoinAndSelect('s.session', 'session').leftJoinAndSelect('session.user', 'user').where('user.id = :userId', { userId }).andWhere('s.exerciseName = :exerciseName', { exerciseName });
+
+    if (onOrBefore) {
+      qb = qb.andWhere('s.date <= :onOrBefore', { onOrBefore });
+    }
+    if (dayFilter != null) {
+      qb = qb.andWhere('session.day = :dayFilter', { dayFilter });
+    }
+
+    const rows = await qb.orderBy('s.date', 'DESC').addOrderBy('s.setNumber', 'ASC').getMany();
+
+    if (!rows.length) {
+      return { exerciseName, date: null, day: null, records: [] };
+    }
+
+    // Keep only the most recent date among the results
+    const latestDate = rows[0].date;
+    const latestRows = rows.filter(r => r.date === latestDate);
+
+    // Be explicit about the session.day (all should share the same)
+    const sessionDay = latestRows[0]?.session?.day ?? null;
+
+    const records = latestRows.map(r => ({
+      id: r.id,
+      setNumber: r.setNumber,
+      weight: Number(r.weight),
+      reps: r.reps,
+      done: r.done,
+      e1rm: r.e1rm ?? epley(Number(r.weight), r.reps),
+      isPr: !!r.isPr,
+    }));
+
+    return { exerciseName, date: latestDate, day: sessionDay, records };
+  }
+
+  async getNextDefaults(
+    userId: string,
+    exerciseName: string,
+    targetDateISO: string,
+    opts?: { lookbackSameWeekday?: boolean; incWeight?: number; incReps?: number; mode?: 'weight' | 'reps'; onOrBefore?: string },
+  ): Promise<{
+    exerciseName: string;
+    baseline: { date: string | null; day: DayOfWeek | null; records: Array<{ setNumber: number; weight: number; reps: number; done: boolean }> };
+    suggested: { date: string; day: DayOfWeek; records: Array<{ setNumber: number; weight: number; reps: number; done: boolean }> };
+  }> {
+    const mode = opts?.mode ?? 'weight';
+    const incWeight = Number(opts?.incWeight ?? 2.5);
+    const incReps = Number(opts?.incReps ?? 1);
+    const onOrBefore = opts?.onOrBefore ?? targetDateISO; // default: look back from target date
+    const sameWeekday = !!opts?.lookbackSameWeekday;
+
+    const baseline = await this.getLastExercise(userId, exerciseName, {
+      onOrBefore,
+      sameWeekday,
+    });
+
+    const targetDay = jsDateToDayOfWeekEnum(targetDateISO);
+
+    // If no baseline, return empty suggestion (caller can decide initial template)
+    if (!baseline.records.length) {
+      return {
+        exerciseName,
+        baseline: {
+          date: null,
+          day: null,
+          records: [],
+        },
+        suggested: {
+          date: targetDateISO,
+          day: targetDay,
+          records: [],
+        },
+      };
+    }
+
+    const allDone = baseline.records.every(r => r.done);
+    const suggested = baseline.records.map(r => {
+      if (!allDone) {
+        return { setNumber: r.setNumber, weight: r.weight, reps: r.reps, done: false };
+      }
+      if (mode === 'reps') {
+        return { setNumber: r.setNumber, weight: r.weight, reps: r.reps + incReps, done: false };
+      }
+      // default: weight progression
+      return { setNumber: r.setNumber, weight: Number((r.weight + incWeight).toFixed(2)), reps: r.reps, done: false };
+    });
+
+    return {
+      exerciseName,
+      baseline: {
+        date: baseline.date,
+        day: baseline.day,
+        records: baseline.records.map(r => ({
+          setNumber: r.setNumber,
+          weight: r.weight,
+          reps: r.reps,
+          done: r.done,
+        })),
+      },
+      suggested: {
+        date: targetDateISO,
+        day: targetDay,
+        records: suggested,
+      },
+    };
+  }
+
+  // prs.service.ts
+  async getLastDayByName(
+    userId: string,
+    dayName: string,
+    opts?: { onOrBefore?: string },
+  ): Promise<{
+    date: string | null;
+    day: DayOfWeek | null;
+    exercises: Array<{
+      exerciseName: string;
+      records: Array<{
+        id: string;
+        setNumber: number;
+        weight: number;
+        reps: number;
+        done: boolean;
+        e1rm: number | null;
+        isPr: boolean;
+      }>;
+    }>;
+  }> {
+    await this.ensureUser(userId);
+
+    // normalize string (Sunday, sunday, SUNDAY → DayOfWeek.SUNDAY)
+    const normalized = dayName.trim().toUpperCase();
+    const dayEnum = DayOfWeek[normalized as keyof typeof DayOfWeek];
+    if (!dayEnum) {
+      throw new Error(`Invalid day name: ${dayName}`);
+    }
+
+    const onOrBefore = opts?.onOrBefore;
+
+    // Pull all sets for that user + day
+    let qb = this.sets.createQueryBuilder('s').leftJoinAndSelect('s.session', 'session').leftJoinAndSelect('session.user', 'user').where('user.id = :userId', { userId }).andWhere('session.day = :dayEnum', { dayEnum });
+
+    if (onOrBefore) {
+      qb = qb.andWhere('s.date <= :onOrBefore', { onOrBefore });
+    }
+
+    const rows = await qb.orderBy('s.date', 'DESC').addOrderBy('s.exerciseName', 'ASC').addOrderBy('s.setNumber', 'ASC').getMany();
+
+    if (!rows.length) {
+      return { date: null, day: dayEnum, exercises: [] };
+    }
+
+    // Pick the latest training date for that weekday
+    const latestDate = rows[0].date;
+    const latestRows = rows.filter(r => r.date === latestDate);
+
+    // Group by exercise
+    const map = new Map<string, typeof latestRows>();
+    for (const r of latestRows) {
+      if (!map.has(r.exerciseName)) map.set(r.exerciseName, []);
+      map.get(r.exerciseName)!.push(r);
+    }
+
+    const exercises = Array.from(map.entries()).map(([exerciseName, arr]) => ({
+      exerciseName,
+      records: arr.map(r => ({
+        id: r.id,
+        setNumber: r.setNumber,
+        weight: Number(r.weight),
+        reps: r.reps,
+        done: false,
+        e1rm: r.e1rm ?? epley(Number(r.weight), r.reps),
+        isPr: !!r.isPr,
+      })),
+    }));
+
+    return { date: latestDate, day: dayEnum, exercises };
   }
 }
