@@ -15,18 +15,14 @@ async function bootstrap() {
 
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
   app.useStaticAssets(join(__dirname, '..', '..', '/uploads'), { prefix: '/uploads/' });
-  const allowedOrigins = ['http://localhost:3000', 'https://fitness-front-iin2.vercel.app'];
-  app.enableCors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // للسماح بـ Postman وما شابه
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error(`CORS blocked for origin: ${origin}`), false);
-    },
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-lang'],
-    exposedHeaders: ['Content-Length', 'Content-Range'],
-  });
+
+	app.enableCors({
+  origin: '*', // يفتح لأي دومين
+  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE'],
+  allowedHeaders: ['Content-Type','Authorization','x-lang'],
+  exposedHeaders: ['Content-Length','Content-Range'],
+});
+
 
   app.setGlobalPrefix('api/v1');
 
