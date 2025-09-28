@@ -8,6 +8,16 @@ function epley(weight: number, reps: number) {
   const r = Number(reps) || 0;
   return Math.round(w * (1 + r / 30));
 }
+// Returns 'YYYY-MM-DD' in the server timezone for consistent DATE comparisons
+function toDateOnly(dateLike?: string): string {
+  const d = dateLike ? new Date(dateLike) : new Date();
+  if (isNaN(d.getTime())) throw new Error(`Invalid date: ${dateLike}`);
+  // format YYYY-MM-DD
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 function jsDateToDayOfWeekEnum(dateISO: string): DayOfWeek {
   const d = new Date(dateISO);
@@ -84,9 +94,14 @@ export class PrsService {
       let entity: SessionSet | undefined;
 
       if (r.id) {
-        entity = await this.sets.findOne({ where: { id: r.id } });
+        entity = await this.sets.findOne({
+          where: { id: r.id },
+          relations: ['session', 'session.user'],
+        });
       }
+
       if (!entity) {
+        // try to find by unique tuple on the target date
         entity = await this.sets.findOne({
           where: {
             session: { id: session.id },
@@ -99,6 +114,7 @@ export class PrsService {
       }
 
       if (!entity) {
+        // NEW record
         entity = this.sets.create({
           session,
           date: dateISO,
@@ -114,6 +130,17 @@ export class PrsService {
           isPr: false,
         });
       } else {
+        // UPDATE existing — ensure it is reattached to the *new* session/date/exercise
+        if (!entity.session || entity.session.id !== session.id) {
+          entity.session = session;
+        }
+        if (entity.date !== dateISO) {
+          entity.date = dateISO;
+        }
+        if (entity.exerciseName !== exerciseName) {
+          entity.exerciseName = exerciseName;
+        }
+
         entity.weight = String(weightNum.toFixed(2));
         entity.reps = repsNum;
         entity.done = !!r.done;
@@ -131,14 +158,12 @@ export class PrsService {
         reps: savedEntity.reps,
         done: savedEntity.done,
         e1rm: savedEntity.e1rm,
-        isPr: false, // will update after PR check
+        isPr: false, // filled after PR recompute
       });
     }
 
-    // Update PRs after all records written
     await this.recomputeExercisePr(userId, exerciseName);
 
-    // mark which of the saved are PRs (by re-reading the best)
     const pr = await this.prs.findOne({
       where: { user: { id: userId }, exerciseName },
       relations: ['user'],
@@ -149,7 +174,6 @@ export class PrsService {
       }
     }
 
-    // return normalized shape for the FE
     return saved
       .sort((a, b) => a.setNumber - b.setNumber)
       .map(r => ({
@@ -368,75 +392,82 @@ export class PrsService {
     };
   }
 
-  // prs.service.ts
+  private normalizeDayName(dayName: string): DayOfWeek {
+    const normalized = dayName.trim().toUpperCase();
+    const dayEnum = (DayOfWeek as any)[normalized] as DayOfWeek | undefined;
+    if (!dayEnum) throw new Error(`Invalid day name: ${dayName}`);
+    return dayEnum;
+  }
+
+  private coerceOnOrBefore(onOrBefore?: string): Date {
+    // If provided, parse to Date; else now.
+    // If you only store DATE (no time) in session, consider clamping to end-of-day.
+    if (onOrBefore) {
+      const d = new Date(onOrBefore);
+      if (isNaN(d.getTime())) throw new Error(`Invalid onOrBefore: ${onOrBefore}`);
+      return d;
+    }
+    return new Date();
+  }
+
   async getLastDayByName(
     userId: string,
     dayName: string,
-    opts?: { onOrBefore?: string },
-  ): Promise<{
-    date: string | null;
-    day: DayOfWeek | null;
-    exercises: Array<{
-      exerciseName: string;
-      records: Array<{
-        id: string;
-        setNumber: number;
-        weight: number;
-        reps: number;
-        done: boolean;
-        e1rm: number | null;
-        isPr: boolean;
-      }>;
-    }>;
-  }> {
-    await this.ensureUser(userId);
+    opts?: { onOrBefore?: string; preferExactDate?: string }, // NEW
+  ) {
+    const dayEnum = this.normalizeDayName(dayName);
+    const cutoff = toDateOnly(opts?.onOrBefore);
+    const preferExact = opts?.preferExactDate ? toDateOnly(opts.preferExactDate) : null;
 
-    // normalize string (Sunday, sunday, SUNDAY → DayOfWeek.SUNDAY)
-    const normalized = dayName.trim().toUpperCase();
-    const dayEnum = DayOfWeek[normalized as keyof typeof DayOfWeek];
-    if (!dayEnum) {
-      throw new Error(`Invalid day name: ${dayName}`);
+    // 1) If preferExactDate is provided, try to grab that session first
+    let latestSession = null as WorkoutSession | null;
+    if (preferExact) {
+      latestSession = await this.sessions.createQueryBuilder('session').innerJoin('session.user', 'user').where('user.id = :userId', { userId }).andWhere('session.day = :dayEnum', { dayEnum }).andWhere('session.date = :exact', { exact: preferExact }).getOne();
     }
 
-    const onOrBefore = opts?.onOrBefore;
-
-    // Pull all sets for that user + day
-    let qb = this.sets.createQueryBuilder('s').leftJoinAndSelect('s.session', 'session').leftJoinAndSelect('session.user', 'user').where('user.id = :userId', { userId }).andWhere('session.day = :dayEnum', { dayEnum });
-
-    if (onOrBefore) {
-      qb = qb.andWhere('s.date <= :onOrBefore', { onOrBefore });
+    // 2) Otherwise / if not found, get the latest ≤ cutoff
+    if (!latestSession) {
+      latestSession = await this.sessions
+        .createQueryBuilder('session')
+        .innerJoin('session.user', 'user')
+        .where('user.id = :userId', { userId })
+        .andWhere('session.day = :dayEnum', { dayEnum })
+        .andWhere('session.date <= :cutoff', { cutoff })
+        .orderBy('session.date', 'DESC')
+        .addOrderBy('session.created_at', 'DESC') // tie-breaker
+        .limit(1)
+        .getOne();
     }
 
-    const rows = await qb.orderBy('s.date', 'DESC').addOrderBy('s.exerciseName', 'ASC').addOrderBy('s.setNumber', 'ASC').getMany();
-
-    if (!rows.length) {
+    if (!latestSession) {
       return { date: null, day: dayEnum, exercises: [] };
     }
 
-    // Pick the latest training date for that weekday
-    const latestDate = rows[0].date;
-    const latestRows = rows.filter(r => r.date === latestDate);
+    const rows = await this.sets.createQueryBuilder('s').innerJoin('s.session', 'session').where('session.id = :sid', { sid: latestSession.id }).orderBy('s.exerciseName', 'ASC').addOrderBy('s.setNumber', 'ASC').getMany();
 
-    // Group by exercise
-    const map = new Map<string, typeof latestRows>();
-    for (const r of latestRows) {
-      if (!map.has(r.exerciseName)) map.set(r.exerciseName, []);
-      map.get(r.exerciseName)!.push(r);
+    const bucket = new Map<string, typeof rows>();
+    for (const r of rows) {
+      if (!bucket.has(r.exerciseName)) bucket.set(r.exerciseName, []);
+      bucket.get(r.exerciseName)!.push(r);
     }
 
-    const exercises = Array.from(map.entries()).map(([exerciseName, arr]) => ({
+    const exercises = Array.from(bucket.entries()).map(([exerciseName, arr]) => ({
       exerciseName,
       records: arr.map(r => ({
         id: r.id,
         setNumber: r.setNumber,
         weight: Number(r.weight),
         reps: r.reps,
-        done: false,
+        done: r.done, // keep actual value
         e1rm: r.e1rm ?? epley(Number(r.weight), r.reps),
         isPr: !!r.isPr,
       })),
     }));
 
-    return { date: latestDate, day: dayEnum, exercises };
+    return {
+      date: latestSession.date ?? null, // no toISOString() on DATE
+      day: latestSession.day ?? dayEnum,
+      exercises,
+    };
   }
 }

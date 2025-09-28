@@ -49,10 +49,9 @@ export class PrsController {
   @Get('last-day/by-name')
   async getLastDayByName(
     @Query('userId') userId: string,
-    @Query('day') day: string, // e.g. ?day=Sunday
-    @Query('onOrBefore') onOrBefore?: string,
+    @Query('day') day: string,          // e.g. ?day=Sunday
+    @Query('onOrBefore') onOrBefore?: string, // e.g. 2025-09-28T23:59:59Z
   ) {
-    const out = await this.prs.getLastDayByName(userId, day, { onOrBefore });
-    return out;
+    return this.prs.getLastDayByName(userId, day, { onOrBefore });
   }
 }
