@@ -55,35 +55,74 @@ export class CRUD {
       query.andWhere(
         new Brackets(qb => {
           searchFields.forEach(field => {
-            const columnMetadata = repository.metadata.columns.find(col => col.propertyName === field);
-            if (columnMetadata?.type === 'jsonb') {
-              qb.orWhere(`LOWER(${entityName}.${field}::text) LIKE LOWER(:search)`, { search: `%${search}%` });
-            } else if (columnMetadata?.type === String || columnMetadata?.type == 'text') {
-              qb.orWhere(`LOWER(${entityName}.${field}) LIKE LOWER(:search)`, {
-                search: `%${search}%`,
-              });
-            } else if (['decimal', 'float'].includes(columnMetadata?.type as any)) {
-              const numericSearch = parseFloat(search);
-              if (!isNaN(numericSearch))
-                qb.orWhere(`${entityName}.${field} = :numericSearch`, {
-                  numericSearch,
-                });
-            } else if (columnMetadata?.type === 'enum') {
-              const enumValues = columnMetadata.enum;
-              if (enumValues.includes(search)) {
-                qb.orWhere(`${entityName}.${field} = :value`, {
-                  value: search,
-                });
-              } else {
-                throw new BadRequestException(`Invalid value '${search}' for enum field '${field}'. Allowed values: ${enumValues.join(', ')}`);
+            const col = repository.metadata.columns.find(c => c.propertyName === field);
+            const typeStr = String(col?.type || '').toLowerCase();
+
+            // Enums: only exact match (don’t throw if not matched; let other fields try)
+            if (col?.enum && Array.isArray(col.enum)) {
+              if (col.enum.includes(search)) {
+                qb.orWhere(`${entityName}.${field} = :enumVal`, { enumVal: search });
               }
-            } else {
-              qb.orWhere(`${entityName}.${field} = :search`, { search });
+              return;
             }
+
+            // Numbers: try exact compare if the search is numeric
+            const isNumericType = ['int', 'int2', 'int4', 'int8', 'integer', 'bigint', 'smallint', 'numeric', 'decimal', 'float', 'float4', 'float8', 'double precision', Number].includes(col?.type as any);
+
+            if (isNumericType) {
+              const n = Number(search);
+              if (!Number.isNaN(n)) {
+                qb.orWhere(`${entityName}.${field} = :n`, { n });
+              }
+              return;
+            }
+
+            // JSON/JSONB → cast to text + ILIKE
+            if (typeStr === 'jsonb' || typeStr === 'json') {
+              qb.orWhere(`${entityName}.${field}::text ILIKE :s`, { s: `%${search}%` });
+              return;
+            }
+
+            // Default: cast to text and ILIKE (covers varchar/text/char/uuid/date…)
+            qb.orWhere(`${entityName}.${field}::text ILIKE :s`, { s: `%${search}%` });
           });
         }),
       );
     }
+
+    // if (search && searchFields?.length >= 1) {
+    //   query.andWhere(
+    //     new Brackets(qb => {
+    //       searchFields.forEach(field => {
+    //         const columnMetadata = repository.metadata.columns.find(col => col.propertyName === field);
+    //         if (columnMetadata?.type === 'jsonb') {
+    //           qb.orWhere(`LOWER(${entityName}.${field}::text) LIKE LOWER(:search)`, { search: `%${search}%` });
+    //         } else if (columnMetadata?.type === String || columnMetadata?.type == 'text') {
+    //           qb.orWhere(`LOWER(${entityName}.${field}) LIKE LOWER(:search)`, {
+    //             search: `%${search}%`,
+    //           });
+    //         } else if (['decimal', 'float'].includes(columnMetadata?.type as any)) {
+    //           const numericSearch = parseFloat(search);
+    //           if (!isNaN(numericSearch))
+    //             qb.orWhere(`${entityName}.${field} = :numericSearch`, {
+    //               numericSearch,
+    //             });
+    //         } else if (columnMetadata?.type === 'enum') {
+    //           const enumValues = columnMetadata.enum;
+    //           if (enumValues.includes(search)) {
+    //             qb.orWhere(`${entityName}.${field} = :value`, {
+    //               value: search,
+    //             });
+    //           } else {
+    //             throw new BadRequestException(`Invalid value '${search}' for enum field '${field}'. Allowed values: ${enumValues.join(', ')}`);
+    //           }
+    //         } else {
+    //           qb.orWhere(`${entityName}.${field} = :search`, { search });
+    //         }
+    //       });
+    //     }),
+    //   );
+    // }
 
     if (relations?.length > 0) {
       const invalidRelations = relations.filter(relation => !repository.metadata.relations.some(rel => rel.propertyName === relation));

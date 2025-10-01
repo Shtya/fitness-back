@@ -9,13 +9,10 @@ import { AuthModule } from './auth/auth.module';
 import { LoggingValidationPipe } from 'common/translationPipe';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 import { AssetModule } from './asset/asset.module';
-import { WorkoutsModule } from './workouts/workouts.module';
-import { PlanningModule } from './planning/planning.module';
-import { TrainingModule } from './training/training.module';
 import { PlansModule } from './plans/plans.module';
 import { PrsModule } from './prs/prs.module';
 import { PlanExercisesModule } from './exercises/exercises.module';
- 
+
 @Module({
   imports: [
     ConfigModule.forRoot(),
@@ -43,9 +40,6 @@ import { PlanExercisesModule } from './exercises/exercises.module';
 
     AuthModule,
     AssetModule,
-    WorkoutsModule,
-    PlanningModule,
-    TrainingModule,
     PlansModule,
     PrsModule,
     PlanExercisesModule,

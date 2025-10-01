@@ -81,3 +81,32 @@ export class BulkCreatePlanExerciseDto {
   @Type(() => CreatePlanExerciseDto)
   items: CreatePlanExerciseDto[];
 }
+
+
+
+
+
+// src/dto/exercises.dto.ts
+export class CreatePlanExercisesDto {
+  name: string;
+  targetSets?: number;   // default 3
+  targetReps: string;    // e.g. "8" or "12-15"
+  rest?: number;         // default 90 (seconds)
+  tempo?: string | null; // e.g. "1/1/1"
+  img?: string | null;   // relative URL or null
+  video?: string | null; // relative URL or null
+}
+
+export class UpdatePlanExercisesDto {
+  name?: string;
+  targetSets?: number;
+  targetReps?: string;
+  rest?: number;
+  tempo?: string | null;
+  img?: string | null;
+  video?: string | null;
+}
+
+export class BulkCreatePlanExercisesDto {
+  items: CreatePlanExercisesDto[];
+}

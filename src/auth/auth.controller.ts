@@ -1,8 +1,6 @@
-
-
+// --- File: src/auth/auth.controller.ts ---
 import { Controller, Post, Get, Put, Delete, Body, Res, Req, UseGuards, Query, Param, BadRequestException } from '@nestjs/common';
 import { Response, Request } from 'express';
-
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { Roles } from './decorators/roles.decorator';
@@ -37,7 +35,6 @@ export class AuthController {
   @Post('logout')
   @UseGuards(JwtAuthGuard)
   async logout(@Res() res: Response) {
-    // if you ever set httpOnly cookies, clear here — currently we just return tokens in JSON
     return res.json({ message: 'Logged out' });
   }
 
@@ -55,59 +52,20 @@ export class AuthController {
     return this.authService.updateProfile(req.user.id, dto);
   }
 
-  /* ---------------------- Admin-only helpers (optional) ---------------------- */
+  /* ---------------------- Admin-only helpers ---------------------- */
 
   @Get('users')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   async listUsers(@Query() query: any) {
-		return CRUD.findAll(
-					this.authService.userRepo,
-					'user',
-					query.search,
-					query.page,
-					query.limit,
-					query.sortBy,
-					query.sortOrder,
-					[],
-					['email' , "name" , "phone"],
-					{},
-				);
+    // supports: ?page, ?limit, ?sortBy, ?sortOrder, ?search, ?role
+    return this.authService.listUsersAdvanced(query);
   }
 
   @Delete('user/:id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   async deleteUser(@Param('id') id: string) {
-    return this.authService.deleteUser(id);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('protected')
-  protected(@Req() req: any) {
-    return { message: `Hello ${req.user.name}, you're authenticated.` };
-  }
-
-  /* NEW: Forgot/Reset */
-  @Post('forgot-password') forgot(@Body() dto: ForgotPasswordDto) {
-    return this.authService.forgotPassword(dto);
-  }
-  @Post('reset-password') reset(@Body() dto: ResetPasswordDto) {
-    return this.authService.resetPassword(dto);
-  }
-
-  /* Admin helpers */
-  @Get('users')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  list(@Query() q: PagedQueryDto) {
-    return this.authService.getAllUsers(q.page, q.limit);
-  }
-
-  @Delete('user/:id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  remove(@Param('id') id: string) {
     return this.authService.deleteUser(id);
   }
 
@@ -119,4 +77,43 @@ export class AuthController {
     if (!Object.values(UserStatus).includes(status)) throw new BadRequestException('Invalid status');
     return this.authService.setStatus(id, status);
   }
+
+  /* ---------------------- Coach / Trainer utilities ---------------------- */
+
+  // Admin creates any user (client/coach/trainer) with auto-password, can also assign their coach right away
+  @Post('admin/users')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  createUserByAdmin(@Body() body: any) {
+    return this.authService.adminCreateUser(body);
+  }
+
+  // List coaches (and trainers if you want them to be selectable as “coach”)
+  @Get('coaches')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  listCoaches(@Query('includeTrainers') includeTrainers?: string) {
+    return this.authService.listCoaches(includeTrainers === '1' || includeTrainers === 'true');
+  }
+
+  // Assign a coach to a user (client or trainer). Admin and Coach can do it.
+  @Post('coach/assign')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  assignCoach(@Body('userId') userId: string, @Body('coachId') coachId: string) {
+    if (!userId || !coachId) throw new BadRequestException('userId and coachId are required');
+    return this.authService.assignCoach(userId, coachId);
+  }
+
+
+ 
+ 
+  /* -------- New: Stats -------- */
+  @Get('stats')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  stats() {
+    return this.authService.getStats();
+  }
+ 
 }

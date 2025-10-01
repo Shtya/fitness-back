@@ -15,6 +15,7 @@ export enum DayOfWeek {
   TUESDAY = 'tuesday',
   WEDNESDAY = 'wednesday',
   THURSDAY = 'thursday',
+  FRIDAY = 'friday',
 }
 
 export enum UserStatus {
@@ -22,6 +23,7 @@ export enum UserStatus {
   ACTIVE = 'active',
   SUSPENDED = 'suspended',
 }
+
 export interface ProgramExercise {
   id: string; // client-side id
   name: string;
@@ -86,6 +88,20 @@ export class User extends CoreEntity {
   @Column({ type: 'enum', enum: UserStatus, default: UserStatus.PENDING })
   status!: UserStatus;
 
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  gender?: string | null; // ← ADD (e.g. 'male' | 'female' | null)
+
+  @ManyToOne(() => User, u => u.athletes, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'coachId' })
+  coach?: User | null; // ← ADD (self-reference)
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  coachId?: string | null; // ← physical FK column for quick filtering
+
+  @OneToMany(() => User, u => u.coach)
+  athletes?: User[]; // ← reverse side
+
   /* Optional but useful for audit */
   @Column({ type: 'timestamptz', nullable: true })
   lastLogin!: Date | null;
@@ -113,9 +129,6 @@ export class User extends CoreEntity {
 
   @OneToMany(() => PlanAssignment, a => a.athlete)
   planAssignments!: PlanAssignment[];
-  // @OneToMany(() => PlanAssignment, a => a.athlete)
-  // plansAssigned!: PlanAssignment 
-
 
   @OneToMany(() => WorkoutSession, s => s.user)
   sessions: WorkoutSession[];
@@ -152,15 +165,15 @@ export class Plan extends CoreEntity {
   meals!: any[]; // [{ time:'08:00', items:[...], kcals: ... }, ...]
 
   @Column({ type: 'jsonb', default: () => `'[]'` })
-  instructions!: any[];  
+  instructions!: any[];
 
   // Who it’s assigned to
   @OneToMany(() => PlanAssignment, a => a.plan, { cascade: true })
   assignments!: PlanAssignment[];
 
-	@ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
-@JoinColumn({ name: 'athleteId' }) // optional: custom column name
-athlete: User;
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'athleteId' }) // optional: custom column name
+  athlete: User;
 }
 
 @Entity('plan_assignments')
@@ -189,7 +202,7 @@ export class PlanAssignment extends CoreEntity {
 }
 
 @Entity('plan_days')
-@Index(['plan', 'day'], { unique: true }) // 1 config per weekday per plan. If you want Push A / Push B both on Saturday, drop “unique”.
+@Index(['plan', 'day', 'orderIndex'], { unique: true }) 
 export class PlanDay extends CoreEntity {
   @ManyToOne(() => Plan, p => p.days, { onDelete: 'CASCADE' })
   plan!: Plan;
@@ -203,10 +216,9 @@ export class PlanDay extends CoreEntity {
   @Column({ type: 'int', default: 0 })
   orderIndex!: number;
 
-  @OneToMany(() => PlanExercise, e => e.day, { cascade: true })
-  exercises!: PlanExercise[];
+  @OneToMany(() => PlanExercises, e => e.day, { cascade: true })
+  exercises!: PlanExercises[];
 }
-
 
 export enum ExerciseStatus {
   ACTIVE = 'Active',
@@ -215,8 +227,8 @@ export enum ExerciseStatus {
 
 @Entity('plan_exercises')
 @Index(['day', 'orderIndex'])
-export class PlanExercise extends CoreEntity {
-  @ManyToOne(() => PlanDay, d => d.exercises, { onDelete: 'CASCADE' })
+export class PlanExercises extends CoreEntity {
+  @ManyToOne(() => PlanDay, d => d.exercises, { nullable: true, onDelete: 'CASCADE' })
   day: PlanDay;
 
   @Index()
@@ -226,6 +238,15 @@ export class PlanExercise extends CoreEntity {
   // same field your UI expects
   @Column({ type: 'varchar', length: 50, default: '10' })
   targetReps: string;
+
+  @Column({ type: 'int', default: 3 })
+  targetSets: number;
+
+  @Column({ type: 'int', default: 90 })
+  rest: number;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  tempo?: string | null;
 
   // optional media shown in the UI
   @Column({ type: 'varchar', length: 512, nullable: true })
@@ -241,7 +262,6 @@ export class PlanExercise extends CoreEntity {
   @Column({ type: 'text', nullable: true })
   desc?: string | null;
 
-  // muscles (store as JSON array of strings)
   @Column({ type: 'jsonb', default: () => `'[]'` })
   primaryMuscles: string[];
 
@@ -252,15 +272,9 @@ export class PlanExercise extends CoreEntity {
   @Column({ type: 'varchar', length: 64, nullable: true })
   equipment?: string | null;
 
-  // sets & rest (you already have targetReps)
-  @Column({ type: 'int', default: 3 })
-  targetSets: number;
-
   @Column({ type: 'int', default: 90 })
   restSeconds: number;
 
-  // alternatives: store **only exercise IDs** (UUIDs or strings).
-  // If your IDs are UUIDs, keep 'uuid' type; if not guaranteed, use varchar.
   @Column('varchar', { array: true, default: '{}' })
   alternatives: string[];
 

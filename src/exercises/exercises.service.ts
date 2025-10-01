@@ -1,186 +1,180 @@
 // src/plan-exercises/plan-exercises.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, DataSource, Repository } from 'typeorm';
-import { CreatePlanExerciseDto, UpdatePlanExerciseDto } from 'dto/exercises.dto';
-import { CRUD } from 'common/crud.service';
-import { PlanDay, PlanExercise } from 'entities/global.entity';
+import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
+import { CreatePlanExercisesDto, UpdatePlanExercisesDto } from 'dto/exercises.dto';
+import { PlanExercises } from 'entities/global.entity';
+
+type PublicExercise = {
+  id: string;
+  name: string;
+  targetSets: number;
+  targetReps: string;
+  rest: number;
+  tempo: string | null;
+  img: string | null;
+  video: string | null;
+};
 
 @Injectable()
 export class PlanExercisesService {
   constructor(
-    @InjectRepository(PlanExercise) public readonly repo: Repository<PlanExercise>,
-    @InjectRepository(PlanDay) private readonly dayRepo: Repository<PlanDay>,
+    @InjectRepository(PlanExercises) public readonly repo: Repository<PlanExercises>,
     private readonly dataSource: DataSource,
   ) {}
 
+  private toPublic(e: any) {
+    return {
+      id: e.id,
+      name: e.name,
+      targetSets: e.targetSets ?? 3,
+      targetReps: e.targetReps ?? '10',
+      rest: e.rest ?? 90,
+      tempo: e.tempo ?? null,
+      img: e.img ?? null,
+      video: e.video ?? null,
+      created_at: e.created_at ?? null, // <- map correctly
+    };
+  }
+
+  private baseQB(q: any): SelectQueryBuilder<PlanExercises> {
+    const qb = this.repo.createQueryBuilder('e');
+    if (q?.search) {
+      qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
+    }
+    return qb;
+  }
+
   async list(q: any) {
-    return CRUD.findAll(
-      this.repo,
-      'plan_exercise',
-      q.search,
-      q.page,
-      q.limit,
-      q.sortBy,
-      q.sortOrder,
-      ['day'], // eager relation if needed
-      ['name', 'desc', 'equipment' ], // search fields
-      q.filters || {},
-    );
+    const page = Math.max(1, parseInt(q?.page ?? '1', 10));
+    const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
+
+    // what the client can send
+    const sortKey = String(q?.sortBy ?? 'created_at');
+
+    // map to entity properties
+    const SORTABLE: Record<string, string> = {
+      created_at: 'e.created_at', // entity property
+      name: 'e.name',
+    };
+
+    const sortByExpr = SORTABLE[sortKey] ?? SORTABLE.created_at;
+    const sortOrder: 'ASC' | 'DESC' = String(q?.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    const qb = this.baseQB(q)
+      .orderBy(sortByExpr, sortOrder)
+      // optional: add stable secondary order to keep pagination consistent
+      .addOrderBy('e.id', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [rows, total] = await qb.getManyAndCount();
+    return {
+      total_records: total,
+      current_page: page,
+      per_page: limit,
+      records: rows.map(r => this.toPublic(r)),
+    };
   }
 
-  async bulkCreate(items: CreatePlanExerciseDto[]) {
-    return this.dataSource.transaction(async manager => {
-      const results: PlanExercise[] = [];
-      for (const i of items) {
-        const day = i.dayId ? await manager.getRepository(PlanDay).findOne({ where: { id: i.dayId } }) : null;
-        const entity = manager.getRepository(PlanExercise).create({
-          ...i,
-          day: day || undefined,
-          // img/video are already URL strings – just persist them
-        });
-        results.push(await manager.getRepository(PlanExercise).save(entity));
-      }
-      return results;
-    });
-  }
-
-  async stats() {
-    // --- Totals (no filters) ---
-    const totals = await this.repo
-      .createQueryBuilder('e')
-      .select([
-        'COUNT(*)::int AS total',
-        `SUM(CASE WHEN e.status = 'Active' THEN 1 ELSE 0 END)::int AS active`,
-        `SUM(CASE WHEN e.status = 'Inactive' THEN 1 ELSE 0 END)::int AS inactive`,
-        `SUM(CASE WHEN e.img IS NOT NULL AND e.img <> '' THEN 1 ELSE 0 END)::int AS with_image`,
-        `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`,
-        // QUOTE camelCase:
-        `SUM(CASE WHEN e."dayId" IS NOT NULL THEN 1 ELSE 0 END)::int AS linked_to_day`,
-        `COALESCE(AVG(e."targetSets"),0)::float AS avg_target_sets`,
-        `COALESCE(AVG(e."restSeconds"),0)::float AS avg_rest_seconds`,
-        // created_at is snake_case in your DB (from CoreEntity) — keep as is:
-        `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END)::int AS created_7d`,
-        `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`,
-      ])
-      .getRawOne<{
-        total: number;
-        active: number;
-        inactive: number;
-        with_image: number;
-        with_video: number;
-        linked_to_day: number;
-        avg_target_sets: number;
-        avg_rest_seconds: number;
-        created_7d: number;
-        created_30d: number;
-      }>();
-
-    // --- Top primary muscles (global) ---
-    const primaryMusclesTop = await this.repo.query<any[]>(
-      `
-    SELECT m.muscle AS label, COUNT(*)::int AS count
-    FROM (
-      SELECT jsonb_array_elements_text(e."primaryMuscles") AS muscle
-      FROM "plan_exercises" e
-    ) m
-    GROUP BY m.muscle
-    ORDER BY count DESC
-    LIMIT 6
-    `,
-    );
-
-    // --- Top secondary muscles (global) ---
-    const secondaryMusclesTop = await this.repo.query<any[]>(
-      `
-    SELECT m.muscle AS label, COUNT(*)::int AS count
-    FROM (
-      SELECT jsonb_array_elements_text(e."secondaryMuscles") AS muscle
-      FROM "plan_exercises" e
-    ) m
-    GROUP BY m.muscle
-    ORDER BY count DESC
-    LIMIT 6
-    `,
-    );
-
-    // --- Equipment distribution (global) ---
-    const equipmentTop = await this.repo.query<any[]>(
-      `
-    SELECT e.equipment AS label, COUNT(*)::int AS count
-    FROM "plan_exercises" e
-    WHERE e.equipment IS NOT NULL AND e.equipment <> ''
-    GROUP BY e.equipment
-    ORDER BY count DESC
-    LIMIT 6
-    `,
-    );
+  async stats(q?: any) {
+    // simple stats for your KPIs; feel free to grow later
+    const totals = await this.repo.createQueryBuilder('e').select(['COUNT(*)::int AS total', `SUM(CASE WHEN e.img   IS NOT NULL AND e.img   <> '' THEN 1 ELSE 0 END)::int AS with_image`, `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`, `COALESCE(AVG(e.rest),0)::float AS avg_rest`, `COALESCE(AVG(e."targetSets"),0)::float AS avg_sets`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days'  THEN 1 ELSE 0 END)::int AS created_7d`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`]).getRawOne<{
+      total: number;
+      with_image: number;
+      with_video: number;
+      avg_rest: number;
+      avg_sets: number;
+      created_7d: number;
+      created_30d: number;
+    }>();
 
     return {
       totals: {
-        total: totals.total,
-        active: totals.active,
-        inactive: totals.inactive,
-        withImage: totals.with_image,
-        withVideo: totals.with_video,
-        linkedToDay: totals.linked_to_day,
-        avgTargetSets: Number(totals.avg_target_sets?.toFixed?.(2) ?? totals.avg_target_sets),
-        avgRestSeconds: Math.round(totals.avg_rest_seconds),
-        created7d: totals.created_7d,
-        created30d: totals.created_30d,
-      },
-      top: {
-        primaryMuscles: primaryMusclesTop,
-        secondaryMuscles: secondaryMusclesTop,
-        equipment: equipmentTop,
+        total: totals?.total ?? 0,
+        withImage: totals?.with_image ?? 0,
+        withVideo: totals?.with_video ?? 0,
+        avgRest: Math.round(totals?.avg_rest ?? 0),
+        avgTargetSets: Number((totals?.avg_sets ?? 0).toFixed(2)),
+        created7d: totals?.created_7d ?? 0,
+        created30d: totals?.created_30d ?? 0,
       },
     };
   }
 
-  async get(id: string) {
-    const ex = await this.repo.findOne({
-      where: { id },
-      relations: ['day'],
-    });
+  async get(id: string): Promise<PublicExercise> {
+    const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
-    return ex;
+    return this.toPublic(ex);
   }
 
-  async create(dto: CreatePlanExerciseDto) {
+  async create(dto: CreatePlanExercisesDto): Promise<PublicExercise> {
     const entity = this.repo.create({
-      ...dto,
-      // `day` relation if dayId provided
-      day: dto.dayId ? await this.dayRepo.findOne({ where: { id: dto.dayId } }) : undefined,
-    });
-    return this.repo.save(entity);
+      name: dto.name,
+      targetSets: dto.targetSets ?? 3,
+      targetReps: dto.targetReps ?? '10',
+      rest: dto.rest ?? 90,
+      tempo: dto.tempo ?? null,
+      img: dto.img ?? null,
+      video: dto.video ?? null,
+    } as any);
+    const saved = await this.repo.save(entity);
+    return this.toPublic(saved);
   }
 
-  async update(id: string, dto: UpdatePlanExerciseDto) {
-    const ex = await this.get(id);
-    if (dto.dayId) {
-      const day = await this.dayRepo.findOne({ where: { id: dto.dayId } });
-      (ex as any).day = day || null;
-      delete (dto as any).dayId;
-    }
-    Object.assign(ex, dto);
-    return this.repo.save(ex);
+  async bulkCreate(items: CreatePlanExercisesDto[]): Promise<PublicExercise[]> {
+    return this.dataSource.transaction(async manager => {
+      const repo = manager.getRepository(PlanExercises);
+      const entities: any = items.map(i =>
+        repo.create({
+          name: i.name,
+          targetSets: i.targetSets ?? 3,
+          targetReps: i.targetReps ?? '10',
+          rest: i.rest ?? 90,
+          tempo: i.tempo ?? null,
+          img: i.img ?? null,
+          video: i.video ?? null,
+        } as any),
+      );
+      const saved = await repo.save(entities);
+      return saved.map(s => this.toPublic(s));
+    });
+  }
+
+  async update(id: string, dto: UpdatePlanExercisesDto): Promise<PublicExercise> {
+    const ex: any = await this.repo.findOne({ where: { id } });
+    if (!ex) throw new NotFoundException('Exercise not found');
+
+    if (dto.name !== undefined) ex.name = dto.name;
+    if (dto.targetSets !== undefined) ex.targetSets = dto.targetSets;
+    if (dto.targetReps !== undefined) ex.targetReps = dto.targetReps;
+    if (dto.rest !== undefined) ex.rest = dto.rest;
+    if (dto.tempo !== undefined) ex.tempo = dto.tempo;
+    if (dto.img !== undefined) ex.img = dto.img;
+    if (dto.video !== undefined) ex.video = dto.video;
+
+    const saved = await this.repo.save(ex);
+    return this.toPublic(saved);
   }
 
   async remove(id: string) {
-    const ex = await this.get(id);
+    const ex = await this.repo.findOne({ where: { id } });
+    if (!ex) throw new NotFoundException('Exercise not found');
     await this.repo.remove(ex);
     return { deleted: true, id };
   }
 
-  async updateImage(id: string, path: string) {
-    const ex = await this.get(id);
+  async updateImage(id: string, path: string): Promise<PublicExercise> {
+    const ex = await this.repo.findOne({ where: { id } });
+    if (!ex) throw new NotFoundException('Exercise not found');
     ex.img = path;
-    return this.repo.save(ex);
+    return this.toPublic(await this.repo.save(ex));
   }
 
-  async updateVideo(id: string, path: string) {
-    const ex = await this.get(id);
+  async updateVideo(id: string, path: string): Promise<PublicExercise> {
+    const ex = await this.repo.findOne({ where: { id } });
+    if (!ex) throw new NotFoundException('Exercise not found');
     ex.video = path;
-    return this.repo.save(ex);
+    return this.toPublic(await this.repo.save(ex));
   }
 }

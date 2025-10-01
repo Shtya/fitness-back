@@ -11,6 +11,81 @@ export class MailService {
     },
   });
 
+  async sendWelcomeWithPassword(to: string, name: string, tempPass: string) {
+    const project = process.env.PROJECT_NAME || 'Your Project';
+    const loginUrl = process.env.APP_LOGIN_URL || '#';
+
+    const htmlContent = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charSet="utf-8" />
+    <style>
+      .email-container {
+        font-family: Arial, sans-serif;
+        color: #333;
+        background-color: #f9f9f9;
+        padding: 20px;
+        max-width: 600px;
+        margin: auto;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      }
+      .content { text-align: center; line-height: 1.6; }
+      .greet { font-size: 16px; margin: 10px 0 20px; color: #444; }
+      .pass-box {
+        display: inline-block;
+        margin: 16px auto;
+        padding: 10px 16px;
+        color: #0B6EEF;
+        background-color: #e9f5ff;
+        font-size: 18px;
+        font-weight: bold;
+        border-radius: 6px;
+        border: 1px solid #0B6EEF;
+      }
+      .btn {
+        display: inline-block;
+        margin-top: 18px;
+        padding: 10px 20px;
+        color: #fff !important;
+        background-color: #0B6EEF;
+        font-size: 16px;
+        border-radius: 6px;
+        text-decoration: none;
+      }
+      .hint { margin-top: 14px; font-size: 13px; color: #666; }
+      .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #888; }
+    </style>
+  </head>
+  <body>
+    <div class="email-container">
+      <div class="content">
+        <h2>Welcome to ${project} 🎉</h2>
+        <p class="greet">Hi ${name || ''}, your account has been created by the admin.</p>
+        <p>Use the temporary password below to sign in and be sure to change it after your first login:</p>
+        <div class="pass-box">${tempPass}</div>
+        <div>
+          <a class="btn" href="${loginUrl}" target="_blank" rel="noopener noreferrer">Go to Login</a>
+        </div>
+        <p class="hint">If you didn’t expect this email, you can safely ignore it.</p>
+      </div>
+      <div class="footer">
+        <p>&copy; ${new Date().getFullYear()} ${project}. All rights reserved.</p>
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+
+    await this.transporter.sendMail({
+      from: `"${project}" <${process.env.EMAIL_USER}>`,
+      to,
+      subject: `Your ${project} account is ready`,
+      html: htmlContent,
+    });
+  }
+
   async sendOTPEmail(to: string, otp: string, actionType: string) {
     const htmlContent = `
     <!DOCTYPE html>

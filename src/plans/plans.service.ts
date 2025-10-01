@@ -1,65 +1,54 @@
+// --- File: plans/plans.service.ts ---
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { Plan, PlanDay, PlanExercise, PlanAssignment, User } from 'entities/global.entity';
+import { Plan, PlanDay, PlanExercises, PlanAssignment, User, DayOfWeek } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
-import { ImportPlanDto } from './plans.dto';
-import { DayOfWeek } from 'entities/global.entity';
+import { ImportPlanDto, TemplateExerciseDto } from 'dto/plans.dto';
 
-const DAY_ALIASES: Record<string, string> = {
-  mon: 'monday',
-  monday: 'monday',
-  tue: 'tuesday',
-  tuesday: 'tuesday',
-  wed: 'wednesday',
-  wednesday: 'wednesday',
-  thu: 'thursday',
-  thursday: 'thursday',
-  fri: 'friday',
-  friday: 'friday',
-  sat: 'saturday',
-  saturday: 'saturday',
-  sun: 'sunday',
-  sunday: 'sunday',
+const DAY_ALIASES: Record<string, DayOfWeek> = {
+  mon: DayOfWeek.MONDAY,
+  monday: DayOfWeek.MONDAY,
+  tue: DayOfWeek.TUESDAY,
+  tuesday: DayOfWeek.TUESDAY,
+  wed: DayOfWeek.WEDNESDAY,
+  wednesday: DayOfWeek.WEDNESDAY,
+  thu: DayOfWeek.THURSDAY,
+  thursday: DayOfWeek.THURSDAY,
+  fri: DayOfWeek.FRIDAY,
+  friday: DayOfWeek.FRIDAY,
+  sat: DayOfWeek.SATURDAY,
+  saturday: DayOfWeek.SATURDAY,
+  sun: DayOfWeek.SUNDAY,
+  sunday: DayOfWeek.SUNDAY,
 };
-const normalizeDay = (v: string) => {
-  const key = String(v || '').toLowerCase();
+const dayEnum = (v?: string): DayOfWeek => {
+  const key = String(v || 'monday').toLowerCase();
   const out = DAY_ALIASES[key];
   if (!out) throw new BadRequestException(`Invalid dayOfWeek: ${v}`);
   return out;
 };
 
-function normalizeDayEnum(day?: string): DayOfWeek {
-  const k = String(day || '')
-    .trim()
-    .toUpperCase();
-  if (k.startsWith('SAT')) return DayOfWeek.SATURDAY;
-  if (k.startsWith('SUN')) return DayOfWeek.SUNDAY;
-  if (k.startsWith('MON')) return DayOfWeek.MONDAY;
-  if (k.startsWith('TUE')) return DayOfWeek.TUESDAY;
-  if (k.startsWith('WED')) return DayOfWeek.WEDNESDAY;
-  if (k.startsWith('THU')) return DayOfWeek.THURSDAY;
-  return DayOfWeek.MONDAY;
-}
-
-// map DB → front end shape (weeklyProgram-like)
+// map DB → FE "weeklyProgram-like" shape (only the minimal keys)
 function planToFrontendShape(plan: Plan, eagerDays: PlanDay[]) {
   const days = (eagerDays || [])
     .sort((a, b) => a.orderIndex - b.orderIndex)
     .map(d => ({
-      id: String(d.day || '').toLowerCase(), // 'saturday'
-      dayOfWeek: String(d.day || '').toLowerCase(),
+      id: String(d.day).toLowerCase(),
+      dayOfWeek: String(d.day).toLowerCase(),
       name: d.name,
       exercises: (d.exercises || [])
         .sort((a, b) => a.orderIndex - b.orderIndex)
-        .map((e, idx) => ({
-          id: e.id || `ex${idx + 1}`,
+        .map((e:any) => ({
+          id: e.id,
           name: e.name,
-          targetSets: 0, // not stored; FE doesn’t require here
-          targetReps: e.targetReps, // stored
+          targetSets: e.targetSets ?? 0,
+          targetReps: e.targetReps,
+          rest: e.restSeconds ?? null,
+          tempo: e.tempo ?? null,
           img: e.img || null,
           video: e.video || null,
-        })),
+        } )),
     }));
 
   return {
@@ -68,8 +57,9 @@ function planToFrontendShape(plan: Plan, eagerDays: PlanDay[]) {
     updated_at: plan.updated_at,
     deleted_at: plan.deleted_at || null,
     name: plan.name,
-    coachId: plan.coach?.id || null,
-    isActive: plan.isActive,
+    userId: (plan as any)?.athlete?.id ?? null,
+    coachId: (plan as any)?.coach?.id ?? null,
+    isActive: !!plan.isActive,
     metadata: {},
     program: { days },
   };
@@ -81,16 +71,14 @@ export class PlanService {
     private readonly dataSource: DataSource,
     @InjectRepository(Plan) private readonly planRepo: Repository<Plan>,
     @InjectRepository(PlanDay) private readonly dayRepo: Repository<PlanDay>,
-    @InjectRepository(PlanExercise) private readonly exRepo: Repository<PlanExercise>,
+    @InjectRepository(PlanExercises) private readonly exRepo: Repository<PlanExercises>,
     @InjectRepository(PlanAssignment) private readonly assignRepo: Repository<PlanAssignment>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly ds: DataSource,
   ) {}
 
-  /** Accept a plan (activate it for user, deactivate others) */
+  /** Activate a plan for a user; ensures only one active at a time */
   async acceptPlan(planId: string, userId: string) {
-    if (!planId || !userId) return { ok: false, error: 'planId and userId are required' };
-
     return this.ds.transaction(async manager => {
       const planRepo = manager.getRepository(Plan);
       const userRepo = manager.getRepository(User);
@@ -99,7 +87,8 @@ export class PlanService {
         where: { id: planId },
         relations: ['athlete'],
       });
-      if (!plan) return { ok: false, error: 'Plan not found' }; 
+      if (!plan) throw new NotFoundException('Plan not found');
+
       // deactivate all other active plans for this user
       await planRepo.createQueryBuilder().update(Plan).set({ isActive: false }).where('athleteId = :userId', { userId }).execute();
 
@@ -114,81 +103,126 @@ export class PlanService {
     });
   }
 
-  /** Import your weeklyProgram JSON (or compact) and make it active for the user */
+  /** Helper: resolve a library exercise by primary or alternate IDs */
+  private async resolveLibraryExercise(manager: any, item: TemplateExerciseDto): Promise<PlanExercises | null> {
+    const tryIds: string[] = [];
+    if (item.exerciseId) tryIds.push(item.exerciseId);
+    if (item.altExerciseId) {
+      if (Array.isArray(item.altExerciseId)) tryIds.push(...item.altExerciseId);
+      else tryIds.push(item.altExerciseId);
+    }
+    for (const id of tryIds) {
+      const lib = await manager.findOne(PlanExercises, { where: { id } });
+      if (lib) return lib;
+    }
+    return null;
+  }
+
+  /** Import your weekly program and (optionally) activate for the userId */
   async importAndActivate(body: ImportPlanDto) {
-    const payload: any = body || {};
-    const userId = payload.userId || payload?.athlete?.id || payload?.user_id || payload?.user;
+    const payload = body || {};
+    const userId = payload.userId || (payload as any)?.athlete?.id || (payload as any)?.user_id || (payload as any)?.user;
 
-    const coachId = payload.coachId || payload?.coach?.id || null;
+    const coachId = payload.coachId || (payload as any)?.coach?.id || null;
     const planName = payload.name || 'Program';
-    const program = payload.program || payload?.plan?.program || payload?.programAlt;
+    const program = payload.program || (payload as any)?.plan?.program || (payload as any)?.programAlt;
 
-    if (!userId) return { ok: false, error: 'userId is required' };
     if (!program || !Array.isArray(program.days)) {
-      return { ok: false, error: 'program.days array is required' };
+      throw new BadRequestException('program.days[] is required');
     }
 
     return this.ds.transaction(async manager => {
       const userRepo = manager.getRepository(User);
       const planRepo = manager.getRepository(Plan);
       const dayRepo = manager.getRepository(PlanDay);
-      const exRepo = manager.getRepository(PlanExercise);
+      const exRepo = manager.getRepository(PlanExercises);
 
-      const athlete = await userRepo.findOne({ where: { id: userId } });
-      if (!athlete) return { ok: false, error: 'Athlete not found' };
-
-      let coach = null;
-      if (coachId) coach = await userRepo.findOne({ where: { id: coachId } });
-
-      // deactivate any existing active plan
-      await planRepo.createQueryBuilder().update(Plan).set({ isActive: false }).where('athleteId = :userId', { userId }).execute();
+      let athlete: User | null = null;
+      if (userId) {
+        athlete = await userRepo.findOne({ where: { id: userId } });
+        if (!athlete) throw new BadRequestException('Athlete not found');
+        // deactivate any existing active plan
+        await planRepo.createQueryBuilder().update(Plan).set({ isActive: false }).where('athleteId = :userId', { userId }).execute();
+      }
 
       // create plan
       const plan = planRepo.create({
         name: planName,
-        isActive: true,
+        isActive: !!userId, // auto-activate if we have a user
         startDate: null,
         endDate: null,
-        athlete,
-        coach: coach || null,
+        athlete: athlete || null,
+        coach: coachId ? ({ id: coachId } as any) : null,
       } as any);
-      const savedPlan:any = await planRepo.save(plan);
+      const savedPlan: any = await planRepo.save(plan);
 
       // create days + exercises
-      for (let i = 0; i < program.days.length; i += 1) {
+      for (let i = 0; i < program.days.length; i++) {
         const d = program.days[i];
-        const dayEntity = dayRepo.create({
-          plan: savedPlan,
-          name: d.name || d.id || 'Workout',
-          day: normalizeDayEnum(d.dayOfWeek || d.id),
-          orderIndex: i,
-        } as any);
-        const savedDay = await dayRepo.save(dayEntity);
+        const savedDay = await dayRepo.save(
+          dayRepo.create({
+            plan: savedPlan,
+            name: d.name || d.id || 'Workout',
+            day: dayEnum(d.dayOfWeek || d.id),
+            orderIndex: Number(d.orderIndex ?? i),
+          } as any),
+        );
 
-        const exercises = Array.isArray(d.exercises) ? d.exercises : [];
-        for (let j = 0; j < exercises.length; j += 1) {
+        const exercises: TemplateExerciseDto[] = Array.isArray(d.exercises) ? d.exercises : [];
+
+        for (let j = 0; j < exercises.length; j++) {
           const e = exercises[j];
-          const exEntity = exRepo.create({
+
+          // Try library first (exerciseId / altExerciseId)
+          const lib:any = await this.resolveLibraryExercise(manager, e);
+
+          if (lib) {
+            const copy = exRepo.create({
+              day: savedDay,
+              orderIndex: Number(e.order ?? e.orderIndex ?? j),
+              name: lib.name,
+              targetReps: e.targetReps ?? lib.targetReps ?? '10',
+              targetSets: e.targetSets !== undefined ? Number(e.targetSets) : (lib.targetSets ?? 3),
+              restSeconds: e.rest !== undefined ? Number(e.rest) : (lib.restSeconds ?? 90),
+              tempo: e.tempo ?? lib.tempo ?? null,
+              img: e.img ?? lib.img ?? null,
+              video: e.video ?? lib.video ?? null,
+            } as any);
+            await exRepo.save(copy);
+            continue;
+          }
+
+          // Inline fallback
+          if (!e.name) {
+            throw new BadRequestException(`exercise requires name or exerciseId (day: ${d.name || d.id}, index: ${j})`);
+          }
+
+          const inline = exRepo.create({
             day: savedDay,
+            orderIndex: Number(e.order ?? e.orderIndex ?? j),
             name: e.name,
-            targetReps: String(e.targetReps || '10'),
-            img: e.img || null,
-            video: e.video || null,
-            orderIndex: j,
+            targetReps: String(e.targetReps ?? '10'),
+            targetSets: Number(e.targetSets ?? 3),
+            restSeconds: Number(e.rest ?? 90),
+            tempo: e.tempo ?? null,
+            img: e.img ?? null,
+            video: e.video ?? null,
           } as any);
-          await exRepo.save(exEntity);
+          await exRepo.save(inline);
         }
       }
 
-      // set user's activePlanId
-      athlete.activePlanId = savedPlan.id;
-      await userRepo.save(athlete);
+      // Set user's active plan pointer
+      if (athlete) {
+        athlete.activePlanId = savedPlan.id;
+        await userRepo.save(athlete);
+      }
 
       // return full plan in FE shape
       const full = await planRepo.findOne({
         where: { id: savedPlan.id },
-        relations: ['athlete', 'coach', 'days', 'days.exercises'],
-        order: { days: { orderIndex: 'ASC' } },
+        relations: ['athlete', 'coach', 'days' ],
+        order: { days: { orderIndex: 'ASC' } } as any,
       });
 
       return { ok: true, planId: full!.id, plan: planToFrontendShape(full!, full!.days) };
@@ -199,18 +233,18 @@ export class PlanService {
   async getActivePlan(userId: string) {
     if (!userId) return { status: 'none', error: 'userId is required' };
 
-    // const active = await this.plans.findOne({
-    //   where: { athlete: { id: userId }, isActive: true },
-    //   relations: ['athlete', 'coach', 'days', 'days.exercises'],
-    //   order: { days: { orderIndex: 'ASC' } },
-    // });
+    const active = await this.planRepo.findOne({
+      where: { athlete: { id: userId }, isActive: true } as any,
+      relations: ['athlete', 'coach', 'days' ],
+      order: { days: { orderIndex: 'ASC' } } as any,
+    });
 
-    // if (!active) return { status: 'none' };
+    if (!active) return { status: 'none' };
 
-    // return {
-    //   status: 'active',
-    //   plan: planToFrontendShape(active, active.days),
-    // };
+    return {
+      status: 'active',
+      plan: planToFrontendShape(active, active.days),
+    };
   }
 
   /* -------------------- Create plan + content (transaction) ------------------- */
@@ -223,8 +257,6 @@ export class PlanService {
         name,
         notes: notes ?? null,
         isActive: !!isActive,
-        meals: program.meals ?? [],
-        instructions: program.instructions ?? [],
       });
 
       if (coachId) {
@@ -236,64 +268,53 @@ export class PlanService {
       const savedPlan = await manager.save(Plan, plan);
 
       // Days
-      for (const d of program.days) {
+      for (const [i, d] of program.days.entries()) {
         const dayEntity = manager.create(PlanDay, {
           plan: savedPlan,
           name: d.name || d.dayOfWeek,
-          day: normalizeDay(d.dayOfWeek),
-          orderIndex: Number(d.orderIndex ?? 0),
+          day: dayEnum(d.dayOfWeek || d.id),
+          orderIndex: Number(d.orderIndex ?? i),
         } as any);
         const savedDay = await manager.save(PlanDay, dayEntity);
 
-        const exItems: any[] = Array.isArray(d.exercises) ? d.exercises : [];
-        for (const item of exItems) {
-          const orderIndex = Number(item.order ?? item.orderIndex ?? 0);
+        const exItems: TemplateExerciseDto[] = Array.isArray(d.exercises) ? d.exercises : [];
 
-          // 1) From library reference
-          if (item.exerciseId) {
-            const lib = await manager.findOne(PlanExercise, { where: { id: item.exerciseId } });
-            if (!lib) throw new BadRequestException(`exerciseId not found: ${item.exerciseId}`);
+        for (const [j, item] of exItems.entries()) {
+          const orderIndex = Number(item.order ?? item.orderIndex ?? j);
 
-            const copy = manager.create(PlanExercise, {
+          // Try library
+          const lib:any = await this.resolveLibraryExercise(manager, item);
+          if (lib) {
+            const copy = manager.create(PlanExercises, {
               day: savedDay,
               orderIndex,
-              // copy relevant fields
               name: lib.name,
-              targetReps: lib.targetReps,
-              img: lib.img,
-              video: lib.video,
-              desc: lib.desc ?? null,
-              primaryMuscles: lib.primaryMuscles ?? [],
-              secondaryMuscles: lib.secondaryMuscles ?? [],
-              equipment: lib.equipment ?? null,
-              targetSets: lib.targetSets ?? 3,
-              restSeconds: lib.restSeconds ?? 90,
-              alternatives: lib.alternatives ?? [],
-              status: lib.status,
+              targetReps: item.targetReps ?? lib.targetReps ?? '10',
+              targetSets: item.targetSets !== undefined ? Number(item.targetSets) : (lib.targetSets ?? 3),
+              restSeconds: item.rest !== undefined ? Number(item.rest) : (lib.restSeconds ?? 90),
+              tempo: item.tempo ?? lib.tempo ?? null,
+              img: item.img ?? lib.img ?? null,
+              video: item.video ?? lib.video ?? null,
             });
-            await manager.save(PlanExercise, copy);
+            await manager.save(PlanExercises, copy);
             continue;
           }
 
-          // 2) Inline payload
+          // Inline payload
           if (!item.name) throw new BadRequestException('exercise requires name or exerciseId');
-          const inline = manager.create(PlanExercise, {
+
+          const inline = manager.create(PlanExercises, {
             day: savedDay,
             orderIndex,
             name: item.name,
             targetReps: String(item.targetReps ?? '10'),
+            targetSets: Number(item.targetSets ?? 3),
+            restSeconds: Number(item.rest ?? 90),
+            tempo: item.tempo ?? null,
             img: item.img ?? null,
             video: item.video ?? null,
-            desc: item.desc ?? null,
-            primaryMuscles: item.primaryMuscles ?? [],
-            secondaryMuscles: item.secondaryMuscles ?? [],
-            equipment: item.equipment ?? null,
-            targetSets: Number(item.targetSets ?? 3),
-            restSeconds: Number(item.restSeconds ?? 90),
-            alternatives: item.alternatives ?? [],
-            status: item.status ?? 'Active',
           });
-          await manager.save(PlanExercise, inline);
+          await manager.save(PlanExercises, inline);
         }
       }
 
@@ -303,19 +324,7 @@ export class PlanService {
 
   /* -------------------------------- List (CRUD) ------------------------------- */
   async list(q: any) {
-    // keep it light; no heavy relations on list
-    return CRUD.findAll<Plan>(
-      this.planRepo,
-      'plan',
-      q.search,
-      q.page,
-      q.limit,
-      q.sortBy,
-      q.sortOrder,
-      [], // relations
-      ['name', 'notes'], // searchFields
-      {}, // filters
-    );
+    return CRUD.findAll<Plan>(this.planRepo, 'plan', q.search, q.page, q.limit, q.sortBy, q.sortOrder, [], ['name', 'notes'], {});
   }
 
   /* ------------------------------ Get one (deep) ------------------------------ */
@@ -323,11 +332,10 @@ export class PlanService {
     const repo = mgr ? mgr.getRepository(Plan) : this.planRepo;
     const plan = await repo.findOne({
       where: { id },
-      relations: ['coach', 'days', 'days.exercises', 'assignments', 'assignments.athlete'],
+      relations: ['coach', 'days' , 'assignments', 'assignments.athlete'],
       order: {
         days: { orderIndex: 'ASC' },
-        // @ts-ignore
-        'days.exercises': { orderIndex: 'ASC' },
+        //  'days.exercises': { orderIndex: 'ASC' },
       } as any,
     });
     if (!plan) throw new NotFoundException('Plan not found');
@@ -342,10 +350,10 @@ export class PlanService {
 
       // shallow updates
       if (dto.name !== undefined) plan.name = dto.name;
-      if (dto.notes !== undefined) plan.notes = dto.notes;
+      if (dto.notes !== undefined) (plan as any).notes = dto.notes ?? null;
       if (dto.isActive !== undefined) plan.isActive = !!dto.isActive;
-      if (dto.meals !== undefined) (plan as any).meals = dto.meals;
-      if (dto.instructions !== undefined) (plan as any).instructions = dto.instructions;
+      if (dto.startDate !== undefined) (plan as any).startDate = dto.startDate ?? null;
+      if (dto.endDate !== undefined) (plan as any).endDate = dto.endDate ?? null;
 
       // coach
       if (dto.coachId !== undefined) {
@@ -361,13 +369,12 @@ export class PlanService {
 
       // replace content?
       if (dto.program?.days) {
-        // remove existing days (cascade removes day.exercises)
+        // remove existing days (cascade removes exercises)
         const oldDays = await manager.find(PlanDay, { where: { plan: { id: plan.id } } });
         if (oldDays.length) await manager.remove(PlanDay, oldDays);
 
-        // recreate using the same logic as create
+        // recreate
         await this.createPlanWithContent({ ...dto, name: plan.name, program: dto.program });
-        // ^ returns a fresh plan; but inside this tx we just need to finish
       }
 
       return this.getOneDeep(plan.id, manager);
@@ -403,12 +410,14 @@ export class PlanService {
           await manager.createQueryBuilder().update(PlanAssignment).set({ isActive: false }).where('athleteId = :athleteId AND isActive = :active', { athleteId, active: true }).execute();
         }
 
-        const existing = await manager.findOne(PlanAssignment, { where: { plan: { id: planId }, athlete: { id: athleteId } } });
+        const existing = await manager.findOne(PlanAssignment, {
+          where: { plan: { id: planId }, athlete: { id: athleteId } } as any,
+        });
 
         if (existing) {
           existing.isActive = isActive;
-          existing.startDate = dto.startDate ?? existing.startDate ?? null;
-          existing.endDate = dto.endDate ?? existing.endDate ?? null;
+          (existing as any).startDate = dto.startDate ?? (existing as any).startDate ?? null;
+          (existing as any).endDate = dto.endDate ?? (existing as any).endDate ?? null;
           await manager.save(PlanAssignment, existing);
         } else {
           const assign = manager.create(PlanAssignment, {
@@ -417,7 +426,7 @@ export class PlanService {
             isActive,
             startDate: dto.startDate ?? null,
             endDate: dto.endDate ?? null,
-          });
+          } as any);
           await manager.save(PlanAssignment, assign);
         }
       }
@@ -428,11 +437,14 @@ export class PlanService {
 
   async listAssignees(planId: string, mgr?: any) {
     const repo = mgr ? mgr.getRepository(PlanAssignment) : this.assignRepo;
-    return repo.find({ where: { plan: { id: planId } }, relations: ['athlete'] });
+    return repo.find({ where: { plan: { id: planId } } as any, relations: ['athlete'] });
   }
 
   async updateAssignment(assignmentId: string, dto: any) {
-    const a = await this.assignRepo.findOne({ where: { id: assignmentId }, relations: ['athlete'] });
+    const a = await this.assignRepo.findOne({
+      where: { id: assignmentId },
+      relations: ['athlete'],
+    });
     if (!a) throw new NotFoundException('Assignment not found');
 
     if (dto.isActive !== undefined && dto.isActive === true) {
@@ -446,8 +458,8 @@ export class PlanService {
     }
 
     if (dto.isActive !== undefined) a.isActive = !!dto.isActive;
-    if (dto.startDate !== undefined) a.startDate = dto.startDate ?? null;
-    if (dto.endDate !== undefined) a.endDate = dto.endDate ?? null;
+    if (dto.startDate !== undefined) (a as any).startDate = dto.startDate ?? null;
+    if (dto.endDate !== undefined) (a as any).endDate = dto.endDate ?? null;
 
     await this.assignRepo.save(a);
     return a;
