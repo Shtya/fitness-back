@@ -12,6 +12,9 @@ import { AssetModule } from './asset/asset.module';
 import { PlansModule } from './plans/plans.module';
 import { PrsModule } from './prs/prs.module';
 import { PlanExercisesModule } from './exercises/exercises.module';
+import { FoodsModule } from './foods/foods.module';
+import { MealPlansModule } from './meal-plans/meal-plans.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
   imports: [
@@ -43,6 +46,9 @@ import { PlanExercisesModule } from './exercises/exercises.module';
     PlansModule,
     PrsModule,
     PlanExercisesModule,
+    FoodsModule,
+    MealPlansModule,
+    ChatModule,
   ],
   controllers: [AppController],
   providers: [AppService, LoggingValidationPipe, QueryFailedErrorFilter],

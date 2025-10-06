@@ -19,23 +19,21 @@ export class TemplateExerciseDto {
   // Inline definition (minimal)
   id?: string; // optional local id like 'ex1' (not used for persistence)
   name?: string;
-  targetSets?: number;            // maps to PlanExercise.targetSets
-  targetReps?: string;            // string "8" | "8-10" | "10-12"
-  rest?: number;                  // seconds (maps to restSeconds)
-  tempo?: string | null;          // "1/1/1" etc.
+  targetSets?: number; // maps to PlanExercise.targetSets
+  targetReps?: string; // string "8" | "8-10" | "10-12"
+  rest?: number; // seconds (maps to restSeconds)
+  tempo?: string | null; // "1/1/1" etc.
   img?: string | null;
   video?: string | null;
 
   // ordering (optional; falls back to array index)
   order?: number;
-  orderIndex?: number;
 }
 
 export class TemplateDayDto {
-  id?: string;                  // e.g. 'saturday'
-  dayOfWeek?: string;           // e.g. 'saturday'
+  id?: string; // e.g. 'saturday'
+  dayOfWeek?: string; // e.g. 'saturday'
   name: string;
-  orderIndex?: number;
   exercises: TemplateExerciseDto[];
 }
 

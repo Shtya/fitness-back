@@ -1,0 +1,530 @@
+{
+  "info": {
+    "name": "Fitness App - Foods & Meal Plans API",
+    "description": "Complete API for foods, meal plans, and food logging",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Foods",
+      "item": [
+        {
+          "name": "List Foods",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods?page=1&limit=10&search=chicken",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "search",
+                  "value": "chicken"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Food",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Chicken Breast\",\n  \"calories\": 165,\n  \"protein\": 31,\n  \"carbs\": 0,\n  \"fat\": 3.6,\n  \"unit\": \"g\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Food",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Chicken Breast (Updated)\",\n  \"calories\": 170,\n  \"protein\": 32\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods/{{food_id}}",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods", "{{food_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Food",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods/{{food_id}}",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods", "{{food_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Log Food",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"foodId\": \"{{food_id}}\",\n  \"date\": \"2024-01-15\",\n  \"mealType\": \"lunch\",\n  \"quantity\": 200,\n  \"notes\": \"Grilled chicken with vegetables\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods/log",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods", "log"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Food Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/foods/logs/my?date=2024-01-15",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["foods", "logs", "my"],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "2024-01-15"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Meal Plans",
+      "item": [
+        {
+          "name": "List Meal Plans",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans?page=1&limit=10",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Meal Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Weight Loss Meal Plan\",\n  \"desc\": \"High protein meal plan for weight loss\",\n  \"days\": [\n    {\n      \"day\": \"monday\",\n      \"name\": \"Monday - High Protein Day\",\n      \"foods\": [\n        {\n          \"foodId\": \"{{food_id}}\",\n          \"quantity\": 150,\n          \"mealType\": \"breakfast\",\n          \"orderIndex\": 1\n        },\n        {\n          \"foodId\": \"{{food_id2}}\",\n          \"quantity\": 200,\n          \"mealType\": \"lunch\",\n          \"orderIndex\": 2\n        }\n      ]\n    },\n    {\n      \"day\": \"tuesday\",\n      \"name\": \"Tuesday - Balanced Day\",\n      \"foods\": [\n        {\n          \"foodId\": \"{{food_id}}\",\n          \"quantity\": 120,\n          \"mealType\": \"breakfast\",\n          \"orderIndex\": 1\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Meal Plan Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Meal Plan",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Weight Loss Plan\",\n  \"desc\": \"Updated high protein meal plan\",\n  \"isActive\": true\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Meal Plan",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Assign Meal Plan to User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{user_id}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}/assign",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}", "assign"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Bulk Assign Meal Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"athleteIds\": [\"{{user_id}}\", \"{{user_id2}}\"]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}/assign-bulk",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}", "assign-bulk"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Meal Plan Assignees",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/{{meal_plan_id}}/assignees",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "{{meal_plan_id}}", "assignees"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Active Meal Plan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:8081/api/v1/meal-plans/my/active",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["meal-plans", "my", "active"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth (For Testing)",
+      "item": [
+        {
+          "name": "Login as Admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@fitness.com\",\n  \"password\": \"admin123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/auth/login",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login as Coach",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"coach@fitness.com\",\n  \"password\": \"coach123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/auth/login",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login as Client",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"client@fitness.com\",\n  \"password\": \"client123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8081/api/v1/auth/login",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "8081",
+              "path": ["auth", "login"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "auth_token",
+      "value": "YOUR_JWT_TOKEN_HERE",
+      "type": "string"
+    },
+    {
+      "key": "food_id",
+      "value": "FOOD_UUID_HERE",
+      "type": "string"
+    },
+    {
+      "key": "food_id2",
+      "value": "ANOTHER_FOOD_UUID_HERE",
+      "type": "string"
+    },
+    {
+      "key": "meal_plan_id",
+      "value": "MEAL_PLAN_UUID_HERE",
+      "type": "string"
+    },
+    {
+      "key": "user_id",
+      "value": "USER_UUID_HERE",
+      "type": "string"
+    },
+    {
+      "key": "user_id2",
+      "value": "ANOTHER_USER_UUID_HERE",
+      "type": "string"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": ["// Pre-request script if needed"]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": ["// Tests for responses\npm.test(\"Status code is 200\", function () {\n    pm.response.to.have.status(200);\n});"]
+      }
+    }
+  ]
+}

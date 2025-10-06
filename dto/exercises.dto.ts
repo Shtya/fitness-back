@@ -41,11 +41,7 @@ export class CreatePlanExerciseDto {
   @IsString()
   @MaxLength(64)
   equipment?: string | null;
-
-  @IsInt()
-  @Min(0)
-  orderIndex: number = 0;
-
+ 
   @IsInt()
   @Min(0)
   targetSets: number = 3;

@@ -1,0 +1,313 @@
+// src/chat/chat.service.ts
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In, Not, Like } from 'typeorm';
+import { User, UserRole } from 'entities/global.entity';
+import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
+
+@Injectable()
+export class ChatService {
+  constructor(
+    @InjectRepository(ChatConversation) private conversationRepo: Repository<ChatConversation>,
+    @InjectRepository(ChatMessage) private messageRepo: Repository<ChatMessage>,
+    @InjectRepository(ChatParticipant) private participantRepo: Repository<ChatParticipant>,
+    @InjectRepository(User) private userRepo: Repository<User>,
+  ) {}
+
+  async getUserConversations(userId: string, page: number = 1, limit: number = 50) {
+    // FIXED: Proper pagination calculation
+    const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
+    const take = Math.max(1, limit || 1);
+
+    try {
+      // Get all active conversations for the user
+      const participants = await this.participantRepo.find({
+        where: {
+          user: { id: userId },
+          isActive: true,
+        },
+        relations: ['conversation', 'conversation.chatParticipants', 'conversation.chatParticipants.user'],
+        order: {
+          conversation: {
+            lastMessageAt: 'DESC',
+          },
+        },
+        skip,
+        take,
+      });
+
+      const conversations = participants.map(p => p.conversation);
+
+      // Enhance each conversation with last message and unread count
+      for (const conversation of conversations) {
+        // Get last message
+        const lastMessage = await this.messageRepo.findOne({
+          where: { conversation: { id: conversation.id } },
+          relations: ['sender'],
+          order: { created_at: 'DESC' },
+        });
+
+        (conversation as any).lastMessage = lastMessage;
+
+        // Get unread count using a safer approach
+        const participant = await this.participantRepo.findOne({
+          where: {
+            conversation: { id: conversation.id },
+            user: { id: userId },
+          },
+        });
+
+        let unreadCount = 0;
+
+        if (participant?.lastReadAt) {
+          // Count messages after last read date
+          unreadCount = await this.messageRepo
+            .createQueryBuilder('message')
+            .where('message.conversationId = :conversationId', { conversationId: conversation.id })
+            .andWhere('message.created_at > :lastRead', {
+              lastRead: participant.lastReadAt,
+            })
+            .andWhere('message.senderId != :userId', { userId })
+            .andWhere('message.isDeleted = false')
+            .getCount();
+        } else {
+          // If never read, count all messages from others
+          unreadCount = await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId: conversation.id }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
+        }
+
+        (conversation as any).unreadCount = unreadCount;
+      }
+
+      return conversations;
+    } catch (error) {
+      console.error('Error loading conversations:', error);
+      throw new Error('Failed to load conversations');
+    }
+  }
+
+  async getConversationMessages(conversationId: string, userId: string, page: number = 1, limit: number = 50) {
+    // Verify user is participant
+    const participant = await this.participantRepo.findOne({
+      where: {
+        conversation: { id: conversationId },
+        user: { id: userId },
+        isActive: true,
+      },
+    });
+
+    if (!participant) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    // FIXED: Proper pagination calculation
+    const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
+    const take = Math.max(1, limit || 1);
+
+    console.log(`Loading messages for conversation ${conversationId}: page=${page}, limit=${limit}, skip=${skip}, take=${take}`);
+
+    // FIXED: Get messages with proper ordering and pagination
+    const messages = await this.messageRepo.find({
+      where: {
+        conversation: { id: conversationId },
+        isDeleted: false,
+      },
+      relations: ['sender', 'replyTo', 'replyTo.sender'],
+      order: { created_at: 'ASC' }, // Show oldest first for chat history
+      skip,
+      take,
+    });
+
+    console.log(`Found ${messages.length} messages for conversation ${conversationId}`);
+
+    // Mark as read
+    await this.participantRepo.update(
+      {
+        conversation: { id: conversationId },
+        user: { id: userId },
+      },
+      {
+        lastReadAt: new Date(),
+      },
+    );
+
+    return messages;
+  }
+
+  async addParticipants(conversationId: string, userIds: string[], addedBy: string) {
+    const conversation = await this.conversationRepo.findOne({
+      where: { id: conversationId },
+      relations: ['chatParticipants', 'chatParticipants.user'],
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    // Check if adder is admin
+    const adder = conversation.chatParticipants.find(p => p.user.id === addedBy);
+    if (!adder?.isAdmin) {
+      throw new BadRequestException('Only admins can add participants');
+    }
+
+    const existingUserIds = conversation.chatParticipants.map(p => p.user.id);
+    const newUserIds = userIds.filter(id => !existingUserIds.includes(id));
+
+    const newUsers = await this.userRepo.find({ where: { id: In(newUserIds) } });
+    const newParticipants = newUsers.map(user =>
+      this.participantRepo.create({
+        conversation,
+        user,
+        isAdmin: false,
+      }),
+    );
+
+    await this.participantRepo.save(newParticipants);
+
+    return this.conversationRepo.findOne({
+      where: { id: conversationId },
+      relations: ['chatParticipants', 'chatParticipants.user'],
+    });
+  }
+
+  async removeParticipant(conversationId: string, userId: string, removedBy: string) {
+    const participant = await this.participantRepo.findOne({
+      where: {
+        conversation: { id: conversationId },
+        user: { id: userId },
+      },
+      relations: ['conversation', 'conversation.chatParticipants'],
+    });
+
+    if (!participant) {
+      throw new NotFoundException('Participant not found');
+    }
+
+    // Check if remover is admin or the user themselves
+    const remover = participant.conversation.chatParticipants.find(p => p.user.id === removedBy);
+    if (!remover?.isAdmin && removedBy !== userId) {
+      throw new BadRequestException('Cannot remove participant');
+    }
+
+    await this.participantRepo.update({ conversation: { id: conversationId }, user: { id: userId } }, { isActive: false });
+
+    return { success: true };
+  }
+
+  async getConversationForCoach(coachId: string, clientId?: string) {
+    let query = this.conversationRepo.createQueryBuilder('conversation').innerJoin('conversation.chatParticipants', 'participant', 'participant.userId = :coachId AND participant.isActive = true', { coachId }).innerJoin('conversation.chatParticipants', 'clientParticipant').innerJoin('clientParticipant.user', 'client').leftJoinAndSelect('conversation.chatParticipants', 'participants').leftJoinAndSelect('participants.user', 'user').where('conversation.isGroup = false').andWhere('client.role = :clientRole', { clientRole: UserRole.CLIENT });
+
+    if (clientId) {
+      query = query.andWhere('client.id = :clientId', { clientId });
+    }
+
+    return query.getMany();
+  }
+
+  async searchConversations(userId: string, query: string) {
+    return this.conversationRepo
+      .createQueryBuilder('conversation')
+      .innerJoin('conversation.chatParticipants', 'participant', 'participant.userId = :userId AND participant.isActive = true', { userId })
+      .leftJoinAndSelect('conversation.chatParticipants', 'participants')
+      .leftJoinAndSelect('participants.user', 'user')
+      .where('conversation.name ILIKE :query', { query: `%${query}%` })
+      .orWhere('user.name ILIKE :query', { query: `%${query}%` })
+      .orWhere('user.email ILIKE :query', { query: `%${query}%` })
+      .orderBy('conversation.lastMessageAt', 'DESC')
+      .getMany();
+  }
+
+  // Search users in the system
+  async searchUsers(currentUserId: string, query: string, role?: UserRole) {
+    let whereConditions: any = [
+      { id: Not(currentUserId), name: Like(`%${query}%`) },
+      { id: Not(currentUserId), email: Like(`%${query}%`) },
+    ];
+
+    if (role) {
+      whereConditions = whereConditions.map(condition => ({ ...condition, role }));
+    }
+
+    return this.userRepo.find({
+      where: whereConditions,
+      take: 20,
+      order: { name: 'ASC' },
+    });
+  }
+
+  async createConversation(createdBy: User, participantIds: string[], name?: string, isGroup: boolean = false) {
+    if (!isGroup && participantIds.length !== 1) {
+      throw new BadRequestException('Direct conversation must have exactly 1 participant');
+    }
+
+    // For direct messages, check if conversation already exists
+    if (!isGroup) {
+      const existing = await this.conversationRepo.createQueryBuilder('c').innerJoin('c.chatParticipants', 'p1', 'p1.userId = :userId1', { userId1: createdBy.id }).innerJoin('c.chatParticipants', 'p2', 'p2.userId = :userId2', { userId2: participantIds[0] }).where('c.isGroup = false').getOne();
+
+      if (existing) {
+        return this.conversationRepo.findOne({
+          where: { id: existing.id },
+          relations: ['chatParticipants', 'chatParticipants.user'],
+        });
+      }
+    }
+
+    const conversation = this.conversationRepo.create({
+      name,
+      isGroup,
+      createdBy,
+    });
+
+    const savedConversation = await this.conversationRepo.save(conversation);
+
+    // Add creator as participant
+    const creatorParticipant = this.participantRepo.create({
+      conversation: savedConversation,
+      user: createdBy,
+      isAdmin: true,
+    });
+
+    // Add other participants
+    const otherUsers = await this.userRepo.find({ where: { id: In(participantIds) } });
+    const otherParticipants = otherUsers.map(user =>
+      this.participantRepo.create({
+        conversation: savedConversation,
+        user,
+        isAdmin: isGroup ? false : true,
+      }),
+    );
+
+    await this.participantRepo.save([creatorParticipant, ...otherParticipants]);
+
+    // Update lastMessageAt to avoid null issues
+    await this.conversationRepo.update(savedConversation.id, {
+      lastMessageAt: new Date(),
+    });
+
+    return this.conversationRepo.findOne({
+      where: { id: savedConversation.id },
+      relations: ['chatParticipants', 'chatParticipants.user'],
+    });
+  }
+
+  async getOrCreateDirectConversation(currentUserId: string, targetUserId: string) {
+    const currentUser = await this.userRepo.findOne({ where: { id: currentUserId } });
+    const targetUser = await this.userRepo.findOne({ where: { id: targetUserId } });
+
+    if (!currentUser || !targetUser) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Check if conversation already exists
+    const existingConversation = await this.conversationRepo.createQueryBuilder('conversation').innerJoinAndSelect('conversation.chatParticipants', 'participant1').innerJoinAndSelect('participant1.user', 'user1').innerJoin('conversation.chatParticipants', 'participant2').innerJoin('participant2.user', 'user2').where('user1.id = :currentUserId', { currentUserId }).andWhere('user2.id = :targetUserId', { targetUserId }).andWhere('conversation.isGroup = false').andWhere('participant1.isActive = true').andWhere('participant2.isActive = true').getOne();
+
+    if (existingConversation) {
+      return this.conversationRepo.findOne({
+        where: { id: existingConversation.id },
+        relations: ['chatParticipants', 'chatParticipants.user'],
+      });
+    }
+
+    // Create new conversation
+    return this.createConversation(currentUser, [targetUserId], null, false);
+  }
+}

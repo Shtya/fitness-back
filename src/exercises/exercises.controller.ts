@@ -1,7 +1,7 @@
 // src/plan-exercises/plan-exercises.controller.ts
 import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
-import {  BulkCreatePlanExercisesDto  } from 'dto/exercises.dto';
+import { BulkCreatePlanExercisesDto } from 'dto/exercises.dto';
 
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
@@ -19,20 +19,6 @@ function toIntOrUndef(v: any) {
   return n;
 }
 
-
-
-
-
- 
-
-
-
-
-
-
-
-
-
 @Controller('plan-exercises')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
@@ -42,18 +28,67 @@ export class PlanExercisesController {
   @Get()
   async list(@Query() q: any) {
     return this.svc.list(q);
-		//  return CRUD.findAll<PlanExercises>(
-		// 			this.svc.repo,
-		// 			'planExercises',
-		// 			q.search,
-		// 			q.page,
-		// 			q.limit,
-		// 			q.sortBy,
-		// 			q.sortOrder,
-		// 			[], // relations
-		// 			['name'],
-		// 			{}, // filters
-		// 		);
+  }
+
+  @Post('upload-exercise-video')
+  @UseInterceptors(FileInterceptor('video', videoUploadOptions))
+  async uploadExerciseVideo(
+    @Body()
+    body: {
+      exerciseId: string;
+      userId: string;
+      exerciseName: string;
+      workoutDate?: string;
+      setNumber?: number;
+      weight?: number;
+      reps?: number;
+      notes?: string;
+    },
+    @UploadedFile() video: any,
+  ) {
+    if (!video) {
+      throw new BadRequestException('Video file is required');
+    }
+
+    const videoUrl = `/uploads/videos/${video.filename}`;
+
+    // Save to database
+    const savedVideo = await this.svc.saveExerciseVideo({
+      userId: body.userId,
+      exerciseName: body.exerciseName,
+      videoUrl: videoUrl,
+      workoutDate: body.workoutDate,
+      setNumber: body.setNumber,
+      weight: body.weight,
+      reps: body.reps,
+      notes: body.notes,
+    });
+
+    return {
+      success: true,
+      videoUrl: videoUrl,
+      message: 'Video uploaded successfully for coach review',
+      videoId: savedVideo.id,
+      exerciseName: body.exerciseName,
+    };
+  }
+
+  // Get videos for a specific user
+  @Get('user-videos/:userId')
+  async getUserVideos(@Param('userId') userId: string) {
+    return await this.svc.getUserExerciseVideos(userId);
+  }
+
+  // Get videos for coach review
+  @Get('coach-videos/:coachId')
+  async getCoachVideos(@Param('coachId') coachId: string, @Query('status') status?: string) {
+    return await this.svc.getVideosForCoach(coachId, status);
+  }
+
+  // Update video feedback (coach reviewing video)
+  @Put('video-feedback/:videoId')
+  async updateVideoFeedback(@Param('videoId') videoId: string, @Body() body: { coachId: string; status: string; coachFeedback: string }) {
+    return await this.svc.updateVideoFeedback(videoId, body.coachId, body);
   }
 
   @Get('stats')
@@ -91,7 +126,7 @@ export class PlanExercisesController {
 
   @Post('bulk')
   async bulkCreate(@Body() dto: any) {
-     const sanitized = (dto.items || []).map((i:any) => ({
+    const sanitized = (dto.items || []).map((i: any) => ({
       name: i.name,
       targetReps: String(i.targetReps ?? '10'),
       targetSets: Number(i.targetSets ?? 3),

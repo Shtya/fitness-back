@@ -1,5 +1,4 @@
-// --- File: plans/plans.controller.ts ---
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards, BadRequestException } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards, BadRequestException, Req } from '@nestjs/common';
 import { UserRole } from 'entities/global.entity';
 import { AcceptPlanDto, ImportPlanDto, UpdatePlanDto } from './plans.dto';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
@@ -12,32 +11,31 @@ import { Roles } from 'common/decorators/roles.decorator';
 export class PlanController {
   constructor(private readonly svc: PlanService) {}
 
-  /** Import a weekly template (or compact) and optionally activate for a user */
+  @Get('overview')
+  async overview(@Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string, @Query('sortBy') sortBy?: string, @Query('sortOrder') sortOrder?: 'ASC' | 'DESC') {
+    return this.svc.listPlansWithStats({
+      page: Number(page) || 1,
+      limit: Math.min(Number(limit) || 12, 100),
+      search: (search || '').trim(),
+      sortBy: (sortBy as any) || 'created_at',
+      sortOrder: sortOrder === 'ASC' ? 'ASC' : 'DESC',
+    });
+  }
+
   @Post('import')
-  importPlan(@Body() body: ImportPlanDto) {
+  importPlan(@Body() body: any) {
     return this.svc.importAndActivate(body);
   }
 
-  /** User accepts an existing plan (activate it, deactivate others) */
-  @Post('accept')
-  accept(@Body() body: AcceptPlanDto) {
-    if (!body?.planId || !body?.userId) {
-      throw new BadRequestException('planId and userId are required');
-    }
-    return this.svc.acceptPlan(body.planId, body.userId);
-  }
-
-  /** Return the active plan for a user in FE shape */
   @Get('active')
-  active(@Query('userId') userId: string) {
-    return this.svc.getActivePlan(userId);
+  active(@Query('userId') userId: string ,@Req() req :any ) {
+    return this.svc.getActivePlan(req.user.id);
   }
 
-  // Create plan + content (days/exercises)
-   @Post()
+  @Post()
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async create(@Body() body: any) {
-    const dto = body?.payload ?? body; // ← accept your current payload shape
+    const dto = body?.payload ?? body;
 
     if (!dto?.name || !dto?.program) {
       throw new BadRequestException('name and program are required');
@@ -45,65 +43,51 @@ export class PlanController {
     return this.svc.createPlanWithContent(dto);
   }
 
-  // List plans (lightweight)
   @Get()
   async list(@Query() q: any) {
     return this.svc.list(q);
   }
 
-  // One plan (deep)
   @Get(':id')
   async getOne(@Param('id') id: string) {
     return this.svc.getOneDeep(id);
   }
 
-  // Update plan; if dto.program is provided, days/exercises are replaced
   @Put(':id')
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any) {
     return this.svc.updatePlanAndContent(id, dto);
   }
 
-  // Delete plan
   @Delete(':id')
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async remove(@Param('id') id: string) {
     return this.svc.remove(id);
   }
 
-  // Assign to many athletes
   @Post(':id/assign')
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async bulkAssign(
     @Param('id') planId: string,
+		@Req() req :any ,
     @Body()
     dto: {
       athleteIds: string[];
       startDate?: string;
       endDate?: string;
       isActive?: boolean;
+      confirm?: 'yes' | 'no';
+      removeOthers?: boolean;
     },
   ) {
-    return this.svc.bulkAssign(planId, dto);
+    dto.removeOthers = true;
+    return this.svc.bulkAssign(planId, dto , req.user.id);
   }
 
-  // List assignees
   @Get(':id/assignees')
   async assignees(@Param('id') id: string) {
     return this.svc.listAssignees(id);
   }
 
-  // Update a single assignment
-  @Put('assignments/:assignmentId')
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
-  async updateAssignment(@Param('assignmentId') assignmentId: string, @Body() dto: any) {
-    return this.svc.updateAssignment(assignmentId, dto);
-  }
-
-  // Delete a single assignment
-  @Delete('assignments/:assignmentId')
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
-  async deleteAssignment(@Param('assignmentId') assignmentId: string) {
-    return this.svc.deleteAssignment(assignmentId);
-  }
+	
 }

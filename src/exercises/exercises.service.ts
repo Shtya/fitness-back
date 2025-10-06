@@ -3,7 +3,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
 import { CreatePlanExercisesDto, UpdatePlanExercisesDto } from 'dto/exercises.dto';
-import { PlanExercises } from 'entities/global.entity';
+import { ExerciseVideo, PlanExercises } from 'entities/global.entity';
 
 type PublicExercise = {
   id: string;
@@ -20,8 +20,62 @@ type PublicExercise = {
 export class PlanExercisesService {
   constructor(
     @InjectRepository(PlanExercises) public readonly repo: Repository<PlanExercises>,
+    @InjectRepository(ExerciseVideo) private readonly exerciseVideoRepo: Repository<ExerciseVideo>, // Add this
     private readonly dataSource: DataSource,
   ) {}
+
+  async saveExerciseVideo(dto: { userId: string; exerciseName: string; videoUrl: string; workoutDate?: string; setNumber?: number; weight?: number; reps?: number; notes?: string }): Promise<ExerciseVideo> {
+    const video = this.exerciseVideoRepo.create({
+      userId: dto.userId,
+      exerciseName: dto.exerciseName,
+      videoUrl: dto.videoUrl,
+      workoutDate: dto.workoutDate || new Date().toISOString().split('T')[0],
+      setNumber: dto.setNumber,
+      weight: dto.weight?.toString(),
+      reps: dto.reps,
+      notes: dto.notes,
+      status: 'pending',
+    });
+
+    return await this.exerciseVideoRepo.save(video);
+  }
+
+  // NEW: Get user's exercise videos
+  async getUserExerciseVideos(userId: string): Promise<ExerciseVideo[]> {
+    return await this.exerciseVideoRepo.find({
+      where: { userId },
+      order: { created_at: 'DESC' },
+      relations: ['coach'],
+    });
+  }
+
+  // NEW: Get videos for coach to review
+  async getVideosForCoach(coachId: string, status?: string): Promise<ExerciseVideo[]> {
+    const where: any = { coachId };
+    if (status) {
+      where.status = status;
+    }
+
+    return await this.exerciseVideoRepo.find({
+      where,
+      order: { created_at: 'DESC' },
+      relations: ['user'],
+    });
+  }
+
+  // NEW: Update video status and feedback
+  async updateVideoFeedback(videoId: string, coachId: string, feedback: { status: string; coachFeedback: string }): Promise<ExerciseVideo> {
+    const video = await this.exerciseVideoRepo.findOne({ where: { id: videoId } });
+    if (!video) {
+      throw new NotFoundException('Exercise video not found');
+    }
+
+    video.coachId = coachId;
+    video.status = feedback.status;
+    video.coachFeedback = feedback.coachFeedback;
+
+    return await this.exerciseVideoRepo.save(video);
+  }
 
   private toPublic(e: any) {
     return {

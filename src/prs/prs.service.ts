@@ -1,473 +1,767 @@
+/**
+ * put the today is active and also and if he swtich to another day save it in the localstorge to get it if exist
+ */
+
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { WorkoutSession, SessionSet, ExercisePR, User, DayOfWeek } from 'entities/global.entity';
-import { Repository } from 'typeorm';
-
-function epley(weight: number, reps: number) {
-  const w = Number(weight) || 0;
-  const r = Number(reps) || 0;
-  return Math.round(w * (1 + r / 30));
-}
-// Returns 'YYYY-MM-DD' in the server timezone for consistent DATE comparisons
-function toDateOnly(dateLike?: string): string {
-  const d = dateLike ? new Date(dateLike) : new Date();
-  if (isNaN(d.getTime())) throw new Error(`Invalid date: ${dateLike}`);
-  // format YYYY-MM-DD
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function jsDateToDayOfWeekEnum(dateISO: string): DayOfWeek {
-  const d = new Date(dateISO);
-  const n = d.getDay(); // 0 Sun .. 6 Sat
-  const map: DayOfWeek[] = [
-    DayOfWeek.SUNDAY,
-    DayOfWeek.MONDAY,
-    DayOfWeek.TUESDAY,
-    DayOfWeek.WEDNESDAY,
-    DayOfWeek.THURSDAY,
-    DayOfWeek.SATURDAY, // temp placeholder
-    DayOfWeek.SATURDAY,
-  ];
-  // fix Thursday/Friday/Saturday mapping:
-  map[4] = DayOfWeek.THURSDAY;
-  map[5] = DayOfWeek.SATURDAY; // your enum doesn't have Friday; your week is Sa..Th in UI
-  map[6] = DayOfWeek.SATURDAY;
-  return map[n] || DayOfWeek.SATURDAY;
-}
+import { Repository, LessThan, MoreThan, MoreThanOrEqual } from 'typeorm';
+import { ExerciseRecord, User } from 'entities/global.entity';
 
 @Injectable()
 export class PrsService {
   constructor(
-    @InjectRepository(User) private readonly users: Repository<User>,
-    @InjectRepository(WorkoutSession) private readonly sessions: Repository<WorkoutSession>,
-    @InjectRepository(SessionSet) private readonly sets: Repository<SessionSet>,
-    @InjectRepository(ExercisePR) private readonly prs: Repository<ExercisePR>,
+    @InjectRepository(ExerciseRecord)
+    private readonly exerciseRecordRepo: Repository<ExerciseRecord>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
   ) {}
 
-  async ensureUser(userId: string) {
-    const u = await this.users.findOne({ where: { id: userId } });
-    if (!u) throw new NotFoundException('User not found');
-    return u;
+  async getAllStats(userId: string, windowDays: number = 30, exerciseWindowDays: number = 90) {
+    if (!userId) {
+      throw new NotFoundException('User ID is required');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Get all data in parallel for better performance
+    const [overview, personalRecords, uniqueExercises, totalAttempts, currentStreak, recentHistory] = await Promise.all([this.getOverviewData(userId, windowDays), this.getPersonalRecords(userId), this.getUniqueExercisesCount(userId), this.getTotalAttemptsCount(userId), this.calculateCurrentStreak(userId), this.getRecentHistory(userId, windowDays)]);
+
+    // Get exercise names for drilldown
+    const exerciseNames = await this.getExerciseNamesForDrilldown(userId);
+
+    // Get stats for each exercise
+    const exerciseDrilldown = await Promise.all(
+      exerciseNames.map(async exerciseName => {
+        return await this.getExerciseDrilldownStats(userId, exerciseName, exerciseWindowDays);
+      }),
+    );
+
+    return {
+      // Overview stats
+      overview: {
+        exercisesTracked: uniqueExercises,
+        totalAttempts,
+        allTimePrs: personalRecords.length,
+        currentStreakDays: currentStreak,
+      },
+
+      // All-time bests
+      allTimeBests: personalRecords.map(pr => ({
+        name: pr.exerciseName,
+        e1rm: pr.bestE1rm,
+        weight: pr.maxWeight,
+        reps: pr.maxReps,
+        date: pr.date,
+      })),
+
+      // Exercise drilldown for each exercise
+      exerciseDrilldown: exerciseDrilldown.reduce((acc, stats) => {
+        if (stats) {
+          acc[stats.exerciseName] = stats;
+        }
+        return acc;
+      }, {}),
+
+      // Session history
+      sessionHistory: {
+        totalWorkouts: recentHistory.length,
+        workouts: recentHistory,
+      },
+
+      // Timestamp
+      timestamp: new Date().toISOString(),
+    };
   }
 
-  async findOrCreateSession(userId: string, dateISO: string) {
-    const user = await this.ensureUser(userId);
-    const existing = await this.sessions.findOne({
-      where: { user, date: dateISO },
-      relations: ['user'],
-    });
-    if (existing) return existing;
+  private async getOverviewData(userId: string, windowDays: number) {
+    // Safe date creation
+    const now = Date.now();
+    const startDate = new Date(now - windowDays * 24 * 60 * 60 * 1000);
 
-    const s = this.sessions.create({
-      user,
-      plan: null,
-      name: 'Auto',
-      day: jsDateToDayOfWeekEnum(dateISO),
-      date: dateISO,
-      startedAt: null,
-      endedAt: null,
-      durationSec: null,
+    // Validate the date
+    if (isNaN(startDate.getTime())) {
+      const fallbackDate = new Date();
+      fallbackDate.setDate(fallbackDate.getDate() - 30);
+      startDate.setTime(fallbackDate.getTime());
+    }
+
+    // Safe date formatting
+    const year = startDate.getFullYear();
+    const month = String(startDate.getMonth() + 1).padStart(2, '0');
+    const day = String(startDate.getDate()).padStart(2, '0');
+    const startDateString = `${year}-${month}-${day}`;
+
+    const recentRecords = await this.exerciseRecordRepo.find({
+      where: {
+        userId,
+        date: MoreThanOrEqual(startDateString),
+      },
     });
-    return await this.sessions.save(s);
+
+    return {
+      history: recentRecords.map(record => ({
+        date: record.date,
+        name: record.exerciseName,
+        volume: record.totalVolume,
+        duration: null,
+        setsDone: record.workoutSets.filter(set => set.done).length,
+        setsTotal: record.workoutSets.length,
+      })),
+    };
   }
 
-  async upsertDay(userId: string, exerciseName: string, dateISO: string, records: Array<{ id?: string; setNumber: number; weight: number; reps: number; done: boolean }>) {
-    const session = await this.findOrCreateSession(userId, dateISO);
+  private async getPersonalRecords(userId: string) {
+    return await this.exerciseRecordRepo.find({
+      where: { userId, isPersonalRecord: true },
+    });
+  }
 
-    const saved: Array<{
-      id: string;
-      setNumber: number;
+  private async getUniqueExercisesCount(userId: string) {
+    const result = await this.exerciseRecordRepo.createQueryBuilder('record').select('DISTINCT record.exerciseId', 'exerciseId').where('record.userId = :userId', { userId }).getRawMany();
+
+    return result.length;
+  }
+
+  private async getTotalAttemptsCount(userId: string) {
+    return await this.exerciseRecordRepo.createQueryBuilder('record').where('record.userId = :userId', { userId }).getCount();
+  }
+
+  private async getRecentHistory(userId: string, windowDays: number) {
+    // Safe date creation - create from current timestamp
+    const now = Date.now();
+    const startDate = new Date(now - windowDays * 24 * 60 * 60 * 1000);
+
+    // Validate the date
+    if (isNaN(startDate.getTime())) {
+      // Fallback: use a fixed date 30 days ago
+      const fallbackDate = new Date();
+      fallbackDate.setDate(fallbackDate.getDate() - 30);
+      startDate.setTime(fallbackDate.getTime());
+    }
+
+    // Safe date formatting without toISOString()
+    const year = startDate.getFullYear();
+    const month = String(startDate.getMonth() + 1).padStart(2, '0');
+    const day = String(startDate.getDate()).padStart(2, '0');
+    const startDateString = `${year}-${month}-${day}`;
+
+    const records = await this.exerciseRecordRepo.find({
+      where: {
+        userId,
+        date: MoreThanOrEqual(startDateString),
+      },
+      order: { date: 'DESC' },
+    });
+
+    // Group by date to get sessions
+    const sessionsByDate = records.reduce((acc, record) => {
+      if (!acc[record.date]) {
+        acc[record.date] = {
+          date: record.date,
+          exercises: [],
+          totalVolume: 0,
+          totalSets: 0,
+          completedSets: 0,
+        };
+      }
+
+      acc[record.date].exercises.push(record.exerciseName);
+      acc[record.date].totalVolume += record.totalVolume;
+      acc[record.date].totalSets += record.workoutSets.length;
+      acc[record.date].completedSets += record.workoutSets.filter(set => set.done).length;
+
+      return acc;
+    }, {});
+
+    return Object.values(sessionsByDate).map((session: any) => ({
+      date: session.date,
+      name: session.exercises.join(', '),
+      volume: session.totalVolume,
+      duration: null,
+      setsDone: session.completedSets,
+      setsTotal: session.totalSets,
+    }));
+  }
+
+  private async getExerciseNamesForDrilldown(userId: string, limit: number = 10) {
+    const records = await this.exerciseRecordRepo.createQueryBuilder('record').select('DISTINCT record.exerciseName', 'exerciseName').where('record.userId = :userId', { userId }).orderBy('record.exerciseName', 'ASC').limit(limit).getRawMany();
+
+    return records.map(r => r.exerciseName);
+  }
+
+  private async getExerciseDrilldownStats(userId: string, exerciseName: string, windowDays: number = 90) {
+    try {
+      const exerciseId = this.generateExerciseId(exerciseName);
+
+      const [series, topSets, attempts] = await Promise.all([this.getE1rmSeries(userId, exerciseName, 'week', windowDays), this.getTopSets(userId, exerciseName, 5), this.getExerciseHistory(userId, exerciseName)]);
+
+      return {
+        exerciseName,
+        series: series || [],
+        topSets: topSets || { byWeight: [], byReps: [], byE1rm: [] },
+        attempts: attempts || [],
+        hasData: series.length > 0 || topSets.byWeight.length > 0 || attempts.length > 0,
+      };
+    } catch (error) {
+      console.error(`Error getting stats for ${exerciseName}:`, error);
+      return {
+        exerciseName,
+        series: [],
+        topSets: { byWeight: [], byReps: [], byE1rm: [] },
+        attempts: [],
+        hasData: false,
+      };
+    }
+  }
+
+  async getLastWorkoutSets(userId: string, exerciseNames: string[]) {
+    if (!userId || !exerciseNames || exerciseNames.length === 0) {
+      throw new NotFoundException('User ID and exercises array are required');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Get last sets for each exercise
+    const results = await Promise.all(
+      exerciseNames.map(async exerciseName => {
+        const exerciseId = this.generateExerciseId(exerciseName);
+
+        // Find the most recent record (closest date to today)
+        const lastRecord = await this.exerciseRecordRepo.findOne({
+          where: {
+            userId,
+            exerciseId,
+          },
+          order: { date: 'DESC' }, // This gets the most recent date
+        });
+
+        console.log(lastRecord);
+
+        if (!lastRecord) {
+          return {
+            exerciseName,
+            date: null,
+            records: [], // No previous workout found
+          };
+        }
+
+        // Get only the completed sets
+        const completedSets = lastRecord.workoutSets
+          .filter(set => set.done && set.weight > 0 && set.reps > 0)
+          .sort((a, b) => a.setNumber - b.setNumber)
+          .map(set => ({
+            weight: set.weight,
+            reps: set.reps,
+            done: true, // Since we filtered for done sets
+            setNumber: set.setNumber,
+          }));
+
+        return {
+          exerciseName,
+          date: lastRecord.date, // Include the date
+          records: completedSets,
+        };
+      }),
+    );
+
+    return {
+      userId,
+      exercises: results,
+    };
+  }
+
+  // Keep the same endpoint but use ExerciseRecord
+  async upsertDailyPR(
+    userId: string,
+    exerciseName: string,
+    date: string,
+    records: Array<{
+      id?: string;
       weight: number;
       reps: number;
       done: boolean;
-      e1rm: number | null;
-      isPr: boolean;
-    }> = [];
+      setNumber: number;
+    }>,
+  ) {
+    if (!userId || !exerciseName) {
+      throw new NotFoundException('User ID and exercise name are required');
+    }
 
-    for (const r of records) {
-      const weightNum = Number(r.weight) || 0;
-      const repsNum = Number(r.reps) || 0;
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
 
-      let entity: SessionSet | undefined;
+    // FIXED: Generate database-safe exerciseId
+    const exerciseId = this.generateExerciseId(exerciseName);
 
-      if (r.id) {
-        entity = await this.sets.findOne({
-          where: { id: r.id },
-          relations: ['session', 'session.user'],
-        });
-      }
+    // Calculate current workout metrics
+    const workoutSets = records.map(record => ({
+      setNumber: record.setNumber,
+      weight: record.weight,
+      reps: record.reps,
+      done: record.done,
+      e1rm: this.calculateE1rm(record.weight, record.reps),
+      isPr: false,
+    }));
 
-      if (!entity) {
-        // try to find by unique tuple on the target date
-        entity = await this.sets.findOne({
-          where: {
-            session: { id: session.id },
-            exerciseName,
-            setNumber: r.setNumber,
-            date: dateISO,
-          },
-          relations: ['session'],
-        });
-      }
+    const doneSets = workoutSets.filter(set => set.done && set.weight > 0 && set.reps > 0);
+    const totalVolume = doneSets.reduce((total, set) => total + set.weight * set.reps, 0);
+    const maxWeight = doneSets.length > 0 ? Math.max(...doneSets.map(set => set.weight)) : 0;
+    const maxReps = doneSets.length > 0 ? Math.max(...doneSets.map(set => set.reps)) : 0;
+    const bestE1rm = doneSets.length > 0 ? Math.max(...doneSets.map(set => set.e1rm)) : 0;
 
-      if (!entity) {
-        // NEW record
-        entity = this.sets.create({
-          session,
-          date: dateISO,
-          exerciseName,
-          planExerciseId: null,
-          setNumber: r.setNumber,
-          weight: String(weightNum.toFixed(2)),
-          reps: repsNum,
-          done: !!r.done,
-          restSeconds: null,
-          effort: null,
-          e1rm: null,
-          isPr: false,
-        });
-      } else {
-        // UPDATE existing — ensure it is reattached to the *new* session/date/exercise
-        if (!entity.session || entity.session.id !== session.id) {
-          entity.session = session;
-        }
-        if (entity.date !== dateISO) {
-          entity.date = dateISO;
-        }
-        if (entity.exerciseName !== exerciseName) {
-          entity.exerciseName = exerciseName;
-        }
+    // Get previous best for progressive overload
+    const previousBestSets = await this.getPreviousBestSets(userId, exerciseId, date);
 
-        entity.weight = String(weightNum.toFixed(2));
-        entity.reps = repsNum;
-        entity.done = !!r.done;
-      }
+    // Check for personal record
+    const { isPersonalRecord, prHistory } = await this.checkPersonalRecord(userId, exerciseId, date, bestE1rm, maxWeight, maxReps, workoutSets);
 
-      // compute e1rm
-      const e1 = weightNum > 0 && repsNum > 0 ? epley(weightNum, repsNum) : null;
-      entity.e1rm = e1;
+    // Get day of week from date
+    const day = this.getDayOfWeek(date);
 
-      const savedEntity = await this.sets.save(entity);
-      saved.push({
-        id: savedEntity.id,
-        setNumber: savedEntity.setNumber,
-        weight: Number(savedEntity.weight),
-        reps: savedEntity.reps,
-        done: savedEntity.done,
-        e1rm: savedEntity.e1rm,
-        isPr: false, // filled after PR recompute
+    // FIRST: Check if record already exists for this user, exercise, and date
+    const existingRecord = await this.exerciseRecordRepo.findOne({
+      where: {
+        userId,
+        exerciseId,
+        date,
+      },
+    });
+
+    let exerciseRecord: ExerciseRecord;
+
+    if (existingRecord) {
+      // UPDATE existing record
+      exerciseRecord = await this.exerciseRecordRepo.save({
+        ...existingRecord,
+        workoutSets,
+        previousBestSets,
+        totalVolume,
+        maxWeight,
+        maxReps,
+        bestE1rm,
+        isPersonalRecord,
+        prHistory,
+        day, // Update day in case it changed
+      });
+    } else {
+      // INSERT new record
+      exerciseRecord = await this.exerciseRecordRepo.save({
+        userId,
+        exerciseId,
+        exerciseName,
+        day,
+        date,
+        workoutSets,
+        previousBestSets,
+        totalVolume,
+        maxWeight,
+        maxReps,
+        bestE1rm,
+        isPersonalRecord,
+        prHistory,
       });
     }
 
-    await this.recomputeExercisePr(userId, exerciseName);
+    return {
+      success: true,
+      records: exerciseRecord.workoutSets.map(set => ({
+        id: `${exerciseRecord.id}-set-${set.setNumber}`,
+        weight: set.weight,
+        reps: set.reps,
+        done: set.done,
+        setNumber: set.setNumber,
+      })),
+      newPR: isPersonalRecord
+        ? {
+            exerciseName,
+            e1rm: bestE1rm,
+            weight: maxWeight,
+            reps: maxReps,
+          }
+        : null,
+      operation: existingRecord ? 'updated' : 'created',
+    };
+  }
 
-    const pr = await this.prs.findOne({
-      where: { user: { id: userId }, exerciseName },
-      relations: ['user'],
-    });
-    if (pr) {
-      for (const r of saved) {
-        r.isPr = r.e1rm != null && r.e1rm >= (pr.bestE1rm || 0) && r.weight > 0 && r.reps > 0;
-      }
+  // FIXED: Generate database-safe exerciseId
+  private generateExerciseId(exerciseName: string): string {
+    let hash = 0;
+    for (let i = 0; i < exerciseName.length; i++) {
+      const char = exerciseName.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash;
     }
+    return `ex-${Math.abs(hash)}`;
+  }
 
-    return saved
-      .sort((a, b) => a.setNumber - b.setNumber)
-      .map(r => ({
-        id: r.id,
-        setNumber: r.setNumber,
-        weight: r.weight,
-        reps: r.reps,
-        done: r.done,
-        e1rm: r.e1rm,
-        isPr: r.isPr,
+  private calculateE1rm(weight: number, reps: number): number {
+    return Math.round(weight * (1 + reps / 30));
+  }
+
+  private getDayOfWeek(dateString: string): string {
+    const date = new Date(dateString);
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    return days[date.getDay()];
+  }
+
+  private async getPreviousBestSets(userId: string, exerciseId: string, currentDate: string) {
+    const previousRecord = await this.exerciseRecordRepo.findOne({
+      where: {
+        userId,
+        exerciseId,
+        date: LessThan(currentDate),
+      },
+      order: { date: 'DESC' },
+    });
+
+    if (!previousRecord) return [];
+
+    return previousRecord.workoutSets
+      .filter(set => set.done && set.weight > 0 && set.reps > 0)
+      .map(set => ({
+        setNumber: set.setNumber,
+        weight: set.weight,
+        reps: set.reps,
+        date: previousRecord.date,
+        totalVolume: set.weight * set.reps,
       }));
   }
 
-  async getDay(userId: string, exerciseName: string, dateISO: string) {
-    await this.ensureUser(userId);
-    const rows = await this.sets.find({
-      where: { date: dateISO, exerciseName, session: { user: { id: userId } } },
-      relations: ['session', 'session.user'],
-      order: { setNumber: 'ASC' as const },
+  private async checkPersonalRecord(userId: string, exerciseId: string, date: string, bestE1rm: number, maxWeight: number, maxReps: number, workoutSets: any[]) {
+    const currentPR = await this.exerciseRecordRepo.findOne({
+      where: {
+        userId,
+        exerciseId,
+        isPersonalRecord: true,
+      },
+      order: { bestE1rm: 'DESC' },
     });
 
-    return rows.map(r => ({
-      id: r.id,
-      setNumber: r.setNumber,
-      weight: Number(r.weight),
-      reps: r.reps,
-      done: r.done,
-      e1rm: r.e1rm,
-      isPr: r.isPr,
-    }));
+    let isPersonalRecord = false;
+    let prHistory = [];
+
+    if (!currentPR || bestE1rm > currentPR.bestE1rm) {
+      isPersonalRecord = true;
+
+      if (currentPR) {
+        await this.exerciseRecordRepo.update({ userId, exerciseId, isPersonalRecord: true }, { isPersonalRecord: false });
+      }
+
+      // Mark PR sets in current workout
+      workoutSets.forEach(set => {
+        if (set.e1rm === bestE1rm) {
+          set.isPr = true;
+        }
+      });
+
+      // Build PR history
+      const previousPRs = await this.exerciseRecordRepo.find({
+        where: {
+          userId,
+          exerciseId,
+          isPersonalRecord: false,
+        },
+        order: { date: 'DESC' },
+        take: 5,
+      });
+
+      prHistory = [
+        { date, bestE1rm, weight: maxWeight, reps: maxReps },
+        ...previousPRs.map(pr => ({
+          date: pr.date,
+          bestE1rm: pr.bestE1rm,
+          weight: pr.maxWeight,
+          reps: pr.maxReps,
+        })),
+      ].slice(0, 10);
+    }
+
+    return { isPersonalRecord, prHistory };
   }
 
-  private async recomputeExercisePr(userId: string, exerciseName: string) {
-    // compute best e1rm across all time for this user + exercise
-    const rows = await this.sets.find({
-      where: { exerciseName, session: { user: { id: userId } } },
-      relations: ['session', 'session.user'],
+  // Keep same endpoint for overview
+  async getOverview(userId: string, windowDays: number = 30) {
+    if (!userId) {
+      throw new NotFoundException('User ID is required');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - windowDays);
+
+    // Get data from ExerciseRecord
+    const recentRecords = await this.exerciseRecordRepo.find({
+      where: {
+        userId,
+        date: startDate.toISOString().split('T')[0],
+      },
     });
 
-    let best = 0;
-    let bestRow: SessionSet | null = null;
-    for (const r of rows) {
-      const e = r.e1rm ?? epley(Number(r.weight), r.reps);
-      if (e > best) {
-        best = e;
-        bestRow = r;
-      }
-    }
-
-    // upsert ExercisePR
-    const existing = await this.prs.findOne({
-      where: { user: { id: userId }, exerciseName },
-      relations: ['user'],
+    const personalRecords = await this.exerciseRecordRepo.find({
+      where: { userId, isPersonalRecord: true },
     });
-    if (bestRow) {
-      const user = await this.ensureUser(userId);
-      if (!existing) {
-        const created = this.prs.create({
-          user,
-          exerciseName,
-          bestE1rm: best,
-          weightAtBest: bestRow.weight,
-          repsAtBest: bestRow.reps,
-          dateOfBest: bestRow.date,
-        });
-        await this.prs.save(created);
-      } else {
-        existing.bestE1rm = best;
-        existing.weightAtBest = bestRow.weight;
-        existing.repsAtBest = bestRow.reps;
-        existing.dateOfBest = bestRow.date;
-        await this.prs.save(existing);
-      }
-    }
 
-    // mark PR flags per set (true if matches best)
-    for (const r of rows) {
-      const e = r.e1rm ?? epley(Number(r.weight), r.reps);
-      const flag = e === best && e > 0;
-      if (r.isPr !== flag) {
-        r.isPr = flag;
-        await this.sets.save(r);
-      }
-    }
+    const totalExercises = await this.exerciseRecordRepo.createQueryBuilder('record').select('DISTINCT record.exerciseId', 'exerciseId').where('record.userId = :userId', { userId }).getRawMany();
+
+    const totalAttempts = await this.exerciseRecordRepo.createQueryBuilder('record').where('record.userId = :userId', { userId }).getCount();
+
+    const currentStreak = await this.calculateCurrentStreak(userId);
+
+    return {
+      totals: {
+        exercisesTracked: totalExercises.length,
+        attempts: totalAttempts,
+        allTimePrs: personalRecords.length,
+        currentStreakDays: currentStreak,
+      },
+      bests: personalRecords.map(pr => ({
+        name: pr.exerciseName,
+        e1rm: pr.bestE1rm,
+        weight: pr.maxWeight,
+        reps: pr.maxReps,
+        date: pr.date,
+      })),
+      history: recentRecords.map(record => ({
+        date: record.date,
+        name: record.exerciseName,
+        volume: record.totalVolume,
+        duration: null, // Not stored in ExerciseRecord
+        setsDone: record.workoutSets.filter(set => set.done).length,
+        setsTotal: record.workoutSets.length,
+      })),
+    };
   }
 
-  async getLastExercise(
-    userId: string,
-    exerciseName: string,
-    opts?: { onOrBefore?: string; sameWeekday?: boolean },
-  ): Promise<{
-    exerciseName: string;
-    date: string | null;
-    day: DayOfWeek | null;
-    records: Array<{
-      id: string;
-      setNumber: number;
-      weight: number;
-      reps: number;
-      done: boolean;
-      e1rm: number | null;
-      isPr: boolean;
-    }>;
-  }> {
-    await this.ensureUser(userId);
-
-    const onOrBefore = opts?.onOrBefore;
-    const sameWeekday = !!opts?.sameWeekday;
-    const dayFilter = sameWeekday ? jsDateToDayOfWeekEnum(onOrBefore || new Date().toISOString()) : null;
-
-    // Pull all rows sorted by date desc then setNumber asc
-    let qb = this.sets.createQueryBuilder('s').leftJoinAndSelect('s.session', 'session').leftJoinAndSelect('session.user', 'user').where('user.id = :userId', { userId }).andWhere('s.exerciseName = :exerciseName', { exerciseName });
-
-    if (onOrBefore) {
-      qb = qb.andWhere('s.date <= :onOrBefore', { onOrBefore });
-    }
-    if (dayFilter != null) {
-      qb = qb.andWhere('session.day = :dayFilter', { dayFilter });
+  // Keep same endpoint for e1rm series
+  async getE1rmSeries(userId: string, exerciseName: string, bucket: string = 'week', windowDays: number = 90) {
+    if (!userId || !exerciseName) {
+      throw new NotFoundException('User ID and exercise name are required');
     }
 
-    const rows = await qb.orderBy('s.date', 'DESC').addOrderBy('s.setNumber', 'ASC').getMany();
+    const exerciseId = this.generateExerciseId(exerciseName);
 
-    if (!rows.length) {
-      return { exerciseName, date: null, day: null, records: [] };
+    // Safe date creation
+    const now = Date.now();
+    const startDate = new Date(now - windowDays * 24 * 60 * 60 * 1000);
+
+    // Validate and format date safely
+    if (isNaN(startDate.getTime())) {
+      const fallbackDate = new Date();
+      fallbackDate.setDate(fallbackDate.getDate() - 90);
+      startDate.setTime(fallbackDate.getTime());
     }
 
-    // Keep only the most recent date among the results
-    const latestDate = rows[0].date;
-    const latestRows = rows.filter(r => r.date === latestDate);
+    const year = startDate.getFullYear();
+    const month = String(startDate.getMonth() + 1).padStart(2, '0');
+    const day = String(startDate.getDate()).padStart(2, '0');
+    const startDateString = `${year}-${month}-${day}`;
 
-    // Be explicit about the session.day (all should share the same)
-    const sessionDay = latestRows[0]?.session?.day ?? null;
+    let groupBy: string;
+    switch (bucket) {
+      case 'day':
+        groupBy = 'DATE(record.date)';
+        break;
+      case 'week':
+        groupBy = `DATE_TRUNC('week', record.date::date)`;
+        break;
+      case 'month':
+        groupBy = `DATE_TRUNC('month', record.date::date)`;
+        break;
+      default:
+        groupBy = `DATE_TRUNC('week', record.date::date)`;
+    }
 
-    const records = latestRows.map(r => ({
-      id: r.id,
-      setNumber: r.setNumber,
-      weight: Number(r.weight),
-      reps: r.reps,
-      done: r.done,
-      e1rm: r.e1rm ?? epley(Number(r.weight), r.reps),
-      isPr: !!r.isPr,
-    }));
+    const series = await this.exerciseRecordRepo.createQueryBuilder('record').select(`${groupBy} as bucket`).addSelect('MAX(record.bestE1rm)', 'e1rm').where('record.userId = :userId', { userId }).andWhere('record.exerciseId = :exerciseId', { exerciseId }).andWhere('record.date >= :startDate', { startDate: startDateString }).andWhere('record.bestE1rm > 0').groupBy('bucket').orderBy('bucket', 'ASC').getRawMany();
 
-    return { exerciseName, date: latestDate, day: sessionDay, records };
-  }
+    // Safe date formatting for response
+    return series.map(item => {
+      let bucketDate: string;
+      try {
+        if (item.bucket && !isNaN(new Date(item.bucket).getTime())) {
+          const date = new Date(item.bucket);
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          bucketDate = `${year}-${month}-${day}`;
+        } else {
+          bucketDate = '1970-01-01'; // Fallback date
+        }
+      } catch (error) {
+        bucketDate = '1970-01-01'; // Fallback date
+      }
 
-  async getNextDefaults(
-    userId: string,
-    exerciseName: string,
-    targetDateISO: string,
-    opts?: { lookbackSameWeekday?: boolean; incWeight?: number; incReps?: number; mode?: 'weight' | 'reps'; onOrBefore?: string },
-  ): Promise<{
-    exerciseName: string;
-    baseline: { date: string | null; day: DayOfWeek | null; records: Array<{ setNumber: number; weight: number; reps: number; done: boolean }> };
-    suggested: { date: string; day: DayOfWeek; records: Array<{ setNumber: number; weight: number; reps: number; done: boolean }> };
-  }> {
-    const mode = opts?.mode ?? 'weight';
-    const incWeight = Number(opts?.incWeight ?? 2.5);
-    const incReps = Number(opts?.incReps ?? 1);
-    const onOrBefore = opts?.onOrBefore ?? targetDateISO; // default: look back from target date
-    const sameWeekday = !!opts?.lookbackSameWeekday;
-
-    const baseline = await this.getLastExercise(userId, exerciseName, {
-      onOrBefore,
-      sameWeekday,
-    });
-
-    const targetDay = jsDateToDayOfWeekEnum(targetDateISO);
-
-    // If no baseline, return empty suggestion (caller can decide initial template)
-    if (!baseline.records.length) {
       return {
-        exerciseName,
-        baseline: {
-          date: null,
-          day: null,
-          records: [],
-        },
-        suggested: {
-          date: targetDateISO,
-          day: targetDay,
-          records: [],
-        },
+        bucket: bucketDate,
+        e1rm: Math.round(parseFloat(item.e1rm)),
+      };
+    });
+  }
+
+  // Keep same endpoint for top sets
+  async getTopSets(userId: string, exerciseName: string, top: number = 5) {
+    if (!userId || !exerciseName) {
+      throw new NotFoundException('User ID and exercise name are required');
+    }
+
+    const exerciseId = this.generateExerciseId(exerciseName);
+
+    const records = await this.exerciseRecordRepo.find({
+      where: { userId, exerciseId },
+      order: { bestE1rm: 'DESC' },
+      take: top,
+    });
+
+    const byWeight = records
+      .sort((a, b) => b.maxWeight - a.maxWeight)
+      .slice(0, top)
+      .map(record => ({
+        weight: record.maxWeight,
+        reps: record.maxReps,
+        e1rm: record.bestE1rm,
+        date: record.date,
+      }));
+
+    const byReps = records
+      .sort((a, b) => b.maxReps - a.maxReps)
+      .slice(0, top)
+      .map(record => ({
+        weight: record.maxWeight,
+        reps: record.maxReps,
+        e1rm: record.bestE1rm,
+        date: record.date,
+      }));
+
+    const byE1rm = records.slice(0, top).map(record => ({
+      weight: record.maxWeight,
+      reps: record.maxReps,
+      e1rm: record.bestE1rm,
+      date: record.date,
+    }));
+
+    return {
+      byWeight,
+      byReps,
+      byE1rm,
+    };
+  }
+
+  // Keep same endpoint for exercise history
+  async getExerciseHistory(userId: string, exerciseName: string) {
+    if (!userId || !exerciseName) {
+      throw new NotFoundException('User ID and exercise name are required');
+    }
+
+    const exerciseId = this.generateExerciseId(exerciseName);
+
+    const records = await this.exerciseRecordRepo.find({
+      where: { userId, exerciseId },
+      order: { date: 'DESC' },
+    });
+
+    const attempts = [];
+    records.forEach(record => {
+      record.workoutSets.forEach(set => {
+        if (set.done && set.weight > 0 && set.reps > 0) {
+          attempts.push({
+            date: record.date,
+            weight: set.weight,
+            reps: set.reps,
+            e1rm: set.e1rm,
+            setIndex: set.setNumber,
+            isPr: set.isPr,
+          });
+        }
+      });
+    });
+
+    return attempts;
+  }
+
+  // Keep same endpoint for last day by name
+  async getLastDayByName(userId: string, day: string, onOrBefore: string) {
+    if (!userId || !day) {
+      throw new NotFoundException('User ID and day are required');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const lastRecord = await this.exerciseRecordRepo.findOne({
+      where: {
+        userId,
+        day: day.toLowerCase(),
+        date: LessThan(onOrBefore),
+      },
+      order: { date: 'DESC' },
+    });
+
+    if (!lastRecord) {
+      return {
+        date: null,
+        day: day,
+        exercises: [],
       };
     }
 
-    const allDone = baseline.records.every(r => r.done);
-    const suggested = baseline.records.map(r => {
-      if (!allDone) {
-        return { setNumber: r.setNumber, weight: r.weight, reps: r.reps, done: false };
-      }
-      if (mode === 'reps') {
-        return { setNumber: r.setNumber, weight: r.weight, reps: r.reps + incReps, done: false };
-      }
-      // default: weight progression
-      return { setNumber: r.setNumber, weight: Number((r.weight + incWeight).toFixed(2)), reps: r.reps, done: false };
-    });
-
     return {
-      exerciseName,
-      baseline: {
-        date: baseline.date,
-        day: baseline.day,
-        records: baseline.records.map(r => ({
-          setNumber: r.setNumber,
-          weight: r.weight,
-          reps: r.reps,
-          done: r.done,
-        })),
-      },
-      suggested: {
-        date: targetDateISO,
-        day: targetDay,
-        records: suggested,
-      },
+      date: lastRecord.date,
+      day: lastRecord.day,
+      exercises: [
+        {
+          exerciseName: lastRecord.exerciseName,
+          records: lastRecord.workoutSets
+            .filter(set => set.done)
+            .map(set => ({
+              setNumber: set.setNumber,
+              weight: set.weight,
+              reps: set.reps,
+              done: set.done,
+              e1rm: set.e1rm,
+            })),
+        },
+      ],
     };
   }
 
-  private normalizeDayName(dayName: string): DayOfWeek {
-    const normalized = dayName.trim().toUpperCase();
-    const dayEnum = (DayOfWeek as any)[normalized] as DayOfWeek | undefined;
-    if (!dayEnum) throw new Error(`Invalid day name: ${dayName}`);
-    return dayEnum;
-  }
+  private async calculateCurrentStreak(userId: string): Promise<number> {
+    const today = new Date().toISOString().split('T')[0];
+    let currentDate = new Date(today);
+    let streak = 0;
+    let foundWorkout = true;
 
-  private coerceOnOrBefore(onOrBefore?: string): Date {
-    // If provided, parse to Date; else now.
-    // If you only store DATE (no time) in session, consider clamping to end-of-day.
-    if (onOrBefore) {
-      const d = new Date(onOrBefore);
-      if (isNaN(d.getTime())) throw new Error(`Invalid onOrBefore: ${onOrBefore}`);
-      return d;
-    }
-    return new Date();
-  }
+    while (foundWorkout) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+      const workout = await this.exerciseRecordRepo.findOne({
+        where: {
+          userId,
+          date: dateStr,
+        },
+      });
 
-  async getLastDayByName(
-    userId: string,
-    dayName: string,
-    opts?: { onOrBefore?: string; preferExactDate?: string }, // NEW
-  ) {
-    const dayEnum = this.normalizeDayName(dayName);
-    const cutoff = toDateOnly(opts?.onOrBefore);
-    const preferExact = opts?.preferExactDate ? toDateOnly(opts.preferExactDate) : null;
+      if (workout) {
+        streak++;
+        currentDate.setDate(currentDate.getDate() - 1);
+      } else {
+        foundWorkout = false;
+      }
 
-    // 1) If preferExactDate is provided, try to grab that session first
-    let latestSession = null as WorkoutSession | null;
-    if (preferExact) {
-      latestSession = await this.sessions.createQueryBuilder('session').innerJoin('session.user', 'user').where('user.id = :userId', { userId }).andWhere('session.day = :dayEnum', { dayEnum }).andWhere('session.date = :exact', { exact: preferExact }).getOne();
+      if (streak > 365) break;
     }
 
-    // 2) Otherwise / if not found, get the latest ≤ cutoff
-    if (!latestSession) {
-      latestSession = await this.sessions
-        .createQueryBuilder('session')
-        .innerJoin('session.user', 'user')
-        .where('user.id = :userId', { userId })
-        .andWhere('session.day = :dayEnum', { dayEnum })
-        .andWhere('session.date <= :cutoff', { cutoff })
-        .orderBy('session.date', 'DESC')
-        .addOrderBy('session.created_at', 'DESC') // tie-breaker
-        .limit(1)
-        .getOne();
-    }
-
-    if (!latestSession) {
-      return { date: null, day: dayEnum, exercises: [] };
-    }
-
-    const rows = await this.sets.createQueryBuilder('s').innerJoin('s.session', 'session').where('session.id = :sid', { sid: latestSession.id }).orderBy('s.exerciseName', 'ASC').addOrderBy('s.setNumber', 'ASC').getMany();
-
-    const bucket = new Map<string, typeof rows>();
-    for (const r of rows) {
-      if (!bucket.has(r.exerciseName)) bucket.set(r.exerciseName, []);
-      bucket.get(r.exerciseName)!.push(r);
-    }
-
-    const exercises = Array.from(bucket.entries()).map(([exerciseName, arr]) => ({
-      exerciseName,
-      records: arr.map(r => ({
-        id: r.id,
-        setNumber: r.setNumber,
-        weight: Number(r.weight),
-        reps: r.reps,
-        done: r.done, // keep actual value
-        e1rm: r.e1rm ?? epley(Number(r.weight), r.reps),
-        isPr: !!r.isPr,
-      })),
-    }));
-
-    return {
-      date: latestSession.date ?? null, // no toISOString() on DATE
-      day: latestSession.day ?? dayEnum,
-      exercises,
-    };
+    return streak;
   }
 }
