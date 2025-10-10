@@ -1,0 +1,274 @@
+{
+  "items": [
+    {
+      "name": "Chicken Breast (cooked)",
+      "category": "Protein",
+      "calories": 165,
+      "protein": 31,
+      "carbs": 0,
+      "fat": 3.6,
+      "unit": "g"
+    },
+    {
+      "name": "Salmon (cooked)",
+      "category": "Protein",
+      "calories": 206,
+      "protein": 22,
+      "carbs": 0,
+      "fat": 13,
+      "unit": "g"
+    },
+    {
+      "name": "Lean Ground Beef (90/10, cooked)",
+      "category": "Protein",
+      "calories": 204,
+      "protein": 26,
+      "carbs": 0,
+      "fat": 11,
+      "unit": "g"
+    },
+    {
+      "name": "Tuna (canned in water)",
+      "category": "Protein",
+      "calories": 116,
+      "protein": 25,
+      "carbs": 0,
+      "fat": 1,
+      "unit": "g"
+    },
+    {
+      "name": "Eggs (large)",
+      "category": "Protein",
+      "calories": 72,
+      "protein": 6.3,
+      "carbs": 0.4,
+      "fat": 4.8,
+      "unit": "each"
+    },
+    {
+      "name": "Whey Protein Powder",
+      "category": "Protein",
+      "calories": 120,
+      "protein": 24,
+      "carbs": 3,
+      "fat": 1,
+      "unit": "scoop (30g)"
+    },
+    {
+      "name": "Greek Yogurt (non-fat)",
+      "category": "Protein",
+      "calories": 59,
+      "protein": 10,
+      "carbs": 3.6,
+      "fat": 0.4,
+      "unit": "g"
+    },
+    {
+      "name": "Cottage Cheese (low-fat)",
+      "category": "Protein",
+      "calories": 72,
+      "protein": 11,
+      "carbs": 2.7,
+      "fat": 1,
+      "unit": "g"
+    },
+    {
+      "name": "Brown Rice (cooked)",
+      "category": "Complex Carbs",
+      "calories": 112,
+      "protein": 2.6,
+      "carbs": 23,
+      "fat": 0.8,
+      "unit": "g"
+    },
+    {
+      "name": "Quinoa (cooked)",
+      "category": "Complex Carbs",
+      "calories": 120,
+      "protein": 4.4,
+      "carbs": 21.3,
+      "fat": 1.9,
+      "unit": "g"
+    },
+    {
+      "name": "Oats (dry)",
+      "category": "Complex Carbs",
+      "calories": 150,
+      "protein": 5,
+      "carbs": 27,
+      "fat": 2.5,
+      "unit": "g"
+    },
+    {
+      "name": "Sweet Potato (cooked)",
+      "category": "Complex Carbs",
+      "calories": 86,
+      "protein": 1.6,
+      "carbs": 20,
+      "fat": 0.1,
+      "unit": "g"
+    },
+    {
+      "name": "Whole Wheat Bread",
+      "category": "Complex Carbs",
+      "calories": 128,
+      "protein": 5,
+      "carbs": 23,
+      "fat": 2,
+      "unit": "slice (45g)"
+    },
+    {
+      "name": "Lentils (cooked)",
+      "category": "Complex Carbs",
+      "calories": 116,
+      "protein": 9,
+      "carbs": 20,
+      "fat": 0.4,
+      "unit": "g"
+    },
+    {
+      "name": "Black Beans (cooked)",
+      "category": "Complex Carbs",
+      "calories": 132,
+      "protein": 8.9,
+      "carbs": 23.7,
+      "fat": 0.5,
+      "unit": "g"
+    },
+    {
+      "name": "Avocado",
+      "category": "Healthy Fats",
+      "calories": 160,
+      "protein": 2,
+      "carbs": 9,
+      "fat": 15,
+      "unit": "half (100g)"
+    },
+    {
+      "name": "Almonds (raw)",
+      "category": "Healthy Fats",
+      "calories": 576,
+      "protein": 21,
+      "carbs": 22,
+      "fat": 49,
+      "unit": "g"
+    },
+    {
+      "name": "Peanut Butter (natural)",
+      "category": "Healthy Fats",
+      "calories": 588,
+      "protein": 25,
+      "carbs": 20,
+      "fat": 50,
+      "unit": "g"
+    },
+    {
+      "name": "Olive Oil",
+      "category": "Healthy Fats",
+      "calories": 884,
+      "protein": 0,
+      "carbs": 0,
+      "fat": 100,
+      "unit": "g"
+    },
+    {
+      "name": "Chia Seeds",
+      "category": "Healthy Fats",
+      "calories": 486,
+      "protein": 17,
+      "carbs": 42,
+      "fat": 31,
+      "unit": "g"
+    },
+    {
+      "name": "Banana",
+      "category": "Fruits & Vegetables",
+      "calories": 89,
+      "protein": 1.1,
+      "carbs": 22.8,
+      "fat": 0.3,
+      "unit": "medium (118g)"
+    },
+    {
+      "name": "Apple",
+      "category": "Fruits & Vegetables",
+      "calories": 52,
+      "protein": 0.3,
+      "carbs": 14,
+      "fat": 0.2,
+      "unit": "medium (182g)"
+    },
+    {
+      "name": "Broccoli (cooked)",
+      "category": "Fruits & Vegetables",
+      "calories": 35,
+      "protein": 2.4,
+      "carbs": 7.2,
+      "fat": 0.4,
+      "unit": "g"
+    },
+    {
+      "name": "Spinach (raw)",
+      "category": "Fruits & Vegetables",
+      "calories": 23,
+      "protein": 2.9,
+      "carbs": 3.6,
+      "fat": 0.4,
+      "unit": "g"
+    },
+    {
+      "name": "Blueberries",
+      "category": "Fruits & Vegetables",
+      "calories": 57,
+      "protein": 0.7,
+      "carbs": 14.5,
+      "fat": 0.3,
+      "unit": "g"
+    },
+    {
+      "name": "Milk (whole)",
+      "category": "Dairy & Alternatives",
+      "calories": 61,
+      "protein": 3.2,
+      "carbs": 4.8,
+      "fat": 3.3,
+      "unit": "g"
+    },
+    {
+      "name": "Almond Milk (unsweetened)",
+      "category": "Dairy & Alternatives",
+      "calories": 15,
+      "protein": 0.6,
+      "carbs": 0.6,
+      "fat": 1.1,
+      "unit": "g"
+    },
+    {
+      "name": "Cheddar Cheese",
+      "category": "Dairy & Alternatives",
+      "calories": 404,
+      "protein": 23,
+      "carbs": 3.1,
+      "fat": 33,
+      "unit": "g"
+    },
+    {
+      "name": "Creatine Monohydrate",
+      "category": "Other",
+      "calories": 0,
+      "protein": 0,
+      "carbs": 0,
+      "fat": 0,
+      "unit": "teaspoon (5g)"
+    },
+    {
+      "name": "Sports Drink",
+      "category": "Other",
+      "calories": 80,
+      "protein": 0,
+      "carbs": 21,
+      "fat": 0,
+      "unit": "bottle (500ml)"
+    }
+  ]
+}

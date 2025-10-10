@@ -1,259 +1,317 @@
+// src/nutrition/nutrition.service.ts
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, In } from 'typeorm';
-import { MealPlan, MealPlanDay, MealPlanFood, MealPlanAssignment, Food, DayOfWeek, MealType } from 'entities/global.entity';
+import { DataSource, Repository } from 'typeorm';
+import { MealPlan, MealPlanDay, MealPlanFood, MealPlanAssignment, MealIntakeLog, DayOfWeek, MealType, User } from 'entities/global.entity';
 
 @Injectable()
-export class MealPlansService {
+export class NutritionService {
   constructor(
-    @InjectRepository(MealPlan) public readonly repo: Repository<MealPlan>,
-    @InjectRepository(MealPlanDay) public readonly dayRepo: Repository<MealPlanDay>,
-    @InjectRepository(MealPlanFood) public readonly foodRepo: Repository<MealPlanFood>,
-    @InjectRepository(MealPlanAssignment) public readonly assignRepo: Repository<MealPlanAssignment>,
-    @InjectRepository(Food) public readonly foodBaseRepo: Repository<Food>,
     private readonly dataSource: DataSource,
+    @InjectRepository(MealPlan) private readonly planRepo: Repository<MealPlan>,
+    @InjectRepository(MealPlanDay) private readonly dayRepo: Repository<MealPlanDay>,
+    @InjectRepository(MealPlanFood) private readonly planFoodRepo: Repository<MealPlanFood>,
+    @InjectRepository(MealPlanAssignment) private readonly assignRepo: Repository<MealPlanAssignment>,
+    @InjectRepository(MealIntakeLog) private readonly logRepo: Repository<MealIntakeLog>,
   ) {}
 
-  async list(q: any) {
+  async listPlans(q: any) {
     const page = Math.max(1, parseInt(q?.page ?? '1', 10));
     const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
-    const search = q?.search || '';
+    const search = (q?.search || '').trim();
 
-    const qb = this.repo.createQueryBuilder('mp');
-
-    if (search) {
-      qb.andWhere('mp.name ILIKE :s', { s: `%${search}%` });
-    }
+    const qb = this.planRepo.createQueryBuilder('mp');
+    if (search) qb.andWhere('mp.name ILIKE :s', { s: `%${search}%` });
 
     qb.orderBy('mp.created_at', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
     const [rows, total] = await qb.getManyAndCount();
+    return { total_records: total, current_page: page, per_page: limit, records: rows };
+  }
+
+  async stats(_q: any) {
+    // safer column reference (works with default or snake-case naming strategy)
+    const r = await this.planRepo.createQueryBuilder('mp').leftJoin('mp.days', 'd').leftJoin('mp.assignments', 'a').select('COUNT(DISTINCT mp.id)', 'total').addSelect('COUNT(DISTINCT d.id)', 'total_days').addSelect('COUNT(DISTINCT a.id)', 'total_assignments').addSelect('SUM(CASE WHEN mp.isActive = true THEN 1 ELSE 0 END)', 'active_plans').getRawOne();
 
     return {
-      total_records: total,
-      current_page: page,
-      per_page: limit,
-      records: rows,
+      totals: {
+        total: Number(r?.total ?? 0),
+        activePlans: Number(r?.active_plans ?? 0),
+        totalDays: Number(r?.total_days ?? 0),
+        totalAssignments: Number(r?.total_assignments ?? 0),
+      },
     };
   }
 
-  async getOneDeep(id: string) {
-    const plan = await this.repo.findOne({
+  async getPlanDeep(id: string) {
+    const plan = await this.planRepo.findOne({
       where: { id },
-      relations: ['days', 'days.foods', 'days.foods.food', 'assignments'],
+      relations: ['days', 'days.foods', 'assignments'],
     });
-    console.log(id, plan);
     if (!plan) throw new NotFoundException('Meal plan not found');
     return plan;
   }
 
-  async create(dto: any) {
+  async createPlan(dto: any) {
     return this.dataSource.transaction(async manager => {
-      const planRepo = manager.getRepository(MealPlan);
-      const dayRepo = manager.getRepository(MealPlanDay);
-      const foodRepo = manager.getRepository(MealPlanFood);
-
-      const plan = await planRepo.save(
-        planRepo.create({
+      const plan = await manager.save(
+        MealPlan,
+        manager.create(MealPlan, {
           name: dto.name,
-          desc: dto.desc,
+          desc: dto.desc ?? null,
         }),
       );
 
-      if (dto.days && Array.isArray(dto.days)) {
-        for (const dayData of dto.days) {
-          const day = await dayRepo.save(
-            dayRepo.create({
-              mealPlan: plan,
-              day: dayData.day,
-              name: dayData.name,
+      for (const d of dto.days ?? []) {
+        const day = await manager.save(
+          MealPlanDay,
+          manager.create(MealPlanDay, {
+            mealPlan: plan,
+            day: d.day as DayOfWeek,
+            name: d.name,
+          }),
+        );
+
+        for (const f of d.foods ?? []) {
+          await manager.save(
+            MealPlanFood,
+            manager.create(MealPlanFood, {
+              day,
+              name: f.name,
+              category: f.category ?? null,
+              calories: f.calories ?? 0,
+              protein: f.protein ?? 0,
+              carbs: f.carbs ?? 0,
+              fat: f.fat ?? 0,
+              unit: f.unit ?? 'g',
+              quantity: f.quantity ?? 0,
+              mealType: f.mealType ?? MealType.BREAKFAST,
+              orderIndex: f.orderIndex ?? 0,
             }),
           );
-
-          // Add foods to day
-          if (dayData.foods && Array.isArray(dayData.foods)) {
-            for (const foodData of dayData.foods) {
-              await foodRepo.save(
-                foodRepo.create({
-                  day: day,
-                  food: { id: foodData.foodId },
-                  quantity: foodData.quantity,
-                  mealType: foodData.mealType,
-                  orderIndex: foodData.orderIndex || 0,
-                }),
-              );
-            }
-          }
         }
       }
 
-      return plan
+      // return created plan with tree
+      return manager.findOne(MealPlan, {
+        where: { id: plan.id },
+        relations: ['days', 'days.foods'],
+      });
     });
   }
 
-	async stats(q) {
-  const totals = await this.repo.createQueryBuilder('mp')
-    .leftJoin('mp.days', 'd')
-    .leftJoin('mp.assignments', 'a')
-    .select([
-      'COUNT(DISTINCT mp.id)::int AS total',
-      'COUNT(DISTINCT d.id)::int AS total_days',
-      'COUNT(DISTINCT a.id)::int AS total_assignments',
-      `SUM(CASE WHEN mp.is_active = true THEN 1 ELSE 0 END)::int AS active_plans`
-    ])
-    .getRawOne();
-
-  return {
-    totals: {
-      total: totals?.total ?? 0,
-      activePlans: totals?.active_plans ?? 0,
-      totalDays: totals?.total_days ?? 0,
-      totalAssignments: totals?.total_assignments ?? 0
-    }
-  };
-}
-
-
-  async update(id: string, dto: any) {
+  async updatePlan(id: string, dto: any) {
     return this.dataSource.transaction(async manager => {
       const plan = await manager.findOne(MealPlan, { where: { id } });
       if (!plan) throw new NotFoundException('Meal plan not found');
 
-      // Update basic info
       if (dto.name !== undefined) plan.name = dto.name;
       if (dto.desc !== undefined) (plan as any).desc = dto.desc;
       if (dto.isActive !== undefined) plan.isActive = dto.isActive;
-
       await manager.save(MealPlan, plan);
 
-      // Replace content if provided
       if (dto.days) {
-        // Remove existing days (cascade removes foods)
         const oldDays = await manager.find(MealPlanDay, { where: { mealPlan: { id: plan.id } } });
         if (oldDays.length) await manager.remove(MealPlanDay, oldDays);
 
-        // Recreate days
-        for (const dayData of dto.days) {
+        for (const d of dto.days ?? []) {
           const day = await manager.save(
             MealPlanDay,
             manager.create(MealPlanDay, {
               mealPlan: plan,
-              day: dayData.day,
-              name: dayData.name,
+              day: d.day as DayOfWeek,
+              name: d.name,
             }),
           );
-
-          // Add foods
-          if (dayData.foods && Array.isArray(dayData.foods)) {
-            for (const foodData of dayData.foods) {
-              await manager.save(
-                MealPlanFood,
-                manager.create(MealPlanFood, {
-                  day: day,
-                  food: { id: foodData.foodId },
-                  quantity: foodData.quantity,
-                  mealType: foodData.mealType,
-                  orderIndex: foodData.orderIndex || 0,
-                }),
-              );
-            }
+          for (const f of d.foods ?? []) {
+            await manager.save(
+              MealPlanFood,
+              manager.create(MealPlanFood, {
+                day,
+                name: f.name,
+                category: f.category ?? null,
+                calories: f.calories ?? 0,
+                protein: f.protein ?? 0,
+                carbs: f.carbs ?? 0,
+                fat: f.fat ?? 0,
+                unit: f.unit ?? 'g',
+                quantity: f.quantity ?? 0,
+                mealType: f.mealType ?? MealType.BREAKFAST,
+                orderIndex: f.orderIndex ?? 0,
+              }),
+            );
           }
         }
       }
 
-      return this.getOneDeep(plan.id);
+      return this.getPlanDeep(plan.id);
     });
   }
 
-  async remove(id: string) {
-    const plan = await this.repo.findOne({ where: { id } });
+  async removePlan(id: string) {
+    const plan = await this.planRepo.findOne({ where: { id } });
     if (!plan) throw new NotFoundException('Meal plan not found');
-    await this.repo.remove(plan);
+    await this.planRepo.remove(plan);
     return { message: 'Meal plan deleted' };
   }
 
-  async assignToUser(planId: string, userId: string) {
-    const plan = await this.repo.findOne({ where: { id: planId } });
-    if (!plan) throw new NotFoundException('Meal plan not found');
+ 
+  async assignToUser(planId: string, userId: string ) {
+    return this.dataSource.transaction(async manager => {
+      const plan = await manager.findOne(MealPlan, { where: { id: planId } });
+      if (!plan) throw new NotFoundException('Meal plan not found');
 
-    const userRepo = this.dataSource.getRepository('User');
-    const user = await userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
+      const user = await manager.findOne(User, { where: { id: userId } as any });
+      if (!user) throw new NotFoundException('User not found');
 
-    // Check if already assigned
-    const existing = await this.assignRepo.findOne({
-      where: { mealPlan: { id: planId }, athlete: { id: userId } },
-    });
+      // 1) deactivate previous active assignments for this user
+      await manager.createQueryBuilder().update(MealPlanAssignment).set({ isActive: false }).where('athleteId = :userId AND isActive = true', { userId }).execute();
 
-    if (existing) {
-      existing.isActive = true;
-      await this.assignRepo.save(existing);
-    } else {
-      const assignment = this.assignRepo.create({
-        mealPlan: plan,
-        athlete: { id: userId } as any,
-        isActive: true,
+      // 2) upsert this assignment as active
+      let assignment = await manager.findOne(MealPlanAssignment, {
+        where: { mealPlan: { id: planId }, athlete: { id: userId } },
       });
-      await this.assignRepo.save(assignment);
-    }
 
-    return { message: 'Meal plan assigned successfully' };
+      if (assignment) {
+        assignment.isActive = true;
+         assignment = await manager.save(MealPlanAssignment, assignment);
+      } else {
+        assignment = await manager.save(
+          MealPlanAssignment,
+          manager.create(MealPlanAssignment, {
+            mealPlan: { id: planId } as any,
+            athlete: { id: userId } as any,
+            isActive: true,
+           }),
+        );
+      }
+
+      // 3) set user's activeMealPlanId
+      user.activeMealPlanId = planId;
+      await manager.save(User, user);
+
+      return {
+        message: 'Meal plan assigned successfully',
+        user: { id: user.id, name: user.name, activeMealPlanId: user.activeMealPlanId },
+        plan: { id: plan.id, name: plan.name },
+        assignment: { id: assignment.id, startDate: assignment.startDate, endDate: assignment.endDate, isActive: assignment.isActive },
+      };
+    });
   }
 
   async bulkAssign(planId: string, dto: { athleteIds: string[] }) {
     if (!Array.isArray(dto.athleteIds) || dto.athleteIds.length === 0) {
       throw new BadRequestException('athleteIds[] required');
     }
-
-    const plan = await this.repo.findOne({ where: { id: planId } });
+    const plan = await this.planRepo.findOne({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Meal plan not found');
 
     const uniqueIds = [...new Set(dto.athleteIds)];
 
-    return this.dataSource.transaction(async manager => {
-      const assignRepo = manager.getRepository(MealPlanAssignment);
-
-      for (const athleteId of uniqueIds) {
-        const existing = await assignRepo.findOne({
-          where: { mealPlan: { id: planId }, athlete: { id: athleteId } },
-        });
-
-        if (existing) {
-          existing.isActive = true;
-          await assignRepo.save(existing);
-        } else {
-          const assignment = assignRepo.create({
-            mealPlan: plan,
-            athlete: { id: athleteId } as any,
-            isActive: true,
-          });
-          await assignRepo.save(assignment);
-        }
+    await this.dataSource.transaction(async manager => {
+      for (const userId of uniqueIds) {
+        // reuse single-assign logic per user
+        await this.assignToUser(planId, userId);
       }
-
-      return { message: `Meal plan assigned to ${uniqueIds.length} users` };
     });
+
+    return { message: `Meal plan assigned to ${uniqueIds.length} users` };
   }
 
   async getActivePlan(userId: string) {
     const assignment = await this.assignRepo.findOne({
       where: { athlete: { id: userId }, isActive: true },
-      relations: ['mealPlan', 'mealPlan.days', 'mealPlan.days.foods', 'mealPlan.days.foods.food'],
+      relations: ['mealPlan', 'mealPlan.days', 'mealPlan.days.foods'],
     });
-
-    if (!assignment) {
-      return { status: 'none', error: 'No active meal plan' };
-    }
-
-    return assignment.mealPlan;
+    if (!assignment) return { status: 'none', error: 'No active meal plan' };
+    return {
+      assignmentId: assignment.id,
+      mealPlan: assignment.mealPlan,
+    };
   }
 
-  async listAssignees(planId: string) {
-    return this.assignRepo.find({
-      where: { mealPlan: { id: planId } },
-      relations: ['athlete'],
+  // ---------- MEAL LOGS ----------
+  async upsertLog(dto: { userId: string; date: string; day: DayOfWeek; mealType: MealType; itemName: string; quantity?: number; taken?: boolean; notes?: string | null; suggestedAlternative?: string | null; planFoodId?: string | null; assignmentId?: string | null }) {
+    if (!dto.itemName?.trim()) throw new BadRequestException('itemName required');
+
+    let mealType = dto.mealType;
+    let itemName = dto.itemName;
+
+    if (dto.planFoodId) {
+      const pf = await this.planFoodRepo.findOne({ where: { id: dto.planFoodId } });
+      if (pf) {
+        itemName = pf.name;
+        mealType = mealType ?? pf.mealType;
+      }
+    }
+
+    const existing = await this.logRepo.findOne({
+      where: { userId: dto.userId, date: dto.date, mealType, itemName },
     });
+
+    if (existing) {
+      existing.quantity = dto.quantity ?? existing.quantity;
+      existing.taken = dto.taken ?? existing.taken;
+      existing.takenAt = dto.taken ? new Date() : existing.takenAt;
+      existing.notes = dto.notes ?? existing.notes;
+      existing.suggestedAlternative = dto.suggestedAlternative ?? existing.suggestedAlternative;
+      existing.planFoodId = dto.planFoodId ?? existing.planFoodId;
+      existing.assignmentId = dto.assignmentId ?? existing.assignmentId;
+      existing.day = dto.day ?? existing.day;
+      return this.logRepo.save(existing);
+    }
+
+    const created = this.logRepo.create({
+      userId: dto.userId,
+      assignmentId: dto.assignmentId ?? null,
+      planFoodId: dto.planFoodId ?? null,
+      date: dto.date,
+      day: dto.day,
+      mealType,
+      itemName,
+      quantity: dto.quantity ?? 0,
+      taken: !!dto.taken,
+      takenAt: dto.taken ? new Date() : null,
+      notes: dto.notes ?? null,
+      suggestedAlternative: dto.suggestedAlternative ?? null,
+    });
+    return this.logRepo.save(created);
+  }
+
+  async summary(userId: string, date: string) {
+    const row = await this.logRepo
+      .createQueryBuilder('l')
+      .leftJoin('l.planFood', 'pf')
+      .where('l.userId = :userId AND l.date = :date AND l.taken = true', { userId, date })
+      .select([
+        // if plan-linked: scale macros using logged quantity vs planned quantity
+        'COALESCE(SUM(pf.calories * l.quantity / NULLIF(pf.quantity,0)), 0) AS kcal',
+        'COALESCE(SUM(pf.protein  * l.quantity / NULLIF(pf.quantity,0)), 0) AS protein',
+        'COALESCE(SUM(pf.carbs    * l.quantity / NULLIF(pf.quantity,0)), 0) AS carbs',
+        'COALESCE(SUM(pf.fat      * l.quantity / NULLIF(pf.quantity,0)), 0) AS fat',
+      ])
+      .getRawOne();
+
+    return {
+      date,
+      totals: {
+        calories: Number(row?.kcal ?? 0),
+        protein: Number(row?.protein ?? 0),
+        carbs: Number(row?.carbs ?? 0),
+        fat: Number(row?.fat ?? 0),
+      },
+    };
+  }
+
+  async listLogs(userId: string, q: { date?: string; from?: string; to?: string }) {
+    const qb = this.logRepo.createQueryBuilder('l').where('l.userId = :userId', { userId }).leftJoinAndSelect('l.planFood', 'pf');
+
+    if (q.date) qb.andWhere('l.date = :date', { date: q.date });
+    if (q.from && q.to) qb.andWhere('l.date BETWEEN :from AND :to', { from: q.from, to: q.to });
+
+    qb.orderBy('l.date', 'DESC').addOrderBy('l.mealType', 'ASC');
+    return qb.getMany();
   }
 }

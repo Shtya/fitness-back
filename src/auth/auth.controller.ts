@@ -58,7 +58,6 @@ export class AuthController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   async listUsers(@Query() query: any) {
-    // supports: ?page, ?limit, ?sortBy, ?sortOrder, ?search, ?role
     return this.authService.listUsersAdvanced(query);
   }
 
@@ -105,9 +104,6 @@ export class AuthController {
     return this.authService.assignCoach(userId, coachId);
   }
 
-
- 
- 
   /* -------- New: Stats -------- */
   @Get('stats')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -115,5 +111,28 @@ export class AuthController {
   stats() {
     return this.authService.getStats();
   }
- 
+
+  @Get('user/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  async getUserById(@Param('id') id: string) {
+    return this.authService.getUserById(id);
+  }
+
+  @Put('user/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  async updateUser(
+    @Param('id') id: string,
+    @Body() dto: any,
+    @Req() req: any,  
+  ) {
+    return this.authService.updateUser(id, dto, req.user);
+  }
+
+  @Get('coaches/select')
+  @UseGuards(JwtAuthGuard)
+  async getCoachesForSelect() {
+    return this.authService.getCoachesForSelect();
+  }
 }

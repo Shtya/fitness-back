@@ -1,69 +1,123 @@
+// src/nutrition/nutrition.controller.ts
 import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Req } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { UserRole } from 'entities/global.entity';
-import { MealPlansService } from './meal-plans.service';
+import { UserRole, DayOfWeek, MealType } from 'entities/global.entity';
+import { NutritionService } from './meal-plans.service';
 
-@Controller('meal-plans')
+// --- DTOs ---
+type SaveMealPlanDto = {
+  name: string;
+  desc?: string | null;
+  days: Array<{
+    day: DayOfWeek | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday';
+    name: string;
+    foods: Array<{
+      name: string;
+      category?: string | null;
+      calories?: number;
+      protein?: number;
+      carbs?: number;
+      fat?: number;
+      unit?: string;
+      quantity?: number;
+      mealType?: MealType;
+      orderIndex?: number;
+    }>;
+  }>;
+};
+
+type MealLogUpsertDto = {
+  date: string; // 'YYYY-MM-DD'
+  day: DayOfWeek;
+  mealType: MealType;
+  itemName: string;
+  quantity?: number;
+  taken?: boolean;
+  notes?: string | null;
+  suggestedAlternative?: string | null;
+  planFoodId?: string | null;
+  assignmentId?: string | null;
+};
+
 @UseGuards(JwtAuthGuard, RolesGuard)
-export class MealPlansController {
-  constructor(private readonly svc: MealPlansService) {}
+@Controller('nutrition')
+export class NutritionController {
+  constructor(private readonly svc: NutritionService) {}
 
-  @Get()
+  // ---------------- MEAL PLANS ----------------
+  @Get('meal-plans')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async list(@Query() q: any) {
-    return this.svc.list(q);
+  listPlans(@Query() q: any) {
+    return this.svc.listPlans(q);
   }
 
-  @Get('stats')
-  async stats(@Query() q: any) {
+  @Get('meal-plans/stats')
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  stats(@Query() q: any) {
     return this.svc.stats(q);
   }
 
-  @Post()
+  @Post('meal-plans')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async create(@Body() dto: any) {
-    return this.svc.create(dto);
+  createPlan(@Body() dto: SaveMealPlanDto) {
+    return this.svc.createPlan(dto);
   }
 
-  @Get(':id')
-  async get(@Param('id') id: string) {
-    return this.svc.getOneDeep(id);
+  @Get('meal-plans/:id')
+  getPlan(@Param('id') id: string) {
+    return this.svc.getPlanDeep(id);
   }
 
-  @Put(':id')
+  @Put('meal-plans/:id')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async update(@Param('id') id: string, @Body() dto: any) {
-    return this.svc.update(id, dto);
+  updatePlan(@Param('id') id: string, @Body() dto: SaveMealPlanDto & { isActive?: boolean }) {
+    return this.svc.updatePlan(id, dto);
   }
 
-  @Delete(':id')
+  @Delete('meal-plans/:id')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async remove(@Param('id') id: string) {
-    return this.svc.remove(id);
+  removePlan(@Param('id') id: string) {
+    return this.svc.removePlan(id);
   }
 
-  @Post(':id/assign')
+  @Post('meal-plans/:id/assign')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async assign(@Param('id') planId: string, @Body('userId') userId: string) {
-    return this.svc.assignToUser(planId, userId);
+  assignPlan(@Param('id') planId: string, @Body() body: { userId: string }) {
+    return this.svc.assignToUser(planId, body.userId);
   }
 
-  @Post(':id/assign-bulk')
+  @Post('meal-plans/:id/assign-bulk')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async bulkAssign(@Param('id') planId: string, @Body() dto: { athleteIds: string[] }) {
+  bulkAssign(@Param('id') planId: string, @Body() dto: { athleteIds: string[] }) {
     return this.svc.bulkAssign(planId, dto);
   }
 
-  @Get(':id/assignees')
+  @Get('meal-plans/:id/assignees')
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async assignees(@Param('id') id: string) {
-    return this.svc.listAssignees(id);
+  assignees(@Param('id') id: string) {
+    // return this.svc.listAssignees(id);
   }
 
-  @Get('my/active')
-  async getMyActive(@Req() req: any) {
+  @Get('meal-plans/my/active')
+  getMyActive(@Req() req: any) {
     return this.svc.getActivePlan(req.user.id);
+  }
+
+  // ---------------- MEAL LOGS (CLIENT) ----------------
+  @Post('meal-logs')
+  upsertLog(@Req() req: any, @Body() dto: MealLogUpsertDto) {
+    return this.svc.upsertLog({ ...dto, userId: req.user.id });
+  }
+
+  @Get('meal-logs/summary')
+  summary(@Req() req: any, @Query('date') date: string) {
+    return this.svc.summary(req.user.id, date);
+  }
+
+  @Get('meal-logs')
+  listLogs(@Req() req: any, @Query() q: { date?: string; from?: string; to?: string }) {
+    return this.svc.listLogs(req.user.id, q);
   }
 }

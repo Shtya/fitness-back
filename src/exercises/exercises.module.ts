@@ -6,7 +6,7 @@ import { PlanExercisesController } from './exercises.controller';
 import { PlanExercisesService } from './exercises.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PlanDay, PlanExercises, ExerciseVideo])], // Add ExerciseVideo
+  imports: [TypeOrmModule.forFeature([PlanDay, PlanExercises, ExerciseVideo])],
   controllers: [PlanExercisesController],
   providers: [PlanExercisesService],
   exports: [PlanExercisesService],

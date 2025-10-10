@@ -43,7 +43,12 @@ export interface ProgramDay {
   name: string; // "Push Day 1 (Chest & Triceps)"
   exercises: ProgramExercise[];
 }
-
+export enum MealType {
+  BREAKFAST = 'breakfast',
+  LUNCH = 'lunch',
+  DINNER = 'dinner',
+  SNACK = 'snack',
+}
 export type RepsPattern = string;
 
 import { PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, BaseEntity, DeleteDateColumn } from 'typeorm';
@@ -60,6 +65,60 @@ export abstract class CoreEntity extends BaseEntity {
 
   @DeleteDateColumn({ type: 'timestamptz', nullable: true })
   deleted_at: Date | null;
+}
+
+@Entity('plans')
+export class Plan extends CoreEntity {
+  @Column({ type: 'varchar', length: 180 })
+  name!: string;
+
+  @Column({ type: 'text', nullable: true })
+  notes!: string | null;
+
+  @Index()
+  @Column({ type: 'boolean', default: true })
+  isActive!: boolean;
+
+  @OneToMany(() => PlanDay, d => d.plan, { cascade: true })
+  days!: PlanDay[];
+
+  // Who it’s assigned to
+  @OneToMany(() => PlanAssignment, a => a.plan, { cascade: true })
+  assignments!: PlanAssignment[];
+
+  @OneToMany(() => User, u => u.activePlan)
+  activeUsers!: User[];
+}
+
+@Entity('meal_plans')
+export class MealPlan extends CoreEntity {
+  @Column({ type: 'varchar', length: 180 })
+  name!: string;
+
+  @Column({ type: 'text', nullable: true })
+  desc?: string | null;
+
+  @Column({ type: 'boolean', default: true })
+  isActive!: boolean;
+
+  // Who created this meal plan (coach)
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'coachId' })
+  coach?: any | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  coachId?: string | null;
+
+  @OneToMany(() => MealPlanDay, d => d.mealPlan, { cascade: true })
+  days!: MealPlanDay[];
+
+  // Who it's assigned to
+  @OneToMany(() => MealPlanAssignment, a => a.mealPlan, { cascade: true })
+  assignments!: MealPlanAssignment[];
+
+  // meal_plan.entity.ts (or same file)
+  @OneToMany(() => User, u => u.activeMealPlan)
+  activeUsers!: User[];
 }
 
 @Entity('users')
@@ -119,21 +178,33 @@ export class User extends CoreEntity {
   @Column({ type: 'int', default: 90 })
   defaultRestSeconds!: number;
 
+  @Column({ type: 'date', nullable: true })
+  subscriptionStart!: string | null; // YYYY-MM-DD
+
+  @Column({ type: 'date', nullable: true })
+  subscriptionEnd!: string | null; // YYYY-MM-DD
+
   @Index()
   @Column({ type: 'uuid', nullable: true })
   activePlanId!: string | null;
 
+  @ManyToOne(() => Plan, p => p.activeUsers, { nullable: true })
+  @JoinColumn({ name: 'activePlanId' })
+  activePlan!: Plan | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  activeMealPlanId!: string | null;
+
+  @ManyToOne(() => MealPlan, mp => mp.activeUsers, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'activeMealPlanId' })
+  activeMealPlan!: MealPlan | null;
+
   @OneToMany(() => PlanAssignment, a => a.athlete)
   planAssignments!: PlanAssignment[];
 
-  @OneToMany(() => FoodLog, fl => fl.user)
-  foodLogs!: FoodLog[];
-
   @OneToMany(() => MealPlanAssignment, a => a.athlete)
   mealPlanAssignments!: MealPlanAssignment[];
-
-  @Column({ type: 'uuid', nullable: true })
-  activeMealPlanId!: string | null;
 
   @OneToMany(() => Asset, upload => upload.user)
   uploads: Asset[];
@@ -150,26 +221,6 @@ export enum ExerciseStatus {
   INACTIVE = 'Inactive',
 }
 
-@Entity('plans')
-export class Plan extends CoreEntity {
-  @Column({ type: 'varchar', length: 180 })
-  name!: string;
-
-  @Column({ type: 'text', nullable: true })
-  notes!: string | null;
-
-  @Index()
-  @Column({ type: 'boolean', default: true })
-  isActive!: boolean;
-
-  @OneToMany(() => PlanDay, d => d.plan, { cascade: true })
-  days!: PlanDay[];
-
-  // Who it’s assigned to
-  @OneToMany(() => PlanAssignment, a => a.plan, { cascade: true })
-  assignments!: PlanAssignment[];
-}
-
 @Entity('plan_days')
 @Index(['plan', 'day'], { unique: true })
 export class PlanDay extends CoreEntity {
@@ -182,19 +233,40 @@ export class PlanDay extends CoreEntity {
   @Column({ type: 'enum', enum: DayOfWeek })
   day!: DayOfWeek;
 
-  @OneToMany(() => PlanExercises, e => e.day, { cascade: true })
-  exercises!: PlanExercises[];
+  @ManyToMany(() => PlanExercises, e => e.day, { cascade: false })
+  @JoinTable({
+    // IMPORTANT: use a **different** join-table name (NOT "plan_exercises")
+    name: 'plan_day_exercise_links',
+    joinColumn: { name: 'plan_day_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'plan_exercise_id', referencedColumnName: 'id' },
+  })
+  exercises!: PlanExercises[]; 
 }
 
-@Index(['day'])
+
 @Entity('plan_exercises')
 export class PlanExercises extends CoreEntity {
-  @ManyToOne(() => PlanDay, d => d.exercises, { nullable: true, onDelete: 'CASCADE' })
-  day: PlanDay;
+  @ManyToMany(() => PlanDay, d => d.exercises)
+  day!: PlanDay[];
 
   @Index()
   @Column({ type: 'varchar', length: 160 })
   name: string;
+
+  // NEW: human-readable details (matches your "details")
+  @Column({ type: 'text', nullable: true })
+  details?: string | null;
+
+  // NEW: "Back / Compound" etc.
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  category?: string | null;
+
+  // NEW: arrays of muscles (PostgreSQL)
+  @Column('text', { array: true, default: '{}' })
+  primaryMusclesWorked: string[];
+
+  @Column('text', { array: true, default: '{}' })
+  secondaryMusclesWorked: string[];
 
   @Column({ type: 'varchar', length: 50, default: '10' })
   targetReps: string;
@@ -216,10 +288,6 @@ export class PlanExercises extends CoreEntity {
 
   @Column({ type: 'int', default: 0 })
   orderIndex: number;
-
-  // description
-  @Column({ type: 'text', nullable: true })
-  desc?: string | null;
 }
 
 @Entity('plan_assignments')
@@ -360,18 +428,14 @@ export class ExerciseRecord extends CoreEntity {
 }
 
 //============== Food
-// Add these to your existing global.entity.ts
-export enum MealType {
-  BREAKFAST = 'breakfast',
-  LUNCH = 'lunch',
-  DINNER = 'dinner',
-  SNACK = 'snack',
-}
 
 @Entity('foods')
 export class Food extends CoreEntity {
   @Column({ type: 'varchar', length: 200 })
   name!: string;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  category?: string | null;
 
   @Column({ type: 'decimal', precision: 8, scale: 2, default: 0 })
   calories!: number;
@@ -387,33 +451,6 @@ export class Food extends CoreEntity {
 
   @Column({ type: 'varchar', length: 50, default: 'g' })
   unit!: string;
-}
-
-@Entity('meal_plans')
-export class MealPlan extends CoreEntity {
-  @Column({ type: 'varchar', length: 180 })
-  name!: string;
-
-  @Column({ type: 'text', nullable: true })
-  desc?: string | null;
-
-  @Column({ type: 'boolean', default: true })
-  isActive!: boolean;
-
-  // Who created this meal plan (coach)
-  @ManyToOne(() => User, { nullable: true })
-  @JoinColumn({ name: 'coachId' })
-  coach?: User | null;
-
-  @Column({ type: 'uuid', nullable: true })
-  coachId?: string | null;
-
-  @OneToMany(() => MealPlanDay, d => d.mealPlan, { cascade: true })
-  days!: MealPlanDay[];
-
-  // Who it's assigned to
-  @OneToMany(() => MealPlanAssignment, a => a.mealPlan, { cascade: true })
-  assignments!: MealPlanAssignment[];
 }
 
 @Entity('meal_plan_days')
@@ -436,13 +473,33 @@ export class MealPlanFood extends CoreEntity {
   @ManyToOne(() => MealPlanDay, d => d.foods, { onDelete: 'CASCADE' })
   day!: MealPlanDay;
 
-  @ManyToOne(() => Food, { onDelete: 'CASCADE' })
-  food!: Food;
+  // inline food details (no FK to another module)
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  name!: string;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  category?: string | null;
+
+  @Column({ type: 'decimal', precision: 8, scale: 2, default: 0 })
+  calories!: number;
+
+  @Column({ type: 'decimal', precision: 8, scale: 2, default: 0 })
+  protein!: number;
+
+  @Column({ type: 'decimal', precision: 8, scale: 2, default: 0 })
+  carbs!: number;
+
+  @Column({ type: 'decimal', precision: 8, scale: 2, default: 0 })
+  fat!: number;
+
+  @Column({ type: 'varchar', length: 50, default: 'g' })
+  unit!: string;
+
+  // per-plan quantity & classification
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   quantity!: number;
 
-  @Column({ type: 'enum', enum: MealType })
+  @Column({ type: 'enum', enum: MealType, default: MealType.BREAKFAST })
   mealType!: MealType;
 
   @Column({ type: 'int', default: 0 })
@@ -468,25 +525,55 @@ export class MealPlanAssignment extends CoreEntity {
   endDate!: string | null;
 }
 
-@Entity('food_logs')
-export class FoodLog extends CoreEntity {
-  @ManyToOne(() => User, u => u.foodLogs, { onDelete: 'CASCADE' })
+// logs a user's action on a single meal item (or a free-text item)
+@Entity('meal_intake_logs')
+@Unique(['userId', 'date', 'mealType', 'itemName'])
+export class MealIntakeLog extends CoreEntity {
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'userId' })
   user!: User;
+  @Column({ type: 'uuid' }) userId!: string;
 
-  @ManyToOne(() => Food, { onDelete: 'CASCADE' })
-  food!: Food;
+  // optional: link to assignment for reporting
+  @ManyToOne(() => MealPlanAssignment, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'assignmentId' })
+  assignment?: MealPlanAssignment | null;
+  @Column({ type: 'uuid', nullable: true }) assignmentId?: string | null;
+
+  // optional: link to a concrete plan item (kept nullable to allow ad-hoc foods)
+  @ManyToOne(() => MealPlanFood, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'planFoodId' })
+  planFood?: MealPlanFood | null;
+  @Column({ type: 'uuid', nullable: true }) planFoodId?: string | null;
 
   @Column({ type: 'date' })
-  date!: string;
+  date!: string; // YYYY-MM-DD
+
+  @Column({ type: 'enum', enum: DayOfWeek })
+  day!: DayOfWeek;
 
   @Column({ type: 'enum', enum: MealType })
   mealType!: MealType;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  // denormalized for convenience + to support custom items
+  @Column({ type: 'varchar', length: 200 })
+  itemName!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   quantity!: number;
 
-  @Column({ type: 'varchar', length: 200, nullable: true })
-  notes?: string | null;
+  // actions
+  @Column({ type: 'boolean', default: false })
+  taken!: boolean;
+
+  @Column({ type: 'timestamp with time zone', nullable: true })
+  takenAt?: Date | null;
+
+  @Column({ type: 'varchar', length: 240, nullable: true })
+  notes?: string | null; // problem / feedback
+
+  @Column({ type: 'varchar', length: 240, nullable: true })
+  suggestedAlternative?: string | null; // “what I have at home”
 }
 
 //============= chat
@@ -592,4 +679,140 @@ export class ChatMessage extends CoreEntity {
 
   @Column({ type: 'timestamptz', nullable: true })
   readBy: Date | null;
+}
+
+// INTAKE
+
+@Entity()
+export class Form {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  title: string;
+
+  @OneToMany(() => FormField, field => field.form, { cascade: true })
+  fields: FormField[];
+
+  @OneToMany(() => FormSubmission, submission => submission.form)
+  submissions: FormSubmission[];
+
+  @CreateDateColumn()
+  created_at: Date;
+}
+
+export enum FieldType {
+  TEXT = 'text',
+  NUMBER = 'number',
+  PHONE = 'phone',
+  DATE = 'date',
+  SELECT = 'select',
+  RADIO = 'radio',
+  CHECKBOX = 'checkbox',
+  TEXTAREA = 'textarea',
+  EMAIL = 'email',
+  FILE = 'file',
+  CHECKLIST = 'checklist',
+}
+
+@Entity()
+export class FormField {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  label: string;
+
+  @Column()
+  key: string;
+
+  @Column({ nullable: true })
+  placeholder: string;
+
+  @Column({ type: 'enum', enum: FieldType })
+  type: FieldType;
+
+  @Column({ default: false })
+  required: boolean;
+
+  @Column({ type: 'jsonb', nullable: true })
+  options: string[];
+
+  @Column()
+  order: number;
+
+  @ManyToOne(() => Form, form => form.fields, { onDelete: 'CASCADE' })
+  @JoinColumn()
+  form: Form;
+}
+
+@Entity()
+export class FormSubmission {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @ManyToOne(() => Form, form => form.submissions, { onDelete: 'CASCADE' })
+  @JoinColumn()
+  form: Form;
+
+  @Column()
+  email: string;
+
+  @Column()
+  phone: string;
+
+  @Column()
+  ipAddress: string;
+
+  @Column('jsonb')
+  answers: Record<string, any>;
+
+  @CreateDateColumn()
+  created_at: Date;
+}
+
+// --- Notifications -----------------------------------------------------------
+export enum NotificationAudience {
+  ADMIN = 'ADMIN',
+  USER = 'USER',
+  SYSTEM = 'SYSTEM',
+}
+
+export enum NotificationType {
+  FORM_SUBMISSION = 'FORM_SUBMISSION',
+  SUBSCRIPTION_EXPIRED_LOGIN = 'SUBSCRIPTION_EXPIRED_LOGIN',
+  // add more types later...
+}
+
+@Entity('notifications')
+export class Notification {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ type: 'enum', enum: NotificationType })
+  type: NotificationType;
+
+  @Column()
+  title: string;
+
+  @Column({ type: 'text', nullable: true })
+  message?: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  data?: Record<string, any> | null;
+
+  // optional: attach to a user if you want per-user inbox (safe to keep nullable)
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'user_id' })
+  user?: User | null;
+
+  // audience hint (useful if you don’t pass a specific user)
+  @Column({ type: 'enum', enum: NotificationAudience, default: NotificationAudience.ADMIN })
+  audience: NotificationAudience;
+
+  @Column({ default: false })
+  isRead: boolean;
+
+  @CreateDateColumn()
+  created_at: Date;
 }

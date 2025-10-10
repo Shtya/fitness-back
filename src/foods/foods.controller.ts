@@ -15,13 +15,21 @@ export class FoodsController {
   async bulkCreate(@Body() dto: any) {
     return this.svc.bulkCreate(dto.items);
   }
+
   @Get('stats')
   async stats(@Query() q: any) {
     return this.svc.stats(q);
   }
+
+  @Get('categories')
+  async categories() {
+    return this.svc.getCategories();
+  }
+
   @Get()
   @Roles(UserRole.ADMIN, UserRole.COACH)
   async list(@Query() q: any) {
+    // Supports: ?page=&limit=&search=&category=
     return this.svc.list(q);
   }
 

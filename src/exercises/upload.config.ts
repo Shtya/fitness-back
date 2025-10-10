@@ -10,7 +10,10 @@ function ensureDir(dir: string) {
 function randomName(base: string, original: string) {
   const name = base.replace(/\.[^/.]+$/, '');
   const extension = extname(original);
-  const rand = Array(16).fill(null).map(() => Math.floor(Math.random()*16).toString(16)).join('');
+  const rand = Array(16)
+    .fill(null)
+    .map(() => Math.floor(Math.random() * 16).toString(16))
+    .join('');
   return `${name}-${rand}${extension}`;
 }
 
@@ -24,7 +27,6 @@ export const imageUploadOptions = {
     filename: (req, file, cb) => cb(null, randomName(file.originalname, file.originalname)),
   }),
   fileFilter: (req, file, cb) => {
-    // allow images only
     if (/^image\/(jpeg|png|jpg|gif|webp|svg\+xml)$/.test(file.mimetype)) return cb(null, true);
     cb(new Error('Unsupported image type'), false);
   },
@@ -41,7 +43,6 @@ export const videoUploadOptions = {
     filename: (req, file, cb) => cb(null, randomName(file.originalname, file.originalname)),
   }),
   fileFilter: (req, file, cb) => {
-    // allow common video types
     if (/^video\/(mp4|quicktime|x-matroska|webm|x-msvideo)$/.test(file.mimetype)) return cb(null, true);
     cb(new Error('Unsupported video type'), false);
   },

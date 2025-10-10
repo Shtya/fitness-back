@@ -1,7 +1,7 @@
 // --- File: plans/plans.service.ts ---
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, IsNull, In } from 'typeorm';
+import { Repository, DataSource, IsNull, In, EntityManager } from 'typeorm';
 import { Plan, PlanDay, PlanExercises, PlanAssignment, User, DayOfWeek } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
 import { ImportPlanDto, TemplateExerciseDto } from 'dto/plans.dto';
@@ -81,20 +81,17 @@ function parseMaybeJson<T = any>(v: any): T {
   return v as T;
 }
 
-type ExerciseInput = {
-  exerciseId?: string; // library id (plan_exercises row with day = null)
-  name?: string; // inline name or override when copying from library
-  targetReps?: string;
-  targetSets?: number;
-  rest?: number;
-  tempo?: string | null;
-  img?: string | null;
-  video?: string | null;
-  order?: number;
-  orderIndex?: number;
-};
 const WEEK_ORDER: Array<'saturday' | 'sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday'> = ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
 
+function toArray<T = any>(v: any): T[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  return [v];
+}
+
+function dayEnumSafe(v: any) {
+  return dayEnum(String(v ?? '').toLowerCase()); // نفس دالتك الموجودة
+}
 @Injectable()
 export class PlanService {
   constructor(
@@ -107,95 +104,88 @@ export class PlanService {
     private readonly ds: DataSource,
   ) {}
 
-  private async resolveLibraryExercise(manager: any, id: string) {
-    return manager.findOne(PlanExercises, { where: { id } });
-  }
-
-  private async resolveLibraryByName(manager: any, name: string): Promise<PlanExercises | null> {
-    // نبحث في "المكتبة": صفوف plan_exercises التي dayId فيها NULL
-    return manager.getRepository(PlanExercises).createQueryBuilder('x').where('LOWER(x.name) = LOWER(:name)', { name }).getOne();
-  }
-
-  async importAndActivate(body: any /* ImportPlanDto | string | any */) {
-    // accept object, stringified JSON, or {payload}/{json}
+  async importAndActivate(body: any) {
+    // 0) Parse incoming body in a flexible way (single or multi)
     const raw: any = parseMaybeJson<any>(body);
     const payload = parseMaybeJson<any>(raw?.payload ?? raw);
     const payloadAlt = parseMaybeJson<any>(raw?.json);
-    const root = payload && typeof payload === 'object' && Object.keys(payload).length ? payload : payloadAlt && typeof payloadAlt === 'object' ? payloadAlt : {};
 
-    const userId = root.userId || root?.athlete?.id || root?.user_id || root?.user || null;
-    const planName = (root.name || 'Program').toString().trim();
+    // Normalize into an array of plan specs
+    let plansInput: any[] = [];
 
-    const program = parseMaybeJson<any>(root.program ?? root?.plan?.program ?? root?.programAlt);
-    if (!program || !Array.isArray(program.days)) {
-      throw new BadRequestException('program.days[] is required');
+    if (Array.isArray(payload)) {
+      plansInput = payload;
+    } else if (Array.isArray(payloadAlt)) {
+      plansInput = payloadAlt;
+    } else if (Array.isArray(payload?.plans)) {
+      plansInput = payload.plans;
+    } else if (Array.isArray(payloadAlt?.plans)) {
+      plansInput = payloadAlt.plans;
+    } else if (payload && typeof payload === 'object' && Object.keys(payload).length) {
+      // single plan object
+      plansInput = [payload];
+    } else if (payloadAlt && typeof payloadAlt === 'object' && Object.keys(payloadAlt).length) {
+      plansInput = [payloadAlt];
+    } else {
+      throw new BadRequestException('No plan payloads found. Expect a plan object, plans[], payload[], or { plans: [] }.');
+    }
+
+    // quick sanity: ensure every item has program.days
+    for (const [i, p] of plansInput.entries()) {
+      const program = parseMaybeJson<any>(p?.program ?? p?.plan?.program ?? p?.programAlt);
+      if (!program || !Array.isArray(program.days) || !program.days.length) {
+        throw new BadRequestException(`plans[${i}]: program.days[] is required`);
+      }
     }
 
     return this.ds.transaction(async manager => {
       const userRepo = manager.getRepository(User);
       const planRepo = manager.getRepository(Plan);
       const dayRepo = manager.getRepository(PlanDay);
-      const exRepo = manager.getRepository(PlanExercises);
+      const libRepo = manager.getRepository(PlanExercises); // your library table
 
-      if (userId) {
-        const exists = await userRepo.findOne({ where: { id: userId } });
-        if (!exists) throw new BadRequestException('Athlete not found');
+      const batchResults: any[] = [];
+      let batchLinked = 0;
+
+      // Validate user(s) that are explicitly provided
+      // (we validate per plan below to keep backward compatibility)
+      for (let index = 0; index < plansInput.length; index++) {
+        const root = plansInput[index];
+
+        const userId = root.userId || root?.athlete?.id || root?.user_id || root?.user || null;
+        if (userId) {
+          const exists = await userRepo.findOne({ where: { id: userId } });
+          if (!exists) throw new BadRequestException(`plans[${index}]: Athlete not found`);
+        }
       }
 
-      // Create plan
-      const savedPlan: any = await planRepo.save(planRepo.create({ name: planName, isActive: true } as any));
+      // Process each plan
+      for (let index = 0; index < plansInput.length; index++) {
+        const root = plansInput[index];
 
-      // Stats
-      let createdCount = 0;
-      let linkedFromLibraryCount = 0;
-      let mergedExistingCount = 0;
+        const userId = root.userId || root?.athlete?.id || root?.user_id || root?.user || null;
+        const planName = String(root.name || `Program ${index + 1}`).trim();
 
-      // We’ll build the FE response program from the payload, preserving duplicates.
-      const responseDays: Array<{
-        id: string;
-        dayOfWeek: string;
-        name: string;
-        exercises: Array<{
+        const program = parseMaybeJson<any>(root.program ?? root?.plan?.program ?? root?.programAlt);
+        const days = toArray(program?.days);
+
+        // 1) prevent duplicate days *within this plan only*
+        const seen = new Set<string>();
+        for (const d of days) {
+          const key = String((d?.dayOfWeek ?? d?.id ?? '').toString().toLowerCase());
+          const norm = String(dayEnumSafe(key));
+          if (seen.has(norm)) throw new BadRequestException(`plans[${index}]: Duplicate day: ${norm}`);
+          seen.add(norm);
+        }
+
+        // 2) create the plan
+        const plan: any = await planRepo.save(planRepo.create({ name: planName, isActive: true } as any));
+
+        const responseDays: Array<{
           id: string;
+          dayOfWeek: string;
           name: string;
-          targetSets: number;
-          targetReps: string;
-          rest: number | null;
-          tempo: string | null;
-          img: string | null;
-          video: string | null;
-        }>;
-      }> = [];
-
-      for (let i = 0; i < program.days.length; i++) {
-        const dRaw = parseMaybeJson<any>(program.days[i]);
-        const dow = String(dRaw.dayOfWeek || dRaw.id || 'monday').toLowerCase();
-
-        const savedDay: any = await dayRepo.save(
-          dayRepo.create({
-            plan: savedPlan,
-            name: dRaw.name || dRaw.id || 'Workout',
-            day: dayEnum(dRaw.dayOfWeek || dRaw.id),
-          } as any),
-        );
-
-        // cache EXISTING rows for THIS day by lower(name) → used for merge/reuse
-        const existingDayExs = await exRepo.find({ where: { day: { id: savedDay.id } } as any });
-        const dayByName = new Map<string, PlanExercises>((existingDayExs || []).map(x => [x.name.toLowerCase(), x]));
-
-        // We'll also keep a local cache of resolved rows per name for this day,
-        // so duplicates in the same payload reuse the same row instance+id.
-        const resolvedForThisDay = new Map<string, PlanExercises>();
-
-        const exArrRaw = parseMaybeJson<any>(dRaw.exercises);
-        const exercises: any[] = Array.isArray(exArrRaw) ? exArrRaw : [];
-
-        // Build the response day object (we’ll push per incoming exercise)
-        const respDay = {
-          id: dow,
-          dayOfWeek: dow,
-          name: savedDay.name,
-          exercises: [] as Array<{
+          exercises: Array<{
             id: string;
             name: string;
             targetSets: number;
@@ -204,134 +194,101 @@ export class PlanService {
             tempo: string | null;
             img: string | null;
             video: string | null;
-          }>,
-        };
+          }>;
+        }> = [];
 
-        for (let j = 0; j < exercises.length; j++) {
-          const eRaw = parseMaybeJson<any>(exercises[j]);
+        let linkedCount = 0;
 
-          const finalName = String(eRaw?.name ?? '').trim();
-          if (!finalName) {
-            throw new BadRequestException(`exercise requires 'name' (day: ${dRaw.name || dRaw.id}, index: ${j})`);
-          }
-          const key = finalName.toLowerCase();
+        // 3) per day: create PlanDay, then attach existing exercise IDs via M2M
+        for (const dRaw of days) {
+          const dayKey = String(dRaw?.dayOfWeek ?? dRaw?.id ?? 'monday').toLowerCase();
+          const savedDay: any = await dayRepo.save(
+            dayRepo.create({
+              plan,
+              name: dRaw?.nameOfWeek || dRaw?.name || dRaw?.id || dRaw?.dayOfWeek || 'Workout',
+              day: dayEnumSafe(dRaw?.dayOfWeek ?? dRaw?.id),
+            } as any),
+          );
 
-          // If we already resolved this name earlier in the same day (duplicate in payload),
-          // just reuse the SAME row and push it to response.
-          if (resolvedForThisDay.has(key)) {
-            const same = resolvedForThisDay.get(key)!;
-            respDay.exercises.push({
-              id: same.id,
-              name: same.name,
-              targetSets: same.targetSets,
-              targetReps: same.targetReps,
-              rest: same.rest ?? null,
-              tempo: same.tempo ?? null,
-              img: same.img ?? null,
-              video: same.video ?? null,
+          // accept both [{exerciseId, order}, ...] and ['id', 'id2', ...]
+          const exArr = toArray(dRaw?.exercises);
+          const exIds = exArr
+            .map((e: any) => (typeof e === 'string' ? e : e?.exerciseId))
+            .filter(Boolean)
+            .map((s: any) => String(s));
+
+          if (exIds.length) {
+            // validate library rows exist
+            const found = await libRepo.findBy({ id: In(exIds) });
+            if (found.length !== exIds.length) {
+              const ok = new Set(found.map(f => f.id));
+              const missing = exIds.filter(x => !ok.has(x));
+              throw new BadRequestException(`plans[${index}]: Some exerciseId(s) not found: ${missing.join(', ')}`);
+            }
+
+            // link all at once (does not create new rows in plan_exercises)
+            await manager.createQueryBuilder().relation(PlanDay, 'exercises').of(savedDay).add(exIds);
+
+            linkedCount += exIds.length;
+            batchLinked += exIds.length;
+
+            // shape FE response in payload order (display only; DB doesn’t persist order in M2M)
+            const byId = new Map(found.map(f => [f.id, f]));
+            const ordered = exIds.map(id => byId.get(id)).filter(Boolean) as typeof found;
+
+            responseDays.push({
+              id: dayKey,
+              dayOfWeek: dayKey,
+              name: savedDay.name,
+              exercises: ordered.map(x => ({
+                id: x.id,
+                name: x.name,
+                targetSets: x.targetSets,
+                targetReps: x.targetReps,
+                rest: x.rest ?? null,
+                tempo: x.tempo ?? null,
+                img: x.img ?? null,
+                video: x.video ?? null,
+              })),
             });
-            // keep orderIndex of the original row; if you want to update, uncomment below
-            // same.orderIndex = Number(eRaw.order ?? eRaw.orderIndex ?? same.orderIndex);
-            // await exRepo.save(same);
-            continue;
-          }
-
-          // 1) If same-name already exists in THIS day → MERGE (don’t create)
-          let row: any = dayByName.get(key);
-          if (row) {
-            if (eRaw.targetReps != null) row.targetReps = String(eRaw.targetReps);
-            if (eRaw.targetSets != null) row.targetSets = Number(eRaw.targetSets);
-            if (eRaw.rest != null) row.rest = Number(eRaw.rest);
-            if (eRaw.tempo != null) row.tempo = eRaw.tempo;
-            if (eRaw.img != null) row.img = eRaw.img;
-            if (eRaw.video != null) row.video = eRaw.video;
-            if (eRaw.order != null || eRaw.orderIndex != null) {
-              row.orderIndex = Number(eRaw.order ?? eRaw.orderIndex);
-            } else {
-              // ensure some stable default order if not provided
-              row.orderIndex = row.orderIndex || j + 1;
-            }
-            await exRepo.save(row);
-            mergedExistingCount++;
           } else {
-            // 2) Else, try to LINK an existing "library" row (dayId IS NULL)
-            const lib = await this.resolveLibraryByName(manager, finalName);
-            if (lib) {
-              lib.day = savedDay; // link same id to this day (no new row)
-              if (eRaw.targetReps != null) lib.targetReps = String(eRaw.targetReps);
-              if (eRaw.targetSets != null) lib.targetSets = Number(eRaw.targetSets);
-              if (eRaw.rest != null) lib.rest = Number(eRaw.rest);
-              if (eRaw.tempo != null) lib.tempo = eRaw.tempo;
-              if (eRaw.img != null) lib.img = eRaw.img;
-              if (eRaw.video != null) lib.video = eRaw.video;
-              lib.orderIndex = Number(eRaw.order ?? eRaw.orderIndex ?? j + 1);
-              await exRepo.save(lib);
-              row = lib;
-              linkedFromLibraryCount++;
-              dayByName.set(key, row);
-            } else {
-              // 3) Else, CREATE a brand-new day exercise
-              row = exRepo.create({
-                day: savedDay,
-                name: finalName,
-                targetReps: String(eRaw.targetReps ?? '10'),
-                targetSets: Number(eRaw.targetSets ?? 3),
-                rest: Number(eRaw.rest ?? 90),
-                tempo: eRaw.tempo ?? null,
-                img: eRaw.img ?? null,
-                video: eRaw.video ?? null,
-                orderIndex: Number(eRaw.order ?? eRaw.orderIndex ?? j + 1),
-              } as any);
-              await exRepo.save(row);
-              createdCount++;
-              dayByName.set(key, row);
-            }
+            responseDays.push({
+              id: dayKey,
+              dayOfWeek: dayKey,
+              name: savedDay.name,
+              exercises: [],
+            });
           }
-
-          // cache resolved row for this day so next duplicates reuse same id
-          resolvedForThisDay.set(key, row);
-
-          // push to response as sent (preserving duplicates)
-          respDay.exercises.push({
-            id: row.id,
-            name: row.name,
-            targetSets: row.targetSets,
-            targetReps: row.targetReps,
-            rest: row.rest ?? null,
-            tempo: row.tempo ?? null,
-            img: row.img ?? null,
-            video: row.video ?? null,
-          });
         }
 
-        responseDays.push(respDay);
+        // 4) build per-plan FE response
+        const fePlan = {
+          id: plan.id,
+          created_at: (plan as any).created_at,
+          updated_at: (plan as any).updated_at,
+          deleted_at: (plan as any).deleted_at ?? null,
+          name: plan.name,
+          userId: userId ?? null,
+          isActive: !!plan.isActive,
+          metadata: {},
+          program: { days: responseDays },
+        };
+
+        batchResults.push({
+          ok: true,
+          message: `Imported successfully. ${linkedCount} links created.`,
+          stats: { linkedFromLibrary: linkedCount },
+          planId: plan.id,
+          plan: fePlan,
+        });
       }
 
-      // Build FE plan directly from responseDays (preserves duplicates in payload)
-      const fePlan = {
-        id: savedPlan.id,
-        created_at: savedPlan.created_at,
-        updated_at: savedPlan.updated_at,
-        deleted_at: savedPlan.deleted_at ?? null,
-        name: savedPlan.name,
-        userId: null,
-        isActive: !!savedPlan.isActive,
-        metadata: {},
-        program: { days: responseDays },
-      };
-
-      const message = `Imported successfully. ${createdCount} created, ` + `${linkedFromLibraryCount} linked from library, ${mergedExistingCount} merged in day.`;
-
+      // 5) final batch response
       return {
         ok: true,
-        message,
-        stats: {
-          created: createdCount,
-          linkedFromLibrary: linkedFromLibraryCount,
-          mergedInDay: mergedExistingCount,
-        },
-        planId: savedPlan.id,
-        plan: fePlan,
+        totalPlans: batchResults.length,
+        totalLinksCreated: batchLinked,
+        results: batchResults,
       };
     });
   }
@@ -393,7 +350,7 @@ export class PlanService {
 
     return {
       id: this.coalesce(plan.id),
-      created_at: this.coalesce(plan.created_at, plan.createdAt, null),
+      created_at: this.coalesce(plan.created_at, plan.created_at, null),
       updated_at: this.coalesce(plan.updated_at, plan.updatedAt, null),
       deleted_at: this.coalesce(plan.deleted_at, plan.deletedAt, null),
       name: this.coalesce(plan.name, 'Untitled Plan'),
@@ -418,7 +375,7 @@ export class PlanService {
 
       if (!active) return { status: 'none', error: 'Active plan not found' as const };
 
-      return this.planToFrontendShape(active)
+      return this.planToFrontendShape(active);
     } catch (err) {
       return { status: 'error', error: 'Unexpected error while fetching active plan' as const };
     }
@@ -431,64 +388,66 @@ export class PlanService {
     if (!name) throw new BadRequestException('name is required');
     if (!program?.days?.length) throw new BadRequestException('program.days[] required');
 
-    // validate duplicate days...
-    const seen = new Set<string>();
+    // prevent duplicate days in the same plan
+    const seenDays = new Set<string>();
     for (const d of program.days) {
-      const dup = String(dayEnum(String(d.dayOfWeek ?? d.id).toLowerCase()));
-      if (seen.has(dup)) throw new BadRequestException(`Duplicate day: ${dup}`);
-      seen.add(dup);
+      const k = String(dayEnum(String(d.dayOfWeek ?? d.id).toLowerCase()));
+      if (seenDays.has(k)) throw new BadRequestException(`Duplicate day: ${k}`);
+      seenDays.add(k);
     }
 
     return this.dataSource.transaction(async manager => {
       // 1) Plan
-      const savedPlan = await manager.save(Plan, manager.create(Plan, { name, notes, isActive: !!isActive }));
+      const plan = await manager.save(Plan, manager.create(Plan, { name, notes, isActive: !!isActive }));
 
-      // 2) Days
+      // 2) Days, then link M2M by IDs
       for (const d of program.days) {
-        const savedDay = await manager.save(
+        const exItems = Array.isArray(d.exercises) ? d.exercises : [];
+        const exIds = exItems.map(e => String(e.exerciseId)).filter(Boolean);
+
+        // Validate **library** rows (your PlanExercises table)
+        if (exIds.length) {
+          const found = await manager.findBy(PlanExercises, { id: In(exIds) });
+          if (found.length !== exIds.length) {
+            const set = new Set(found.map(f => f.id));
+            const missing = exIds.filter(id => !set.has(id));
+            throw new BadRequestException(`Some exerciseId(s) not found: ${missing.join(', ')}`);
+          }
+        }
+
+        // Create the day
+        const dayRow = await manager.save(
           PlanDay,
           manager.create(PlanDay, {
-            plan: savedPlan,
-            name: d.nameOfWeek || d.name || d.dayOfWeek || 'Workout',
+            plan,
+            name: d.nameOfWeek || d.name || d.dayOfWeek,
             day: dayEnum(d.dayOfWeek || d.id),
           }),
         );
 
-        // 3) “Link” by reassigning the existing plan_exercises row
-        const exItems = Array.isArray(d.exercises) ? d.exercises : [];
-        for (let j = 0; j < exItems.length; j++) {
-          const item = exItems[j];
-          if (!item.exerciseId) continue;
-
-          const lib = await this.resolveLibraryExercise(manager, item.exerciseId);
-          if (!lib) {
-            // If you want strictness, throw; else continue
-            throw new BadRequestException(`exerciseId ${item.exerciseId} not found in library (day IS NULL).`);
-          }
-
-          // Move it from library to plan-day
-          lib.day = savedDay;
-          // Optional per-plan overrides:
-          if (item.name) lib.name = item.name;
-          if (item.img !== undefined) lib.img = item.img;
-          if (item.video !== undefined) lib.video = item.video;
-          if (item.targetReps !== undefined) lib.targetReps = item.targetReps;
-          if (item.targetSets !== undefined) lib.targetSets = item.targetSets;
-          if (item.rest !== undefined) lib.rest = item.rest;
-          if (item.tempo !== undefined) lib.tempo = item.tempo;
-          if (item.desc !== undefined) lib.desc = item.desc;
-
-          lib.orderIndex = item.order ?? j + 1;
-
-          await manager.save(PlanExercises, lib);
+        // Attach links (this writes join rows in plan_day_exercise_links)
+        if (exIds.length) {
+          await manager.createQueryBuilder().relation(PlanDay, 'exercises').of(dayRow).add(exIds);
         }
       }
 
+      // 3) Load graph
       const full = await manager.findOne(Plan, {
-        where: { id: savedPlan.id },
+        where: { id: plan.id },
         relations: ['days', 'days.exercises'],
+        // Adjust timestamp field name to your CoreEntity (created_at vs created_at)
+        order: { days: { created_at: 'ASC' as any } },
       });
-      for (const d of full?.days ?? []) d.exercises?.sort?.((a, b) => a.orderIndex - b.orderIndex);
+
+      // Optional: Present exercises in payload order (NOT persisted by DB)
+      for (const d of full?.days ?? []) {
+        const orig = program.days.find(x => dayEnum(x.dayOfWeek || x.id) === d.day);
+        if (orig?.exercises?.length && d.exercises?.length) {
+          const orderMap: any = new Map(orig.exercises.map((x: any, i: number) => [String(x.exerciseId), i]));
+          d.exercises.sort((a: any, b: any) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
+        }
+      }
+
       return full;
     });
   }
@@ -499,43 +458,208 @@ export class PlanService {
   }
 
   /* ------------------------------ Get one (deep) ------------------------------ */
-  async getOneDeep(id: string, mgr?: any) {
+  async getOneDeep(id: string, mgr?: any, dayOrderMap?: Map<string, number>) {
     const repo = mgr ? mgr.getRepository(Plan) : this.planRepo;
     const plan = await repo.findOne({
       where: { id },
       relations: ['days', 'assignments', 'days.exercises'],
     });
+
     if (!plan) throw new NotFoundException('Plan not found');
+
+    // Sort days - if dayOrderMap is provided, use it, otherwise use week order
+    if (plan.days) {
+      if (dayOrderMap && dayOrderMap.size > 0) {
+        // Sort by the custom order from DTO
+        plan.days.sort((a, b) => {
+          const orderA = dayOrderMap.get(a.day) ?? 99;
+          const orderB = dayOrderMap.get(b.day) ?? 99;
+          return orderA - orderB;
+        });
+      } else {
+        // Fallback to week order
+        plan.days.sort((a, b) => {
+          const orderA = WEEK_ORDER.indexOf(a.day as any);
+          const orderB = WEEK_ORDER.indexOf(b.day as any);
+          return orderA - orderB;
+        });
+      }
+    }
+
     return plan;
   }
 
-  /* -------------------- Update (replace content if provided) ------------------- */
+  /** نفس الدالة السابقة التي أعطيتك إياها */
+  private dayEnum(input: string): string {
+    const s = String(input || '')
+      .trim()
+      .toLowerCase();
+    const map: Record<string, string> = {
+      mon: 'monday',
+      monday: 'monday',
+      tue: 'tuesday',
+      tues: 'tuesday',
+      tuesday: 'tuesday',
+      wed: 'wednesday',
+      weds: 'wednesday',
+      wednesday: 'wednesday',
+      thu: 'thursday',
+      thur: 'thursday',
+      thurs: 'thursday',
+      thursday: 'thursday',
+      fri: 'friday',
+      friday: 'friday',
+      sat: 'saturday',
+      saturday: 'saturday',
+      sun: 'sunday',
+      sunday: 'sunday',
+    };
+    const v = map[s];
+    if (!v) throw new BadRequestException(`Invalid dayOfWeek "${input}"`);
+    return v;
+  }
+
   async updatePlanAndContent(id: string, dto: any) {
     return await this.dataSource.transaction(async manager => {
-      const plan = await manager.findOne(Plan, { where: { id } });
+      const plan = await manager.findOne(Plan, {
+        where: { id },
+        relations: ['days', 'days.exercises'],
+      });
+
       if (!plan) throw new NotFoundException('Plan not found');
 
-      // shallow updates
+      // Update basic plan properties
       if (dto.name !== undefined) plan.name = dto.name;
       if (dto.notes !== undefined) (plan as any).notes = dto.notes ?? null;
       if (dto.isActive !== undefined) plan.isActive = !!dto.isActive;
-      if (dto.startDate !== undefined) (plan as any).startDate = dto.startDate ?? null;
-      if (dto.endDate !== undefined) (plan as any).endDate = dto.endDate ?? null;
 
       await manager.save(Plan, plan);
 
-      // replace content?
-      if (dto.program?.days) {
-        // remove existing days (cascade removes exercises)
-        const oldDays = await manager.find(PlanDay, { where: { plan: { id: plan.id } } });
-        if (oldDays.length) await manager.remove(PlanDay, oldDays);
+      // Declare days variable outside the if block so it's accessible later
+      let daysFromDto: any[] = [];
+      let dayOrderMap: Map<string, number> = new Map();
 
-        // recreate
-        await this.createPlanWithContent({ ...dto, name: plan.name, program: dto.program });
+      // If program.days is provided, update the plan structure
+      if (dto.program?.days) {
+        daysFromDto = toArray(dto.program.days);
+
+        // Build day order map for sorting
+        daysFromDto.forEach((dayDto, index) => {
+          const dayKey = this.dayEnum(dayDto.dayOfWeek ?? dayDto.id);
+          dayOrderMap.set(dayKey, index);
+        });
+
+        // Validate days to prevent duplicates
+        const seenDays = new Set<string>();
+        for (const d of daysFromDto) {
+          const dayKey = String(this.dayEnum(d.dayOfWeek ?? d.id));
+          if (seenDays.has(dayKey)) {
+            throw new BadRequestException(`Duplicate day: ${dayKey}`);
+          }
+          seenDays.add(dayKey);
+        }
+
+        // Get existing days to compare
+        const existingDays = await manager.find(PlanDay, {
+          where: { plan: { id } },
+          relations: ['exercises'],
+        });
+
+        const existingDayMap = new Map(existingDays.map(d => [d.day, d]));
+
+        // Process each day from the DTO in order
+        for (const dayDto of daysFromDto) {
+          const dayOfWeek: any = this.dayEnum(dayDto.dayOfWeek ?? dayDto.id);
+          const existingDay = existingDayMap.get(dayOfWeek);
+
+          if (existingDay) {
+            // Update existing day name and order
+            existingDay.name = dayDto.nameOfWeek || dayDto.name || dayDto.dayOfWeek || existingDay.name;
+            await manager.save(PlanDay, existingDay);
+
+            // Update exercises for this day (maintaining order)
+            await this.updateDayExercisesWithOrder(manager, existingDay, dayDto.exercises || []);
+
+            // Remove from map to track which days were processed
+            existingDayMap.delete(dayOfWeek);
+          } else {
+            // Create new day with order
+            const newDayData: any = {
+              plan,
+              name: dayDto.nameOfWeek || dayDto.name || dayDto.dayOfWeek || 'Workout',
+              day: dayOfWeek as DayOfWeek,
+            };
+
+            const newDay = await manager.save(PlanDay, manager.create(PlanDay, newDayData));
+
+            // Add exercises to new day with order
+            await this.updateDayExercisesWithOrder(manager, newDay, dayDto.exercises || []);
+          }
+        }
+
+        // Remove days that are no longer in the DTO
+        for (const removedDay of existingDayMap.values()) {
+          await manager.remove(PlanDay, removedDay);
+        }
       }
 
-      return this.getOneDeep(plan.id, manager);
+      // Return the updated plan with proper day ordering
+      const updatedPlan = await this.getOneDeep(plan.id, manager, dayOrderMap);
+
+      return updatedPlan;
     });
+  }
+
+  // Helper method to update exercises with order preservation
+  private async updateDayExercisesWithOrder(manager: EntityManager, day: PlanDay, exercisesDto: any[]) {
+    const exerciseRepo = manager.getRepository(PlanExercises);
+
+    // Extract exercise IDs with their order from DTO
+    const exercisesWithOrder = exercisesDto.map((e, index) => ({
+      id: String(e.exerciseId || e),
+      order: e.order !== undefined ? e.order : index,
+    }));
+
+    const newExerciseIds = exercisesWithOrder.map(e => e.id);
+
+    // Validate that all exercise IDs exist in the library
+    if (newExerciseIds.length > 0) {
+      const foundExercises = await exerciseRepo.findBy({
+        id: In(newExerciseIds),
+      });
+
+      if (foundExercises.length !== newExerciseIds.length) {
+        const foundIds = new Set(foundExercises.map(e => e.id));
+        const missingIds = newExerciseIds.filter(id => !foundIds.has(id));
+        throw new BadRequestException(`Exercise IDs not found: ${missingIds.join(', ')}`);
+      }
+    }
+
+    // Get current exercises for this day
+    const currentExercises = await manager.createQueryBuilder().relation(PlanDay, 'exercises').of(day).loadMany();
+
+    const currentExerciseIds = currentExercises.map(e => e.id);
+
+    // Find exercises to add and remove
+    const exercisesToAdd = newExerciseIds.filter(id => !currentExerciseIds.includes(id));
+    const exercisesToRemove = currentExerciseIds.filter(id => !newExerciseIds.includes(id));
+
+    // Remove exercises that are no longer needed
+    if (exercisesToRemove.length > 0) {
+      await manager.createQueryBuilder().relation(PlanDay, 'exercises').of(day).remove(exercisesToRemove);
+    }
+
+    // Add new exercises
+    if (exercisesToAdd.length > 0) {
+      await manager.createQueryBuilder().relation(PlanDay, 'exercises').of(day).add(exercisesToAdd);
+    }
+
+    // Since M2M doesn't natively support order, we'll store the order mapping
+    // This can be used when querying to maintain order
+    const exerciseOrderMap = new Map(exercisesWithOrder.map(e => [e.id, e.order]));
+
+    // If you need to persist order, you might need a join entity with order field
+    // For now, we'll handle order in the response transformation
   }
 
   /* --------------------------------- Remove ---------------------------------- */
@@ -572,8 +696,6 @@ export class PlanService {
         where: { id: In(uniqueIds) },
         select: ['id', 'name', 'activePlanId'],
       });
-
-      console.log(athletes);
 
       if (athletes.length !== uniqueIds.length) {
         const found = new Set(athletes.map(a => a.id));
@@ -655,124 +777,44 @@ export class PlanService {
   }
 
   async listPlansWithStats(q: ListPlansWithStatsQuery) {
-    const page = Math.max(1, q.page || 1);
-    const limit = Math.min(Math.max(1, q.limit || 12), 100);
-    const offset = (page - 1) * limit;
     const search = (q.search || '').trim();
 
-    // base filter for plan name search
     const planWhere = search ? 'p.name ILIKE :search' : '1=1';
     const params: any = search ? { search: `%${search}%` } : {};
 
-    // total count (plans) for pagination — doesn’t need joins
-    const total_records = await this.planRepo.createQueryBuilder('p').where(planWhere, params).getCount();
-
-    // map sort fields to SQL expressions available in the aggregated SELECT
-    const sortMap: Record<string, string> = {
-      name: '"name"',
-      isActive: '"isActive"',
-      created_at: '"created_at"',
-      dayCount: '"dayCount"',
-      exerciseCount: '"exerciseCount"',
-      assignees: '"assignees"',
-      activeAssignees: '"activeAssignees"',
-    };
-    const sortBy = sortMap[q.sortBy || 'created_at'] || '"created_at"';
-    const sortOrder = q.sortOrder === 'ASC' ? 'ASC' : 'DESC';
-
-    // aggregated rows
-    const rows = await this.planRepo
-      .createQueryBuilder('p')
-      .leftJoin('p.days', 'd')
-      .leftJoin('d.exercises', 'e')
-      .leftJoin('p.assignments', 'a')
-      .where(planWhere, params)
-      .select('p.id', 'id')
-      .addSelect('p.name', 'name')
-      .addSelect('p.isActive', 'isActive')
-      .addSelect('p.created_at', 'created_at')
-      .addSelect('COUNT(DISTINCT d.id)', 'dayCount')
-      .addSelect('COUNT(DISTINCT e.id)', 'exerciseCount')
-      .addSelect('COUNT(DISTINCT a.id)', 'assignees')
-      .addSelect(`COUNT(DISTINCT CASE WHEN a.isActive = true THEN a.id END)`, 'activeAssignees')
-      .groupBy('p.id')
-      .orderBy(sortBy, sortOrder as 'ASC' | 'DESC')
-      .offset(offset)
-      .limit(limit)
-      .getRawMany<{
-        id: string;
-        name: string;
-        isActive: boolean;
-        created_at: string;
-        dayCount: string;
-        exerciseCount: string;
-        assignees: string;
-        activeAssignees: string;
-      }>();
-
-    const records = rows.map(r => ({
-      id: r.id,
-      name: r.name,
-      isActive: !!r.isActive,
-      created_at: r.created_at,
-      dayCount: Number(r.dayCount || 0),
-      exerciseCount: Number(r.exerciseCount || 0),
-      assignees: Number(r.assignees || 0),
-      activeAssignees: Number(r.activeAssignees || 0),
-    }));
-
-    // summary for header KPIs (computed from current page or whole set — choose whole set)
-    // Whole set summary: run the same query without paging and fold quickly.
-    const fullAgg = await this.planRepo
-      .createQueryBuilder('p')
-      .leftJoin('p.days', 'd')
-      .leftJoin('d.exercises', 'e')
-      .leftJoin('p.assignments', 'a')
-      .where(planWhere, params)
-      .select('COUNT(DISTINCT p.id)', 'plansTotal')
-      .addSelect('COUNT(DISTINCT CASE WHEN p.isActive = true THEN p.id END)', 'plansActive')
-      .addSelect('COUNT(DISTINCT CASE WHEN d.id IS NULL THEN p.id END)', 'plansWithNoDays') // counted per plan
-      .addSelect('COUNT(DISTINCT d.id)', 'days')
-      .addSelect('COUNT(DISTINCT e.id)', 'exercisesAttached')
-      .addSelect('COUNT(DISTINCT a.id)', 'assignments')
-      .getRawOne<{
-        plansTotal: string;
-        plansActive: string;
-        plansWithNoDays: string;
-        days: string;
-        exercisesAttached: string;
-        assignments: string;
-      }>();
-
-    // Averages across the FULL filtered set (not only current page)
-    const planCountForAvg = Math.max(1, Number(fullAgg?.plansTotal || 0));
-    // We need totals per plan for assignees avg; we can approximate using total assignments / distinct plans
-    const averages = {
-      daysPerPlan: Number((Number(fullAgg?.days || 0) / planCountForAvg).toFixed(2)),
-      exercisesPerPlan: Number((Number(fullAgg?.exercisesAttached || 0) / planCountForAvg).toFixed(2)),
-      assigneesPerPlan: Number((Number(fullAgg?.assignments || 0) / planCountForAvg).toFixed(2)),
-    };
+    // Enhanced summary for header KPIs
+    const fullAgg = await this.planRepo.createQueryBuilder('p').leftJoin('p.days', 'd').leftJoin('d.exercises', 'e').leftJoin('p.assignments', 'a').leftJoin('p.activeUsers', 'au').where(planWhere, params).select('COUNT(DISTINCT p.id)', 'plansTotal').addSelect('COUNT(DISTINCT CASE WHEN p.isActive = true THEN p.id END)', 'plansActive').addSelect('COUNT(DISTINCT CASE WHEN d.id IS NULL THEN p.id END)', 'plansWithNoDays').addSelect('COUNT(DISTINCT CASE WHEN a.id IS NULL THEN p.id END)', 'plansWithNoAssignments').addSelect('COUNT(DISTINCT CASE WHEN au.id IS NOT NULL THEN p.id END)', 'plansWithActiveUsers').addSelect('COUNT(DISTINCT d.id)', 'days').addSelect('COUNT(DISTINCT e.id)', 'exercisesAttached').addSelect('COUNT(DISTINCT a.id)', 'assignments').addSelect('COUNT(DISTINCT au.id)', 'totalActiveUsers').addSelect('MAX(p.created_at)', 'newestPlanDate').addSelect('MIN(p.created_at)', 'oldestPlanDate').addSelect(`COUNT(DISTINCT CASE WHEN d.day = 'monday' THEN d.id END)`, 'totalMondays').addSelect(`COUNT(DISTINCT CASE WHEN d.day = 'friday' THEN d.id END)`, 'totalFridays').addSelect(`COUNT(DISTINCT CASE WHEN d.day = 'saturday' THEN d.id END)`, 'totalSaturdays').addSelect(`COUNT(DISTINCT CASE WHEN d.day = 'sunday' THEN d.id END)`, 'totalSundays').getRawOne<{
+      plansTotal: string;
+      plansActive: string;
+      plansWithNoDays: string;
+      plansWithNoAssignments: string;
+      plansWithActiveUsers: string;
+      days: string;
+      exercisesAttached: string;
+      assignments: string;
+      totalActiveUsers: string;
+      newestPlanDate: string;
+      oldestPlanDate: string;
+      totalMondays: string;
+      totalFridays: string;
+      totalSaturdays: string;
+      totalSundays: string;
+    }>();
 
     return {
-      total_records,
-      current_page: page,
-      per_page: limit,
-      sortBy: q.sortBy || 'created_at',
-      sortOrder,
-      search: search || null,
       summary: {
         plans: {
           total: Number(fullAgg?.plansTotal || 0),
           active: Number(fullAgg?.plansActive || 0),
           withNoDays: Number(fullAgg?.plansWithNoDays || 0),
+          withNoAssignments: Number(fullAgg?.plansWithNoAssignments || 0),
+          withActiveUsers: Number(fullAgg?.plansWithActiveUsers || 0),
         },
-        structure: {
-          days: Number(fullAgg?.days || 0),
-          exercisesAttached: Number(fullAgg?.exercisesAttached || 0),
+        usage: {
+          totalActiveUsers: Number(fullAgg?.totalActiveUsers || 0),
+          totalAssignments: Number(fullAgg?.assignments || 0),
         },
-        averages,
       },
-      records, // [{ id, name, isActive, created_at, dayCount, exerciseCount, assignees, activeAssignees }]
     };
   }
 }

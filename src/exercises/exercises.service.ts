@@ -1,30 +1,50 @@
 // src/plan-exercises/plan-exercises.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
-import { CreatePlanExercisesDto, UpdatePlanExercisesDto } from 'dto/exercises.dto';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { ExerciseVideo, PlanExercises } from 'entities/global.entity';
 
 type PublicExercise = {
   id: string;
   name: string;
+  details: string | null;
+  category: string | null;
+  primaryMusclesWorked: string[];
+  secondaryMusclesWorked: string[];
   targetSets: number;
   targetReps: string;
   rest: number;
   tempo: string | null;
   img: string | null;
   video: string | null;
+  created_at?: string | null;
 };
+
+type CreatePlanExercisesInput = {
+  name: string;
+  details?: string | null;
+  category?: string | null;
+  primaryMusclesWorked?: string[];
+  secondaryMusclesWorked?: string[];
+  targetSets?: number;
+  targetReps?: string;
+  rest?: number;
+  tempo?: string | null;
+  img?: string | null;
+  video?: string | null;
+};
+
+type UpdatePlanExercisesInput = Partial<CreatePlanExercisesInput>;
 
 @Injectable()
 export class PlanExercisesService {
   constructor(
     @InjectRepository(PlanExercises) public readonly repo: Repository<PlanExercises>,
-    @InjectRepository(ExerciseVideo) private readonly exerciseVideoRepo: Repository<ExerciseVideo>, // Add this
+    @InjectRepository(ExerciseVideo) private readonly exerciseVideoRepo: Repository<ExerciseVideo>,
     private readonly dataSource: DataSource,
   ) {}
 
-  async saveExerciseVideo(dto: { userId: string; exerciseName: string; videoUrl: string; workoutDate?: string; setNumber?: number; weight?: number; reps?: number; notes?: string }): Promise<ExerciseVideo> {
+  async saveExerciseVideo(dto: { userId: string; exerciseName: string; videoUrl: string; workoutDate?: string; setNumber?: number; weight?: number; reps?: number; notes?: string }) {
     const video = this.exerciseVideoRepo.create({
       userId: dto.userId,
       exerciseName: dto.exerciseName,
@@ -40,8 +60,7 @@ export class PlanExercisesService {
     return await this.exerciseVideoRepo.save(video);
   }
 
-  // NEW: Get user's exercise videos
-  async getUserExerciseVideos(userId: string): Promise<ExerciseVideo[]> {
+  async getUserExerciseVideos(userId: string) {
     return await this.exerciseVideoRepo.find({
       where: { userId },
       order: { created_at: 'DESC' },
@@ -49,13 +68,9 @@ export class PlanExercisesService {
     });
   }
 
-  // NEW: Get videos for coach to review
-  async getVideosForCoach(coachId: string, status?: string): Promise<ExerciseVideo[]> {
+  async getVideosForCoach(coachId: string, status?: string) {
     const where: any = { coachId };
-    if (status) {
-      where.status = status;
-    }
-
+    if (status) where.status = status;
     return await this.exerciseVideoRepo.find({
       where,
       order: { created_at: 'DESC' },
@@ -63,12 +78,9 @@ export class PlanExercisesService {
     });
   }
 
-  // NEW: Update video status and feedback
-  async updateVideoFeedback(videoId: string, coachId: string, feedback: { status: string; coachFeedback: string }): Promise<ExerciseVideo> {
+  async updateVideoFeedback(videoId: string, coachId: string, feedback: { status: string; coachFeedback: string }) {
     const video = await this.exerciseVideoRepo.findOne({ where: { id: videoId } });
-    if (!video) {
-      throw new NotFoundException('Exercise video not found');
-    }
+    if (!video) throw new NotFoundException('Exercise video not found');
 
     video.coachId = coachId;
     video.status = feedback.status;
@@ -77,47 +89,50 @@ export class PlanExercisesService {
     return await this.exerciseVideoRepo.save(video);
   }
 
-  private toPublic(e: any) {
+  private toPublic(e: any): PublicExercise {
     return {
       id: e.id,
       name: e.name,
+      details: e.details ?? null,
+      category: e.category ?? null,
+      primaryMusclesWorked: Array.isArray(e.primaryMusclesWorked) ? e.primaryMusclesWorked : [],
+      secondaryMusclesWorked: Array.isArray(e.secondaryMusclesWorked) ? e.secondaryMusclesWorked : [],
       targetSets: e.targetSets ?? 3,
       targetReps: e.targetReps ?? '10',
       rest: e.rest ?? 90,
       tempo: e.tempo ?? null,
       img: e.img ?? null,
       video: e.video ?? null,
-      created_at: e.created_at ?? null, // <- map correctly
+      created_at: e.created_at ?? null,
     };
   }
 
   private baseQB(q: any): SelectQueryBuilder<PlanExercises> {
     const qb = this.repo.createQueryBuilder('e');
-    if (q?.search) {
-      qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
-    }
+    if (q?.search) qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
+    if (q?.category) qb.andWhere('e.category ILIKE :c', { c: `%${q.category}%` });
     return qb;
   }
+
+  // in exercises.service.ts
 
   async list(q: any) {
     const page = Math.max(1, parseInt(q?.page ?? '1', 10));
     const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
-
-    // what the client can send
     const sortKey = String(q?.sortBy ?? 'created_at');
-
-    // map to entity properties
     const SORTABLE: Record<string, string> = {
-      created_at: 'e.created_at', // entity property
+      created_at: 'e.created_at',
       name: 'e.name',
+      category: 'e.category',
     };
-
     const sortByExpr = SORTABLE[sortKey] ?? SORTABLE.created_at;
     const sortOrder: 'ASC' | 'DESC' = String(q?.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-    const qb = this.baseQB(q)
-      .orderBy(sortByExpr, sortOrder)
-      // optional: add stable secondary order to keep pagination consistent
+    const qb = this.baseQB(q);
+
+    if (q?.category) qb.andWhere('e.category ILIKE :cat', { cat: `%${q.category}%` });
+
+    qb.orderBy(sortByExpr, sortOrder)
       .addOrderBy('e.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
@@ -131,8 +146,14 @@ export class PlanExercisesService {
     };
   }
 
-  async stats(q?: any) {
-    // simple stats for your KPIs; feel free to grow later
+  // ✅ NEW: return all unique, non-empty categories (sorted A→Z)
+  async categories(): Promise<string[]> {
+    const rows = await this.repo.createQueryBuilder('e').select('DISTINCT e.category', 'category').where("e.category IS NOT NULL AND TRIM(e.category) <> ''").orderBy('e.category', 'ASC').getRawMany<{ category: string }>();
+
+    return rows.map(r => r.category);
+  }
+
+  async stats(_q?: any) {
     const totals = await this.repo.createQueryBuilder('e').select(['COUNT(*)::int AS total', `SUM(CASE WHEN e.img   IS NOT NULL AND e.img   <> '' THEN 1 ELSE 0 END)::int AS with_image`, `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`, `COALESCE(AVG(e.rest),0)::float AS avg_rest`, `COALESCE(AVG(e."targetSets"),0)::float AS avg_sets`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days'  THEN 1 ELSE 0 END)::int AS created_7d`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`]).getRawOne<{
       total: number;
       with_image: number;
@@ -156,15 +177,54 @@ export class PlanExercisesService {
     };
   }
 
+async bulkCreate(items: CreatePlanExercisesInput[]) {
+  return this.dataSource.transaction(async manager => {
+    const repo = manager.getRepository(PlanExercises);
+
+    const rows = items.map(i => ({
+      name: i.name,
+      details: i.details ?? null,
+      category: i.category ?? null,
+      primaryMusclesWorked: i.primaryMusclesWorked ?? [],
+      secondaryMusclesWorked: i.secondaryMusclesWorked ?? [],
+      targetSets: i.targetSets ?? 3,
+      targetReps: i.targetReps ?? '10',
+      rest: i.rest ?? 90,
+      tempo: i.tempo ?? null,
+      img: i.img ?? null,
+      video: i.video ?? null,
+    }));
+
+		console.log(rows);
+    const result = await repo.insert(rows);           // <- fast, plain insert
+    
+    const ids = result.identifiers.map(x => x.id).filter(Boolean);
+
+    const fresh = ids.length
+      ? await repo.find({ where: { id: In(ids) } })
+      : await repo.find({ order: { id: 'DESC' }, take: rows.length }); // fallback
+
+			// console.log(fresh);
+    return fresh.map(e => this.toPublic(e));
+ 
+  });
+}
+
+
+
   async get(id: string): Promise<PublicExercise> {
     const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
     return this.toPublic(ex);
   }
 
-  async create(dto: CreatePlanExercisesDto): Promise<PublicExercise> {
+  async create(dto: CreatePlanExercisesInput): Promise<PublicExercise> {
     const entity = this.repo.create({
       name: dto.name,
+      details: dto.details ?? null,
+      category: dto.category ?? null,
+      primaryMusclesWorked: dto.primaryMusclesWorked ?? [],
+      secondaryMusclesWorked: dto.secondaryMusclesWorked ?? [],
       targetSets: dto.targetSets ?? 3,
       targetReps: dto.targetReps ?? '10',
       rest: dto.rest ?? 90,
@@ -176,30 +236,15 @@ export class PlanExercisesService {
     return this.toPublic(saved);
   }
 
-  async bulkCreate(items: CreatePlanExercisesDto[]): Promise<PublicExercise[]> {
-    return this.dataSource.transaction(async manager => {
-      const repo = manager.getRepository(PlanExercises);
-      const entities: any = items.map(i =>
-        repo.create({
-          name: i.name,
-          targetSets: i.targetSets ?? 3,
-          targetReps: i.targetReps ?? '10',
-          rest: i.rest ?? 90,
-          tempo: i.tempo ?? null,
-          img: i.img ?? null,
-          video: i.video ?? null,
-        } as any),
-      );
-      const saved = await repo.save(entities);
-      return saved.map(s => this.toPublic(s));
-    });
-  }
-
-  async update(id: string, dto: UpdatePlanExercisesDto): Promise<PublicExercise> {
-    const ex: any = await this.repo.findOne({ where: { id } });
+  async update(id: string, dto: UpdatePlanExercisesInput): Promise<PublicExercise> {
+    const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
 
     if (dto.name !== undefined) ex.name = dto.name;
+    if (dto.details !== undefined) ex.details = dto.details;
+    if (dto.category !== undefined) ex.category = dto.category;
+    if (dto.primaryMusclesWorked !== undefined) ex.primaryMusclesWorked = dto.primaryMusclesWorked ?? [];
+    if (dto.secondaryMusclesWorked !== undefined) ex.secondaryMusclesWorked = dto.secondaryMusclesWorked ?? [];
     if (dto.targetSets !== undefined) ex.targetSets = dto.targetSets;
     if (dto.targetReps !== undefined) ex.targetReps = dto.targetReps;
     if (dto.rest !== undefined) ex.rest = dto.rest;

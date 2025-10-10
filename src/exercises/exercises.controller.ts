@@ -1,22 +1,52 @@
 // src/plan-exercises/plan-exercises.controller.ts
 import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
-import { BulkCreatePlanExercisesDto } from 'dto/exercises.dto';
 
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { PlanExercises, UserRole } from 'entities/global.entity';
+import { UserRole } from 'entities/global.entity';
 import { imageUploadOptions, videoUploadOptions } from './upload.config';
 import { PlanExercisesService } from './exercises.service';
 import { mixedUploadOptions } from './mixed-upload.config';
-import { CRUD } from 'common/crud.service';
 
 function toIntOrUndef(v: any) {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   if (Number.isNaN(n)) throw new BadRequestException(`Expected number, got "${v}"`);
   return n;
+}
+
+function toStringOrUndef(v: any) {
+  if (v === undefined || v === null || v === '') return undefined;
+  return String(v);
+}
+
+function parseStringArray(input: unknown): string[] | undefined {
+  if (input === undefined || input === null || input === '') return undefined;
+  if (Array.isArray(input))
+    return input
+      .map(String)
+      .map(s => s.trim())
+      .filter(Boolean);
+  const s = String(input).trim();
+  if (!s) return [];
+  // Try JSON array first
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed))
+      return parsed
+        .map(String)
+        .map(x => x.trim())
+        .filter(Boolean);
+  } catch (_) {
+    /* fall back to CSV */
+  }
+  // CSV (split by comma or semicolon)
+  return s
+    .split(/[;,]/g)
+    .map(x => x.trim())
+    .filter(Boolean);
 }
 
 @Controller('plan-exercises')
@@ -27,7 +57,14 @@ export class PlanExercisesController {
 
   @Get()
   async list(@Query() q: any) {
+    // now supports /plan-exercises?category=Back or ?category=Back%20/%20Compound
     return this.svc.list(q);
+  }
+
+  // ✅ NEW: get all unique categories
+  @Get('categories')
+  async categories() {
+    return this.svc.categories();
   }
 
   @Post('upload-exercise-video')
@@ -51,8 +88,6 @@ export class PlanExercisesController {
     }
 
     const videoUrl = `/uploads/videos/${video.filename}`;
-
-    // Save to database
     const savedVideo = await this.svc.saveExerciseVideo({
       userId: body.userId,
       exerciseName: body.exerciseName,
@@ -73,19 +108,16 @@ export class PlanExercisesController {
     };
   }
 
-  // Get videos for a specific user
   @Get('user-videos/:userId')
   async getUserVideos(@Param('userId') userId: string) {
     return await this.svc.getUserExerciseVideos(userId);
   }
 
-  // Get videos for coach review
   @Get('coach-videos/:coachId')
   async getCoachVideos(@Param('coachId') coachId: string, @Query('status') status?: string) {
     return await this.svc.getVideosForCoach(coachId, status);
   }
 
-  // Update video feedback (coach reviewing video)
   @Put('video-feedback/:videoId')
   async updateVideoFeedback(@Param('videoId') videoId: string, @Body() body: { coachId: string; status: string; coachFeedback: string }) {
     return await this.svc.updateVideoFeedback(videoId, body.coachId, body);
@@ -101,6 +133,24 @@ export class PlanExercisesController {
     return this.svc.get(id);
   }
 
+  @Post('bulk')
+  async bulkCreate(@Body() dto: any) {
+    const sanitized = (dto.items || []).map((i: any) => ({
+      name: i.name,
+      details: i.details ?? null,
+      category: i.category ?? null,
+      primaryMusclesWorked: parseStringArray(i.primary_muscles_worked) ?? [],
+      secondaryMusclesWorked: parseStringArray(i.secondary_muscles_worked) ?? [],
+      targetReps: String(i.targetReps ?? '10'),
+      targetSets: Number(i.targetSets ?? 3),
+      rest: Number(i.rest ?? 90),
+      tempo: i.tempo ?? null,
+      img: i.img ?? null,
+      video: i.video ?? null,
+    }));
+    return this.svc.bulkCreate(sanitized);
+  }
+
   @Post()
   @UseInterceptors(
     FileFieldsInterceptor(
@@ -114,28 +164,19 @@ export class PlanExercisesController {
   async create(@Body() body: any, @UploadedFiles() files: { img?: any[]; video?: any[] }) {
     const dto: any = {
       name: body.name,
+      details: toStringOrUndef(body.details) ?? null,
+      category: toStringOrUndef(body.category) ?? null,
+      primaryMusclesWorked: parseStringArray(body.primaryMusclesWorked) ?? [],
+      secondaryMusclesWorked: parseStringArray(body.secondaryMusclesWorked) ?? [],
       targetReps: body.targetReps,
       targetSets: toIntOrUndef(body.targetSets) ?? 3,
       rest: toIntOrUndef(body.rest) ?? 90,
       tempo: body.tempo ?? null,
       img: files?.img?.[0] ? `/uploads/images/${files.img[0].filename}` : (body.img ?? null),
       video: files?.video?.[0] ? `/uploads/videos/${files.video[0].filename}` : (body.video ?? null),
+      altOfId: body.altOfId ? Number(body.altOfId) : undefined,
     };
     return this.svc.create(dto);
-  }
-
-  @Post('bulk')
-  async bulkCreate(@Body() dto: any) {
-    const sanitized = (dto.items || []).map((i: any) => ({
-      name: i.name,
-      targetReps: String(i.targetReps ?? '10'),
-      targetSets: Number(i.targetSets ?? 3),
-      rest: Number(i.rest ?? 90),
-      tempo: i.tempo ?? null,
-      img: i.img ?? null,
-      video: i.video ?? null,
-    }));
-    return this.svc.bulkCreate(sanitized);
   }
 
   @Put(':id')
@@ -151,13 +192,17 @@ export class PlanExercisesController {
   async update(@Param('id') id: string, @Body() body: any, @UploadedFiles() files: { img?: any[]; video?: any[] }) {
     const patch: any = {
       name: body.name ?? undefined,
+      details: body.details ?? undefined,
+      category: body.category ?? undefined,
+      primaryMusclesWorked: body.primaryMusclesWorked !== undefined ? parseStringArray(body.primaryMusclesWorked) : undefined,
+      secondaryMusclesWorked: body.secondaryMusclesWorked !== undefined ? parseStringArray(body.secondaryMusclesWorked) : undefined,
       targetReps: body.targetReps ?? undefined,
       targetSets: body.targetSets !== undefined ? toIntOrUndef(body.targetSets) : undefined,
       rest: body.rest !== undefined ? toIntOrUndef(body.rest) : undefined,
       tempo: body.tempo ?? undefined,
-
       img: files?.img?.[0] ? `/uploads/images/${files.img[0].filename}` : (body.img ?? undefined),
       video: files?.video?.[0] ? `/uploads/videos/${files.video[0].filename}` : (body.video ?? undefined),
+      altOfId: body.altOfId !== undefined ? (body.altOfId === null || body.altOfId === '' ? null : Number(body.altOfId)) : undefined,
     };
     return this.svc.update(id, patch);
   }

@@ -15,6 +15,8 @@ import { PlanExercisesModule } from './exercises/exercises.module';
 import { FoodsModule } from './foods/foods.module';
 import { MealPlansModule } from './meal-plans/meal-plans.module';
 import { ChatModule } from './chat/chat.module';
+import { FormModule } from './form/form.module';
+import { NotificationModule } from './notification/notification.module';
 
 @Module({
   imports: [
@@ -49,6 +51,8 @@ import { ChatModule } from './chat/chat.module';
     FoodsModule,
     MealPlansModule,
     ChatModule,
+    FormModule,
+    NotificationModule,
   ],
   controllers: [AppController],
   providers: [AppService, LoggingValidationPipe, QueryFailedErrorFilter],

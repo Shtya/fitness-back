@@ -263,7 +263,7 @@
       async function loadExercises() {
         try {
           const res = await fetch('exercise.json');
-          exercises = await res.json();
+          exercises = await res.json(); 
           render(); // call your render function from earlier
         } catch (err) {
           console.error('Failed to load exercises.json', err);
@@ -304,7 +304,10 @@
         return `
         <article class="card">
           <div class="thumb">
-            ${hasImg ? `<video src="${ex.video}" alt="${ex.name} image" onerror="this.src='data:image/svg+xml;utf8,${encodeURIComponent(placeholderSVG())}'" />` : `<img alt="" src="data:image/svg+xml;utf8,${encodeURIComponent(placeholderSVG())}" />`}
+            ${!ex.img 
+						? `<video src="${ex.video}" alt="${ex.name} image" onerror="this.src='data:image/svg+xml;utf8,${encodeURIComponent(placeholderSVG())}'" />` 
+						: `<img alt="" src="${"../../" + ex.img}" />
+						`}
             <span class="badge">${ex.category || 'Uncategorized'}</span>
           </div>
           <div class="body">
@@ -350,10 +353,10 @@
       function render() {
         const q = $('#search').value.trim();
         const cat = $('#category').value;
-        const filtered = exercises.filter(ex => exerciseMatches(ex, q) && (!cat || ex.category === cat));
+        const filtered = exercises 
         $('#count').textContent = `${filtered.length} item${filtered.length === 1 ? '' : 's'}`;
 
-        const html = filtered.map(renderCard).join('');
+        const html = exercises.map(renderCard).join('');
         const grid = $('#grid');
         grid.innerHTML = html;
 
