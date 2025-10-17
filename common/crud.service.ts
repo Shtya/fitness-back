@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import * as ExcelJS from 'exceljs';
-import { Repository, Brackets } from 'typeorm';
+import { Repository, Brackets, SelectQueryBuilder } from 'typeorm';
 import { BadRequestException } from '@nestjs/common';
 
 export interface CustomPaginatedResponse<T> {
@@ -90,48 +90,17 @@ export class CRUD {
       );
     }
 
-    // if (search && searchFields?.length >= 1) {
-    //   query.andWhere(
-    //     new Brackets(qb => {
-    //       searchFields.forEach(field => {
-    //         const columnMetadata = repository.metadata.columns.find(col => col.propertyName === field);
-    //         if (columnMetadata?.type === 'jsonb') {
-    //           qb.orWhere(`LOWER(${entityName}.${field}::text) LIKE LOWER(:search)`, { search: `%${search}%` });
-    //         } else if (columnMetadata?.type === String || columnMetadata?.type == 'text') {
-    //           qb.orWhere(`LOWER(${entityName}.${field}) LIKE LOWER(:search)`, {
-    //             search: `%${search}%`,
-    //           });
-    //         } else if (['decimal', 'float'].includes(columnMetadata?.type as any)) {
-    //           const numericSearch = parseFloat(search);
-    //           if (!isNaN(numericSearch))
-    //             qb.orWhere(`${entityName}.${field} = :numericSearch`, {
-    //               numericSearch,
-    //             });
-    //         } else if (columnMetadata?.type === 'enum') {
-    //           const enumValues = columnMetadata.enum;
-    //           if (enumValues.includes(search)) {
-    //             qb.orWhere(`${entityName}.${field} = :value`, {
-    //               value: search,
-    //             });
-    //           } else {
-    //             throw new BadRequestException(`Invalid value '${search}' for enum field '${field}'. Allowed values: ${enumValues.join(', ')}`);
-    //           }
-    //         } else {
-    //           qb.orWhere(`${entityName}.${field} = :search`, { search });
-    //         }
-    //       });
-    //     }),
-    //   );
+    // if (relations?.length > 0) {
+    //   const invalidRelations = relations.filter(relation => !repository.metadata.relations.some(rel => rel.propertyName === relation));
+    //   if (invalidRelations.length > 0) {
+    //     throw new BadRequestException(`Invalid relations: ${invalidRelations.join(', ')}`);
+    //   }
+    //   relations.forEach(relation => {
+    //     query.leftJoinAndSelect(`${entityName}.${relation}`, relation);
+    //   });
     // }
-
-    if (relations?.length > 0) {
-      const invalidRelations = relations.filter(relation => !repository.metadata.relations.some(rel => rel.propertyName === relation));
-      if (invalidRelations.length > 0) {
-        throw new BadRequestException(`Invalid relations: ${invalidRelations.join(', ')}`);
-      }
-      relations.forEach(relation => {
-        query.leftJoinAndSelect(`${entityName}.${relation}`, relation);
-      });
+    if (relations?.length) {
+      CRUD.joinNestedRelations(query, repository, entityName, relations);
     }
 
     const defaultSortBy = 'created_at';
@@ -153,6 +122,43 @@ export class CRUD {
       per_page: limitNumber,
       records: data,
     };
+  }
+
+  static joinNestedRelations<T>(query: SelectQueryBuilder<T>, repository: Repository<T>, rootAlias: string, relations: string[]) {
+    const addedAliases = new Set<string>();
+
+    function validatePathAndReturnJoins(path: string) {
+      const segments = path.split('.');
+      let currentMeta = repository.metadata;
+      let parentAlias = rootAlias;
+      const steps: { joinPath: string; alias: string }[] = [];
+      let aliasPath = rootAlias;
+
+      for (const seg of segments) {
+        const relMeta = currentMeta.relations.find(r => r.propertyName === seg);
+        if (!relMeta) {
+          throw new BadRequestException(`Invalid relation segment '${seg}' in '${path}'`);
+        }
+        const joinPath = `${parentAlias}.${seg}`;
+        const alias = (aliasPath + '_' + seg).replace(/\./g, '_');
+        steps.push({ joinPath, alias });
+
+        parentAlias = alias;
+        aliasPath = alias;
+        currentMeta = relMeta.inverseEntityMetadata;
+      }
+      return steps;
+    }
+
+    for (const path of relations) {
+      const steps = validatePathAndReturnJoins(path);
+      for (const { joinPath, alias } of steps) {
+        if (!addedAliases.has(alias)) {
+          query.leftJoinAndSelect(joinPath, alias);
+          addedAliases.add(alias);
+        }
+      }
+    }
   }
 
   static async delete<T>(repository: Repository<T>, entityName: string, id: number | string): Promise<{ message: string }> {

@@ -1,8 +1,8 @@
-// src/plan-exercises/plan-exercises.service.ts
+// src/exercises/exercises.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
-import { ExerciseVideo, PlanExercises } from 'entities/global.entity';
+import { Exercise, ExerciseVideo } from 'entities/global.entity';
 
 type PublicExercise = {
   id: string;
@@ -20,7 +20,7 @@ type PublicExercise = {
   created_at?: string | null;
 };
 
-type CreatePlanExercisesInput = {
+type CreateExerciseInput = {
   name: string;
   details?: string | null;
   category?: string | null;
@@ -34,12 +34,12 @@ type CreatePlanExercisesInput = {
   video?: string | null;
 };
 
-type UpdatePlanExercisesInput = Partial<CreatePlanExercisesInput>;
+type UpdateExerciseInput = Partial<CreateExerciseInput>;
 
 @Injectable()
-export class PlanExercisesService {
+export class ExercisesService {
   constructor(
-    @InjectRepository(PlanExercises) public readonly repo: Repository<PlanExercises>,
+    @InjectRepository(Exercise) public readonly repo: Repository<Exercise>,
     @InjectRepository(ExerciseVideo) private readonly exerciseVideoRepo: Repository<ExerciseVideo>,
     private readonly dataSource: DataSource,
   ) {}
@@ -50,10 +50,10 @@ export class PlanExercisesService {
       exerciseName: dto.exerciseName,
       videoUrl: dto.videoUrl,
       workoutDate: dto.workoutDate || new Date().toISOString().split('T')[0],
-      setNumber: dto.setNumber,
-      weight: dto.weight?.toString(),
-      reps: dto.reps,
-      notes: dto.notes,
+      setNumber: dto.setNumber ?? null,
+      weight: dto.weight?.toString() ?? null,
+      reps: dto.reps ?? null,
+      notes: dto.notes ?? null,
       status: 'pending',
     });
 
@@ -64,7 +64,7 @@ export class PlanExercisesService {
     return await this.exerciseVideoRepo.find({
       where: { userId },
       order: { created_at: 'DESC' },
-      relations: ['coach'],
+      relations: ['coach', 'user'],
     });
   }
 
@@ -89,7 +89,7 @@ export class PlanExercisesService {
     return await this.exerciseVideoRepo.save(video);
   }
 
-  private toPublic(e: any): PublicExercise {
+  private toPublic(e: Exercise): PublicExercise {
     return {
       id: e.id,
       name: e.name,
@@ -103,18 +103,16 @@ export class PlanExercisesService {
       tempo: e.tempo ?? null,
       img: e.img ?? null,
       video: e.video ?? null,
-      created_at: e.created_at ?? null,
+      created_at: (e as any).created_at ?? null,
     };
   }
 
-  private baseQB(q: any): SelectQueryBuilder<PlanExercises> {
+  private baseQB(q: any): SelectQueryBuilder<Exercise> {
     const qb = this.repo.createQueryBuilder('e');
     if (q?.search) qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
     if (q?.category) qb.andWhere('e.category ILIKE :c', { c: `%${q.category}%` });
     return qb;
   }
-
-  // in exercises.service.ts
 
   async list(q: any) {
     const page = Math.max(1, parseInt(q?.page ?? '1', 10));
@@ -146,7 +144,6 @@ export class PlanExercisesService {
     };
   }
 
-  // ✅ NEW: return all unique, non-empty categories (sorted A→Z)
   async categories(): Promise<string[]> {
     const rows = await this.repo.createQueryBuilder('e').select('DISTINCT e.category', 'category').where("e.category IS NOT NULL AND TRIM(e.category) <> ''").orderBy('e.category', 'ASC').getRawMany<{ category: string }>();
 
@@ -177,40 +174,32 @@ export class PlanExercisesService {
     };
   }
 
-async bulkCreate(items: CreatePlanExercisesInput[]) {
-  return this.dataSource.transaction(async manager => {
-    const repo = manager.getRepository(PlanExercises);
+  async bulkCreate(items: CreateExerciseInput[]) {
+    return this.dataSource.transaction(async manager => {
+      const repo = manager.getRepository(Exercise);
 
-    const rows = items.map(i => ({
-      name: i.name,
-      details: i.details ?? null,
-      category: i.category ?? null,
-      primaryMusclesWorked: i.primaryMusclesWorked ?? [],
-      secondaryMusclesWorked: i.secondaryMusclesWorked ?? [],
-      targetSets: i.targetSets ?? 3,
-      targetReps: i.targetReps ?? '10',
-      rest: i.rest ?? 90,
-      tempo: i.tempo ?? null,
-      img: i.img ?? null,
-      video: i.video ?? null,
-    }));
+      const rows = items.map(i => ({
+        name: i.name,
+        details: i.details ?? null,
+        category: i.category ?? null,
+        primaryMusclesWorked: i.primaryMusclesWorked ?? [],
+        secondaryMusclesWorked: i.secondaryMusclesWorked ?? [],
+        targetSets: i.targetSets ?? 3,
+        targetReps: i.targetReps ?? '10',
+        rest: i.rest ?? 90,
+        tempo: i.tempo ?? null,
+        img: i.img ?? null,
+        video: i.video ?? null,
+      }));
 
-		console.log(rows);
-    const result = await repo.insert(rows);           // <- fast, plain insert
-    
-    const ids = result.identifiers.map(x => x.id).filter(Boolean);
+      const result = await repo.insert(rows);
+      const ids = result.identifiers.map(x => x.id).filter(Boolean);
 
-    const fresh = ids.length
-      ? await repo.find({ where: { id: In(ids) } })
-      : await repo.find({ order: { id: 'DESC' }, take: rows.length }); // fallback
+      const fresh = ids.length ? await repo.find({ where: { id: In(ids) } }) : await repo.find({ order: { id: 'DESC' }, take: rows.length }); // fallback
 
-			// console.log(fresh);
-    return fresh.map(e => this.toPublic(e));
- 
-  });
-}
-
-
+      return fresh.map(e => this.toPublic(e));
+    });
+  }
 
   async get(id: string): Promise<PublicExercise> {
     const ex = await this.repo.findOne({ where: { id } });
@@ -218,7 +207,7 @@ async bulkCreate(items: CreatePlanExercisesInput[]) {
     return this.toPublic(ex);
   }
 
-  async create(dto: CreatePlanExercisesInput): Promise<PublicExercise> {
+  async create(dto: CreateExerciseInput): Promise<PublicExercise> {
     const entity = this.repo.create({
       name: dto.name,
       details: dto.details ?? null,
@@ -232,11 +221,11 @@ async bulkCreate(items: CreatePlanExercisesInput[]) {
       img: dto.img ?? null,
       video: dto.video ?? null,
     } as any);
-    const saved = await this.repo.save(entity);
+    const saved:any = await this.repo.save(entity);
     return this.toPublic(saved);
   }
 
-  async update(id: string, dto: UpdatePlanExercisesInput): Promise<PublicExercise> {
+  async update(id: string, dto: UpdateExerciseInput): Promise<PublicExercise> {
     const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
 

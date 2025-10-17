@@ -8,13 +8,13 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { RolesGuard } from './guard/roles.guard';
-import { MealPlan, Notification, Plan, User } from 'entities/global.entity';
+import { MealPlan, Notification, ExercisePlan, User, FoodSuggestion } from 'entities/global.entity';
 import { MailService } from 'common/nodemailer';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    TypeOrmModule.forFeature([User , MealPlan , Plan , Notification]),
+    TypeOrmModule.forFeature([User , MealPlan , ExercisePlan , Notification , FoodSuggestion]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (cfg: ConfigService) => ({

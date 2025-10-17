@@ -10,19 +10,35 @@ import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const port = process.env.PORT || 3030;
-  // Get the ConfigService instance
-  const configService = app.get(ConfigService);
 
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
   app.useStaticAssets(join(__dirname, '..', '..', '/uploads'), { prefix: '/uploads/' });
 
 	app.enableCors({
-  origin: '*',  
-  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE'],
-  allowedHeaders: ['Content-Type','Authorization','x-lang'],
-  exposedHeaders: ['Content-Length','Content-Range'],
-});
+		origin: (origin, callback) => {
+			const allowedOrigins = [
+				'http://localhost:3000',
+				'https://fitness-front-iin2.vercel.app', 
+			];
+			if (!origin || allowedOrigins.includes(origin)) {
+				callback(null, true);
+			} else {
+				callback(new Error('CORS not allowed for this origin'), false);
+			}
+		},
+		credentials: true,
+		methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+		allowedHeaders: ['Content-Type', 'Authorization', 'x-lang'],
+		exposedHeaders: ['Content-Length', 'Content-Range'],
+	});
 
+
+  // app.enableCors({
+  //   origin: '*',
+  //   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
+  //   allowedHeaders: ['Content-Type', 'Authorization', 'x-lang'],
+  //   exposedHeaders: ['Content-Length', 'Content-Range'],
+  // });
 
   app.setGlobalPrefix('api/v1');
 

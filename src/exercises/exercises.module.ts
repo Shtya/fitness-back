@@ -1,14 +1,14 @@
-// src/plan-exercises/plan-exercises.module.ts
+// src/exercises/exercises.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ExerciseVideo, PlanDay, PlanExercises } from 'entities/global.entity';
+import { Exercise, ExerciseVideo } from 'entities/global.entity';
 import { PlanExercisesController } from './exercises.controller';
-import { PlanExercisesService } from './exercises.service';
+import { ExercisesService } from './exercises.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PlanDay, PlanExercises, ExerciseVideo])],
+  imports: [TypeOrmModule.forFeature([Exercise, ExerciseVideo])],
   controllers: [PlanExercisesController],
-  providers: [PlanExercisesService],
-  exports: [PlanExercisesService],
+  providers: [ExercisesService],
+  exports: [ExercisesService],
 })
-export class PlanExercisesModule {}
+export class ExercisesModule {}

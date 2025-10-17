@@ -16,6 +16,343 @@ export class PrsService {
     private readonly userRepo: Repository<User>,
   ) {}
 
+  private ymd(d: Date) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  }
+
+  // 1) rich progress using ONLY exercise_records
+  async getProgress(windowDays: number, exerciseWindowDays: number, userId: string) {
+    if (!userId) throw new NotFoundException('User ID is required');
+
+    const start = new Date();
+    start.setDate(start.getDate() - (windowDays || 30));
+    const startStr = this.ymd(start);
+
+    const recent = await this.exerciseRecordRepo.find({
+      where: { userId, date: MoreThanOrEqual(startStr) },
+      order: { date: 'ASC' },
+    });
+
+    // group by date (sessions)
+    const byDate = new Map<string, typeof recent>();
+    for (const r of recent) {
+      if (!byDate.has(r.date)) byDate.set(r.date, [] as any);
+      byDate.get(r.date)!.push(r);
+    }
+    const sessions = Array.from(byDate.entries())
+      .map(([date, list]) => {
+        const volume = list.reduce((s, x) => s + (x.totalVolume || 0), 0);
+        const sets = list.reduce((s, x) => s + (x.workoutSets?.length || 0), 0);
+        const done = list.reduce((s, x) => s + (x.workoutSets?.filter(s => s.done).length || 0), 0);
+        return {
+          date,
+          volume,
+          setsTotal: sets,
+          setsDone: done,
+          exercises: Array.from(new Set(list.map(x => x.exerciseName))),
+        };
+      })
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const sessionsCount = sessions.length;
+    const totalVolume = sessions.reduce((s, x) => s + x.volume, 0);
+    const avgVolumePerSession = sessionsCount ? Math.round(totalVolume / sessionsCount) : 0;
+    const avgSetsPerSession = sessionsCount ? Math.round(sessions.reduce((s, x) => s + x.setsTotal, 0) / sessionsCount) : 0;
+
+    // adherence & streaks (days trained / window)
+    const adherencePct = Math.round((sessionsCount / Math.max(1, windowDays)) * 100);
+    const lastWorkoutDate = sessionsCount ? sessions[sessionsCount - 1].date : null;
+    const currentStreakDays = await this.calculateCurrentStreak(userId);
+
+    // top exercises by attempts & volume
+    const attempts = new Map<string, number>();
+    const volumes = new Map<string, number>();
+    for (const r of recent) {
+      attempts.set(r.exerciseName, (attempts.get(r.exerciseName) || 0) + 1);
+      volumes.set(r.exerciseName, (volumes.get(r.exerciseName) || 0) + (r.totalVolume || 0));
+    }
+    const topByAttempts = Array.from(attempts.entries())
+      .map(([name, attempts]) => ({ name, attempts }))
+      .sort((a, b) => b.attempts - a.attempts)
+      .slice(0, 8);
+    const topByVolume = Array.from(volumes.entries())
+      .map(([name, volume]) => ({ name, volume }))
+      .sort((a, b) => b.volume - a.volume)
+      .slice(0, 8);
+
+    // recent PRs
+    const recentPRs = await this.exerciseRecordRepo.find({
+      where: { userId, isPersonalRecord: true },
+      order: { date: 'DESC' },
+      take: 10,
+    });
+    const prs = {
+      count: recentPRs.length,
+      top: recentPRs.slice(0, 5).map(r => ({
+        exercise: r.exerciseName,
+        e1rm: r.bestE1rm,
+        weight: r.maxWeight,
+        reps: r.maxReps,
+        date: r.date,
+      })),
+    };
+
+    // e1RM trends for the 3 most frequent exercises (weekly buckets)
+    const trendNames = topByAttempts.slice(0, 3).map(x => x.name);
+    const e1rmTrends: Record<string, Array<{ date: string; e1rm: number }>> = {};
+    for (const name of trendNames) {
+      const series = await this.getE1rmSeries(userId, name, 'week', exerciseWindowDays || 90);
+      e1rmTrends[name] = series.map(s => ({ date: s.bucket, e1rm: s.e1rm }));
+    }
+
+    return {
+      adherence: { pct: adherencePct, daysTrained: sessionsCount, currentStreakDays, lastWorkoutDate },
+      volume: { total: totalVolume, avgPerSession: avgVolumePerSession },
+      sessions: { count: sessionsCount, avgSetsPerSession, last8: sessions.slice(-8) },
+      exercises: { topByAttempts, topByVolume },
+      prs,
+      e1rmTrends,
+      // for simple UI drill-downs
+      meta: { windowDays, exerciseWindowDays, timestamp: new Date().toISOString() },
+    };
+  }
+
+  // 2) weights used ON A CHOSEN DAY (per exercise + per-set summary)
+  async getDayStats(userId: string, date: string) {
+    if (!userId || !date) throw new NotFoundException('userId & date are required');
+
+    const records = await this.exerciseRecordRepo.find({
+      where: { userId, date },
+      order: { exerciseName: 'ASC' },
+    });
+
+    // group by exercise
+    const byName = new Map<string, typeof records>();
+    for (const r of records) {
+      if (!byName.has(r.exerciseName)) byName.set(r.exerciseName, [] as any);
+      byName.get(r.exerciseName)!.push(r);
+    }
+
+    const exercises = Array.from(byName.entries()).map(([name, list]) => {
+      const allSets = list.flatMap(x => x.workoutSets || []);
+      const doneSets = allSets.filter(s => s.done && s.weight > 0 && s.reps > 0);
+      const bestWeight = doneSets.length ? Math.max(...doneSets.map(s => s.weight)) : 0;
+      const bestReps = doneSets.length ? Math.max(...doneSets.map(s => s.reps)) : 0;
+      const bestE1rm = doneSets.length ? Math.max(...doneSets.map(s => s.e1rm || 0)) : 0;
+      const totalVolume = list.reduce((sum, x) => sum + (x.totalVolume || 0), 0);
+
+      return {
+        exerciseName: name,
+        totalVolume,
+        bestWeight,
+        bestReps,
+        bestE1rm,
+        sets: doneSets.sort((a, b) => a.setNumber - b.setNumber).map(s => ({ setNumber: s.setNumber, weight: s.weight, reps: s.reps, e1rm: s.e1rm, isPr: !!s.isPr })),
+      };
+    });
+
+    const totals = {
+      exercisesCount: exercises.length,
+      totalVolume: exercises.reduce((s, x) => s + x.totalVolume, 0),
+      totalSets: exercises.reduce((s, x) => s + x.sets.length, 0),
+    };
+
+    return { date, totals, exercises };
+  }
+
+  // 3) per-exercise deltas (زاد/نقص بين الجلسات)
+  async getExerciseDeltas(userId: string, exerciseName: string, limit = 50) {
+    if (!userId || !exerciseName) throw new NotFoundException('userId & exerciseName are required');
+    const exerciseId = this.generateExerciseId(exerciseName);
+
+    const rows = await this.exerciseRecordRepo.find({
+      where: { userId, exerciseId },
+      order: { date: 'ASC' },
+    });
+
+    const items = rows.map(r => ({
+      date: r.date,
+      weight: r.maxWeight || 0,
+      reps: r.maxReps || 0,
+      e1rm: r.bestE1rm || 0,
+    }));
+
+    const withDeltas = items.map((cur, i) => {
+      if (i === 0) return { ...cur, delta: { weight: 0, reps: 0, e1rm: 0 }, trend: '—' };
+      const prev = items[i - 1];
+      const dw = cur.weight - prev.weight;
+      const dr = cur.reps - prev.reps;
+      const de = cur.e1rm - prev.e1rm;
+      const trend = dw > 0 || de > 0 || dr > 0 ? 'up' : dw < 0 || de < 0 || dr < 0 ? 'down' : 'same';
+      return { ...cur, delta: { weight: dw, reps: dr, e1rm: de }, trend };
+    });
+
+    const lastChange = withDeltas.length >= 2 ? withDeltas[withDeltas.length - 1] : null;
+
+    return {
+      exerciseName,
+      count: withDeltas.length,
+      lastChange, // e.g. {date, weight, reps, e1rm, delta:{...}, trend:'up|down|same'}
+      sessions: withDeltas.slice(-limit),
+    };
+  }
+
+  // 4) quick comparison for one exercise between two dates
+  async compareExerciseBetweenDates(userId: string, exerciseName: string, fromDate: string, toDate: string) {
+    if (!userId || !exerciseName || !fromDate || !toDate) {
+      throw new NotFoundException('userId, exerciseName, from, to are required');
+    }
+    const exerciseId = this.generateExerciseId(exerciseName);
+
+    const [from, to] = await Promise.all([this.exerciseRecordRepo.findOne({ where: { userId, exerciseId, date: fromDate } }), this.exerciseRecordRepo.findOne({ where: { userId, exerciseId, date: toDate } })]);
+
+    const A = from ? { weight: from.maxWeight || 0, reps: from.maxReps || 0, e1rm: from.bestE1rm || 0 } : { weight: 0, reps: 0, e1rm: 0 };
+    const B = to ? { weight: to.maxWeight || 0, reps: to.maxReps || 0, e1rm: to.bestE1rm || 0 } : { weight: 0, reps: 0, e1rm: 0 };
+
+    const delta = { weight: B.weight - A.weight, reps: B.reps - A.reps, e1rm: B.e1rm - A.e1rm };
+    const trend = delta.weight > 0 || delta.reps > 0 || delta.e1rm > 0 ? 'up' : delta.weight < 0 || delta.reps < 0 || delta.e1rm < 0 ? 'down' : 'same';
+
+    return {
+      exerciseName,
+      from: { date: fromDate, ...A },
+      to: { date: toDate, ...B },
+      delta,
+      trend,
+    };
+  }
+  async getProgressSummary(userId: string, windowDays: number = 30) {
+    if (!userId) throw new NotFoundException('User ID is required');
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    // Safe window start (YYYY-MM-DD)
+    const now = Date.now();
+    const start = new Date(now - windowDays * 24 * 60 * 60 * 1000);
+    if (isNaN(start.getTime())) {
+      const f = new Date();
+      f.setDate(f.getDate() - 30);
+      start.setTime(f.getTime());
+    }
+    const y = start.getFullYear();
+    const m = String(start.getMonth() + 1).padStart(2, '0');
+    const d = String(start.getDate()).padStart(2, '0');
+    const startStr = `${y}-${m}-${d}`;
+
+    // Pull all recent records once
+    const records = await this.exerciseRecordRepo.find({
+      where: { userId, date: MoreThanOrEqual(startStr) },
+      order: { date: 'ASC' },
+    });
+
+    // Build sessions by date
+    const byDate = new Map<
+      string,
+      {
+        date: string;
+        totalVolume: number;
+        totalSets: number;
+        doneSets: number;
+        exercises: Set<string>;
+      }
+    >();
+    for (const r of records) {
+      if (!byDate.has(r.date)) {
+        byDate.set(r.date, { date: r.date, totalVolume: 0, totalSets: 0, doneSets: 0, exercises: new Set() });
+      }
+      const sess = byDate.get(r.date)!;
+      sess.totalVolume += r.totalVolume || 0;
+      sess.totalSets += r.workoutSets?.length || 0;
+      sess.doneSets += r.workoutSets?.filter(s => s.done).length || 0;
+      sess.exercises.add(r.exerciseName);
+    }
+
+    const sessions = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+    const daysTrained = sessions.length;
+    const adherencePct = windowDays > 0 ? Math.round((daysTrained / windowDays) * 100) : 0;
+    const totalVolume = sessions.reduce((t, s) => t + s.totalVolume, 0);
+    const totalSets = sessions.reduce((t, s) => t + s.totalSets, 0);
+    const avgSetsPerSession = sessions.length ? +(totalSets / sessions.length).toFixed(1) : 0;
+    const avgVolumePerSession = sessions.length ? Math.round(totalVolume / sessions.length) : 0;
+    const lastWorkoutDate = sessions.length ? sessions[sessions.length - 1].date : null;
+
+    // Streak (reuses your existing function)
+    const currentStreakDays = await this.calculateCurrentStreak(userId);
+
+    // Recent PRs (top 3 by bestE1rm within window or all-time fallback)
+    const windowPrs = await this.exerciseRecordRepo.find({
+      where: { userId, isPersonalRecord: true, date: MoreThanOrEqual(startStr) },
+      order: { bestE1rm: 'DESC' },
+    });
+    let topPrs = windowPrs.slice(0, 3);
+    if (topPrs.length < 3) {
+      const allPrs = await this.exerciseRecordRepo.find({
+        where: { userId, isPersonalRecord: true },
+        order: { bestE1rm: 'DESC' },
+        take: 3,
+      });
+      topPrs = allPrs;
+    }
+    const prs = {
+      count: await this.exerciseRecordRepo.createQueryBuilder('r').where('r.userId = :userId AND r.isPersonalRecord = true', { userId }).getCount(),
+      top: topPrs.map(pr => ({
+        exercise: pr.exerciseName,
+        e1rm: pr.bestE1rm,
+        weight: pr.maxWeight,
+        reps: pr.maxReps,
+        date: pr.date,
+      })),
+    };
+
+    // Most-trained exercises (by attempts count in window)
+    const attemptsByExercise = new Map<string, number>();
+    for (const r of records) {
+      attemptsByExercise.set(r.exerciseName, (attemptsByExercise.get(r.exerciseName) || 0) + 1);
+    }
+    const topExercises = Array.from(attemptsByExercise.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, attempts]) => ({ name, attempts }));
+
+    // Tiny e1RM trends for up to 3 most frequent lifts (weekly)
+    const trendTargets = topExercises.slice(0, 3).map(x => x.name);
+    const e1rmTrendsEntries = await Promise.all(
+      trendTargets.map(async name => {
+        const series = await this.getE1rmSeries(userId, name, 'week', Math.max(windowDays, 90));
+        return [name, series] as const;
+      }),
+    );
+    const e1rmTrends: Record<string, Array<{ bucket: string; e1rm: number }>> = Object.fromEntries(e1rmTrendsEntries);
+
+    return {
+      adherence: {
+        daysTrained,
+        windowDays,
+        pct: adherencePct,
+        currentStreakDays,
+        lastWorkoutDate,
+      },
+      volume: {
+        total: totalVolume,
+        byDay: sessions.map(s => ({ date: s.date, volume: s.totalVolume })),
+        avgPerSession: avgVolumePerSession,
+      },
+      sessions: {
+        count: sessions.length,
+        avgSetsPerSession,
+      },
+      prs,
+      exercises: {
+        topByAttempts: topExercises,
+      },
+      e1rmTrends,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   async getAllStats(userId: string, windowDays: number = 30, exerciseWindowDays: number = 90) {
     if (!userId) {
       throw new NotFoundException('User ID is required');
@@ -489,29 +826,21 @@ export class PrsService {
 
   // Keep same endpoint for overview
   async getOverview(userId: string, windowDays: number = 30) {
-    if (!userId) {
-      throw new NotFoundException('User ID is required');
-    }
+    if (!userId) throw new NotFoundException('User ID is required');
 
     const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
+    if (!user) throw new NotFoundException('User not found');
 
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - windowDays);
+    const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`;
 
-    // Get data from ExerciseRecord
     const recentRecords = await this.exerciseRecordRepo.find({
-      where: {
-        userId,
-        date: startDate.toISOString().split('T')[0],
-      },
+      where: { userId, date: MoreThanOrEqual(startStr) }, // <-- was exact equality
+      order: { date: 'ASC' },
     });
 
-    const personalRecords = await this.exerciseRecordRepo.find({
-      where: { userId, isPersonalRecord: true },
-    });
+    const personalRecords = await this.exerciseRecordRepo.find({ where: { userId, isPersonalRecord: true } });
 
     const totalExercises = await this.exerciseRecordRepo.createQueryBuilder('record').select('DISTINCT record.exerciseId', 'exerciseId').where('record.userId = :userId', { userId }).getRawMany();
 
@@ -537,7 +866,7 @@ export class PrsService {
         date: record.date,
         name: record.exerciseName,
         volume: record.totalVolume,
-        duration: null, // Not stored in ExerciseRecord
+        duration: null,
         setsDone: record.workoutSets.filter(set => set.done).length,
         setsTotal: record.workoutSets.length,
       })),

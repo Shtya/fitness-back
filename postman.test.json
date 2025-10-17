@@ -1,0 +1,450 @@
+{
+  "info": {
+    "name": "Nutrition Suggestions API",
+    "description": "Complete suggestions management system for clients and coaches",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "authToken",
+      "value": "YOUR_JWT_TOKEN_HERE",
+      "type": "string"
+    },
+    {
+      "key": "clientId",
+      "value": "CLIENT_USER_ID_HERE",
+      "type": "string"
+    },
+    {
+      "key": "suggestionId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Authentication Setup",
+      "item": [
+        {
+          "name": "Login (Get Token First)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"client@example.com\",\n  \"password\": \"password\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "💡 Client Suggestions",
+      "item": [
+        {
+          "name": "Create Suggestion (Client)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"day\": \"monday\",\n  \"mealIndex\": 0,\n  \"message\": \"I don't like oats for breakfast. They make me feel bloated. Can we replace them with quinoa or sweet potatoes?\",\n  \"wantsAlternative\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/meal-suggestions",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "meal-suggestions"]
+            }
+          }
+        },
+        {
+          "name": "Get My Suggestions - All (Client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/my/suggestions",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "my", "suggestions"]
+            }
+          }
+        },
+        {
+          "name": "Get My Suggestions - Pending Only (Client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/my/suggestions?status=pending",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "my", "suggestions"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pending"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get My Suggestions - Approved Only (Client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/my/suggestions?status=approved",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "my", "suggestions"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "approved"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get My Suggestions - With Pagination (Client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/my/suggestions?status=all&page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "my", "suggestions"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "all"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get My Suggestion Statistics (Client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "stats"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "👨‍💼 Coach Suggestions Management",
+      "item": [
+        {
+          "name": "Get All Client Suggestions (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions"]
+            }
+          }
+        },
+        {
+          "name": "Get Pending Suggestions (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions?status=pending",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pending"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Suggestions for Specific Client (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions?clientId={{clientId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions"],
+              "query": [
+                {
+                  "key": "clientId",
+                  "value": "{{clientId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Suggestions with Pagination (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions?status=pending&page=1&limit=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pending"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Coach Suggestion Statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "stats"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🔄 Suggestion Status Management",
+      "item": [
+        {
+          "name": "Approve Suggestion (Coach)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"approved\",\n  \"coachFeedback\": \"Great suggestion! Quinoa is an excellent alternative. I've updated your meal plan.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/{{suggestionId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "{{suggestionId}}", "status"]
+            }
+          }
+        },
+        {
+          "name": "Reject Suggestion (Coach)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"rejected\",\n  \"coachFeedback\": \"Sweet potatoes would increase carbs too much. Let's try buckwheat instead.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/{{suggestionId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "{{suggestionId}}", "status"]
+            }
+          }
+        },
+        {
+          "name": "Add Feedback to Suggestion (Coach)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"coachFeedback\": \"I need more information about why oats don't work for you. Are there any other foods you'd prefer?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/{{suggestionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "{{suggestionId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 Sample Responses",
+      "item": [
+        {
+          "name": "Sample - Create Suggestion Response",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/my/suggestions",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "my", "suggestions"]
+            }
+          }
+        },
+        {
+          "name": "Sample - Suggestions List Response",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions"]
+            }
+          }
+        },
+        {
+          "name": "Sample - Statistics Response",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/suggestions/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "suggestions", "stats"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ import { Repository, Not, In, IsNull } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 
-import { MealPlan, Notification, NotificationAudience, NotificationType, Plan, User, UserRole, UserStatus } from 'entities/global.entity';
+import { MealPlan, Notification, NotificationAudience, NotificationType, ExercisePlan, User, UserRole, UserStatus, FoodSuggestion } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
 import { ConfigService } from '@nestjs/config';
 import { MailService } from 'common/nodemailer';
@@ -14,9 +14,10 @@ import * as crypto from 'crypto';
 export class AuthService {
   constructor(
     @InjectRepository(User) public userRepo: Repository<User>,
-    @InjectRepository(Plan) private readonly planRepo: Repository<Plan>,
+    @InjectRepository(ExercisePlan) private readonly planRepo: Repository<ExercisePlan>,
     @InjectRepository(MealPlan) private readonly mealPlanRepo: Repository<MealPlan>,
     @InjectRepository(Notification) private readonly notifRepo: Repository<Notification>,
+    @InjectRepository(FoodSuggestion) private readonly suggestionRepo: Repository<FoodSuggestion>,
     private jwt: JwtService,
     private cfg: ConfigService,
     public emailService: MailService,
@@ -34,7 +35,7 @@ export class AuthService {
       clients,
       withPlans, // users having a workout/exercise plan
       withMealPlans, // users having a meal plan
-    ] = await Promise.all([this.userRepo.count(), this.userRepo.count({ where: { status: UserStatus.ACTIVE } }), this.userRepo.count({ where: { status: UserStatus.SUSPENDED } }), this.userRepo.count({ where: { role: UserRole.ADMIN } }), this.userRepo.count({ where: { role: UserRole.COACH } }), this.userRepo.count({ where: { role: UserRole.CLIENT } }), this.userRepo.count({ where: { activePlanId: Not(IsNull()) } }), this.userRepo.count({ where: { activeMealPlanId: Not(IsNull()) } })]);
+    ] = await Promise.all([this.userRepo.count(), this.userRepo.count({ where: { status: UserStatus.ACTIVE } }), this.userRepo.count({ where: { status: UserStatus.SUSPENDED } }), this.userRepo.count({ where: { role: UserRole.ADMIN } }), this.userRepo.count({ where: { role: UserRole.COACH } }), this.userRepo.count({ where: { role: UserRole.CLIENT } }), this.userRepo.count({ where: { activeExercisePlanId: Not(IsNull()) } }), this.userRepo.count({ where: { activeMealPlanId: Not(IsNull()) } })]);
 
     const withoutPlans = totalUsers - withPlans;
     const withoutMealPlans = totalUsers - withMealPlans;
@@ -67,8 +68,6 @@ export class AuthService {
     };
   }
 
-  /* ===================== Endpoints ===================== */
-  // users.service.ts
   async listUsersAdvanced(query: any) {
     const page = Number(query.page ?? 1);
     const limit = Math.min(Number(query.limit ?? 10), 100);
@@ -104,8 +103,8 @@ export class AuthService {
     const [users, total] = await qb.getManyAndCount();
 
     // ===== batch load exercise plans by id
-    let plansById: Record<string, Plan> = {};
-    const planIds = users.map(u => u.activePlanId).filter((x): x is string => !!x);
+    let plansById: Record<string, ExercisePlan> = {};
+    const planIds = users.map(u => u.activeExercisePlanId).filter((x): x is string => !!x);
     if (planIds.length) {
       const plans = await this.planRepo.find({
         where: { id: In(planIds) },
@@ -130,13 +129,13 @@ export class AuthService {
         const base = this.serialize(u); // your existing serializer
         const out: any = {
           ...base,
-          activePlanId: u.activePlanId ?? null,
+          activePlanId: u.activeExercisePlanId ?? null,
           activeMealPlanId: u.activeMealPlanId ?? null,
         };
 
         // --- attach workout plan (exercise)
-        if (u.activePlanId && plansById[u.activePlanId]) {
-          const p = plansById[u.activePlanId];
+        if (u.activeExercisePlanId && plansById[u.activeExercisePlanId]) {
+          const p:any = plansById[u.activeExercisePlanId];
           out.activePlan = includePlans
             ? {
                 id: p.id,
@@ -212,6 +211,8 @@ export class AuthService {
     };
   }
 
+ 
+
   async adminCreateUser(body: any) {
     const { name, email, role, phone, gender, membership, coachId, subscriptionStart, subscriptionEnd } = body || {};
     if (!name || !email) throw new BadRequestException('name and email are required');
@@ -237,7 +238,7 @@ export class AuthService {
       status: UserStatus.ACTIVE, // Admin-created accounts start active
       subscriptionStart: subscriptionStart ?? new Date().toISOString().slice(0, 10),
       subscriptionEnd: subscriptionEnd ?? null,
-      activePlanId: null,
+      activeExercisePlanId: null,
       defaultRestSeconds: 90,
       lastLogin: null,
       resetPasswordToken: null,
@@ -308,7 +309,7 @@ export class AuthService {
       password: await bcrypt.hash(dto.password, 12),
       role: dto.role ?? UserRole.CLIENT,
       defaultRestSeconds: dto.defaultRestSeconds ?? 90,
-      activePlanId: null,
+      activeExercisePlanId: null,
       status: UserStatus.PENDING, // NEW: account starts pending
       points: 0,
       lastLogin: null,
@@ -395,7 +396,7 @@ export class AuthService {
     if (!user) throw new NotFoundException('User not found');
     if (dto.name !== undefined) user.name = dto.name;
     if (dto.defaultRestSeconds !== undefined) user.defaultRestSeconds = dto.defaultRestSeconds;
-    if (dto.activePlanId !== undefined) user.activePlanId = dto.activePlanId;
+    if (dto.activePlanId !== undefined) user.activeExercisePlanId = dto.activePlanId;
     if ((dto as any).gender !== undefined) (user as any).gender = (dto as any).gender;
     await this.userRepo.save(user);
     return this.serialize(user);
@@ -419,7 +420,6 @@ export class AuthService {
     return { message: 'User deleted' };
   }
 
-  /* ------------ NEW: Admin can approve/suspend users ------------ */
   async setStatus(userId: string, status: UserStatus) {
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
@@ -427,8 +427,6 @@ export class AuthService {
     await this.userRepo.save(user);
     return this.serialize(user);
   }
-
-  /* ------------ NEW: Forgot / Reset password ------------ */
 
   async forgotPassword(dto: ForgotPasswordDto) {
     const user = await this.userRepo.findOne({ where: { email: dto.email } });
@@ -458,8 +456,6 @@ export class AuthService {
     return { message: 'Password reset successfully' };
   }
 
-  // Add these methods to AuthService
-
   async getUserById(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -470,50 +466,6 @@ export class AuthService {
 
     return this.serialize(user);
   }
-
-  // async updateUser(userId: string, dto: any) {
-  //   const user = await this.userRepo.findOne({ where: { id: userId } });
-  //   if (!user) throw new NotFoundException('User not found');
-
-  //   // Update allowed fields
-  //   if (dto.name !== undefined) user.name = dto.name;
-  //   if (dto.email !== undefined) {
-  //     // Check if email is already taken by another user
-  //     const existing = await this.userRepo.findOne({
-  //       where: { email: dto.email, id: Not(userId) },
-  //     });
-  //     if (existing) throw new ConflictException('Email already taken');
-  //     user.email = dto.email;
-  //   }
-  //   if (dto.subscriptionStart !== undefined) user.subscriptionStart = dto.subscriptionStart;
-  //   if (dto.subscriptionEnd !== undefined) user.subscriptionEnd = dto.subscriptionEnd;
-  //   if (dto.phone !== undefined) user.phone = dto.phone;
-  //   if (dto.gender !== undefined) user.gender = dto.gender;
-  //   if (dto.membership !== undefined) user.membership = dto.membership;
-  //   if (dto.defaultRestSeconds !== undefined) user.defaultRestSeconds = dto.defaultRestSeconds;
-
-  //   // Only admins can update role and status
-  //   if (dto.role !== undefined) user.role = dto.role;
-  //   if (dto.status !== undefined) user.status = dto.status;
-
-  //   // Coach assignment
-  //   if (dto.coachId !== undefined) {
-  //     if (dto.coachId === null) {
-  //       user.coach = null;
-  //       user.coachId = null;
-  //     } else {
-  //       const coach = await this.userRepo.findOne({
-  //         where: { id: dto.coachId, role: In([UserRole.COACH, UserRole.ADMIN]) },
-  //       });
-  //       if (!coach) throw new NotFoundException('Coach not found');
-  //       user.coach = coach;
-  //       user.coachId = coach.id;
-  //     }
-  //   }
-
-  //   await this.userRepo.save(user);
-  //   return this.serialize(user);
-  // }
 
   async updateUser(userId: string, dto: any, actor: { id: string; role: UserRole }) {
     const user = await this.userRepo.findOne({ where: { id: userId } });
@@ -608,5 +560,53 @@ export class AuthService {
       email: coach.email,
       role: coach.role,
     }));
+  }
+
+  async getUserProfile(userId: string) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      relations: ['coach', 'activePlan', 'activeMealPlan'],
+      select: ['id', 'name', 'email', 'phone', 'gender', 'membership', 'points', 'defaultRestSeconds', 'subscriptionStart', 'subscriptionEnd', 'lastLogin', 'created_at'],
+    });
+
+    if (!user) throw new NotFoundException('User not found');
+
+    return {
+      ...user,
+      coach: user.coach ? { id: user.coach.id, name: user.coach.name } : null,
+      activePlan: user.activeExercisePlan ? { id: user.activeExercisePlan.id, name: user.activeExercisePlan.name } : null,
+      activeMealPlan: user.activeMealPlan ? { id: user.activeMealPlan.id, name: user.activeMealPlan.name } : null,
+    };
+  }
+
+  async updateUserProfile(userId: string, dto: any) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    // Update allowed fields
+    const allowedFields = ['name', 'phone', 'gender', 'membership', 'defaultRestSeconds'];
+    allowedFields.forEach(field => {
+      if (dto[field] !== undefined) user[field] = dto[field];
+    });
+
+    await this.userRepo.save(user);
+    return this.serialize(user);
+  }
+
+  async changePassword(userId: string, dto: { currentPassword: string; newPassword: string }) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'password'],
+    });
+
+    if (!user) throw new NotFoundException('User not found');
+
+    const isCurrentValid = await bcrypt.compare(dto.currentPassword, user.password);
+    if (!isCurrentValid) throw new BadRequestException('Current password is incorrect');
+
+    user.password = await bcrypt.hash(dto.newPassword, 12);
+    await this.userRepo.save(user);
+
+    return { message: 'Password updated successfully' };
   }
 }

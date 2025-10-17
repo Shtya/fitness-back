@@ -52,6 +52,26 @@ export class AuthController {
     return this.authService.updateProfile(req.user.id, dto);
   }
 
+  @Get('profile/:id')
+  @UseGuards(JwtAuthGuard)
+  async getProfile(@Param('id') id: string) {
+    return this.authService.getUserProfile(id);
+  }
+
+  @Put('profile/:id')
+  @UseGuards(JwtAuthGuard)
+  async updateProfiles(@Param('id') id: string, @Body() dto: UpdateProfileDto) {
+    return this.authService.updateUserProfile(id, dto);
+  }
+
+  @Put('profile/:id/password')
+  @UseGuards(JwtAuthGuard)
+  async changePassword(@Param('id') id: string, @Body() dto: any) {
+    return this.authService.changePassword(id, dto);
+  }
+
+ 
+
   /* ---------------------- Admin-only helpers ---------------------- */
 
   @Get('users')
@@ -122,11 +142,7 @@ export class AuthController {
   @Put('user/:id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  async updateUser(
-    @Param('id') id: string,
-    @Body() dto: any,
-    @Req() req: any,  
-  ) {
+  async updateUser(@Param('id') id: string, @Body() dto: any, @Req() req: any) {
     return this.authService.updateUser(id, dto, req.user);
   }
 
@@ -136,3 +152,4 @@ export class AuthController {
     return this.authService.getCoachesForSelect();
   }
 }
+ 

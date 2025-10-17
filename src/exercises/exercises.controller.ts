@@ -1,4 +1,4 @@
-// src/plan-exercises/plan-exercises.controller.ts
+// src/exercises/exercises.controller.ts
 import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 
@@ -7,7 +7,7 @@ import { RolesGuard } from '../auth/guard/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from 'entities/global.entity';
 import { imageUploadOptions, videoUploadOptions } from './upload.config';
-import { PlanExercisesService } from './exercises.service';
+import { ExercisesService } from './exercises.service';
 import { mixedUploadOptions } from './mixed-upload.config';
 
 function toIntOrUndef(v: any) {
@@ -31,7 +31,6 @@ function parseStringArray(input: unknown): string[] | undefined {
       .filter(Boolean);
   const s = String(input).trim();
   if (!s) return [];
-  // Try JSON array first
   try {
     const parsed = JSON.parse(s);
     if (Array.isArray(parsed))
@@ -40,28 +39,25 @@ function parseStringArray(input: unknown): string[] | undefined {
         .map(x => x.trim())
         .filter(Boolean);
   } catch (_) {
-    /* fall back to CSV */
+    /* CSV fallback */
   }
-  // CSV (split by comma or semicolon)
   return s
     .split(/[;,]/g)
     .map(x => x.trim())
     .filter(Boolean);
 }
 
-@Controller('plan-exercises')
+@Controller('plan-exercises') // keep route for backward compatibility
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
 export class PlanExercisesController {
-  constructor(private readonly svc: PlanExercisesService) {}
+  constructor(private readonly svc: ExercisesService) {}
 
   @Get()
   async list(@Query() q: any) {
-    // now supports /plan-exercises?category=Back or ?category=Back%20/%20Compound
     return this.svc.list(q);
   }
 
-  // ✅ NEW: get all unique categories
   @Get('categories')
   async categories() {
     return this.svc.categories();
@@ -83,15 +79,13 @@ export class PlanExercisesController {
     },
     @UploadedFile() video: any,
   ) {
-    if (!video) {
-      throw new BadRequestException('Video file is required');
-    }
+    if (!video) throw new BadRequestException('Video file is required');
 
     const videoUrl = `/uploads/videos/${video.filename}`;
     const savedVideo = await this.svc.saveExerciseVideo({
       userId: body.userId,
       exerciseName: body.exerciseName,
-      videoUrl: videoUrl,
+      videoUrl,
       workoutDate: body.workoutDate,
       setNumber: body.setNumber,
       weight: body.weight,
@@ -101,7 +95,7 @@ export class PlanExercisesController {
 
     return {
       success: true,
-      videoUrl: videoUrl,
+      videoUrl,
       message: 'Video uploaded successfully for coach review',
       videoId: savedVideo.id,
       exerciseName: body.exerciseName,
@@ -174,7 +168,6 @@ export class PlanExercisesController {
       tempo: body.tempo ?? null,
       img: files?.img?.[0] ? `/uploads/images/${files.img[0].filename}` : (body.img ?? null),
       video: files?.video?.[0] ? `/uploads/videos/${files.video[0].filename}` : (body.video ?? null),
-      altOfId: body.altOfId ? Number(body.altOfId) : undefined,
     };
     return this.svc.create(dto);
   }
@@ -202,7 +195,6 @@ export class PlanExercisesController {
       tempo: body.tempo ?? undefined,
       img: files?.img?.[0] ? `/uploads/images/${files.img[0].filename}` : (body.img ?? undefined),
       video: files?.video?.[0] ? `/uploads/videos/${files.video[0].filename}` : (body.video ?? undefined),
-      altOfId: body.altOfId !== undefined ? (body.altOfId === null || body.altOfId === '' ? null : Number(body.altOfId)) : undefined,
     };
     return this.svc.update(id, patch);
   }

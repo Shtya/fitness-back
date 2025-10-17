@@ -1,3 +1,4 @@
+// src/plans/plans.controller.ts
 import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards, BadRequestException, Req } from '@nestjs/common';
 import { UserRole } from 'entities/global.entity';
 import { AcceptPlanDto, ImportPlanDto, UpdatePlanDto } from './plans.dto';
@@ -28,7 +29,7 @@ export class PlanController {
   }
 
   @Get('active')
-  active(@Query('userId') userId: string ,@Req() req :any ) {
+  active(@Query('userId') _userId: string, @Req() req: any) {
     return this.svc.getActivePlan(req.user.id);
   }
 
@@ -36,10 +37,7 @@ export class PlanController {
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async create(@Body() body: any) {
     const dto = body?.payload ?? body;
-
-    if (!dto?.name || !dto?.program) {
-      throw new BadRequestException('name and program are required');
-    }
+    if (!dto?.name || !dto?.program) throw new BadRequestException('name and program are required');
     return this.svc.createPlanWithContent(dto);
   }
 
@@ -65,11 +63,12 @@ export class PlanController {
     return this.svc.remove(id);
   }
 
+  // simplified assignment (no join table): point users at activeExercisePlanId
   @Post(':id/assign')
   @Roles(UserRole.ADMIN, UserRole.CLIENT)
   async bulkAssign(
     @Param('id') planId: string,
-		@Req() req :any ,
+    @Req() req: any,
     @Body()
     dto: {
       athleteIds: string[];
@@ -81,13 +80,11 @@ export class PlanController {
     },
   ) {
     dto.removeOthers = true;
-    return this.svc.bulkAssign(planId, dto , req.user.id);
+    return this.svc.bulkAssign(planId, dto, req.user.id);
   }
 
   @Get(':id/assignees')
   async assignees(@Param('id') id: string) {
     return this.svc.listAssignees(id);
   }
-
-	
 }
