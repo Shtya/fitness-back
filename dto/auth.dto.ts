@@ -1,4 +1,4 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength, IsEnum, IsInt, Min } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength, IsEnum, IsInt, Min, IsPositive, Max, MaxLength } from 'class-validator';
 import { UserRole } from 'entities/global.entity';
 
 export class RegisterDto {
@@ -26,6 +26,10 @@ export class RefreshDto {
 export class UpdateProfileDto {
   @IsOptional()
   @IsString()
+  id?: string; // optional user ID, fallback to token user
+
+  @IsOptional()
+  @IsString()
   name?: string;
 
   @IsOptional()
@@ -37,6 +41,35 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsString()
   activePlanId?: string | null;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  caloriesTarget?: number; // kcal/day
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  proteinPerDay?: number; // g/day
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  carbsPerDay?: number; // g/day
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  fatsPerDay?: number; // g/day
+
+  @IsOptional()
+  @IsString()
+  activityLevel?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(5000)
+  notes?: string;
 }
 
 export class PagedQueryDto {

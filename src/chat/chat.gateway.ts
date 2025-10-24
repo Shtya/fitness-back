@@ -1,7 +1,7 @@
 // src/chat/chat.gateway.ts
 import { WebSocketGateway, WebSocketServer, SubscribeMessage, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Injectable, UseGuards } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -19,7 +19,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private connectedUsers = new Map<string, string>(); // userId -> socketId
+  private connectedUsers = new Map<string, string>();
 
   constructor(
     private jwtService: JwtService,
@@ -63,6 +63,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Notify others about user online status
       this.server.emit('user_online', { userId: user.id, online: true });
     } catch (error) {
+      console.error('Connection error:', error);
       client.disconnect();
     }
   }
@@ -88,7 +89,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('send_message')
-  async handleMessage(client: Socket, payload: { conversationId: string; content: string; messageType?: string; attachments?: any[]; replyToId?: string; tempId?: string }) {
+  async handleMessage(
+    client: Socket,
+    payload: {
+      conversationId: string;
+      content: string;
+      messageType?: string;
+      attachments?: any[];
+      replyToId?: string;
+      tempId?: string;
+    },
+  ) {
     try {
       const token = client.handshake.auth.token;
       const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
@@ -107,6 +118,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       if (!participant) return;
 
+      // Create and save message
       const message = this.messageRepo.create({
         conversation: { id: payload.conversationId },
         sender: user,
@@ -132,7 +144,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Prepare message for emission
       const messageToEmit = {
         ...messageWithRelations,
-        tempId: payload.tempId, // Include tempId to prevent duplicates
+        tempId: payload.tempId,
         conversation: {
           id: messageWithRelations.conversation.id,
         },
@@ -141,24 +153,76 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Emit to all participants in the conversation
       this.server.to(`conversation_${payload.conversationId}`).emit('new_message', messageToEmit);
 
-      // Notify participants who are not in the conversation
+      // Update conversation list for all participants
       const participants = await this.participantRepo.find({
         where: { conversation: { id: payload.conversationId }, isActive: true },
         relations: ['user'],
       });
 
-      participants.forEach(participant => {
+      // Emit conversation update to all participants
+      participants.forEach(async participant => {
         const userSocketId = this.connectedUsers.get(participant.user.id);
-        if (!userSocketId || userSocketId === client.id) return;
 
-        this.server.to(userSocketId).emit('conversation_updated', {
-          conversationId: payload.conversationId,
-          lastMessage: messageToEmit,
-        });
+        // Get updated conversation with unread count
+        const updatedConvo = await this.getConversationWithUnreadCount(payload.conversationId, participant.user.id);
+
+        if (userSocketId) {
+          this.server.to(userSocketId).emit('conversation_updated', updatedConvo);
+        }
       });
     } catch (error) {
       console.error('Error sending message:', error);
+      // Emit error back to sender
+      client.emit('message_error', {
+        tempId: payload.tempId,
+        error: 'Failed to send message',
+      });
     }
+  }
+
+  private async getConversationWithUnreadCount(conversationId: string, userId: string) {
+    const conversation = await this.conversationRepo.findOne({
+      where: { id: conversationId },
+      relations: ['chatParticipants', 'chatParticipants.user'],
+    });
+
+    if (!conversation) return null;
+
+    // Get last message
+    const lastMessage = await this.messageRepo.findOne({
+      where: { conversation: { id: conversationId } },
+      relations: ['sender'],
+      order: { created_at: 'DESC' },
+    });
+
+    // Calculate unread count
+    const participant = await this.participantRepo.findOne({
+      where: {
+        conversation: { id: conversationId },
+        user: { id: userId },
+      },
+    });
+
+    let unreadCount = 0;
+    if (participant?.lastReadAt) {
+      unreadCount = await this.messageRepo
+        .createQueryBuilder('message')
+        .where('message.conversationId = :conversationId', { conversationId })
+        .andWhere('message.created_at > :lastRead', {
+          lastRead: participant.lastReadAt,
+        })
+        .andWhere('message.senderId != :userId', { userId })
+        .andWhere('message.isDeleted = false')
+        .getCount();
+    } else {
+      unreadCount = await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
+    }
+
+    return {
+      ...conversation,
+      lastMessage,
+      unreadCount,
+    };
   }
 
   @SubscribeMessage('typing_start')
@@ -210,7 +274,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       if (!user) return;
 
+      // Update last read time
       await this.participantRepo.update({ conversation: { id: conversationId }, user: { id: user.id } }, { lastReadAt: new Date() });
+
+      // Mark messages as read
+      await this.messageRepo
+      .createQueryBuilder()
+      .update(ChatMessage)
+      .set({ readBy: () => 'CURRENT_TIMESTAMP' }) // ✅ timestamptz
+      .where('conversationId = :conversationId', { conversationId })
+      .andWhere('senderId != :userId', { userId: user.id })
+      .andWhere('readBy IS NULL') // ✅ مفيش JSON ولا @>
+      .execute();
 
       // Notify others in conversation
       client.to(`conversation_${conversationId}`).emit('messages_read', {
@@ -218,6 +293,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         userId: user.id,
         readAt: new Date(),
       });
+
+      // Update conversation unread count for user
+      const updatedConvo = await this.getConversationWithUnreadCount(conversationId, user.id);
+      client.emit('conversation_updated', updatedConvo);
     } catch (error) {
       console.error('Error marking messages as read:', error);
     }

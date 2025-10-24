@@ -13,59 +13,70 @@ export class PlanController {
   constructor(private readonly svc: PlanService) {}
 
   @Get('overview')
-  async overview(@Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string, @Query('sortBy') sortBy?: string, @Query('sortOrder') sortOrder?: 'ASC' | 'DESC') {
-    return this.svc.listPlansWithStats({
-      page: Number(page) || 1,
-      limit: Math.min(Number(limit) || 12, 100),
-      search: (search || '').trim(),
-      sortBy: (sortBy as any) || 'created_at',
-      sortOrder: sortOrder === 'ASC' ? 'ASC' : 'DESC',
-    });
+  async overview(@Req() req: any, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string, @Query('sortBy') sortBy?: string, @Query('sortOrder') sortOrder?: 'ASC' | 'DESC') {
+    return this.svc.listPlansWithStats(
+      {
+        page: Number(page) || 1,
+        limit: Math.min(Number(limit) || 12, 100),
+        search: (search || '').trim(),
+        sortBy: (sortBy as any) || 'created_at',
+        sortOrder: sortOrder === 'ASC' ? 'ASC' : 'DESC',
+      },
+      { id: req.user.id, role: req.user.role },
+    );
   }
 
+  // IMPORT predefined plan(s) into DB -> associate with this admin
   @Post('import')
-  importPlan(@Body() body: any) {
-    return this.svc.importAndActivate(body);
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  importPlan(@Body() body: any, @Req() req: any) {
+    return this.svc.importAndActivate(body, { id: req.user.id, role: req.user.role });
   }
 
+  // which plan is active for a specific user (unchanged, this is per athlete)
   @Get('active')
-  active(@Query('userId') _userId: string, @Req() req: any) {
+  active(@Req() req: any) {
     return this.svc.getActivePlan(req.user.id);
   }
 
+  // CREATE manual plan
   @Post()
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
-  async create(@Body() body: any) {
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async create(@Body() body: any, @Req() req: any) {
     const dto = body?.payload ?? body;
     if (!dto?.name || !dto?.program) throw new BadRequestException('name and program are required');
-    return this.svc.createPlanWithContent(dto);
+    return this.svc.createPlanWithContent(dto, { id: req.user.id, role: req.user.role });
   }
 
+  // LIST all plans (scoped to vendor visibility)
   @Get()
-  async list(@Query() q: any) {
-    return this.svc.list(q);
+  async list(@Query() q: any, @Req() req: any) {
+    return this.svc.list(q, { id: req.user.id, role: req.user.role });
   }
 
+  // GET one plan deep (must be allowed to see it)
   @Get(':id')
-  async getOne(@Param('id') id: string) {
-    return this.svc.getOneDeep(id);
+  async getOne(@Param('id') id: string, @Req() req: any) {
+    return this.svc.getOneDeep(id, { id: req.user.id, role: req.user.role });
   }
 
+  // UPDATE plan (only owner admin or super admin)
   @Put(':id')
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
-  async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any) {
-    return this.svc.updatePlanAndContent(id, dto);
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any, @Req() req: any) {
+    return this.svc.updatePlanAndContent(id, dto, { id: req.user.id, role: req.user.role });
   }
 
+  // DELETE a plan (only owner admin or super admin)
   @Delete(':id')
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
-  async remove(@Param('id') id: string) {
-    return this.svc.remove(id);
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async remove(@Param('id') id: string, @Req() req: any) {
+    return this.svc.remove(id, { id: req.user.id, role: req.user.role });
   }
 
-  // simplified assignment (no join table): point users at activeExercisePlanId
+  // ASSIGN plan to athletes
   @Post(':id/assign')
-  @Roles(UserRole.ADMIN, UserRole.CLIENT)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async bulkAssign(
     @Param('id') planId: string,
     @Req() req: any,
@@ -80,7 +91,7 @@ export class PlanController {
     },
   ) {
     dto.removeOthers = true;
-    return this.svc.bulkAssign(planId, dto, req.user.id);
+    return this.svc.bulkAssign(planId, dto, { id: req.user.id, role: req.user.role });
   }
 
   @Get(':id/assignees')

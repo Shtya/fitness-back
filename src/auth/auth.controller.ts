@@ -49,7 +49,8 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Put('profile')
   async updateProfile(@Req() req: any, @Body() dto: UpdateProfileDto) {
-    return this.authService.updateProfile(req.user.id, dto);
+    const targetUserId = dto.id || req.user?.id;
+    return this.authService.updateProfile(targetUserId, dto);
   }
 
   @Get('profile/:id')
@@ -70,15 +71,13 @@ export class AuthController {
     return this.authService.changePassword(id, dto);
   }
 
- 
-
   /* ---------------------- Admin-only helpers ---------------------- */
 
   @Get('users')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  async listUsers(@Query() query: any) {
-    return this.authService.listUsersAdvanced(query);
+  async listUsers(@Query() query: any, @Req() req: any) {
+    return this.authService.listUsersAdvanced(query, req.user);
   }
 
   @Delete('user/:id')
@@ -86,6 +85,18 @@ export class AuthController {
   @Roles(UserRole.ADMIN)
   async deleteUser(@Param('id') id: string) {
     return this.authService.deleteUser(id);
+  }
+
+  /* ---------------------- Super Admin utilities ---------------------- */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Get('super-admin/admins')
+  async listAdminsForSuper(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string, // optional filter
+  ) {
+    return this.authService.listAdminsForSuper({ page, limit, search, status });
   }
 
   /* NEW: approve/suspend */
@@ -97,14 +108,12 @@ export class AuthController {
     return this.authService.setStatus(id, status);
   }
 
-  /* ---------------------- Coach / Trainer utilities ---------------------- */
-
   // Admin creates any user (client/coach/trainer) with auto-password, can also assign their coach right away
   @Post('admin/users')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
-  createUserByAdmin(@Body() body: any) {
-    return this.authService.adminCreateUser(body);
+  createUserByAdmin(@Body() body: any, @Req() req: any) {
+    return this.authService.adminCreateUser(body, req?.user.id);
   }
 
   // List coaches (and trainers if you want them to be selectable as “coach”)
@@ -124,12 +133,38 @@ export class AuthController {
     return this.authService.assignCoach(userId, coachId);
   }
 
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Get('admin/:adminId/coaches')
+  async getCoachesByAdmin(@Param('adminId') adminId: string, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
+    return this.authService.getCoachesByAdmin(adminId, { page, limit, search });
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Get('admin/:adminId/clients')
+  async getClientsByAdmin(@Param('adminId') adminId: string, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
+    return this.authService.getClientsByAdmin(adminId, { page, limit, search });
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COACH)
+  @Get('coach/:coachId/clients')
+  async getClientsByCoach(@Param('coachId') coachId: string, @Req() req: any, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
+    // Coaches can only see their own roster; admins can see any coach
+    const actor = req.user as { id: string; role: UserRole };
+    const allow = actor.role === UserRole.ADMIN || (actor.role === UserRole.COACH && actor.id === coachId);
+    if (!allow) throw new BadRequestException('Not allowed');
+
+    return this.authService.getClientsByCoach(coachId, { page, limit, search });
+  }
+
   /* -------- New: Stats -------- */
   @Get('stats')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.COACH)
-  stats() {
-    return this.authService.getStats();
+  stats(@Req() req: any) {
+    return this.authService.getStats(req?.user.id);
   }
 
   @Get('user/:id')
@@ -152,4 +187,3 @@ export class AuthController {
     return this.authService.getCoachesForSelect();
   }
 }
- 

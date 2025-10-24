@@ -23,34 +23,105 @@ export class AuthService {
     public emailService: MailService,
   ) {}
 
+  /* Utility to normalize pagination */
+  private normPaged(q?: { page?: string | number; limit?: string | number }) {
+    const page = Math.max(1, Number(q?.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(q?.limit ?? 20)));
+    const skip = (page - 1) * limit;
+    return { page, limit, skip };
+  }
+
+  private likeable(search?: string) {
+    const s = (search ?? '').trim();
+    return s ? `%${s}%` : null;
+  }
+
+  /** Enforce that the calling admin can only access their own hierarchy */
+  private ensureSameAdminOrThrow(requestingAdminId: string, targetAdminId: string) {
+    if (requestingAdminId !== targetAdminId) {
+      throw new ForbiddenException('You can only access your own hierarchy');
+    }
+  }
+
+  /** Return coaches created/owned by an admin (via adminId) */
+  async getCoachesByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string }) {
+    // Optional: if you want to limit to the caller admin only, uncomment and pass req.user.id to this method.
+    // this.ensureSameAdminOrThrow(requestingAdminId, adminId);
+
+    const { page, limit, skip } = this.normPaged(opts);
+    const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at']).where('u.role = :role', { role: UserRole.COACH }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+
+    const s = this.likeable(opts?.search);
+    if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  /** Return clients owned by an admin (via adminId) */
+  async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string }) {
+    const { page, limit, skip } = this.normPaged(opts);
+    const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+
+    const s = this.likeable(opts?.search);
+    if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+
+    const [items, total] = await qb.getManyAndCount();
+    return {
+      items: items.map(u => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        status: u.status,
+        coach: u.coach ? { id: u.coach.id, name: (u.coach as any).name } : null,
+        created_at: u.created_at,
+      })),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /** Return clients assigned to a coach (via coachId) */
+  async getClientsByCoach(coachId: string, opts?: { page?: string | number; limit?: string | number; search?: string }) {
+    const { page, limit, skip } = this.normPaged(opts);
+    const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.adminId']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.coachId = :coachId', { coachId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+
+    const s = this.likeable(opts?.search);
+    if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
   /* ===================== Core ===================== */
 
-  async getStats() {
-    const [
-      totalUsers,
-      activeUsers,
-      suspendedUsers,
-      admins,
-      coaches,
-      clients,
-      withPlans, // users having a workout/exercise plan
-      withMealPlans, // users having a meal plan
-    ] = await Promise.all([this.userRepo.count(), this.userRepo.count({ where: { status: UserStatus.ACTIVE } }), this.userRepo.count({ where: { status: UserStatus.SUSPENDED } }), this.userRepo.count({ where: { role: UserRole.ADMIN } }), this.userRepo.count({ where: { role: UserRole.COACH } }), this.userRepo.count({ where: { role: UserRole.CLIENT } }), this.userRepo.count({ where: { activeExercisePlanId: Not(IsNull()) } }), this.userRepo.count({ where: { activeMealPlanId: Not(IsNull()) } })]);
+  async getStats(adminId: string) {
+    if (!adminId) {
+      throw new BadRequestException('adminId is required');
+    }
 
-    const withoutPlans = totalUsers - withPlans;
-    const withoutMealPlans = totalUsers - withMealPlans;
+    const whereBase = { adminId };
+
+    const [totalUsers, activeUsers, coaches, clients] = await Promise.all([
+      this.userRepo.count({ where: whereBase }),
+      this.userRepo.count({
+        where: { ...whereBase, status: UserStatus.ACTIVE },
+      }),
+      this.userRepo.count({
+        where: { ...whereBase, role: UserRole.COACH },
+      }),
+      this.userRepo.count({
+        where: { ...whereBase, role: UserRole.CLIENT },
+      }),
+    ]);
 
     return {
       totalUsers,
       activeUsers,
-      suspendedUsers,
-      admins,
       coaches,
       clients,
-      withPlans,
-      withoutPlans,
-      withMealPlans,
-      withoutMealPlans,
     };
   }
 
@@ -68,16 +139,17 @@ export class AuthService {
     };
   }
 
-  async listUsersAdvanced(query: any) {
+  // auth.service.ts
+  async listUsersAdvanced(query: any, actor?: { id: string; role: UserRole }) {
     const page = Number(query.page ?? 1);
     const limit = Math.min(Number(query.limit ?? 10), 100);
     const sortBy = query.sortBy ?? 'created_at';
     const sortOrder: 'ASC' | 'DESC' = (String(query.sortOrder || 'DESC').toUpperCase() as any) === 'ASC' ? 'ASC' : 'DESC';
     const search = (query.search || '').trim();
     const role = (query.role || '').toLowerCase();
-
-    const includePlans = String(query.includePlans || '').toLowerCase() === 'true'; // workout plan
-    const includeMeals = String(query.includeMeals || '').toLowerCase() === 'true'; // meal plan
+    const includePlans = String(query.includePlans || '').toLowerCase() === 'true';
+    const includeMeals = String(query.includeMeals || '').toLowerCase() === 'true';
+    const myOnly = ['1', 'true', true].includes((query.myOnly ?? '').toString().toLowerCase());
 
     const qb = this.userRepo
       .createQueryBuilder('user')
@@ -86,17 +158,57 @@ export class AuthService {
       .skip((page - 1) * limit)
       .take(limit);
 
+    // ====== SCOPING (myOnly) ======
+    if (actor) {
+      if (actor.role === UserRole.ADMIN) {
+        // Always restrict admin to their own hierarchy
+        qb.andWhere('user.adminId = :adminId', { adminId: actor.id });
+
+        // If no explicit role filter, only return client & coach
+        const roleLower = role; // from query
+        if (!roleLower) {
+          qb.andWhere('user.role IN (:...roles)', { roles: [UserRole.CLIENT, UserRole.COACH] });
+        } else {
+          // If role is provided, allow only intersection with {client, coach}
+          if (roleLower === 'client') {
+            qb.andWhere('user.role = :rClient', { rClient: UserRole.CLIENT });
+          } else if (roleLower === 'coach') {
+            qb.andWhere('user.role = :rCoach', { rCoach: UserRole.COACH });
+          } else {
+            // Admin asked for something outside {client, coach} -> no results
+            qb.andWhere('1=0');
+          }
+        }
+      } else if (myOnly) {
+        if (actor.role === UserRole.COACH) {
+          // Coach sees only their clients
+          qb.andWhere('user.role = :clientRole AND user.coachId = :coachId', {
+            clientRole: UserRole.CLIENT,
+            coachId: actor.id,
+          });
+        } else if (actor.role === UserRole.CLIENT) {
+          // Client sees only their coach (0..1)
+          const me = await this.userRepo.findOne({ where: { id: actor.id } });
+          const coachId = me?.coachId ?? '00000000-0000-0000-0000-000000000000';
+          qb.andWhere('user.id = :coachId', { coachId });
+        }
+      }
+    }
+
+    // ====== Search ======
     if (search) {
       qb.andWhere('(user.email ILIKE :q OR user.name ILIKE :q OR user.phone ILIKE :q)', { q: `%${search}%` });
     }
-    const VALID_ROLES = ['admin', 'coach', 'trainer', 'client'] as const;
 
-    if (role) {
-      if (role === 'coach') {
-        // coach filter should include admins too
-        qb.andWhere('user.role IN (:...roles)', { roles: ['coach', 'admin'] });
-      } else if (VALID_ROLES.includes(role as any)) {
-        qb.andWhere('user.role = :role', { role });
+    // ====== Role filter (ONLY for non-admins and when not overridden above) ======
+    if (!actor || actor.role !== UserRole.ADMIN) {
+      const VALID_ROLES = ['admin', 'coach', 'trainer', 'client'] as const;
+      if (role) {
+        if (role === 'coach') {
+          qb.andWhere('user.role IN (:...roles)', { roles: ['coach', 'admin'] });
+        } else if (VALID_ROLES.includes(role as any)) {
+          qb.andWhere('user.role = :role', { role });
+        }
       }
     }
 
@@ -108,7 +220,7 @@ export class AuthService {
     if (planIds.length) {
       const plans = await this.planRepo.find({
         where: { id: In(planIds) },
-        relations: includePlans ? ['days', 'days.exercises'] : [], // full tree only if asked
+        relations: includePlans ? ['days', 'days.exercises'] : [],
       });
       plansById = Object.fromEntries(plans.map(p => [p.id, p]));
     }
@@ -119,23 +231,23 @@ export class AuthService {
     if (mealIds.length) {
       const mps = await this.mealPlanRepo.find({
         where: { id: In(mealIds) },
-        relations: includeMeals ? ['days', 'days.foods'] : [], // full tree only if asked
+        relations: includeMeals ? ['days', 'days.foods'] : [],
       });
       mealPlansById = Object.fromEntries(mps.map(p => [p.id, p]));
     }
 
     return {
       users: users.map(u => {
-        const base = this.serialize(u); // your existing serializer
+        const base = this.serialize(u);
         const out: any = {
           ...base,
           activePlanId: u.activeExercisePlanId ?? null,
           activeMealPlanId: u.activeMealPlanId ?? null,
         };
 
-        // --- attach workout plan (exercise)
+        // workout plan attach
         if (u.activeExercisePlanId && plansById[u.activeExercisePlanId]) {
-          const p:any = plansById[u.activeExercisePlanId];
+          const p: any = plansById[u.activeExercisePlanId];
           out.activePlan = includePlans
             ? {
                 id: p.id,
@@ -143,7 +255,7 @@ export class AuthService {
                 isActive: p.isActive,
                 days: (p.days || []).map(d => ({
                   id: d.id,
-                  day: d.day, // enum DayOfWeek
+                  day: d.day,
                   name: d.name,
                   exercises: (d.exercises || [])
                     .sort((a, b) => a.orderIndex - b.orderIndex)
@@ -164,12 +276,12 @@ export class AuthService {
                     })),
                 })),
               }
-            : { id: p.id, name: p.name, isActive: p.isActive }; // summary
+            : { id: p.id, name: p.name, isActive: p.isActive };
         } else {
           out.activePlan = null;
         }
 
-        // --- attach meal plan
+        // meal plan attach
         if (u.activeMealPlanId && mealPlansById[u.activeMealPlanId]) {
           const mp = mealPlansById[u.activeMealPlanId];
           out.activeMealPlan = includeMeals
@@ -198,7 +310,7 @@ export class AuthService {
                     })),
                 })),
               }
-            : { id: mp.id, name: mp.name, isActive: mp.isActive }; // summary
+            : { id: mp.id, name: mp.name, isActive: mp.isActive };
         } else {
           out.activeMealPlan = null;
         }
@@ -211,9 +323,27 @@ export class AuthService {
     };
   }
 
- 
+  async listAdminsForSuper(query: any) {
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
+    const skip = (page - 1) * limit;
+    const search = (query.search || '').trim();
+    const status = (query.status || '').trim(); // optional: pending/active/suspended
 
-  async adminCreateUser(body: any) {
+    const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at']).where('u.role = :role', { role: UserRole.ADMIN }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+
+    if (search) {
+      qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s: `%${search}%` });
+    }
+    if (status) {
+      qb.andWhere('u.status = :status', { status });
+    }
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  async adminCreateUser(body: any, userId) {
     const { name, email, role, phone, gender, membership, coachId, subscriptionStart, subscriptionEnd } = body || {};
     if (!name || !email) throw new BadRequestException('name and email are required');
 
@@ -243,6 +373,7 @@ export class AuthService {
       lastLogin: null,
       resetPasswordToken: null,
       resetPasswordExpires: null,
+      adminId: userId,
     });
 
     if (coachId) {
@@ -385,19 +516,50 @@ export class AuthService {
   }
 
   async getCurrentUser(userId: string) {
-    const user = await this.userRepo.findOne({ where: { id: userId } });
+    const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['activeExercisePlan', 'activeMealPlan'] });
     if (!user) throw new UnauthorizedException('User not found');
     return this.serialize(user);
   }
 
   // tweak updateProfile if you want to accept gender (and ignore coachId here)
+  // async updateProfile(userId: string, dto: UpdateProfileDto) {
+  //   const user = await this.userRepo.findOne({ where: { id: userId } });
+  //   if (!user) throw new NotFoundException('User not found');
+  //   if (dto.name !== undefined) user.name = dto.name;
+  //   if (dto.defaultRestSeconds !== undefined) user.defaultRestSeconds = dto.defaultRestSeconds;
+  //   if (dto.activePlanId !== undefined) user.activeExercisePlanId = dto.activePlanId;
+  //   if ((dto as any).gender !== undefined) (user as any).gender = (dto as any).gender;
+  //   await this.userRepo.save(user);
+  //   return this.serialize(user);
+  // }
+
   async updateProfile(userId: string, dto: UpdateProfileDto) {
-    const user = await this.userRepo.findOne({ where: { id: userId } });
+    const user: any = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
-    if (dto.name !== undefined) user.name = dto.name;
-    if (dto.defaultRestSeconds !== undefined) user.defaultRestSeconds = dto.defaultRestSeconds;
-    if (dto.activePlanId !== undefined) user.activeExercisePlanId = dto.activePlanId;
-    if ((dto as any).gender !== undefined) (user as any).gender = (dto as any).gender;
+
+    const set = (key: keyof typeof user, v: any) => {
+      if (typeof v !== 'undefined') user[key] = (v === '' ? null : v) as any;
+    };
+
+    set('name', dto.name);
+    set('defaultRestSeconds', dto.defaultRestSeconds);
+    set('activeExercisePlanId', dto.activePlanId);
+    set('gender' as any, (dto as any).gender);
+
+    // nutrition (kcal / g per day)
+    set('caloriesTarget' as any, dto.caloriesTarget ?? null);
+    set('proteinPerDay' as any, dto.proteinPerDay ?? null);
+    set('carbsPerDay' as any, dto.carbsPerDay ?? null);
+    set('fatsPerDay' as any, dto.fatsPerDay ?? null);
+
+    // activity level (normalize to enum or null)
+    if (typeof dto.activityLevel !== 'undefined') {
+      const v = dto.activityLevel;
+      user.activityLevel = v;
+    }
+
+    set('notes' as any, dto.notes ?? null);
+
     await this.userRepo.save(user);
     return this.serialize(user);
   }
@@ -408,7 +570,6 @@ export class AuthService {
       skip,
       take: limit,
       order: { created_at: 'DESC' as any },
-      select: ['id', 'name', 'email', 'role', 'status', 'points', 'defaultRestSeconds', 'activePlanId'] as any,
     });
     return { users, total, page, totalPages: Math.ceil(total / limit) };
   }
@@ -565,8 +726,7 @@ export class AuthService {
   async getUserProfile(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
-      relations: ['coach', 'activePlan', 'activeMealPlan'],
-      select: ['id', 'name', 'email', 'phone', 'gender', 'membership', 'points', 'defaultRestSeconds', 'subscriptionStart', 'subscriptionEnd', 'lastLogin', 'created_at'],
+      relations: ['coach', 'activeExercisePlan', 'activeMealPlan'],
     });
 
     if (!user) throw new NotFoundException('User not found');

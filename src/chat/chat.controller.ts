@@ -113,7 +113,7 @@ export class ChatController {
   @Post('upload/video')
   @UseInterceptors(FileInterceptor('file', chatVideoUploadOptions))
   async uploadVideo(@UploadedFile() file: any) {
-    return {
+     return {
       url: `/uploads/chat/videos/${file.filename}`,
       path: file.path,
       filename: file.filename,

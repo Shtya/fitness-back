@@ -2,13 +2,11 @@
 import { Entity, Column, Index, ManyToOne, OneToMany, Unique, JoinColumn, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, BaseEntity } from 'typeorm';
 import { Asset } from './assets.entity';
 
-/* =========================================================
- * Enums & Shared Types
- * ======================================================= */
 export enum UserRole {
   CLIENT = 'client',
   COACH = 'coach',
   ADMIN = 'admin',
+  SUPER_ADMIN = 'super_admin', // <-- add this
 }
 
 export enum DayOfWeek {
@@ -115,6 +113,9 @@ export class Exercise extends CoreEntity {
 
   @Column({ type: 'varchar', length: 512, nullable: true })
   video?: string | null;
+
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  adminId?: string | null;
 }
 
 @Entity('exercise_plans')
@@ -131,6 +132,10 @@ export class ExercisePlan extends CoreEntity {
 
   @OneToMany(() => ExercisePlanDay, d => d.plan, { cascade: true })
   days!: ExercisePlanDay[];
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  adminId?: string | null;
 }
 
 @Entity('exercise_plan_days')
@@ -239,6 +244,10 @@ export class User extends CoreEntity {
   @Column({ type: 'uuid', nullable: true })
   coachId?: string | null;
 
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  adminId?: string | null;
+
   @OneToMany(() => User, u => u.coach)
   athletes?: User[];
 
@@ -260,12 +269,31 @@ export class User extends CoreEntity {
   defaultRestSeconds!: number;
 
   @Column({ type: 'date', nullable: true })
-  subscriptionStart!: string | null; // YYYY-MM-DD
+  subscriptionStart!: string | null;
 
   @Column({ type: 'date', nullable: true })
-  subscriptionEnd!: string | null; // YYYY-MM-DD
+  subscriptionEnd!: string | null;
 
-  // NEW: active exercise plan linkage (replaces old activePlanId/activePlan->Plan)
+  @Column({ type: 'int', nullable: true })
+  caloriesTarget?: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  proteinPerDay?: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  carbsPerDay?: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  fatsPerDay?: number | null;
+
+  /** Activity level */
+  @Column({ type: 'text', nullable: true })
+  activityLevel?: null;
+
+  /** Free text notes */
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
   @Index()
   @Column({ type: 'uuid', nullable: true })
   activeExercisePlanId!: string | null;

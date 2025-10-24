@@ -1,8 +1,8 @@
 // src/exercises/exercises.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
-import { Exercise, ExerciseVideo } from 'entities/global.entity';
+import { Exercise, ExerciseVideo, UserRole } from 'entities/global.entity';
 
 type PublicExercise = {
   id: string;
@@ -32,6 +32,7 @@ type CreateExerciseInput = {
   tempo?: string | null;
   img?: string | null;
   video?: string | null;
+  userId?: string | null;
 };
 
 type UpdateExerciseInput = Partial<CreateExerciseInput>;
@@ -107,14 +108,55 @@ export class ExercisesService {
     };
   }
 
-  private baseQB(q: any): SelectQueryBuilder<Exercise> {
+  private baseQB(q: any, adminId: string): SelectQueryBuilder<Exercise> {
     const qb = this.repo.createQueryBuilder('e');
-    if (q?.search) qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
+    qb.andWhere('(e."adminId" IS NULL OR e."adminId" = :adminId)', { adminId });
+
+    // if (q?.search) qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
     if (q?.category) qb.andWhere('e.category ILIKE :c', { c: `%${q.category}%` });
+    if (q?.search) {
+      const s = String(q.search).trim();
+      const like = `%${s}%`;
+      const terms = s.split(/\s+/).filter(Boolean);
+
+      // Build a lightweight full text expression (no unaccent)
+      const TS_EXPR = `(
+      setweight(to_tsvector('simple', coalesce(e.name, '')), 'A') ||
+      setweight(to_tsvector('simple', coalesce(e.category, '')), 'B') ||
+      setweight(to_tsvector('simple', coalesce(e.details, '')), 'C') ||
+      setweight(to_tsvector('simple', array_to_string(e."primaryMusclesWorked", ' ')), 'B') ||
+      setweight(to_tsvector('simple', array_to_string(e."secondaryMusclesWorked", ' ')), 'C')
+    )`;
+
+      // Rank by full-text match; fallback to ILIKE across key fields/arrays
+      qb.addSelect(`ts_rank(${TS_EXPR}, websearch_to_tsquery('simple', :q))`, 'rank');
+
+      qb.andWhere(
+        `(
+        ${TS_EXPR} @@ websearch_to_tsquery('simple', :q)
+        OR e.name ILIKE :like
+        OR e.category ILIKE :like
+        OR e.details ILIKE :like
+        OR EXISTS (SELECT 1 FROM unnest(e."primaryMusclesWorked") pm WHERE pm ILIKE :like)
+        OR EXISTS (SELECT 1 FROM unnest(e."secondaryMusclesWorked") sm WHERE sm ILIKE :like)
+      )`,
+        { q: s, like },
+      );
+
+      // Make each term contribute (simple AND-ish behavior)
+      terms.forEach((t, i) => {
+        const k = `t${i}`;
+        qb.andWhere(`(e.name ILIKE :${k} OR e.details ILIKE :${k} OR e.category ILIKE :${k})`, { [k]: `%${t}%` });
+      });
+
+      // Order by relevance first, then recency
+      qb.orderBy('rank', 'DESC').addOrderBy('e.created_at', 'DESC').addOrderBy('e.id', 'DESC');
+    }
+
     return qb;
   }
 
-  async list(q: any) {
+  async list(q: any, userId) {
     const page = Math.max(1, parseInt(q?.page ?? '1', 10));
     const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
     const sortKey = String(q?.sortBy ?? 'created_at');
@@ -126,7 +168,7 @@ export class ExercisesService {
     const sortByExpr = SORTABLE[sortKey] ?? SORTABLE.created_at;
     const sortOrder: 'ASC' | 'DESC' = String(q?.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-    const qb = this.baseQB(q);
+    const qb = this.baseQB(q, userId);
 
     if (q?.category) qb.andWhere('e.category ILIKE :cat', { cat: `%${q.category}%` });
 
@@ -150,8 +192,9 @@ export class ExercisesService {
     return rows.map(r => r.category);
   }
 
-  async stats(_q?: any) {
-    const totals = await this.repo.createQueryBuilder('e').select(['COUNT(*)::int AS total', `SUM(CASE WHEN e.img   IS NOT NULL AND e.img   <> '' THEN 1 ELSE 0 END)::int AS with_image`, `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`, `COALESCE(AVG(e.rest),0)::float AS avg_rest`, `COALESCE(AVG(e."targetSets"),0)::float AS avg_sets`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days'  THEN 1 ELSE 0 END)::int AS created_7d`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`]).getRawOne<{
+  async stats(_q?: any, actor?: { id: string; role: UserRole }) {
+    // --- Global statistics (for all exercises) ---
+    const global = await this.repo.createQueryBuilder('e').select(['COUNT(*)::int AS total', `SUM(CASE WHEN e.img IS NOT NULL AND e.img <> '' THEN 1 ELSE 0 END)::int AS with_image`, `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`, `COALESCE(AVG(e.rest),0)::float AS avg_rest`, `COALESCE(AVG(e."targetSets"),0)::float AS avg_sets`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END)::int AS created_7d`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`]).getRawOne<{
       total: number;
       with_image: number;
       with_video: number;
@@ -161,15 +204,28 @@ export class ExercisesService {
       created_30d: number;
     }>();
 
+    // --- Get global count separately ---
+    const globalCount = global?.total ?? 0;
+
+    // --- Get personal count (only if admin) ---
+    let personalCount: number | null = null;
+    if (actor?.role === UserRole.ADMIN) {
+      const personal = await this.repo.createQueryBuilder('e').where('e."adminId" = :adminId', { adminId: actor.id }).select('COUNT(*)::int', 'count').getRawOne<{ count: number }>();
+      personalCount = personal?.count ?? 0;
+    }
+
+    // --- Return all stats (all metrics global, only counts separated) ---
     return {
+      success: true,
       totals: {
-        total: totals?.total ?? 0,
-        withImage: totals?.with_image ?? 0,
-        withVideo: totals?.with_video ?? 0,
-        avgRest: Math.round(totals?.avg_rest ?? 0),
-        avgTargetSets: Number((totals?.avg_sets ?? 0).toFixed(2)),
-        created7d: totals?.created_7d ?? 0,
-        created30d: totals?.created_30d ?? 0,
+        totalGlobalExercise: globalCount,
+        totalPersonalExercise: actor?.role === UserRole.ADMIN ? personalCount : null,
+        withImage: global?.with_image ?? 0,
+        withVideo: global?.with_video ?? 0,
+        avgRest: Math.round(global?.avg_rest ?? 0),
+        avgTargetSets: Number((global?.avg_sets ?? 0).toFixed(2)),
+        created7d: global?.created_7d ?? 0,
+        created30d: global?.created_30d ?? 0,
       },
     };
   }
@@ -220,8 +276,9 @@ export class ExercisesService {
       tempo: dto.tempo ?? null,
       img: dto.img ?? null,
       video: dto.video ?? null,
+      adminId: dto.userId,
     } as any);
-    const saved:any = await this.repo.save(entity);
+    const saved: any = await this.repo.save(entity);
     return this.toPublic(saved);
   }
 
@@ -245,11 +302,36 @@ export class ExercisesService {
     return this.toPublic(saved);
   }
 
-  async remove(id: string) {
+  async remove(id: string, actor?: { id: string; role: UserRole; lang?: string }) {
     const ex = await this.repo.findOne({ where: { id } });
-    if (!ex) throw new NotFoundException('Exercise not found');
-    await this.repo.remove(ex);
-    return { deleted: true, id };
+    const lang = actor?.lang === 'ar' ? 'ar' : 'en';
+
+    if (!ex) {
+      throw new NotFoundException(lang === 'ar' ? 'التمرين غير موجود' : 'Exercise not found');
+    }
+
+    if (actor?.role === UserRole.SUPER_ADMIN) {
+      await this.repo.remove(ex);
+      return {
+        deleted: true,
+        id,
+        message: lang === 'ar' ? 'تم حذف التمرين بنجاح' : 'Exercise deleted successfully',
+      };
+    }
+
+    if (actor?.role === UserRole.ADMIN) {
+      if (ex.adminId !== actor.id) {
+        throw new ForbiddenException(lang === 'ar' ? 'لا يمكنك حذف التمارين التي لم تنشئها' : 'You can only delete exercises you created.');
+      }
+      await this.repo.remove(ex);
+      return {
+        deleted: true,
+        id,
+        message: lang === 'ar' ? 'تم حذف التمرين بنجاح' : 'Exercise deleted successfully',
+      };
+    }
+
+    throw new ForbiddenException(lang === 'ar' ? 'غير مسموح بحذف التمارين' : 'Not allowed to delete exercises.');
   }
 
   async updateImage(id: string, path: string): Promise<PublicExercise> {

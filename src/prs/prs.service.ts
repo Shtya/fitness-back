@@ -554,6 +554,15 @@ export class PrsService {
     }
   }
 
+  todayCairo(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  }
+
   async getLastWorkoutSets(userId: string, exerciseNames: string[]) {
     if (!userId || !exerciseNames || exerciseNames.length === 0) {
       throw new NotFoundException('User ID and exercises array are required');
@@ -563,47 +572,61 @@ export class PrsService {
     if (!user) {
       throw new NotFoundException('User not found');
     }
-
-    // Get last sets for each exercise
+    const today = this.todayCairo();
     const results = await Promise.all(
       exerciseNames.map(async exerciseName => {
         const exerciseId = this.generateExerciseId(exerciseName);
 
-        // Find the most recent record (closest date to today)
         const lastRecord = await this.exerciseRecordRepo.findOne({
-          where: {
-            userId,
-            exerciseId,
-          },
-          order: { date: 'DESC' }, // This gets the most recent date
+          where: { userId, exerciseId },
+          order: { date: 'DESC' },
         });
-
-        console.log(lastRecord);
 
         if (!lastRecord) {
           return {
+            id: exerciseId,
             exerciseName,
             date: null,
-            records: [], // No previous workout found
+            isToday: false,
+            records: [],
           };
         }
 
-        // Get only the completed sets
-        const completedSets = lastRecord.workoutSets
-          .filter(set => set.done && set.weight > 0 && set.reps > 0)
+        const isToday = lastRecord.date === today;
+
+        const sets = (lastRecord.workoutSets ?? [])
+          .slice()
           .sort((a, b) => a.setNumber - b.setNumber)
           .map(set => ({
             weight: set.weight,
             reps: set.reps,
-            done: true, // Since we filtered for done sets
             setNumber: set.setNumber,
+            done: isToday ? !!set.done : false,
           }));
 
         return {
+          id: exerciseId,
           exerciseName,
-          date: lastRecord.date, // Include the date
-          records: completedSets,
+          date: lastRecord.date,
+          isToday,
+          records: sets,
         };
+
+        // const completedSets = lastRecord.workoutSets
+        //   .sort((a, b) => a.setNumber - b.setNumber)
+        //   .map(set => ({
+        //     weight: set.weight,
+        //     reps: set.reps,
+        //     done: true, // Since we filtered for done sets
+        //     setNumber: set.setNumber,
+        //   }));
+
+        // return {
+        //   id: exerciseId,
+        //   exerciseName,
+        //   date: lastRecord.date, // Include the date
+        //   records: completedSets,
+        // };
       }),
     );
 

@@ -13,25 +13,25 @@ async function bootstrap() {
 
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
   app.useStaticAssets(join(__dirname, '..', '..', '/uploads'), { prefix: '/uploads/' });
-
-	app.enableCors({
-		origin: (origin, callback) => {
-			const allowedOrigins = [
-				'http://localhost:3000',
-				'https://fitness-front-iin2.vercel.app', 
-			];
-			if (!origin || allowedOrigins.includes(origin)) {
-				callback(null, true);
-			} else {
-				callback(new Error('CORS not allowed for this origin'), false);
-			}
-		},
-		credentials: true,
-		methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-		allowedHeaders: ['Content-Type', 'Authorization', 'x-lang'],
-		exposedHeaders: ['Content-Length', 'Content-Range'],
-	});
-
+  app.enableCors();
+  // app.enableCors({
+  // 	origin: (origin, callback) => {
+  // 		const allowedOrigins = [
+  // 			'http://localhost:3000',
+  // 			'https://fitness-front-iin2.vercel.app',
+  // 			'https://fitdashboard.vercel.app',
+  // 		];
+  // 		if (!origin || allowedOrigins.includes(origin)) {
+  // 			callback(null, true);
+  // 		} else {
+  // 			callback(new Error('CORS not allowed for this origin'), false);
+  // 		}
+  // 	},
+  // 	credentials: true,
+  // 	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // 	allowedHeaders: ['Content-Type', 'Authorization', 'x-lang'],
+  // 	exposedHeaders: ['Content-Length', 'Content-Range'],
+  // });
 
   // app.enableCors({
   //   origin: '*',

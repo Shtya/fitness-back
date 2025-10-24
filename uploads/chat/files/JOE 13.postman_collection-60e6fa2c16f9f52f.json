@@ -1,0 +1,3934 @@
+{
+	"info": {
+		"_postman_id": "ec9275de-be12-4aa9-b69b-21691d6a7211",
+		"name": "JOE 13",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "23301799"
+	},
+	"item": [
+		{
+			"name": "Deprecated",
+			"item": [
+				{
+					"name": "Sections",
+					"item": [
+						{
+							"name": "GET",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/sections",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "GET BY SLUG",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/sections/by-slug/contact",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"by-slug",
+										"contact"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "GET ONE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/sections/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"1"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "POST",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"section_name\": {\r\n    \"en\": \"About Us\",\r\n    \"ar\": \"من نحن\"\r\n  },\r\n  \"title\": {\r\n    \"en\": \"Welcome to Our Platform\",\r\n    \"ar\": \"مرحبًا بكم في منصتنا\"\r\n  },\r\n  \"content\": {\r\n    \"en\": \"We are committed to excellence in digital services.\",\r\n    \"ar\": \"نحن ملتزمون بالتميز في الخدمات الرقمية.\"\r\n  },\r\n  \"image_url\": \"placekitten.com/200/300\",\r\n  \"image_alt\": \"About Us Image\",\r\n  \"slug\": \"about-us\",\r\n  \"is_active\": true\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/sections",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "UPDATE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "PATCH",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "  {\r\n    \"section_name\": {\r\n      \"en\": \"update About Us\",\r\n      \"ar\": \"update من نحن\"\r\n    },\r\n    \"title\": {\r\n      \"en\": \"update Welcome to Our Platform\",\r\n      \"ar\": \"update مرحبًا بكم في منصتنا\"\r\n    },\r\n    \"content\": {\r\n      \"en\": \"update We are committed to excellence in digital services.\",\r\n      \"ar\": \"update نحن ملتزمون بالتميز في الخدمات الرقمية.\"\r\n    },\r\n    \"image_url\": \"update https://placekitten.com/200/300\",\r\n    \"image_alt\": \"update About Us Image\",\r\n    \"meta_title\": {\r\n      \"en\": \"update About Us - Excellence\",\r\n      \"ar\": \"update من نحن - التميز\"\r\n    },\r\n    \"meta_description\": {\r\n      \"en\": \"update Learn about our mission and values.\",\r\n      \"ar\": \"update تعرف على مهمتنا وقيمنا.\"\r\n    },\r\n    \"meta_keywords\": [\"about\", \"platform\", \"digital\", \"team\"],\r\n    \"slug\": \"update about-us\",\r\n    \"is_active\": true\r\n  }",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/sections/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"1"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "Delete",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "DELETE",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/sections/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"1"
+									]
+								}
+							},
+							"response": []
+						}
+					]
+				},
+				{
+					"name": "Pages Meta",
+					"item": [
+						{
+							"name": "GET",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/page-meta",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"page-meta"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "GET BY SLUG",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/page-meta/by-slug/contact",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"page-meta",
+										"by-slug",
+										"contact"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "GET ONE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/sections/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"1"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "POST",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"slug\": \"home2\",\r\n  \"title\": {\r\n    \"en\": \"Welcome to Our Website\",\r\n    \"ar\": \"مرحبًا بكم في موقعنا\"\r\n  },\r\n  \"description\": {\r\n    \"en\": \"This is the home page of our amazing website.\",\r\n    \"ar\": \"هذه هي الصفحة الرئيسية لموقعنا الرائع.\"\r\n  },\r\n  \"keywords\": [\"home\", \"landing\", \"website\", \"meta\"],\r\n  \"custom_head_script\": \"<style>body { background-color: #f0f0f0; }</style>\",\r\n  \"custom_body_script\": \"<script>console.log('Welcome to the homepage');</script>\",\r\n  \"og_tags\": {\r\n    \"title\": \"Home - MySite\",\r\n    \"description\": \"The homepage of MySite\",\r\n    \"image\": \"https://example.com/images/og-home.jpg\",\r\n    \"url\": \"https://example.com/home\",\r\n    \"type\": \"website\"\r\n  }\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/page-meta",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"page-meta"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "UPDATE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "PATCH",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"title\": {\r\n    \"en\": \"Welcome to Our Website\",\r\n    \"ar\": \"مرحبًا بكم في موقعنا\"\r\n  },\r\n  \"description\": {\r\n    \"en\": \"This is the home page of our amazing website.\",\r\n    \"ar\": \"هذه هي الصفحة الرئيسية لموقعنا الرائع.\"\r\n  },\r\n  \"keywords\": [\"home\", \"landing\", \"website\", \"meta\"],\r\n  \"custom_head_script\": \"<style>body { background-color: #f0f0f0; }</style>\",\r\n  \"custom_body_script\": \"<script>console.log('Welcome to the homepage');</script>\",\r\n  \"og_tags\": {\r\n    \"title\": \"Home - MySite\",\r\n    \"description\": \"The homepage of MySite\",\r\n    \"image\": \"https://example.com/images/og-home.jpg\",\r\n    \"url\": \"https://example.com/home\",\r\n    \"type\": \"website\"\r\n  }\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/page-meta/3",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"page-meta",
+										"3"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "Delete",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "DELETE",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/sections/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"sections",
+										"1"
+									]
+								}
+							},
+							"response": []
+						}
+					]
+				},
+				{
+					"name": "Partners",
+					"item": [
+						{
+							"name": "GET",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/partners",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"partners"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "GET ONE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{url}}/api/v1/partners/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"partners",
+										"1"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "POST",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "formdata",
+									"formdata": [
+										{
+											"key": "website_url",
+											"value": "logo_alt",
+											"type": "text"
+										},
+										{
+											"key": "name[ar]",
+											"value": "logo_alt",
+											"type": "text"
+										},
+										{
+											"key": "name[en]",
+											"value": "logo_alt",
+											"type": "text"
+										},
+										{
+											"key": "logo_alt",
+											"value": "logo_alt",
+											"type": "text"
+										},
+										{
+											"key": "file",
+											"type": "file",
+											"src": "/C:/Users/abdul/Downloads/Frame.png"
+										}
+									]
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/partners",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"partners"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "UPDATE",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "PATCH",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"name\": {\r\n    \"en\": \"Tech Vision\",\r\n    \"ar\": \"رؤية التقنية\"\r\n  },\r\n  \"logo_url\": \"/uploads/tech-vision-logo.png\",\r\n  \"logo_alt\": \"Tech Vision Logo\",\r\n  \"website_url\": \"https://techvision.com\"\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/partners/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"partners",
+										"1"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "Delete",
+							"request": {
+								"auth": {
+									"type": "bearer",
+									"bearer": [
+										{
+											"key": "token",
+											"value": "{{access-token}}",
+											"type": "string"
+										}
+									]
+								},
+								"method": "DELETE",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{url}}/api/v1/partners/1",
+									"host": [
+										"{{url}}"
+									],
+									"path": [
+										"api",
+										"v1",
+										"partners",
+										"1"
+									]
+								}
+							},
+							"response": []
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Sign up",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": ";lkasdjf;laksdjf",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"username\": \"John Doe\",\r\n  \"email\": \"joe13@gmail.com\",\r\n  \"password\": \"joe13@gmail.com\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/auth/register",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"register"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Sign in",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"let jsonData = pm.response.json();\r",
+									"pm.environment.set(\"access-token\", jsonData.access_token);\r",
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": ";lkasdjf;laksdjf",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"email\": \"joe13@gmail.com\",\r\n  \"password\": \"joe13@gmail.com\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/auth/login",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"login"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "User",
+			"item": [
+				{
+					"name": "All Users",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/auth",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"username\": \"newu323\",\r\n  \"email\": \"newemail21@example.com\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/auth/profile/update",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"profile",
+								"update"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Forget Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"let jsonData = pm.response.json();\r",
+									"pm.environment.set(\"access-token\", jsonData.access_token);\r",
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": ";lkasdjf;laksdjf",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"email\": \"user@example.com\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/auth/forgot-password",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"forgot-password"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Reset Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"let jsonData = pm.response.json();\r",
+									"pm.environment.set(\"access-token\", jsonData.access_token);\r",
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": ";lkasdjf;laksdjf",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"token\": \"<reset_token>\",\r\n  \"password\": \"newpassword123\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/auth/reset-password",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"reset-password"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Careers",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/careers",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"careers"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/careers/2",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"careers",
+								"2"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"title\": {\r\n        \"en\": \"Software Engineer\",\r\n        \"ar\": \"مهندس برمجيات\"\r\n    },\r\n    \"slug\" : \"software-engineer\",\r\n    \"description\": {\r\n        \"en\": \"Responsible for developing and maintaining software applications.\",\r\n        \"ar\": \"مسؤول عن تطوير وصيانة تطبيقات البرمجيات.\"\r\n    },\r\n    \"requirments\": {\r\n        \"en\": \"Bachelor's degree in Computer Science or related field, 3+ years of experience.\",\r\n        \"ar\": \"درجة بكالوريوس في علوم الكمبيوتر أو مجال ذي صلة، 3+ سنوات من الخبرة.\"\r\n    },\r\n    \"benefits\": {\r\n        \"en\": \"Health insurance, Paid vacation, Remote work option.\",\r\n        \"ar\": \"تأمين صحي، إجازة مدفوعة، خيار العمل عن بُعد.\"\r\n    },\r\n    \"image_url\": \"placekitten.com/400/300\",\r\n    \"image_alt\": \"Software Engineer\",\r\n    \"meta_title\": {\r\n        \"en\": \"Software Engineer Job Opening\",\r\n        \"ar\": \"فرصة عمل مهندس برمجيات\"\r\n    },\r\n    \"meta_description\": {\r\n        \"en\": \"Apply for the Software Engineer role at our company.\",\r\n        \"ar\": \"قدم لوظيفة مهندس برمجيات في شركتنا.\"\r\n    },\r\n    \"meta_keywords\": {\r\n        \"en\": \"software, engineer, developer, coding, remote\",\r\n        \"ar\": \"برمجيات، مهندس، مطور، ترميز، عن بُعد\"\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/careers",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"careers"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": " {\r\n    \"title\": {\r\n        \"en\": \"Software Engineer update\",\r\n        \"ar\": \"مهندس برمجيات\"\r\n    },\r\n    \"description\": {\r\n        \"en\": \"Responsible for developing and maintaining software applications. update\",\r\n        \"ar\": \"مسؤول عن تطوير وصيانة تطبيقات البرمجيات.\"\r\n    },\r\n    \"requirments\": {\r\n        \"en\": \"Bachelor's degree in Computer Science or related field, 3+ years of experience. update\",\r\n        \"ar\": \"درجة بكالوريوس في علوم الكمبيوتر أو مجال ذي صلة، 3+ سنوات من الخبرة.\"\r\n    },\r\n    \"benefits\": {\r\n        \"en\": \"Health insurance, Paid vacation, Remote work option. update\",\r\n        \"ar\": \"تأمين صحي، إجازة مدفوعة، خيار العمل عن بُعد.\"\r\n    },\r\n    \"image_url\": \"placekitten.com/400/300 update\",\r\n    \"image_alt\": \"Software Engineer update\",\r\n    \"meta_title\": {\r\n        \"en\": \"Software Engineer Job Opening update\",\r\n        \"ar\": \"فرصة عمل مهندس برمجيات\"\r\n    },\r\n    \"meta_description\": {\r\n        \"en\": \"Apply for the Software Engineer role at our company. update\",\r\n        \"ar\": \"قدم لوظيفة مهندس برمجيات في شركتنا.\"\r\n    },\r\n    \"meta_keywords\": {\r\n        \"en\": \"software, engineer, developer, coding, remote update\",\r\n        \"ar\": \"برمجيات، مهندس، مطور، ترميز، عن بُعد\"\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/careers/8",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"careers",
+								"8"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/careers/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"careers",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Departments",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/departments",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"departments"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/departments/2",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"departments",
+								"2"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "name[en]",
+									"value": "name",
+									"type": "text"
+								},
+								{
+									"key": "name[ar]",
+									"value": "name",
+									"type": "text"
+								},
+								{
+									"key": "description[en]",
+									"value": "desc",
+									"type": "text"
+								},
+								{
+									"key": "description[ar]",
+									"value": "desc",
+									"type": "text"
+								},
+								{
+									"key": "file",
+									"type": "file",
+									"src": "/D:/icons/6422200.png"
+								},
+								{
+									"key": "image_alt",
+									"value": "alt text",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/departments",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"departments"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": {\r\n    \"en\": \"update Marketing\",\r\n    \"ar\": \"update التسويق\"\r\n  },\r\n  \"description\": {\r\n    \"en\": \"update Responsible for promoting products and engaging customers.\",\r\n    \"ar\": \"update مسؤول عن ترويج المنتجات والتفاعل مع العملاء.\"\r\n  },\r\n  \"image_url\": \"update example.com/images/marketing.jpg\",\r\n  \"image_alt\": \"update Marketing department\"\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/departments/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"departments",
+								"1"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/departments/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"departments",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Projects",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/projects",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/projects/62",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"62"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET BY SLUG",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/projects/slug/elite-skills-sport-academy2",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"slug",
+								"elite-skills-sport-academy2"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "alt[0]",
+									"value": " Office Front View",
+									"type": "text"
+								},
+								{
+									"key": "alt[1]",
+									"value": " Office Side View",
+									"type": "text"
+								},
+								{
+									"key": "name[en]",
+									"value": " Office Tower",
+									"type": "text"
+								},
+								{
+									"key": "name[ar]",
+									"value": " برج إداري",
+									"type": "text"
+								},
+								{
+									"key": "description[en]",
+									"value": " A modern office tower.",
+									"type": "text"
+								},
+								{
+									"key": "description[ar]",
+									"value": " برج إداري حديث.",
+									"type": "text"
+								},
+								{
+									"key": "meta_title[en]",
+									"value": " Modern Office in Riyadh",
+									"type": "text"
+								},
+								{
+									"key": "meta_description",
+									"value": " Spacious, elegant offices.",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[0]",
+									"value": " office, tower, riyadh",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[1]",
+									"value": " مكتب, برج, الرياض",
+									"type": "text"
+								},
+								{
+									"key": "department_id",
+									"value": "2",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/test-assets/landing.jpg"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/test-assets/landing.jpg"
+								},
+								{
+									"key": "slug",
+									"value": "product-4",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/projects",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "alt[0]",
+									"value": " Office Front View",
+									"type": "text"
+								},
+								{
+									"key": "alt[1]",
+									"value": " Office Side View",
+									"type": "text"
+								},
+								{
+									"key": "name[en]",
+									"value": " Office Tower",
+									"type": "text"
+								},
+								{
+									"key": "name[ar]",
+									"value": " برج إداري",
+									"type": "text"
+								},
+								{
+									"key": "description[en]",
+									"value": " A modern office tower.",
+									"type": "text"
+								},
+								{
+									"key": "description[ar]",
+									"value": " برج إداري حديث.",
+									"type": "text"
+								},
+								{
+									"key": "meta_title[en]",
+									"value": " Modern Office in Riyadh",
+									"type": "text"
+								},
+								{
+									"key": "meta_description",
+									"value": " Spacious, elegant offices.",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[0]",
+									"value": " office, tower, riyadh",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[1]",
+									"value": " مكتب, برج, الرياض",
+									"type": "text"
+								},
+								{
+									"key": "department_id",
+									"value": "2",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/icons/6422215.png"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/icons/6424087.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/projects/60",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"60"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/projects/11",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"11"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "ADD IMG TO PROJECT",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "alt[0]",
+									"value": " Office Front View 3",
+									"type": "text"
+								},
+								{
+									"key": "alt[1]",
+									"value": " Office Side View 4",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/ENV/JOE13/Venuat Website/public/venues/13.png"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/ENV/JOE13/Venuat Website/public/venues/12.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/projects/6/images",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"6",
+								"images"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "DEL IMG  FROM PROJECT",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"imageId\": 5\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/projects/6/images",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"projects",
+								"6",
+								"images"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Blogs",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/blogs?search=Qa",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs"
+							],
+							"query": [
+								{
+									"key": "sortBy",
+									"value": "created_at",
+									"disabled": true
+								},
+								{
+									"key": "sortOrder",
+									"value": "DESC",
+									"disabled": true
+								},
+								{
+									"key": "search",
+									"value": "Qa"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/blogs/21",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs",
+								"21"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET BY SLUG",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/blogs/slug/marketing-department",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs",
+								"slug",
+								"marketing-department"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "slug",
+									"value": "nour-eldien-3",
+									"type": "text"
+								},
+								{
+									"key": "title[en]",
+									"value": "Understanding PostgreSQL JSONB",
+									"type": "text"
+								},
+								{
+									"key": "title[ar]",
+									"value": "فهم PostgreSQL JSONB",
+									"type": "text"
+								},
+								{
+									"key": "content[en]",
+									"value": "<p>PostgreSQL's JSONB data type allows efficient storage and querying of JSON data, making it ideal for flexible schemas.</p><p>Learn how to use JSONB in your projects effectively.</p>",
+									"type": "text"
+								},
+								{
+									"key": "content[ar]",
+									"value": "<p>يتيح نوع البيانات JSONB في PostgreSQL تخزين واستعلام فعال لبيانات JSON، مما يجعله مثاليًا للهياكل المرنة.</p><p>تعرف على كيفية استخدام JSONB في مشاريعك بفعالية.</p>",
+									"type": "text"
+								},
+								{
+									"key": "meta_title",
+									"value": "PostgreSQL JSONB Explained",
+									"type": "text"
+								},
+								{
+									"key": "meta_description",
+									"value": "A deep dive into PostgreSQL JSONB and its benefits.",
+									"type": "text"
+								},
+								{
+									"key": "author",
+									"value": "Ahmed Al-Farsi",
+									"type": "text"
+								},
+								{
+									"key": "status",
+									"value": "published",
+									"type": "text"
+								},
+								{
+									"key": "published_at",
+									"value": "2025-05-15T09:00:00Z",
+									"type": "text"
+								},
+								{
+									"key": "tags[0]",
+									"value": "postgresql",
+									"type": "text"
+								},
+								{
+									"key": "tags[1]",
+									"value": "jsonb",
+									"type": "text"
+								},
+								{
+									"key": "tags[2]",
+									"value": "database",
+									"type": "text"
+								},
+								{
+									"key": "views_count",
+									"value": "1200",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[0]",
+									"value": "postgresql",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[1]",
+									"value": "jsonb",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[2]",
+									"value": "database",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[3]",
+									"value": "performance",
+									"type": "text"
+								},
+								{
+									"key": "departmentId",
+									"value": "1",
+									"type": "text"
+								},
+								{
+									"key": "image_alt",
+									"value": "PostgreSQL JSONB visualization",
+									"type": "text"
+								},
+								{
+									"key": "file",
+									"type": "file",
+									"src": "/D:/icons/6422210.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/blogs",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "  {\r\n    \"image_url\": \"/upload/1-5dfb3410ad3db834b4341713efad0f4100.png update \",\r\n    \"image_alt\": \"AI Future Image update \",\r\n    \"type_blog\": \"Technology update \",\r\n    \"slug\" : \"slug update\",\r\n    \"title\": {\r\n        \"en\": \"The Future of AI update \",\r\n        \"ar\": \"مستقبل الذكاء الاصطناعي\"\r\n    },\r\n    \"content\": {\r\n        \"en\": \"Artificial Intelligence is growing rapidly... update \",\r\n        \"ar\": \"الذكاء الاصطناعي ينمو بسرعة...\"\r\n    },\r\n    \"meta_title\": {\r\n        \"en\": \"Future of AI update \",\r\n        \"ar\": \"مستقبل الذكاء الاصطناعي\"\r\n    },\r\n    \"meta_description\": {\r\n        \"en\": \"Learn about the upcoming trends in AI. update \",\r\n        \"ar\": \"تعرف على الاتجاهات المستقبلية في الذكاء الاصطناعي.\"\r\n    },\r\n    \"meta_keywords\": {\r\n        \"en\": \"AI technology future update \",\r\n        \"ar\": \"الذكاء الاصطناعي تكنولوجيا المستقبل\"\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/blogs/23",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs",
+								"23"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/blogs/24",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"blogs",
+								"24"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Services",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/services",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/services/2",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services",
+								"2"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET BY SLUG",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/services/slug/manpower-hr-solutions",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services",
+								"slug",
+								"manpower-hr-solutions"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"slug\": \"home-page-7\",\r\n    \"title\": {\r\n        \"en\": \"home-page\",\r\n        \"ar\": \"home-page\"\r\n    },\r\n    \"subTitle\": {\r\n        \"en\": \"home-page\",\r\n        \"ar\": \"home-page\"\r\n    },\r\n    \"image\": {\r\n        \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n        \"alt\": \"54545\"\r\n    },\r\n    \"meta\": {\r\n        \"title\": \"home-page\",\r\n        \"description\": \"home-pagehome-page\",\r\n        \"keywords\": [\r\n            \"home-page\",\r\n            \"home-page1\"\r\n        ],\r\n        \"canonicalUrl\": \"http://localhost:3000/en/services/create\",\r\n        \"ogTitle\": \"home-page\",\r\n        \"ogDescription\": \"Custom HR solutions for Saudi businesses\",\r\n        \"ogImage\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n        \"ogUrl\": \"home-page\",\r\n        \"ogImageAlt\": \"54545\",\r\n        \"ogType\": \"home-page\",\r\n        \"structuredData\": {\r\n            \"home-page\": [\r\n                \"home-page\",\r\n                \"home-page1\"\r\n            ]\r\n        },\r\n        \"headScript\": \"home-page\",\r\n        \"bodyScript\": \"home-page\"\r\n    },\r\n    \"hero\": {\r\n        \"serviceName\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"images\": [\r\n            \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\"\r\n        ],\r\n        \"attr\": [\r\n            {\r\n                \"key\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"value\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                }\r\n            }\r\n        ]\r\n    },\r\n    \"partners\": [\r\n        {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    ],\r\n    \"benefits\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"feature\": [\r\n            {\r\n                \"en\": \"home-page\",\r\n                \"ar\": \"home-page\"\r\n            }\r\n        ],\r\n        \"image\": {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    },\r\n    \"impact\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"statics\": [\r\n            {\r\n                \"name\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"count\": \"44\",\r\n                \"desc\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                }\r\n            }\r\n        ]\r\n    },\r\n    \"faqs\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"list\": [\r\n            {\r\n                \"question\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"answer\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                }\r\n            }\r\n        ]\r\n    },\r\n    \"call\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"content\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"image\": {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/services",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"slug\": \"home-page\",\r\n    \"title\": {\r\n        \"en\": \"home-page\",\r\n        \"ar\": \"home-page\"\r\n    },\r\n    \"subTitle\": {\r\n        \"en\": \"home-page\",\r\n        \"ar\": \"home-page\"\r\n    },\r\n    \"image\": {\r\n        \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n        \"alt\": \"54545\"\r\n    },\r\n    \"meta\": {\r\n        \"title\": \"home-page\",\r\n        \"description\": \"home-pagehome-page\",\r\n        \"keywords\": [\r\n            \"home-page\",\r\n            \"home-page1\"\r\n        \r\n        ],\r\n        \"canonicalUrl\": \"http://localhost:3000/en/services/create\",\r\n        \"ogTitle\": \"home-page\",\r\n        \"ogDescription\": \"Custom HR solutions for Saudi businesses\",\r\n        \"ogImage\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n        \"ogUrl\": \"home-page\",\r\n        \"ogImageAlt\": \"54545\",\r\n        \"ogType\": \"home-page\",\r\n        \"structuredData\":{\"structuredData\": {\"home-page\": [\"home-page\", \"home-page1\"]}},\r\n        \"headScript\": \"home-page\",\r\n        \"bodyScript\": \"home-page\"\r\n    },\r\n    \"hero\": {\r\n        \"serviceName\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"images\": [\r\n            \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\"\r\n        ],\r\n        \"attr\": [\r\n            {\r\n                \"key\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"value\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\":   \"home-page\"\r\n                }\r\n            }\r\n           \r\n        ]\r\n    },\r\n    \"partners\": [\r\n        {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    ],\r\n    \"benefits\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"feature\": [\r\n            {\r\n                \"en\": \"home-page\",\r\n                \"ar\": \"home-page\"\r\n            }\r\n        ],\r\n        \"image\": {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    },\r\n    \"impact\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"statics\": [\r\n            {\r\n                \"name\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"count\": \"44\",\r\n                \"desc\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                }\r\n            }\r\n        ]\r\n    },\r\n    \"faqs\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"list\": [\r\n            {\r\n                \"question\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                },\r\n                \"answer\": {\r\n                    \"en\": \"home-page\",\r\n                    \"ar\": \"home-page\"\r\n                }\r\n            }\r\n        ]\r\n    },\r\n    \"call\": {\r\n        \"title\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"subTitle\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"content\": {\r\n            \"en\": \"home-page\",\r\n            \"ar\": \"home-page\"\r\n        },\r\n        \"image\": {\r\n            \"url\": \"/uploads/54545-5d2c0918922a0d3d61010a3e693e4d79bb.png\",\r\n            \"alt\": \"54545\"\r\n        }\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/services/12",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services",
+								"12"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/services/13",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"services",
+								"13"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Pages",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/pages",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET BY SLUG",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/pages/home-page",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"home-page"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \r\n    \"slug\": \"department\",\r\n    \"title\": \"department\",\r\n    \"meta\": {\r\n        \"ogUrl\": \"https://yourdomain.com/home-page\",\r\n        \"title\": \"Joe13 - 360° Business Solutions with 11+ Years of Impact\",\r\n        \"ogType\": \"website\",\r\n        \"ogImage\": {\r\n            \"alt\": \"Joe13 Logo\",\r\n            \"url\": \"/uploads/joe-13/logo.png\"\r\n        },\r\n        \"ogTitle\": \"Joe13 - Your Partner in Growth Across Marketing, Tech, HR & Events\",\r\n        \"keywords\": [\r\n            \"Joe13\",\r\n            \"Marketing Solutions\",\r\n            \"Digital Marketing\",\r\n            \"HR Solutions\",\r\n            \"Software and AI\",\r\n            \"Event Management\",\r\n            \"Telecom Services\",\r\n            \"Business Consulting\",\r\n            \"Brand Activation\",\r\n            \"ERP Solutions\",\r\n            \"Web Development\",\r\n            \"Promoters Management\"\r\n        ],\r\n        \"bodyScript\": \"<script>console.log('Body script loaded');</script>\",\r\n        \"headScript\": \"<script>console.log('Head script loaded');</script>\",\r\n        \"description\": \"Explore Joe13, a comprehensive solutions company offering marketing, software, telecom, HR, and event services. Over 180 successful projects, 100+ clients, and 70 skilled team members across 47 cities.\",\r\n        \"canonicalUrl\": \"https://yourdomain.com/home-page\",\r\n        \"ogDescription\": \"Discover Joe13’s 360° business solutions trusted by 100+ clients in 47 cities. From digital marketing to AI software, HR outsourcing, and more.\",\r\n        \"structuredData\": {\r\n            \"url\": \"https://yourdomain.com/home-page\",\r\n            \"name\": \"Joe13\",\r\n            \"@type\": \"Organization\",\r\n            \"@context\": \"https://schema.org\"\r\n        }\r\n    },\r\n    \"sections\": [\r\n        {\r\n            \"id\": \"sec1\",\r\n            \"list\": [],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/logo.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"شركة حلول شاملة بخبرة تزيد عن 11 عامًا في السوق\",\r\n                \"en\": \"360 solutions company with +11 years of experience in the market\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"\",\r\n                \"en\": \"\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 1,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec2\",\r\n            \"list\": [],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section2.jpeg\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"نجاحنا بالأرقام، نُحدث تأثيرًا عبر مختلف الصناعات\",\r\n                \"en\": \"Our Success in Numbers, Driving Impact Across Industries\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"\",\r\n                \"en\": \"\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 2,\r\n            \"objectData\": {\r\n                \"ar\": {\r\n                    \"المدن\": \"٤٧\",\r\n                    \"النمو\": \"٣١٪\",\r\n                    \"العملاء\": \"١٠٠\",\r\n                    \"أعضاء الفريق\": \"٧٠\",\r\n                    \"المشاريع الناجحة\": \"١٨٠\"\r\n                },\r\n                \"en\": {\r\n                    \"Cities\": \"47\",\r\n                    \"Growth\": \"31%\",\r\n                    \"Clients\": \"100\",\r\n                    \"Team Members\": \"70\",\r\n                    \"Successful Projects\": \"180\"\r\n                }\r\n            }\r\n        },\r\n        {\r\n            \"id\": \"sec3\",\r\n            \"list\": [\r\n                {\r\n                    \"alt\": \"Brand 1\",\r\n                    \"url\": \"/uploads/joe-13/brands/1.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 2\",\r\n                    \"url\": \"/uploads/joe-13/brands/2.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 3\",\r\n                    \"url\": \"/uploads/joe-13/brands/3.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 4\",\r\n                    \"url\": \"/uploads/joe-13/brands/4.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 5\",\r\n                    \"url\": \"/uploads/joe-13/brands/5.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 6\",\r\n                    \"url\": \"/uploads/joe-13/brands/6.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 7\",\r\n                    \"url\": \"/uploads/joe-13/brands/7.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 8\",\r\n                    \"url\": \"/uploads/joe-13/brands/8.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 9\",\r\n                    \"url\": \"/uploads/joe-13/brands/9.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 10\",\r\n                    \"url\": \"/uploads/joe-13/brands/10.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 11\",\r\n                    \"url\": \"/uploads/joe-13/brands/11.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 12\",\r\n                    \"url\": \"/uploads/joe-13/brands/12.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 13\",\r\n                    \"url\": \"/uploads/joe-13/brands/13.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 14\",\r\n                    \"url\": \"/uploads/joe-13/brands/14.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 15\",\r\n                    \"url\": \"/uploads/joe-13/brands/15.png\"\r\n                },\r\n                {\r\n                    \"alt\": \"Brand 16\",\r\n                    \"url\": \"/uploads/joe-13/brands/16.png\"\r\n                }\r\n            ],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section3.jpeg\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"شركاؤنا\",\r\n                \"en\": \"Our Partners\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"\",\r\n                \"en\": \"\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 3,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec4\",\r\n            \"list\": [],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section4.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"تعرّف على وحدات أعمالنا وخدماتها\",\r\n                \"en\": \"Check out our Business Units and their services\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"\",\r\n                \"en\": \"\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 4,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec5\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"التسويق التقليدي\",\r\n                    \"الإعلانات المطبوعة\",\r\n                    \"وضع المنتج في الأماكن الفعلية\",\r\n                    \"التسويق الرقمي\",\r\n                    \"إدارة وسائل التواصل الاجتماعي\",\r\n                    \"تحسين محركات البحث\",\r\n                    \"إنشاء المحتوى\",\r\n                    \"إنتاج الوسائط\",\r\n                    \"بناء العلامة التجارية\",\r\n                    \"الرسومات\",\r\n                    \"الرسوم المتحركة والمرئية\",\r\n                    \"تنشيط العلامة التجارية\",\r\n                    \"إدارة المدونين والمؤثرين\",\r\n                    \"المحتوى الذي ينشئه المستخدمون\",\r\n                    \"حملات المدونين\",\r\n                    \"إدارة المؤثرين\"\r\n                ],\r\n                \"en\": [\r\n                    \"Offline Marketing\",\r\n                    \"Print Advertising.\",\r\n                    \"Physical Product Placement.\",\r\n                    \"Digital Marketing\",\r\n                    \"Social media management\",\r\n                    \"SEO\",\r\n                    \"Content Creation\",\r\n                    \"Media production\",\r\n                    \"Branding\",\r\n                    \"Graphics\",\r\n                    \"Motion graphic and visual\",\r\n                    \"Brand Promotion and Activation\",\r\n                    \"Bloggers & Influencers Management\",\r\n                    \"User Generated Content (UGC)\",\r\n                    \"Bloggers Campaign\",\r\n                    \"Influencers Management\"\r\n                ]\r\n            },\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section5.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"التسويق\",\r\n                \"en\": \"Marketing\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"دفع عجلة النمو والتفاعل من خلال حلول التسويق الرقمي الاستراتيجية\",\r\n                \"en\": \"Driving Growth and Engagement with Strategic Digital Marketing Solutions\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 5,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec6\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"استضافة المواقع وخدمات تصميم المواقع.\",\r\n                    \"متجر إلكتروني (التجارة الإلكترونية).\",\r\n                    \"إنشاء تطبيقات الجوال\",\r\n                    \"إدارة وصيانة المواقع والتطبيقات\",\r\n                    \"أنظمة إدارة المحتوى\",\r\n                    \"إدارة علاقات العملاء\",\r\n                    \"نظام أتمتة العمليات التجارية\",\r\n                    \"الفوترة الآلية\",\r\n                    \"بوابات إلكترونية للشركات أو العملاء\",\r\n                    \"برامج تتبع الأخطاء\"\r\n                ],\r\n                \"en\": [\r\n                    \"Web Hosting and Website Design Services.\",\r\n                    \"Online store (E-commerce).\",\r\n                    \"Create mobile applications\",\r\n                    \"Managing and maintaining websites and applications\",\r\n                    \"Content management systems (CMS)\",\r\n                    \"Customer relationship management (CRM)\",\r\n                    \"A business process automation system.\",\r\n                    \"Automated invoicing.\",\r\n                    \"Company-facing or customer-facing web portals.\",\r\n                    \"Bug tracking software.\"\r\n                ]\r\n            },\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section6.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"البرمجيات والذكاء الاصطناعي\",\r\n                \"en\": \"Software & AI\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"نلبي احتياجات عملك ونحولها إلى حلول عملية لنقدم لك أعلى مستويات الجودة. قسم التكنولوجيا لدينا هو شريك موثوق للشركات التي تبحث عن حلول مبتكرة.\",\r\n                \"en\": \"Manage your business needs and put them into practice to deliver you the best quality available. Our Technology department is a trusted partner for businesses seeking innovative solutions\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 6,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec7\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"خدمة الاستشارات المالية\",\r\n                    \"توجيه استراتيجي للشركات من جميع الأحجام\",\r\n                    \"نمو مستدام\",\r\n                    \"إدارة المخاطر\",\r\n                    \"التخطيط المالي\",\r\n                    \"استراتيجيات الاستثمار\",\r\n                    \"توسيع الأعمال\"\r\n                ],\r\n                \"en\": [\r\n                    \"Finance Consulting Service\",\r\n                    \"Strategic guidance to businesses of all sizes\",\r\n                    \"Sustainable Growth\",\r\n                    \"Risk Management\",\r\n                    \"Financial Planning\",\r\n                    \"Investment Strategies\",\r\n                    \"Business Expansion\"\r\n                ]\r\n            },\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section7.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"مساندة\",\r\n                \"en\": \"Masanadah\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"نُصر على النجاح، ونُصر على تقديم جودة عالية\",\r\n                \"en\": \"We are insisting on success, insisting on providing a high quality\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 7,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec8\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"المبيعات المباشرة\",\r\n                    \"الشركاء الحاليون: (فيرجن - ريد بول موبايل - زين - موبايلي)\",\r\n                    \"التجارة الحديثة - العملاء الحاليون: (فيرجن، ريد بول، زين)\",\r\n                    \"مبيعات الحج والعمرة - مع (فيرجن، موبايلي، ريد بول، مبيعات غير اتصالات)\",\r\n                    \"مبيعات B2B - الشركاء الحاليون: (زين)\",\r\n                    \"مبيعات غير اتصالات\",\r\n                    \"مبيعات B2C - (بطاقة فلكسيبل)\",\r\n                    \"مبيعات B2B - شركاء: (موتورولا - الكمبيوتر العربي - إن هوم)\"\r\n                ],\r\n                \"en\": [\r\n                    \"Direct Sales\",\r\n                    \"current partners: (Virgin - Red Bull mobile -Zain - Mobily)\",\r\n                    \"Modern trade - current clients:(Virgin, Red Bull, Zain)\",\r\n                    \"Haj & Umrah sales - with (Virgin, Mobily, Red Bull, Non-telecom sales)\",\r\n                    \"B2B Sales - current partners: (Zain)\",\r\n                    \"Non-telecom sales\",\r\n                    \"B2C Sales - (Flexible Card)\",\r\n                    \"B2B Sales - partners: (Motorola - Arab computer - In Home)\"\r\n                ]\r\n            },\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section8.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"الاتصالات\",\r\n                \"en\": \"Telecoms\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"فريق مبيعات موهوب ومدرب باحترافية عالية\",\r\n                \"en\": \"A talented and professionally-trained sales team\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 8,\r\n            \"objectData\": {}\r\n        },\r\n        {\r\n            \"id\": \"sec9\",\r\n            \"list\": [],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section9.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"حلول الموارد البشرية والقوى العاملة\",\r\n                \"en\": \"Manpower & HR Solutions\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"تبسيط حلول القوى العاملة لتحقيق نجاح تجاري أمثل\",\r\n                \"en\": \"Streamlining Workforce Solutions for Optimal Business Success\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 9,\r\n            \"objectData\": {\r\n                \"ar\": {\r\n                    \"الشؤون الحكومية\": \"معالجة الإقامة، معالجة التأشيرات، الأمور القانونية، خدمات الجوازات، خدمات التأمينات، خدمات التأمين الطبي\",\r\n                    \"خدمة التوظيف الخارجي\": \"نقل الكفالة، إصدار التأشيرات، الإدارة، الرواتب، التدريب، التوظيف، إدارة خطط المزايا، تسجيلات التأمينات الاجتماعية السعودية\",\r\n                    \"إدارة الموارد البشرية\": \"تأشيرة العمل المؤقتة، التصاريح، نقل الموظفين، خطة التوطين\"\r\n                },\r\n                \"en\": {\r\n                    \"HR Management\": \"Temporary work visa, Permits, Employee transfer, Nationalisation plan\",\r\n                    \"Governmental affairs\": \"Iqama processing, Visa processing, Legal matters, Passport services, GOSI services, Medical insurance services\",\r\n                    \"HR Outsourcing service\": \"Sponsorship transfer, Visa Issuing, Administration, Management, Payroll, Training, Hiring, Recruiting, Operate benefit plans, and Saudi Gosi registrations\"\r\n                }\r\n            }\r\n        },\r\n        {\r\n            \"id\": \"sec10\",\r\n            \"list\": [],\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section10.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"الترويج، التفعيل، وإدارة الفعاليات\",\r\n                \"en\": \"Merchandising, Activation and Event Management\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"زيادة الوعي بعلامتك التجارية من خلال تسويقها باستخدام الأساليب والتقنيات الحديثة\",\r\n                \"en\": \"Increase client awareness of your brand by marketing it utilizing contemporary techniques and growin\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 10,\r\n            \"objectData\": {},\r\n            \"list_Object\": {\r\n                \"ar\": [\r\n                    {\r\n                        \"desc\": \"نهج شامل لعرض وترويج المنتجات بطريقة تعزز المبيعات وتقوي الهوية التجارية.\",\r\n                        \"list\": [],\r\n                        \"title\": \"الترويج\"\r\n                    },\r\n                    {\r\n                        \"desc\": \"زيادة الوعي بالعلامة التجارية باستخدام تقنيات تسويقية حديثة.\",\r\n                        \"list\": [\r\n                            \"المسابقات والفعاليات\",\r\n                            \"العروض الترويجية\",\r\n                            \"الاتصال الهاتفي التسويقي\",\r\n                            \"عينات المنتجات المجانية\",\r\n                            \"العروض داخل المتاجر\",\r\n                            \"المعارض التجارية\",\r\n                            \"الإعلانات المستهدفة\"\r\n                        ],\r\n                        \"title\": \"التنشيط\"\r\n                    },\r\n                    {\r\n                        \"desc\": \"إدارة متكاملة للفعاليات من التخطيط حتى التحليل بعد الحدث.\",\r\n                        \"list\": [\r\n                            \"التخطيط: من الفكرة إلى التنفيذ\",\r\n                            \"اللوجستيات: المكان، النقل، المعدات\",\r\n                            \"التصميم: التناسق البصري\",\r\n                            \"الموردين: جودة الخدمات\",\r\n                            \"في الموقع: الإشراف على الحدث\",\r\n                            \"التحليل: التقييم بعد الحدث\"\r\n                        ],\r\n                        \"title\": \"إدارة الفعاليات\"\r\n                    }\r\n                ],\r\n                \"en\": [\r\n                    {\r\n                        \"desc\": \"A holistic approach to presenting and promoting goods to drive sales and shape brand identity.\",\r\n                        \"list\": [],\r\n                        \"title\": \"Merchandising\"\r\n                    },\r\n                    {\r\n                        \"desc\": \"Increase client awareness of your brand through contemporary marketing techniques.\",\r\n                        \"list\": [\r\n                            \"Events competitions\",\r\n                            \"Sales promotion\",\r\n                            \"Telemarketing\",\r\n                            \"Free product samples\",\r\n                            \"In-store promotions\",\r\n                            \"Trade shows\",\r\n                            \"Targeted advertisements\"\r\n                        ],\r\n                        \"title\": \"Activation\"\r\n                    },\r\n                    {\r\n                        \"desc\": \"Complete event planning and execution from logistics to post-event analysis.\",\r\n                        \"list\": [\r\n                            \"Planning: Concept to execution.\",\r\n                            \"Logistics: Venue, transport, equipment.\",\r\n                            \"Design: Visual consistency.\",\r\n                            \"Vendors: Service quality.\",\r\n                            \"On-site: Supervision.\",\r\n                            \"Analysis: Evaluations.\"\r\n                        ],\r\n                        \"title\": \"Event Management\"\r\n                    }\r\n                ]\r\n            }\r\n        },\r\n        {\r\n            \"id\": \"sec11\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"جو مي: يحسن إدارة العمل ويوفر تتبعاً فورياً لمندوبي المبيعات.\",\r\n                    \"نظام ERP (مدعوم من أودو): يدمج وظائف الأعمال في منصة واحدة مؤتمتة.\",\r\n                    \"نص وظيفة: تطبيق ذكي للربط بين الوظائف والمتقدمين المناسبين.\",\r\n                    \"أكاديمية إيليت: برامج تدريب احترافية في كرة القدم لتطوير المواهب.\",\r\n                    \"جو إكس: تطبيق لإدارة المروجين يتيح تتبع الحضور والمبيعات والمخزون بالموقع.\"\r\n                ],\r\n                \"en\": [\r\n                    \"JOE MI: Streamlines workflow and enhances sales operations for field promoters.\",\r\n                    \"ERP (powered by Odoo): Integrates business functions into one automated platform.\",\r\n                    \"Nos Wazeefa: A job-matching app with personalized recommendations.\",\r\n                    \"Elite Academy: Professional football training for youth.\",\r\n                    \"JoeX: App for managing merchandisers and promoters with real-time tracking.\"\r\n                ]\r\n            },\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/joe-13/section11.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"منتجاتنا\",\r\n                \"en\": \"Our Products\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"نبتكر ونُبدع ونُقدم الأفضل\",\r\n                \"en\": \"We Create, Innovate and Serve\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 11,\r\n            \"objectData\": {},\r\n            \"list_Object\": []\r\n        }\r\n    ],\r\n    \"created_at\": \"2025-05-19T11:58:33.995Z\",\r\n    \"updated_at\": \"2025-05-19T11:58:33.995Z\"\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"title\": \"department\",\r\n    \"meta\": {\r\n            \"title\": \"About Us - Company\",\r\n            \"description\": \"Learn more about our company.\",\r\n            \"keywords\": [\r\n                \"company\",\r\n                \"about\",\r\n                \"team\"\r\n            ],\r\n            \"canonicalUrl\": \"https://example.com/about-us\",\r\n            \"ogTitle\": \"About Us on Open Graph\",\r\n            \"ogDescription\": \"Open Graph description here.\",\r\n            \"ogImage\":  {\r\n            \"id\": 24,\r\n            \"url\": \"/uploads/Frame-31c9334d8fb59339e12bec5721031cf06.png\",\r\n            \"alt\": \"Image 1\",\r\n            \"name\": \"Frame.png\"\r\n\r\n        },\r\n            \"ogUrl\": \"https://example.com/about-us\",\r\n            \"ogType\": \"website\",\r\n            \"structuredData\": {\r\n                \"@context\": \"https://schema.org\",\r\n                \"@type\": \"Organization\",\r\n                \"name\": \"Example Company\",\r\n                \"url\": \"https://example.com\"\r\n            },\r\n            \"headScript\": \"<script>console.log('Head script loaded');</script>\",\r\n            \"bodyScript\": \"<script>console.log('Body script loaded');</script>\"\r\n    },\r\n     \"sections\": [\r\n        {\r\n            \"id\": \"sec99\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ],\r\n                \"en\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ]\r\n            },\r\n            \"type\": \"hero\",\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/6422199-d42a1e0a83575e5739c1047871036ab65.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"مرحباً بكم في شركتنا\",\r\n                \"en\": \"Welcome to Our Company\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"نقدم أفضل الخدمات.\",\r\n                \"en\": \"We provide the best services.\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 1,\r\n            \"objectData\": {\r\n                \"ar\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                },\r\n                \"en\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                }\r\n            }\r\n        },\r\n         {\r\n            \"id\": \"sec99\",\r\n            \"list\": {\r\n                \"ar\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ],\r\n                \"en\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ]\r\n            },\r\n            \"type\": \"hero\",\r\n            \"image\": {\r\n                \"alt\": \"alt image 1\",\r\n                \"url\": \"/uploads/6422199-d42a1e0a83575e5739c1047871036ab65.png\"\r\n            },\r\n            \"title\": {\r\n                \"ar\": \"مرحباً بكم في شركتنا\",\r\n                \"en\": \"Welcome to Our Company\"\r\n            },\r\n            \"content\": {\r\n                \"ar\": \"نقدم أفضل الخدمات.\",\r\n                \"en\": \"We provide the best services.\"\r\n            },\r\n            \"visible\": true,\r\n            \"position\": 1,\r\n            \"objectData\": {\r\n                \"ar\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                },\r\n                \"en\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                }\r\n            }\r\n        }\r\n    ]\r\n   \r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages/20",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"20"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages/5",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"5"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Sections",
+			"item": [
+				{
+					"name": "Add Section",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"id\": \"sec5\",\r\n  \"type\": \"text\",\r\n  \"image\": 11,\r\n  \"title\": {\r\n    \"en\": \"Our Mission\",\r\n    \"ar\": \"مهمتنا\"\r\n  },\r\n  \"content\": {\r\n    \"en\": \"To deliver quality products.\",\r\n    \"ar\": \"تقديم منتجات ذات جودة عالية.\"\r\n  },\r\n  \"position\": 2,\r\n  \"visible\": true\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages/4/sections",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"4",
+								"sections"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Edit Section",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"type\": \"text 12\",\r\n  \"image\": 12,\r\n  \"title\": {\r\n    \"en\": \"Our Mission 2\",\r\n    \"ar\": \"مهمتنا\"\r\n  },\r\n  \"content\": {\r\n    \"en\": \"To deliver quality products.\",\r\n    \"ar\": \"تقديم منتجات ذات جودة عالية.\"\r\n  },\r\n  \"position\": 2,\r\n  \"visible\": true,\r\n   \"objectData\": {\r\n                \"ar\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                },\r\n                \"en\": {\r\n                    \"feature\": \"feature one\",\r\n                    \"extraInfo\": \"Some extra information here\"\r\n                }\r\n            },\"list\": {\r\n                \"ar\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ],\r\n                \"en\": [\r\n                    \"Quality\",\r\n                    \"Trust\",\r\n                    \"Experience\"\r\n                ]\r\n            },\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages/4/sections/sec2",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"4",
+								"sections",
+								"sec2"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Del Section",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"type\": \"text 12\",\r\n  \"image\": 12,\r\n  \"title\": {\r\n    \"en\": \"Our Mission 2\",\r\n    \"ar\": \"مهمتنا\"\r\n  },\r\n  \"content\": {\r\n    \"en\": \"To deliver quality products.\",\r\n    \"ar\": \"تقديم منتجات ذات جودة عالية.\"\r\n  },\r\n  \"position\": 2,\r\n  \"visible\": true\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/pages/4/sections/sec7",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"pages",
+								"4",
+								"sections",
+								"sec7"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Team Members",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/team-members?sortBy=order&sortOrder=ASC",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"team-members"
+							],
+							"query": [
+								{
+									"key": "sortBy",
+									"value": "order"
+								},
+								{
+									"key": "sortOrder",
+									"value": "ASC"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/team-members/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"team-members",
+								"1"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"name\": {\r\n        \"en\": \"Ahmed El Said\",\r\n        \"ar\": \"أحمد السيد\"\r\n    },\r\n    \"position\": {\r\n        \"en\": \"Chief Executive Officer\",\r\n        \"ar\": \"المدير التنفيذي\"\r\n    },\r\n    \"bio\": {\r\n        \"en\": \"Ahmed is the visionary behind Joe13 with over a decade of leadership in marketing and tech.\",\r\n        \"ar\": \"أحمد هو العقل المدبر وراء شركة Joe13 ويتمتع بخبرة تفوق 10 سنوات في مجال التسويق والتقنية.\"\r\n    },\r\n    \"image_url\": \"/uploads/joe-13/team/ahmed.png\",\r\n    \"image_alt\": \"Ahmed El Said - CEO\",\r\n    \"order\": 1\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/team-members",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"team-members"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"name\": {\r\n        \"en\": \"Jane Smith\",\r\n        \"ar\": \"جين سميث\"\r\n    },\r\n    \"position\": {\r\n        \"en\": \"Project Manager\",\r\n        \"ar\": \"مدير مشروع\"\r\n    },\r\n    \"bio\": {\r\n        \"en\": \"Experienced in managing high-scale projects across various industries.\",\r\n        \"ar\": \"ذات خبرة في إدارة المشاريع الكبيرة عبر مختلف الصناعات.\"\r\n    },\r\n    \"image_url\": \"https://placekitten.com/200/301\",\r\n    \"image_alt\": \"Jane Smith Image\",\r\n    \"created_at\": \"2025-04-01T10:00:00Z\",\r\n    \"updated_at\": \"2025-04-02T12:00:00Z\"\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/team-members/3",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"team-members",
+								"3"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/team-members/26",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"team-members",
+								"26"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Offers",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/offers",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"offers"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "GET ONE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/sections/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"sections",
+								"1"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "name[en]",
+									"value": "Summer Promo Package",
+									"type": "text"
+								},
+								{
+									"key": "name[ar]",
+									"value": "باقة عرض الصيف",
+									"type": "text"
+								},
+								{
+									"key": "department_id",
+									"value": "32",
+									"type": "text"
+								},
+								{
+									"key": "price",
+									"value": "4",
+									"type": "text"
+								},
+								{
+									"key": "priceAfterOffers",
+									"value": "3",
+									"type": "text"
+								},
+								{
+									"key": "image_alt",
+									"value": "Summer Promo Offer Image",
+									"type": "text"
+								},
+								{
+									"key": "meta_title[en]",
+									"value": "Special Summer Offer from Joe13",
+									"type": "text"
+								},
+								{
+									"key": "meta_title[ar]",
+									"value": "عرض صيفي خاص من Joe13",
+									"type": "text"
+								},
+								{
+									"key": "meta_description[en]",
+									"value": "Enjoy our limited-time summer offer on premium services with Joe13.",
+									"type": "text"
+								},
+								{
+									"key": "meta_description[ar]",
+									"value": "استمتع بعرض الصيف المحدود على خدماتنا المميزة مع Joe13.",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[en]",
+									"value": "Summer Offer, Promo, Joe13, Discount, Special Package",
+									"type": "text"
+								},
+								{
+									"key": "meta_keywords[ar]",
+									"value": "عرض الصيف, خصم, باقة مميزة, Joe13, ترويج",
+									"type": "text"
+								},
+								{
+									"key": "file",
+									"type": "file",
+									"src": "/D:/icons/6422200.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/offers",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"offers"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "  {\r\n    \"section_name\": {\r\n      \"en\": \"update About Us\",\r\n      \"ar\": \"update من نحن\"\r\n    },\r\n    \"title\": {\r\n      \"en\": \"update Welcome to Our Platform\",\r\n      \"ar\": \"update مرحبًا بكم في منصتنا\"\r\n    },\r\n    \"content\": {\r\n      \"en\": \"update We are committed to excellence in digital services.\",\r\n      \"ar\": \"update نحن ملتزمون بالتميز في الخدمات الرقمية.\"\r\n    },\r\n    \"image_url\": \"update https://placekitten.com/200/300\",\r\n    \"image_alt\": \"update About Us Image\",\r\n    \"meta_title\": {\r\n      \"en\": \"update About Us - Excellence\",\r\n      \"ar\": \"update من نحن - التميز\"\r\n    },\r\n    \"meta_description\": {\r\n      \"en\": \"update Learn about our mission and values.\",\r\n      \"ar\": \"update تعرف على مهمتنا وقيمنا.\"\r\n    },\r\n    \"meta_keywords\": [\"about\", \"platform\", \"digital\", \"team\"],\r\n    \"slug\": \"update about-us\",\r\n    \"is_active\": true\r\n  }",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/offers/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"offers",
+								"1"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/sections/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"sections",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Settings",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/settings",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"settings"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "slug",
+									"value": "settings4",
+									"type": "text"
+								},
+								{
+									"key": "site_name[en]",
+									"value": "My Website",
+									"type": "text"
+								},
+								{
+									"key": "site_name[ar]",
+									"value": "موقعي",
+									"type": "text"
+								},
+								{
+									"key": "site_logo_url",
+									"type": "file",
+									"src": "/D:/icons/6422215.png"
+								},
+								{
+									"key": "site_logo[alt]",
+									"value": "Logo of My Website",
+									"type": "text"
+								},
+								{
+									"key": "favicon_url",
+									"type": "file",
+									"src": "/D:/icons/6424087.png"
+								},
+								{
+									"key": "favicon[alt]",
+									"value": "Favicon of My Website",
+									"type": "text"
+								},
+								{
+									"key": "social_media[facebook]",
+									"value": "https://facebook.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[instagram]",
+									"value": "https://instagram.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[twitter]",
+									"value": "https://twitter.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[linkedin]",
+									"value": "https://linkedin.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[address][en]",
+									"value": "123 Main St, City",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[address][ar]",
+									"value": "123 الشارع الرئيسي، المدينة",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[email]",
+									"value": "contact@mywebsite.com",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[main_branch][ar]",
+									"value": "Downtown Branch",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[main_branch][en]",
+									"value": "Downtown Branch",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[phone]",
+									"value": "+1234567890",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][0]",
+									"value": "Main",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][1]",
+									"value": "Downtown",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][2]",
+									"value": "East",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][0]",
+									"value": "الرئيسي",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][1]",
+									"value": "وسط المدينة",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][2]",
+									"value": "الشرق",
+									"type": "text"
+								},
+								{
+									"key": "meta[title]",
+									"value": "Best Website",
+									"type": "text"
+								},
+								{
+									"key": "meta[description]",
+									"value": "This is a demo site",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][0]",
+									"value": "demo",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][1]",
+									"value": "website",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][2]",
+									"value": "nestjs",
+									"type": "text"
+								},
+								{
+									"key": "meta[custom_scripts][head]",
+									"value": "<script>console.log('head script')</script>",
+									"type": "text"
+								},
+								{
+									"key": "meta[custom_scripts][body]",
+									"value": "<script>console.log('body script')</script>",
+									"type": "text"
+								},
+								{
+									"key": "about_us_footer[en]",
+									"value": "About us English text",
+									"type": "text"
+								},
+								{
+									"key": "about_us_footer[ar]",
+									"value": "عنّا النص العربي",
+									"type": "text"
+								},
+								{
+									"key": "copyright[en]",
+									"value": "© 2024 My Website. All rights reserved.",
+									"type": "text"
+								},
+								{
+									"key": "copyright[ar]",
+									"value": "© ٢٠٢٤ موقعي. جميع الحقوق محفوظة.",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/settings",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"settings"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "UPDATE",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "site_name[en]",
+									"value": "My Website",
+									"type": "text"
+								},
+								{
+									"key": "site_name[ar]",
+									"value": "موقعي",
+									"type": "text"
+								},
+								{
+									"key": "site_logo[alt]",
+									"value": "Logo of My Website",
+									"type": "text"
+								},
+								{
+									"key": "favicon[alt]",
+									"value": "Favicon of My Website",
+									"type": "text"
+								},
+								{
+									"key": "social_media[facebook]",
+									"value": "https://facebook.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[instagram]",
+									"value": "https://instagram.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[twitter]",
+									"value": "https://twitter.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "social_media[linkedin]",
+									"value": "https://linkedin.com/mywebsite",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[address][en]",
+									"value": "123 Main St, City",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[address][ar]",
+									"value": "123 الشارع الرئيسي، المدينة",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[email]",
+									"value": "contact@mywebsite.com",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[main_branch][ar]",
+									"value": "Downtown Branch",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[main_branch][en]",
+									"value": "Downtown Branch",
+									"type": "text"
+								},
+								{
+									"key": "contact_us[phone]",
+									"value": "+1234567890",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][0]",
+									"value": "Main",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][1]",
+									"value": "Downtown",
+									"type": "text"
+								},
+								{
+									"key": "branch[en][2]",
+									"value": "East",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][0]",
+									"value": "الرئيسي",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][1]",
+									"value": "وسط المدينة",
+									"type": "text"
+								},
+								{
+									"key": "branch[ar][2]",
+									"value": "الشرق",
+									"type": "text"
+								},
+								{
+									"key": "meta[title]",
+									"value": "Best Website",
+									"type": "text"
+								},
+								{
+									"key": "meta[description]",
+									"value": "This is a demo site",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][0]",
+									"value": "demo",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][1]",
+									"value": "website",
+									"type": "text"
+								},
+								{
+									"key": "meta[keywords][2]",
+									"value": "nestjs",
+									"type": "text"
+								},
+								{
+									"key": "meta[custom_scripts][head]",
+									"value": "<script>console.log('head script')</script>",
+									"type": "text"
+								},
+								{
+									"key": "meta[custom_scripts][body]",
+									"value": "<script>console.log('body script')</script>",
+									"type": "text"
+								},
+								{
+									"key": "about_us_footer[en]",
+									"value": "About us English text",
+									"type": "text"
+								},
+								{
+									"key": "about_us_footer[ar]",
+									"value": "عنّا النص العربي",
+									"type": "text"
+								},
+								{
+									"key": "copyright[en]",
+									"value": "© 2024 My Website. All rights reserved.",
+									"type": "text"
+								},
+								{
+									"key": "copyright[ar]",
+									"value": "© ٢٠٢٤ موقعي. جميع الحقوق محفوظة.",
+									"type": "text"
+								},
+								{
+									"key": "site_logo_url",
+									"type": "file",
+									"src": "/D:/ENV/JOE13/Venuat Website/public/venues/2.png"
+								},
+								{
+									"key": "favicon_url",
+									"type": "file",
+									"src": "/D:/ENV/JOE13/Venuat Website/public/venues/7.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/settings/5",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"settings",
+								"5"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/settings/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"settings",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Images",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/images",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"images"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "alt[0]",
+									"value": "alt image 1",
+									"type": "text"
+								},
+								{
+									"key": "alt[1]",
+									"value": "alt image 2",
+									"type": "text"
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": [
+										"/D:/icons/6422199.png",
+										"/D:/icons/6422199.png"
+									]
+								},
+								{
+									"key": "files",
+									"type": "file",
+									"src": "/D:/icons/6422199.png"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/images",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"images"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/images/9",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"images",
+								"9"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Contacts",
+			"item": [
+				{
+					"name": "GET",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{url}}/api/v1/contacts?search=general",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"contacts"
+							],
+							"query": [
+								{
+									"key": "search",
+									"value": "general"
+								},
+								{
+									"key": "search",
+									"value": "offers",
+									"disabled": true
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST USER",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"type\": \"general\",\r\n  \"name\": \"Ahmed General\",\r\n  \"email\": \"ahmed.general@example.com\",\r\n  \"address\": \"Riyadh, Saudi Arabia\",\r\n  \"phone\": \"+966512345678\",\r\n  \"message\": \"I have a question about your services.\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/contacts",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"contacts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST OFFERS",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"type\": \"offers\",\r\n  \"name\": \"Sarah Offers\",\r\n  \"email\": \"sarah.offers@example.com\",\r\n  \"phone\": \"+966534567890\",\r\n  \"offers_name\": \"Summer Wedding Package\",\r\n  \"offers_price\": \"15000\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/contacts",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"contacts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "POST CAREERS",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "type",
+									"value": "career",
+									"type": "text"
+								},
+								{
+									"key": "name",
+									"value": " Ahmed",
+									"type": "text"
+								},
+								{
+									"key": "email",
+									"value": "ahmed@example.com",
+									"type": "text"
+								},
+								{
+									"key": "phone",
+									"value": " 0555555555",
+									"type": "text"
+								},
+								{
+									"key": "offers_name",
+									"value": " Frontend Developer",
+									"type": "text"
+								},
+								{
+									"key": "offers_price",
+									"value": " 9000",
+									"type": "text"
+								},
+								{
+									"key": "file",
+									"type": "file",
+									"src": "/D:/JOE13 Profile.pdf"
+								},
+								{
+									"key": "address",
+									"value": "cairo",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/contacts",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"contacts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access-token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"name\": \"Architecture 55\",\r\n  \"description\": \"Beautiful building designs\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{url}}/api/v1/contacts/1",
+							"host": [
+								"{{url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"contacts",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "url",
+			"value": "",
+			"type": "default"
+		}
+	]
+}

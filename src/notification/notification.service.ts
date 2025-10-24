@@ -1,3 +1,4 @@
+// notification/notification.service.ts (updated)
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository } from 'typeorm';
@@ -12,7 +13,7 @@ export function normalizePagination(pageInput?: number | string, limitInput?: nu
   const takeRaw = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : 20;
 
   const take = Math.min(takeRaw, maxLimit);
-  const skip = (page - 1) * take; // guaranteed >= 0
+  const skip = (page - 1) * take;
 
   return { page, take, skip };
 }
@@ -22,48 +23,49 @@ export class NotificationService {
   constructor(
     @InjectRepository(Notification)
     private readonly repo: Repository<Notification>,
-    private readonly gateway: NotificationGateway, // <-- add
+    private readonly gateway: NotificationGateway,
   ) {}
 
-  async create(opts: { type: NotificationType; title: string; message?: string | null; data?: Record<string, any> | null; audience?: NotificationAudience; userId?: number | null }): Promise<Notification> {
+  async create(opts: { 
+    type: NotificationType; 
+    title: string; 
+    message?: string | null; 
+    data?: Record<string, any> | null; 
+    audience?: NotificationAudience; 
+    userId?: string | null;
+    user?: User;
+  }): Promise<Notification> {
     const notification = this.repo.create({
       type: opts.type,
       title: opts.title,
       message: opts.message ?? null,
       data: opts.data ?? null,
       audience: opts.audience ?? NotificationAudience.ADMIN,
-      user: opts.userId ? ({ id: opts.userId } as any) : null,
+      user: opts.userId ? ({ id: opts.userId } as any) : opts.user || null,
     });
+    
     const saved = await this.repo.save(notification);
 
-    // push realtime event (non-blocking)
+    // Push realtime event (non-blocking)
     try {
       this.gateway.broadcastNew(saved);
     } catch (e) {
-      // log & ignore
-      // console.error('gateway.emit error', e);
+      // Log error but don't fail the request
+      console.error('WebSocket notification error:', e);
     }
+    
     return saved;
   }
 
   async listAdmin(page: number | string = 1, limit: number | string = 20, isRead?: boolean) {
-    // --- normalize pagination (never negative) ---
-    const pNumRaw = Number(page);
-    const lNumRaw = Number(limit);
+    const { page: p, take, skip } = normalizePagination(page, limit);
 
-    const p = Number.isFinite(pNumRaw) && pNumRaw > 0 ? Math.floor(pNumRaw) : 1;
-    const takeUncapped = Number.isFinite(lNumRaw) && lNumRaw > 0 ? Math.floor(lNumRaw) : 20;
-    const take = Math.min(takeUncapped, 100);
-    const skip = (p - 1) * take;
-
-    // --- filters ---
     const where: FindOptionsWhere<Notification> = {};
     if (typeof isRead === 'boolean') where.isRead = isRead;
-    // If you only want admin-broadcast notifications, uncomment:
-    // where.audience = NotificationAudience.ADMIN as any;
 
     const [items, total] = await this.repo.findAndCount({
       where,
+      relations: ['user'],
       order: { created_at: 'DESC' },
       take,
       skip,
@@ -78,8 +80,8 @@ export class NotificationService {
     };
   }
 
-  async list(page?: number | string, limit?: number | string, isRead?: boolean, userId?: number) {
-    const { page: p, take, skip } = normalizePagination(page, limit, 100);
+  async list(page?: number | string, limit?: number | string, isRead?: boolean, userId?: string) {
+    const { page: p, take, skip } = normalizePagination(page, limit);
 
     const where: FindOptionsWhere<Notification> = {};
     if (userId) where.user = { id: userId } as any;
@@ -87,6 +89,7 @@ export class NotificationService {
 
     const [items, total] = await this.repo.findAndCount({
       where,
+      relations: ['user'],
       order: { created_at: 'DESC' },
       take,
       skip,
@@ -106,13 +109,62 @@ export class NotificationService {
     return { id, isRead: true };
   }
 
-  async markAllRead() {
-    await this.repo.createQueryBuilder().update().set({ isRead: true }).execute();
+  async markAllRead(userId?: string) {
+    if (userId) {
+      await this.repo.createQueryBuilder()
+        .update()
+        .set({ isRead: true })
+        .where('user.id = :userId', { userId })
+        .execute();
+    } else {
+      await this.repo.createQueryBuilder()
+        .update()
+        .set({ isRead: true })
+        .execute();
+    }
+    
     return { ok: true };
   }
 
-  async unreadCount() {
-    const count = await this.repo.count({ where: { isRead: false } });
+  async unreadCount(userId?: string) {
+    const where: FindOptionsWhere<Notification> = { isRead: false };
+    if (userId) where.user = { id: userId } as any;
+
+    const count = await this.repo.count({ where });
     return { count };
+  }
+
+  // Specialized method for weekly report notifications
+  async createWeeklyReportNotification(user: User, weekOf: string, coachId: string) {
+    return this.create({
+      type: NotificationType.FORM_SUBMISSION,
+      title: 'New Weekly Report Submitted',
+      message: `${user.name} has submitted their weekly report for ${weekOf}`,
+      data: {
+        type: 'weekly_report',
+        userId: user.id,
+        userName: user.name,
+        weekOf,
+        timestamp: new Date().toISOString(),
+      },
+      audience: NotificationAudience.USER,
+      userId: coachId,
+    });
+  }
+
+  async createCoachFeedbackNotification(userId: string, weekOf: string, reportId: string) {
+    return this.create({
+      type: NotificationType.FORM_SUBMISSION,
+      title: 'Coach Feedback Received',
+      message: `Your coach has provided feedback on your weekly report for ${weekOf}`,
+      data: {
+        type: 'weekly_report_feedback',
+        reportId,
+        weekOf,
+        timestamp: new Date().toISOString(),
+      },
+      audience: NotificationAudience.USER,
+      userId,
+    });
   }
 }

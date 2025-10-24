@@ -1,15 +1,8 @@
 // src/plans/plans.service.ts
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, EntityManager } from 'typeorm';
-import {
-  Exercise,
-  ExercisePlan,
-  ExercisePlanDay,
-  ExercisePlanDayExercise,
-  User,
-  DayOfWeek,
-} from 'entities/global.entity';
+import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
 
 const DAY_ALIASES: Record<string, DayOfWeek> = {
@@ -35,8 +28,7 @@ const dayEnum = (v?: string): DayOfWeek => {
   return out;
 };
 
-const WEEK_ORDER: Array<'saturday'|'sunday'|'monday'|'tuesday'|'wednesday'|'thursday'|'friday'> =
-  ['saturday','sunday','monday','tuesday','wednesday','thursday','friday'];
+const WEEK_ORDER: Array<'saturday' | 'sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday'> = ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
 
 function toArray<T = any>(v: any): T[] {
   if (!v) return [];
@@ -48,7 +40,11 @@ function parseMaybeJson<T = any>(v: any): T {
   if (typeof v === 'string') {
     const s = v.trim();
     if (!s) return {} as any;
-    try { return JSON.parse(s) as T; } catch { return v as T; }
+    try {
+      return JSON.parse(s) as T;
+    } catch {
+      return v as T;
+    }
   }
   return v as T;
 }
@@ -64,6 +60,37 @@ export class PlanService {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
   ) {}
 
+  private assertCanAccessPlan(plan: ExercisePlan, actor: { id: string; role: UserRole }, action: 'view' | 'edit' | 'delete' | 'assign') {
+    if (actor.role === UserRole.SUPER_ADMIN) {
+      return;
+    }
+
+    if (actor.role === UserRole.ADMIN && plan.adminId === actor.id) {
+      return;
+    }
+
+    throw new ForbiddenException('You can only take actions on plans you created.');
+  }
+
+  private scopedPlanQB(actor: { id: string; role: UserRole }) {
+    const qb = this.planRepo.createQueryBuilder('p');
+
+    // SUPER_ADMIN sees all
+    if (actor.role === UserRole.SUPER_ADMIN) {
+      return qb;
+    }
+
+    // ADMIN sees public (adminId NULL) or their own
+    if (actor.role === UserRole.ADMIN) {
+      qb.where('(p."adminId" IS NULL OR p."adminId" = :adminId)', { adminId: actor.id });
+      return qb;
+    }
+
+    // default: block everything
+    qb.where('1=0');
+    return qb;
+  }
+
   /* ---------- Helpers ---------- */
   weekIndex(d?: string) {
     const i = WEEK_ORDER.indexOf(String(d ?? '').toLowerCase() as any);
@@ -77,8 +104,7 @@ export class PlanService {
     return dayEnum(String(input ?? '').toLowerCase());
   }
 
-  /* ---------- Import (plans/plans.controller: POST /plans/import) ---------- */
-  async importAndActivate(body: any) {
+  async importAndActivate(body: any, actor: { id: string; role: UserRole }) {
     const raw: any = parseMaybeJson<any>(body);
     const payload = parseMaybeJson<any>(raw?.payload ?? raw);
     const payloadAlt = parseMaybeJson<any>(raw?.json);
@@ -92,7 +118,6 @@ export class PlanService {
     else if (payloadAlt && typeof payloadAlt === 'object' && Object.keys(payloadAlt).length) plansInput = [payloadAlt];
     else throw new BadRequestException('No plan payloads found.');
 
-    // sanity: ensure program.days
     for (const [i, p] of plansInput.entries()) {
       const program = parseMaybeJson<any>(p?.program ?? p?.plan?.program ?? p?.programAlt);
       if (!program || !Array.isArray(program.days) || !program.days.length) {
@@ -110,7 +135,7 @@ export class PlanService {
         const program = parseMaybeJson<any>(root.program ?? root?.plan?.program ?? root?.programAlt);
         const days = toArray(program?.days);
 
-        // prevent duplicate days within this plan
+        // no duplicate days across same plan
         const seen = new Set<string>();
         for (const d of days) {
           const norm = String(this.normDay(d?.dayOfWeek ?? d?.id));
@@ -118,13 +143,19 @@ export class PlanService {
           seen.add(norm);
         }
 
-        // 1) create plan
-        const plan = await manager.save(ExercisePlan, manager.create(ExercisePlan, { name: planName, isActive: true }));
+        // create plan WITH adminId
+        const plan = await manager.save(
+          ExercisePlan,
+          manager.create(ExercisePlan, {
+            name: planName,
+            isActive: true,
+            adminId: actor.role === UserRole.ADMIN ? actor.id : null,
+          }),
+        );
 
         const responseDays: any[] = [];
         let linkedCount = 0;
 
-        // 2) per day: create day and its items
         for (const dRaw of days) {
           const dayRow = await manager.save(
             ExercisePlanDay,
@@ -136,11 +167,10 @@ export class PlanService {
           );
 
           const exArr = toArray(dRaw?.exercises);
-          // allow: [{name,...}] OR {exerciseId, orderIndex} OR just string id
           let order = 0;
           const items: ExercisePlanDayExercise[] = [];
           for (const src of exArr) {
-            const exId = typeof src === 'string' ? src : (src?.exerciseId || src?.id || null);
+            const exId = typeof src === 'string' ? src : src?.exerciseId || src?.id || null;
             if (!exId) continue;
             const exercise = await manager.findOne(Exercise, { where: { id: String(exId) } });
             if (!exercise) throw new BadRequestException(`Exercise not found: ${exId}`);
@@ -225,13 +255,12 @@ export class PlanService {
     return this.planToFrontendShape(active);
   }
 
-  /* ---------- Create with content ---------- */
-  async createPlanWithContent(input: any) {
+  async createPlanWithContent(input: any, actor: { id: string; role: UserRole }) {
     const { name, isActive = true, program } = input ?? {};
     if (!name) throw new BadRequestException('name is required');
     if (!program?.days?.length) throw new BadRequestException('program.days[] required');
 
-    // no duplicate days
+    // validate duplicate days
     const seenDays = new Set<string>();
     for (const d of program.days) {
       const k = String(dayEnum(String(d.dayOfWeek ?? d.id).toLowerCase()));
@@ -240,7 +269,14 @@ export class PlanService {
     }
 
     return this.dataSource.transaction(async manager => {
-      const plan = await manager.save(ExercisePlan, manager.create(ExercisePlan, { name, isActive: !!isActive }));
+      const plan = await manager.save(
+        ExercisePlan,
+        manager.create(ExercisePlan, {
+          name,
+          isActive: !!isActive,
+          adminId: actor.role === UserRole.ADMIN ? actor.id : null,
+        }),
+      );
 
       for (const d of program.days) {
         const dayRow = await manager.save(
@@ -281,40 +317,71 @@ export class PlanService {
     });
   }
 
-  /* ---------- List / Get Deep ---------- */
-  async list(q: any) {
-    return CRUD.findAll<ExercisePlan>(
-      this.planRepo as any,
-      'plan',
-      q.search,
-      q.page,
-      q.limit,
-      q.sortBy,
-      q.sortOrder,
-      // ['days', 'days.items'],
-			['days' , 'days.items'  ],
-      ['name'],
-      {},
-    );
+  async list(q: any, actor: { id: string; role: UserRole }) {
+    // we'll basically use your CRUD.findAll but enforce adminId visibility
+    // If CRUD.findAll doesn't support extra where easily, we do manual QB:
+
+    const page = Number(q.page) || 1;
+    const limit = Math.min(Number(q.limit) || 12, 100);
+    const search = (q.search || '').trim();
+    const sortBy = (q.sortBy as any) || 'created_at';
+    const sortOrder: 'ASC' | 'DESC' = String(q.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    const SORTABLE: Record<string, string> = {
+      created_at: 'p.created_at',
+      name: 'p.name',
+      isActive: 'p.isActive',
+    };
+    const sortExpr = SORTABLE[sortBy] ?? SORTABLE.created_at;
+
+    const qb = this.scopedPlanQB(actor).leftJoinAndSelect('p.days', 'd').leftJoinAndSelect('d.items', 'i').leftJoinAndSelect('i.exercise', 'ex');
+
+    if (search) {
+      qb.andWhere('p.name ILIKE :s', { s: `%${search}%` });
+    }
+
+    qb.orderBy(sortExpr, sortOrder)
+      .addOrderBy('p.id', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [rows, total] = await qb.getManyAndCount();
+
+    return {
+      total_records: total,
+      current_page: page,
+      per_page: limit,
+      records: rows.map(plan => this.planToFrontendShape(plan)),
+    };
   }
 
-  async getOneDeep(id: string) {
+  async getOneDeep(id: string, actor: { id: string; role: UserRole }) {
     const plan = await this.planRepo.findOne({
       where: { id },
       relations: ['days', 'days.items', 'days.items.exercise'],
     });
     if (!plan) throw new NotFoundException('Plan not found');
+
     return this.planToFrontendShape(plan);
   }
 
   /* ---------- Update (days + items) ---------- */
-  async updatePlanAndContent(id: string, dto: any) {
+  /**
+   * i need here if he super_admin can make any thing
+   * if her admin check if the exercisePlan have { adminId == this user id } can make any thing if not cannot edit on it
+   *
+   */
+  async updatePlanAndContent(id: string, dto: any, actor: { id: string; role: UserRole }) {
     return await this.dataSource.transaction(async manager => {
       const plan = await manager.findOne(ExercisePlan, {
         where: { id },
         relations: ['days', 'days.items', 'days.items.exercise'],
       });
       if (!plan) throw new NotFoundException('Plan not found');
+
+      console.log(plan?.adminId, actor);
+
+      this.assertCanAccessPlan(plan, actor, 'edit');
 
       if (dto.name !== undefined) plan.name = dto.name;
       if (dto.isActive !== undefined) plan.isActive = !!dto.isActive;
@@ -411,15 +478,16 @@ export class PlanService {
     });
   }
 
-  /* ---------- Delete ---------- */
-  async remove(id: string) {
+  async remove(id: string, actor: { id: string; role: UserRole }) {
     const plan = await this.planRepo.findOne({ where: { id } });
     if (!plan) throw new NotFoundException('Plan not found');
+
+    this.assertCanAccessPlan(plan, actor, 'delete');
+
     await this.planRepo.remove(plan);
     return { message: 'Plan deleted' };
   }
 
-  /* ---------- Assignments (simplified via User.activeExercisePlanId) ---------- */
   async bulkAssign(
     planId: string,
     dto: {
@@ -430,7 +498,7 @@ export class PlanService {
       confirm?: 'yes' | 'no';
       removeOthers?: boolean;
     },
-    _actorId: string,
+    actor: { id: string; role: UserRole },
   ) {
     if (!Array.isArray(dto.athleteIds) || dto.athleteIds.length === 0) {
       throw new BadRequestException('athleteIds[] required');
@@ -441,11 +509,11 @@ export class PlanService {
 
     const uniqueIds = [...new Set(dto.athleteIds)];
 
-    // only set pointer now if dates include "now"
+    // (rest of your logic is unchanged)
     const now = new Date();
     const startOk = !dto.startDate || new Date(dto.startDate) <= now;
     const endOk = !dto.endDate || new Date(dto.endDate) >= now;
-    const shouldPointUserNow = (dto.isActive !== false) && startOk && endOk;
+    const shouldPointUserNow = dto.isActive !== false && startOk && endOk;
 
     await this.dataSource.transaction(async manager => {
       const users = await manager.find(User, { where: { id: In(uniqueIds) } });
@@ -512,33 +580,28 @@ export class PlanService {
     };
   }
 
-  /* ---------- KPIs (light) ---------- */
-  async listPlansWithStats(q: ListPlansWithStatsQuery) {
+  async listPlansWithStats(q: ListPlansWithStatsQuery, actor: { id: string; role: UserRole }) {
     const search = (q.search || '').trim();
-    const where = search ? 'p.name ILIKE :search' : '1=1';
-    const params: any = search ? { search: `%${search}%` } : {};
 
-    const agg = await this.planRepo
-      .createQueryBuilder('p')
-      .leftJoin('p.days', 'd')
-      .leftJoin('d.items', 'i')
-      .where(where, params)
-      .select('COUNT(DISTINCT p.id)', 'plansTotal')
-      .addSelect('COUNT(DISTINCT CASE WHEN p.isActive = true THEN p.id END)', 'plansActive')
-      .addSelect('COUNT(DISTINCT d.id)', 'days')
-      .addSelect('COUNT(DISTINCT i.id)', 'items')
-      .getRawOne<{ plansTotal: string; plansActive: string; days: string; items: string }>();
+    // قاعدة الاستعلام الأساسية
+    const qb = this.scopedPlanQB(actor);
+
+    if (search) {
+      qb.andWhere('p.name ILIKE :search', { search: `%${search}%` });
+    }
+
+    // احسب إجمالي الخطط العامة (adminId = null)
+    const publicPlansQb = qb.clone().andWhere('p.adminId IS NULL').select('COUNT(DISTINCT p.id)', 'publicPlansTotal');
+
+    // احسب إجمالي الخطط الشخصية (adminId = actor.id)
+    const personalPlansQb = qb.clone().andWhere('p.adminId = :adminId', { adminId: actor.id }).select('COUNT(DISTINCT p.id)', 'personalPlansTotal');
+
+    const [publicAgg, personalAgg] = await Promise.all([publicPlansQb.getRawOne<{ publicPlansTotal: string }>(), personalPlansQb.getRawOne<{ personalPlansTotal: string }>()]);
 
     return {
-      summary: {
-        plans: {
-          total: Number(agg?.plansTotal || 0),
-          active: Number(agg?.plansActive || 0),
-        },
-        structure: {
-          days: Number(agg?.days || 0),
-          items: Number(agg?.items || 0),
-        },
+      plans: {
+        total: Number(publicAgg?.publicPlansTotal || 0),
+        totalPlansPersonal: Number(personalAgg?.personalPlansTotal || 0),
       },
     };
   }

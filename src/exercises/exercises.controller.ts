@@ -1,5 +1,5 @@
 // src/exercises/exercises.controller.ts
-import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, Req, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
@@ -8,7 +8,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from 'entities/global.entity';
 import { imageUploadOptions, videoUploadOptions } from './upload.config';
 import { ExercisesService } from './exercises.service';
-import { mixedUploadOptions } from './mixed-upload.config';
+import { mixedUploadOptions, mixedUploadOptionsWorkouts } from './mixed-upload.config';
 
 function toIntOrUndef(v: any) {
   if (v === undefined || v === null || v === '') return undefined;
@@ -54,8 +54,8 @@ export class PlanExercisesController {
   constructor(private readonly svc: ExercisesService) {}
 
   @Get()
-  async list(@Query() q: any) {
-    return this.svc.list(q);
+  async list(@Query() q: any, @Req() req: any) {
+    return this.svc.list(q, req?.user?.id);
   }
 
   @Get('categories')
@@ -118,8 +118,11 @@ export class PlanExercisesController {
   }
 
   @Get('stats')
-  async stats(@Query() q: any) {
-    return this.svc.stats(q);
+  async stats(@Req() req: any, @Query() q: any) {
+    return this.svc.stats(q, {
+      id: req.user.id,
+      role: req.user.role,
+    });
   }
 
   @Get(':id')
@@ -152,11 +155,12 @@ export class PlanExercisesController {
         { name: 'img', maxCount: 1 },
         { name: 'video', maxCount: 1 },
       ],
-      mixedUploadOptions,
+      mixedUploadOptionsWorkouts,
     ),
   )
   async create(@Body() body: any, @UploadedFiles() files: { img?: any[]; video?: any[] }) {
     const dto: any = {
+      userId: body.userId,
       name: body.name,
       details: toStringOrUndef(body.details) ?? null,
       category: toStringOrUndef(body.category) ?? null,
@@ -179,7 +183,7 @@ export class PlanExercisesController {
         { name: 'img', maxCount: 1 },
         { name: 'video', maxCount: 1 },
       ],
-      mixedUploadOptions,
+      mixedUploadOptionsWorkouts,
     ),
   )
   async update(@Param('id') id: string, @Body() body: any, @UploadedFiles() files: { img?: any[]; video?: any[] }) {
@@ -200,8 +204,9 @@ export class PlanExercisesController {
   }
 
   @Delete(':id')
-  async remove(@Param('id') id: string) {
-    return this.svc.remove(id);
+  async remove(@Param('id') id: string, @Req() req: any, @Query('lang') lang?: string) {
+    const language = lang || req.headers['accept-language']?.split(',')[0]?.startsWith('ar') ? 'ar' : 'en';
+    return this.svc.remove(id, { id: req.user.id, role: req.user.role, lang: language });
   }
 
   @Post(':id/upload-image')

@@ -15,12 +15,10 @@ export class ChatService {
   ) {}
 
   async getUserConversations(userId: string, page: number = 1, limit: number = 50) {
-    // FIXED: Proper pagination calculation
     const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
     const take = Math.max(1, limit || 1);
 
     try {
-      // Get all active conversations for the user
       const participants = await this.participantRepo.find({
         where: {
           user: { id: userId },
@@ -36,53 +34,58 @@ export class ChatService {
         take,
       });
 
-      const conversations = participants.map(p => p.conversation);
+      const conversations = await Promise.all(
+        participants.map(async p => {
+          const conversation = p.conversation;
 
-      // Enhance each conversation with last message and unread count
-      for (const conversation of conversations) {
-        // Get last message
-        const lastMessage = await this.messageRepo.findOne({
-          where: { conversation: { id: conversation.id } },
-          relations: ['sender'],
-          order: { created_at: 'DESC' },
-        });
+          // Get last message
+          const lastMessage = await this.messageRepo.findOne({
+            where: { conversation: { id: conversation.id } },
+            relations: ['sender'],
+            order: { created_at: 'DESC' },
+          });
 
-        (conversation as any).lastMessage = lastMessage;
+          // Calculate unread count
+          const unreadCount = await this.getUnreadCount(conversation.id, userId);
 
-        // Get unread count using a safer approach
-        const participant = await this.participantRepo.findOne({
-          where: {
-            conversation: { id: conversation.id },
-            user: { id: userId },
-          },
-        });
-
-        let unreadCount = 0;
-
-        if (participant?.lastReadAt) {
-          // Count messages after last read date
-          unreadCount = await this.messageRepo
-            .createQueryBuilder('message')
-            .where('message.conversationId = :conversationId', { conversationId: conversation.id })
-            .andWhere('message.created_at > :lastRead', {
-              lastRead: participant.lastReadAt,
-            })
-            .andWhere('message.senderId != :userId', { userId })
-            .andWhere('message.isDeleted = false')
-            .getCount();
-        } else {
-          // If never read, count all messages from others
-          unreadCount = await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId: conversation.id }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
-        }
-
-        (conversation as any).unreadCount = unreadCount;
-      }
+          return {
+            ...conversation,
+            lastMessage,
+            unreadCount,
+          };
+        }),
+      );
 
       return conversations;
     } catch (error) {
       console.error('Error loading conversations:', error);
       throw new Error('Failed to load conversations');
     }
+  }
+
+  private async getUnreadCount(conversationId: string, userId: string): Promise<number> {
+    const participant = await this.participantRepo.findOne({
+      where: {
+        conversation: { id: conversationId },
+        user: { id: userId },
+      },
+    });
+
+    if (!participant?.lastReadAt) {
+      // If never read, count all messages from others
+      return await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
+    }
+
+    // Count messages after last read date
+    return await this.messageRepo
+      .createQueryBuilder('message')
+      .where('message.conversationId = :conversationId', { conversationId })
+      .andWhere('message.created_at > :lastRead', {
+        lastRead: participant.lastReadAt,
+      })
+      .andWhere('message.senderId != :userId', { userId })
+      .andWhere('message.isDeleted = false')
+      .getCount();
   }
 
   async getConversationMessages(conversationId: string, userId: string, page: number = 1, limit: number = 50) {
@@ -99,27 +102,28 @@ export class ChatService {
       throw new NotFoundException('Conversation not found');
     }
 
-    // FIXED: Proper pagination calculation
     const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
     const take = Math.max(1, limit || 1);
 
-    console.log(`Loading messages for conversation ${conversationId}: page=${page}, limit=${limit}, skip=${skip}, take=${take}`);
-
-    // FIXED: Get messages with proper ordering and pagination
     const messages = await this.messageRepo.find({
       where: {
         conversation: { id: conversationId },
         isDeleted: false,
       },
       relations: ['sender', 'replyTo', 'replyTo.sender'],
-      order: { created_at: 'ASC' }, // Show oldest first for chat history
+      order: { created_at: 'DESC' },
       skip,
       take,
     });
 
-    console.log(`Found ${messages.length} messages for conversation ${conversationId}`);
+    // Mark as read when fetching messages
+    await this.markConversationAsRead(conversationId, userId);
 
-    // Mark as read
+    return messages.reverse(); // Return in ascending order for UI
+  }
+
+  async markConversationAsRead(conversationId: string, userId: string) {
+    // Update participant's last read time
     await this.participantRepo.update(
       {
         conversation: { id: conversationId },
@@ -130,9 +134,11 @@ export class ChatService {
       },
     );
 
-    return messages;
+    // For messages that don't have readBy set yet, set them to current time
+    // This tracks when the message was first read
+    await this.messageRepo.createQueryBuilder().update(ChatMessage).set({ readBy: new Date() }).where('conversationId = :conversationId', { conversationId }).andWhere('senderId != :userId', { userId }).andWhere('readBy IS NULL').execute();
   }
-
+  // ... rest of your existing methods remain the same
   async addParticipants(conversationId: string, userIds: string[], addedBy: string) {
     const conversation = await this.conversationRepo.findOne({
       where: { id: conversationId },
@@ -216,7 +222,6 @@ export class ChatService {
       .getMany();
   }
 
-  // Search users in the system
   async searchUsers(currentUserId: string, query: string, role?: UserRole) {
     let whereConditions: any = [
       { id: Not(currentUserId), name: Like(`%${query}%`) },

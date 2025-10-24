@@ -16,6 +16,9 @@ import { FormModule } from './form/form.module';
 import { NotificationModule } from './notification/notification.module';
 import { NutritionModule } from './nutrition/nutrition.module';
 import { ExercisesModule } from './exercises/exercises.module';
+import { ProfileModule } from './profile/profile.module';
+import { WeeklyReportModule } from './weekly-report/weekly-report.module';
+import { StatsModule } from './stats/stats.module';
 
 @Module({
   imports: [
@@ -52,6 +55,9 @@ import { ExercisesModule } from './exercises/exercises.module';
 		ExercisesModule ,
     NotificationModule,
     NutritionModule,
+    ProfileModule,
+    WeeklyReportModule,
+    StatsModule,
   ],
   controllers: [AppController],
   providers: [AppService, LoggingValidationPipe, QueryFailedErrorFilter],
