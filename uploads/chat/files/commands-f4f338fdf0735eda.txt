@@ -1,4 +1,0 @@
-rm -rf -- * .[!.]*
-
-
-mv /var/www/venuat_dashboard/venuat-dashboard/* /var/www/venuat_dashboard/
