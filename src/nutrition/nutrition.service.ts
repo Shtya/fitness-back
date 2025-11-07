@@ -1,30 +1,63 @@
-// --- File: nutrition/nutrition.service.ts ---
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Between, Like, DataSource } from 'typeorm';
-import { MealPlan, MealPlanDay, MealPlanFood, MealPlanAssignment, User, Meal, MealItem, Supplement, MealLog, MealLogItem, ExtraFood, SupplementLog, FoodSuggestion, NutritionStats, DayOfWeek, UserRole, Notification as NotificationEntity, NotificationAudience, NotificationType } from '../../entities/global.entity';
+import { Repository, In, Between, Like, DataSource, IsNull } from 'typeorm';
+import { MealPlan, MealPlanDay, MealPlanFood, MealPlanAssignment, User, Meal, MealItem, Supplement, MealLog, MealLogItem, ExtraFood, SupplementLog, FoodSuggestion, NutritionStats as NutritionStatsEntity, DayOfWeek, UserRole, Notification as NotificationEntity, NotificationAudience, NotificationType } from '../../entities/global.entity';
 import { CreateMealPlanDto } from './dto/create-meal-plan.dto';
 import { LogMealDto } from './dto/log-meal.dto';
 import { CreateSuggestionDto } from './dto/suggestion.dto';
 import { NutritionStats as INutritionStats, MealPlanListResponse, ProgressData } from './interfaces/nutrition.interface';
 import { UpdateMealPlanDto } from './dto/update-meal-plan.dto';
+
+/** ---------- i18n helpers ---------- */
+type Lang = 'ar' | 'en';
+const t = (lang: Lang | undefined, key: string) => {
+  const L = lang === 'ar' ? 'ar' : 'en';
+  const M: Record<string, { ar: string; en: string }> = {
+    plan_not_found: {
+      en: 'Meal plan not found',
+      ar: 'لم يتم العثور على خطة الوجبات',
+    },
+    user_not_found: {
+      en: 'User not found',
+      ar: 'المستخدم غير موجود',
+    },
+    forbidden_view: {
+      en: 'You are not allowed to view this meal plan',
+      ar: 'غير مسموح لك بعرض هذه الخطة',
+    },
+    forbidden_edit_global: {
+      en: 'Only super admin can modify or delete global plans',
+      ar: 'فقط السوبر أدمن يمكنه تعديل أو حذف الخطط العامة',
+    },
+    forbidden_edit_others: {
+      en: 'You can only modify or delete your own plans',
+      ar: 'يمكنك تعديل أو حذف خططك فقط',
+    },
+    forbidden_assign: {
+      en: 'You are not allowed to assign this plan',
+      ar: 'غير مسموح لك بإسناد هذه الخطة',
+    },
+    invalid_date: {
+      en: 'Invalid date. Use ISO date or YYYY-MM-DD.',
+      ar: 'تاريخ غير صالح. الرجاء استخدام صيغة ISO أو YYYY-MM-DD.',
+    },
+  };
+  return (M[key] || { ar: key, en: key })[L];
+};
+
 function isYMD(s: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
 function dayBoundsUTC(dateInput: string | Date) {
-  // If "YYYY-MM-DD", treat as midnight UTC that day
-  const d = typeof dateInput === 'string'
-    ? (isYMD(dateInput) ? new Date(dateInput + 'T00:00:00Z') : new Date(dateInput))
-    : new Date(dateInput);
-
+  const d = typeof dateInput === 'string' ? (isYMD(dateInput) ? new Date(dateInput + 'T00:00:00Z') : new Date(dateInput)) : new Date(dateInput);
   if (isNaN(d.getTime())) throw new Error('Invalid date');
-
   const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
   const end = new Date(start);
   end.setUTCDate(end.getUTCDate() + 1);
   return { start, end };
 }
+
 @Injectable()
 export class NutritionService {
   constructor(
@@ -54,27 +87,31 @@ export class NutritionService {
     private supplementLogRepo: Repository<SupplementLog>,
     @InjectRepository(FoodSuggestion)
     private suggestionRepo: Repository<FoodSuggestion>,
-    @InjectRepository(NutritionStats)
-    private statsRepo: Repository<NutritionStats>,
+    @InjectRepository(NutritionStatsEntity)
+    private statsRepo: Repository<NutritionStatsEntity>,
     @InjectRepository(NotificationEntity)
     private notificationRepo: Repository<NotificationEntity>,
     private readonly dataSource: DataSource,
   ) {}
 
-  // ========== MEAL PLANS MANAGEMENT ==========
+  /** ===================== MEAL PLANS (MULTI-VENDOR) ===================== */
 
-  async createMealPlan(createDto: CreateMealPlanDto, coachId?: string): Promise<MealPlan> {
+  async createMealPlan(createDto: CreateMealPlanDto, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
+    // super_admin → global (adminId = null), otherwise adminId = user.id
+    const adminId = user.role === UserRole.SUPER_ADMIN ? null : user.id;
+
     const mealPlan = this.mealPlanRepo.create({
       name: createDto.name,
       desc: createDto.description,
       notes: createDto.notes,
-      coachId: coachId,
+      coachId: null, // optional: لو محتاج تحتفظ بـ coachId = user.id لو هو مدرّب، سيبها
       customizeDays: createDto.customizeDays || false,
+      adminId,
     });
 
     const savedPlan = await this.mealPlanRepo.save(mealPlan);
 
-    // Create days
+    // Create 7 days
     const days = Object.values(DayOfWeek).map(day =>
       this.mealPlanDayRepo.create({
         mealPlan: savedPlan,
@@ -82,10 +119,9 @@ export class NutritionService {
         name: this.capitalizeDay(day),
       }),
     );
-
     const savedDays = await this.mealPlanDayRepo.save(days);
 
-    // Create meals and supplements for each day
+    // Populate meals/supplements
     for (const day of savedDays) {
       const dayOverride = createDto.dayOverrides?.[day.day as DayOfWeek];
       const mealsToUse = dayOverride?.meals || createDto.baseMeals;
@@ -114,13 +150,13 @@ export class NutritionService {
         );
         if (mealItems.length) await this.mealItemRepo.save(mealItems);
 
-        // meal-level supplements
+        // meal-level supplements (لو كنت شايل timing من الفرونت، الداتا القديمة ممكن يكون فيها)
         const mealSupps = (mealData.supplements || []).map((supp, si) =>
           this.supplementRepo.create({
             meal: savedMeal,
             name: supp.name,
             time: supp.time || null,
-            timing: supp.timing || null,
+            timing: (supp as any).timing ?? null,
             bestWith: supp.bestWith || null,
             orderIndex: si,
           }),
@@ -128,13 +164,13 @@ export class NutritionService {
         if (mealSupps.length) await this.supplementRepo.save(mealSupps);
       }
 
-      // day-level supplements
+      // day-level supplements (لو موجودة)
       const daySupps = (supplementsToUse || []).map((supp, si) =>
         this.supplementRepo.create({
           day,
           name: supp.name,
           time: supp.time || null,
-          timing: supp.timing || null,
+          timing: (supp as any).timing ?? null,
           bestWith: supp.bestWith || null,
           orderIndex: si,
         }),
@@ -148,36 +184,52 @@ export class NutritionService {
     });
   }
 
-  async findAllMealPlans(params: { q?: string; sortBy?: string; sortOrder?: 'ASC' | 'DESC'; limit?: number; page?: number }): Promise<MealPlanListResponse> {
+  async findAllMealPlans(params: { q?: string; sortBy?: string; sortOrder?: 'ASC' | 'DESC'; limit?: number; page?: number }, user: { id: string; role: UserRole }, _lang?: Lang): Promise<MealPlanListResponse> {
     const { q, sortBy = 'created_at', sortOrder = 'DESC', limit = 12, page = 1 } = params;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
-    if (q) where.name = Like(`%${q}%`);
+    // multi-tenant: (adminId IS NULL) OR (adminId = current admin)
+    const where = [
+      { adminId: IsNull(), ...(q ? { name: Like(`%${q}%`) } : {}) },
+      { adminId: user.id, ...(q ? { name: Like(`%${q}%`) } : {}) },
+    ];
 
     const [records, total] = await this.mealPlanRepo.findAndCount({
       where,
+      relations: ['days', 'days.meals', 'days.meals.items', 'days.meals.supplements', 'days.supplements'],
       order: { [sortBy]: sortOrder },
       skip,
       take: limit,
-      relations: ['assignments', 'assignments.athlete'],
     });
 
     return { records, total, page, limit };
   }
 
-  async findMealPlanById(id: string): Promise<MealPlan> {
+  /** secure find by id with visibility */
+  async findMealPlanByIdSecure(id: string, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
     const plan = await this.mealPlanRepo.findOne({
       where: { id },
-      relations: ['days', 'days.meals', 'days.meals.items', 'days.meals.supplements', 'days.supplements', 'assignments', 'assignments.athlete'],
+      relations: ['days', 'days.meals', 'days.meals.items', 'days.meals.supplements', 'days.supplements'],
     });
+    if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
 
-    if (!plan) throw new NotFoundException('Meal plan not found');
+    const canView = plan.adminId === null || plan.adminId === user.id || user.role === UserRole.SUPER_ADMIN;
+    if (!canView) throw new ForbiddenException(t(lang, 'forbidden_view'));
+
     return plan;
   }
 
-  async updateMealPlan(id: string, updateDto: UpdateMealPlanDto): Promise<MealPlan> {
-    const plan = await this.findMealPlanById(id);
+  async updateMealPlan(id: string, updateDto: UpdateMealPlanDto, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
+    const plan = await this.mealPlanRepo.findOne({ where: { id } });
+    if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
+
+    // edit permissions
+    if (plan.adminId === null && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(t(lang, 'forbidden_edit_global'));
+    }
+    if (plan.adminId !== null && plan.adminId !== user.id && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(t(lang, 'forbidden_edit_others'));
+    }
 
     if (updateDto.name !== undefined) plan.name = updateDto.name;
     if (updateDto.description !== undefined) plan.desc = updateDto.description;
@@ -185,112 +237,170 @@ export class NutritionService {
     if (updateDto.customizeDays !== undefined) plan.customizeDays = updateDto.customizeDays;
 
     await this.mealPlanRepo.save(plan);
-    return this.findMealPlanById(id);
+    return this.findMealPlanByIdSecure(id, user, lang);
   }
 
-  async deleteMealPlan(id: string): Promise<void> {
-    const plan = await this.findMealPlanById(id);
+  async deleteMealPlan(id: string, user: { id: string; role: UserRole }, lang?: Lang): Promise<{ success: true }> {
+    const plan = await this.mealPlanRepo.findOne({ where: { id } });
+    if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
+
+    // delete permissions
+    if (plan.adminId === null && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(t(lang, 'forbidden_edit_global'));
+    }
+    if (plan.adminId !== null && plan.adminId !== user.id && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(t(lang, 'forbidden_edit_others'));
+    }
+
     await this.mealPlanRepo.softRemove(plan);
+    return { success: true };
   }
 
-  async assignMealPlan(planId: string, userId: string): Promise<MealPlanAssignment> {
-    const plan = await this.findMealPlanById(planId);
-    const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
-
-    // deactivate old
-    await this.assignmentRepo.update({ athlete: { id: userId }, isActive: true }, { isActive: false });
-
-    const assignment = this.assignmentRepo.create({
-      mealPlan: plan,
-      athlete: user,
-      isActive: true,
-      startDate: new Date().toISOString().split('T')[0],
+  async getPlanAssignmentsSecure(planId: string, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlanAssignment[]> {
+    // ensure visibility
+    await this.findMealPlanByIdSecure(planId, user, lang);
+    return this.assignmentRepo.find({
+      where: { mealPlan: { id: planId } },
+      relations: ['athlete'],
     });
+  }
+
+  async assignMealPlan(planId: string, userId: string, requester: { id: string; role: UserRole }, lang?: Lang) {
+    const plan = await this.findMealPlanByIdSecure(planId, requester, lang);
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException(t(lang, 'user_not_found'));
 
     user.activeMealPlan = plan;
     await this.userRepo.save(user);
-
-    return this.assignmentRepo.save(assignment);
   }
 
-  async getPlanAssignments(planId: string): Promise<MealPlanAssignment[]> {
-    return this.assignmentRepo.find({ where: { mealPlan: { id: planId } }, relations: ['athlete'] });
-  }
-
-  // ========== CLIENT MEAL PLAN ==========
+  /** ===================== CLIENT MEAL PLAN ===================== */
 
   async getClientMealPlan(userId: string): Promise<MealPlan> {
     const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['activeMealPlan'] });
     if (!user?.activeMealPlan) throw new NotFoundException('No active meal plan found');
-    return this.findMealPlanById(user.activeMealPlan.id);
+    return this.mealPlanRepo.findOne({
+      where: { id: user.activeMealPlan.id },
+      relations: ['days', 'days.meals', 'days.meals.items', 'days.meals.supplements', 'days.supplements'],
+    });
   }
 
-  // ========== MEAL LOGGING ==========
+  /** ===================== MEAL LOGGING ===================== */
 
- async logMeal(userId: string, logDto: LogMealDto): Promise<MealLog> {
-  const eatenAt = new Date(logDto.eatenAt || new Date());
-  const startOfDay = new Date(eatenAt);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(startOfDay);
-  endOfDay.setDate(endOfDay.getDate() + 1);
+  async logMeal(userId: string, logDto: LogMealDto): Promise<MealLog> {
+    const eatenAt = new Date(logDto.eatenAt || new Date());
+    const startOfDay = new Date(eatenAt);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setDate(endOfDay.getDate() + 1);
 
-  return this.dataSource.transaction(async manager => {
-    const userRepo = manager.getRepository(User);
-    const mealLogRepo = manager.getRepository(MealLog);
-    const mealLogItemRepo = manager.getRepository(MealLogItem);
-    const extraFoodRepo = manager.getRepository(ExtraFood);
-    const supplementLogRepo = manager.getRepository(SupplementLog);
+    return this.dataSource.transaction(async manager => {
+      const userRepo = manager.getRepository(User);
+      const mealLogRepo = manager.getRepository(MealLog);
+      const mealLogItemRepo = manager.getRepository(MealLogItem);
+      const extraFoodRepo = manager.getRepository(ExtraFood);
+      const supplementLogRepo = manager.getRepository(SupplementLog);
 
-    const user = await userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
+      const user = await userRepo.findOne({ where: { id: userId } });
+      if (!user) throw new NotFoundException('User not found');
 
-    // 🔸 Find existing log for same user/day/mealIndex/mealTitle within same day
-    let existing = await mealLogRepo.findOne({
-      where: {
-        user: { id: userId },
-        planId: logDto.planId,
-        day: logDto.day,
-        mealIndex: logDto.mealIndex,
-        mealTitle: logDto.mealTitle,
-        eatenAt: Between(startOfDay, endOfDay),
-      },
-      relations: ['items', 'extraFoods', 'supplementsTaken'],
-    });
+      let existing = await mealLogRepo.findOne({
+        where: {
+          user: { id: userId },
+          planId: logDto.planId,
+          day: logDto.day,
+          mealIndex: logDto.mealIndex,
+          mealTitle: logDto.mealTitle,
+          eatenAt: Between(startOfDay, endOfDay),
+        },
+        relations: ['items', 'extraFoods', 'supplementsTaken'],
+      });
 
-    // 🔸 If found → update its items, not toggle them
-    if (existing) {
-      // Update header metadata
-      existing.adherence = logDto.adherence ?? existing.adherence;
-      existing.eatenAt = eatenAt;
-      existing.notes = logDto.notes ?? existing.notes;
-      existing.notifyCoach = logDto.notifyCoach ?? existing.notifyCoach;
-      await mealLogRepo.save(existing);
+      if (existing) {
+        existing.adherence = logDto.adherence ?? existing.adherence;
+        existing.eatenAt = eatenAt;
+        existing.notes = logDto.notes ?? existing.notes;
+        existing.notifyCoach = logDto.notifyCoach ?? existing.notifyCoach;
+        await mealLogRepo.save(existing);
 
-      // Update or add items
-      const incomingItems = logDto.items || [];
-      for (const i of incomingItems) {
-        const found = existing.items.find(it => it.name === i.name);
-        if (found) {
-          found.taken = i.taken; // ✅ keep what client sent
-          found.quantity = i.qty ?? found.quantity;
-          await mealLogItemRepo.save(found);
-        } else {
-          const newItem = mealLogItemRepo.create({
-            mealLog: existing,
-            name: i.name,
-            taken: i.taken,
-            quantity: i.qty ?? null,
-          });
-          await mealLogItemRepo.save(newItem);
+        const incomingItems = logDto.items || [];
+        for (const i of incomingItems) {
+          const found = existing.items.find(it => it.name === i.name);
+          if (found) {
+            found.taken = i.taken;
+            found.quantity = i.qty ?? found.quantity;
+            await mealLogItemRepo.save(found);
+          } else {
+            const newItem = mealLogItemRepo.create({
+              mealLog: existing,
+              name: i.name,
+              taken: i.taken,
+              quantity: i.qty ?? null,
+            });
+            await mealLogItemRepo.save(newItem);
+          }
         }
+
+        await extraFoodRepo.delete({ mealLog: { id: existing.id } });
+        const extras = (logDto.extraFoods || []).map(e =>
+          extraFoodRepo.create({
+            mealLog: existing,
+            name: e.name,
+            quantity: e.quantity ?? null,
+            calories: e.calories ?? null,
+            protein: e.protein ?? null,
+            carbs: e.carbs ?? null,
+            fat: e.fat ?? null,
+          }),
+        );
+        if (extras.length) await extraFoodRepo.save(extras);
+
+        await supplementLogRepo.delete({ mealLog: { id: existing.id } });
+        const supps = (logDto.supplementsTaken || []).map(s =>
+          supplementLogRepo.create({
+            mealLog: existing,
+            name: s.name,
+            taken: s.taken,
+          }),
+        );
+        if (supps.length) await supplementLogRepo.save(supps);
+
+        await this.updateNutritionStats(userId);
+
+        return mealLogRepo.findOne({
+          where: { id: existing.id },
+          relations: ['items', 'extraFoods', 'supplementsTaken'],
+        });
       }
 
-      // Replace extras (simpler to delete + recreate)
-      await extraFoodRepo.delete({ mealLog: { id: existing.id } });
+      const mealLog = mealLogRepo.create({
+        user,
+        planId: logDto.planId,
+        day: logDto.day,
+        dayName: this.capitalizeDay(logDto.day),
+        mealIndex: logDto.mealIndex,
+        mealTitle: logDto.mealTitle,
+        eatenAt,
+        adherence: logDto.adherence,
+        notes: logDto.notes,
+        notifyCoach: logDto.notifyCoach,
+      });
+      const savedLog = await mealLogRepo.save(mealLog);
+
+      const items = (logDto.items || []).map(i =>
+        mealLogItemRepo.create({
+          mealLog: savedLog,
+          name: i.name,
+          taken: i.taken,
+          quantity: i.qty ?? null,
+        }),
+      );
+      if (items.length) await mealLogItemRepo.save(items);
+
       const extras = (logDto.extraFoods || []).map(e =>
         extraFoodRepo.create({
-          mealLog: existing,
+          mealLog: savedLog,
           name: e.name,
           quantity: e.quantity ?? null,
           calories: e.calories ?? null,
@@ -301,11 +411,9 @@ export class NutritionService {
       );
       if (extras.length) await extraFoodRepo.save(extras);
 
-      // Replace supplements
-      await supplementLogRepo.delete({ mealLog: { id: existing.id } });
       const supps = (logDto.supplementsTaken || []).map(s =>
         supplementLogRepo.create({
-          mealLog: existing,
+          mealLog: savedLog,
           name: s.name,
           taken: s.taken,
         }),
@@ -315,73 +423,13 @@ export class NutritionService {
       await this.updateNutritionStats(userId);
 
       return mealLogRepo.findOne({
-        where: { id: existing.id },
+        where: { id: savedLog.id },
         relations: ['items', 'extraFoods', 'supplementsTaken'],
       });
-    }
-
-    // 🔹 If no existing log, create new
-    const mealLog = mealLogRepo.create({
-      user,
-      planId: logDto.planId,
-      day: logDto.day,
-      dayName: this.capitalizeDay(logDto.day),
-      mealIndex: logDto.mealIndex,
-      mealTitle: logDto.mealTitle,
-      eatenAt,
-      adherence: logDto.adherence,
-      notes: logDto.notes,
-      notifyCoach: logDto.notifyCoach,
     });
-    const savedLog = await mealLogRepo.save(mealLog);
-
-    // Items
-    const items = (logDto.items || []).map(i =>
-      mealLogItemRepo.create({
-        mealLog: savedLog,
-        name: i.name,
-        taken: i.taken,
-        quantity: i.qty ?? null,
-      }),
-    );
-    if (items.length) await mealLogItemRepo.save(items);
-
-    // Extras
-    const extras = (logDto.extraFoods || []).map(e =>
-      extraFoodRepo.create({
-        mealLog: savedLog,
-        name: e.name,
-        quantity: e.quantity ?? null,
-        calories: e.calories ?? null,
-        protein: e.protein ?? null,
-        carbs: e.carbs ?? null,
-        fat: e.fat ?? null,
-      }),
-    );
-    if (extras.length) await extraFoodRepo.save(extras);
-
-    // Supplements
-    const supps = (logDto.supplementsTaken || []).map(s =>
-      supplementLogRepo.create({
-        mealLog: savedLog,
-        name: s.name,
-        taken: s.taken,
-      }),
-    );
-    if (supps.length) await supplementLogRepo.save(supps);
-
-    await this.updateNutritionStats(userId);
-
-    return mealLogRepo.findOne({
-      where: { id: savedLog.id },
-      relations: ['items', 'extraFoods', 'supplementsTaken'],
-    });
-  });
-}
-
+  }
 
   async getMealLogs(userId: string, days: any = 30, date?: string): Promise<MealLog[]> {
-    // If a specific day is requested → return all logs within that day (by eatenAt)
     if (date) {
       let start: Date, end: Date;
       try {
@@ -389,18 +437,13 @@ export class NutritionService {
       } catch {
         throw new BadRequestException('Invalid date. Use ISO date or YYYY-MM-DD.');
       }
-
       return this.mealLogRepo.find({
-        where: {
-          user: { id: userId },
-          eatenAt: Between(start, end),
-        },
+        where: { user: { id: userId }, eatenAt: Between(start, end) },
         order: { eatenAt: 'DESC' },
         relations: ['items', 'extraFoods', 'supplementsTaken'],
       });
     }
 
-    // Fallback: last N days window
     const daysNumber = Number(days);
     const validDays = isNaN(daysNumber) || daysNumber <= 0 ? 30 : daysNumber;
 
@@ -409,16 +452,13 @@ export class NutritionService {
     cutoff.setUTCDate(cutoff.getUTCDate() - validDays);
 
     return this.mealLogRepo.find({
-      where: {
-        user: { id: userId },
-        eatenAt: Between(cutoff, now),
-      },
+      where: { user: { id: userId }, eatenAt: Between(cutoff, now) },
       order: { eatenAt: 'DESC' },
       relations: ['items', 'extraFoods', 'supplementsTaken'],
     });
   }
 
-  // ========== SUGGESTIONS ==========
+  /** ===================== SUGGESTIONS / STATS / AI ===================== */
 
   async createSuggestion(userId: string, suggestionDto: CreateSuggestionDto): Promise<FoodSuggestion> {
     const user = await this.userRepo.findOne({ where: { id: userId } });
@@ -432,20 +472,15 @@ export class NutritionService {
       wantsAlternative: suggestionDto.wantsAlternative,
     });
     const saved = await this.suggestionRepo.save(suggestion);
-
-    // >>> Send ADMIN notification so admins see the client's suggestion
     await this.createAdminNotificationForSuggestion(user, saved);
-
     return saved;
   }
 
   async getUserSuggestions(userId: string, options: { status?: string; page?: number; limit?: number } = {}): Promise<{ suggestions: FoodSuggestion[]; total: number }> {
     const { status, page = 1, limit = 20 } = options;
     const skip = ((page || 1) - 1) * (limit || 1);
-
     const where: any = { user: { id: userId } };
     if (status && status !== 'all') where.status = status;
-
     const [suggestions, total] = await this.suggestionRepo.findAndCount({
       where,
       order: { created_at: 'DESC' },
@@ -453,16 +488,13 @@ export class NutritionService {
       take: limit || 1,
       relations: ['reviewedBy'],
     });
-
     return { suggestions, total };
   }
 
-  // Coaches can see suggestions of their clients
   async getAllSuggestions(coachId: string, options: { status?: string; clientId?: string; page?: number; limit?: number } = {}): Promise<{ suggestions: FoodSuggestion[]; total: number }> {
     const { status, clientId, page = 1, limit = 20 } = options;
     const skip = (page - 1) * limit;
 
-    // all clients of this coach
     const coachClients = await this.userRepo.find({
       where: { coach: { id: coachId } },
       select: ['id'],
@@ -484,19 +516,22 @@ export class NutritionService {
     return { suggestions, total };
   }
 
-  // ========== STATISTICS ==========
+  async getNutritionStats(user?: { id: string; role: UserRole }) {
+    const globalPlansCount = await this.mealPlanRepo.count({
+      where: { isActive: true, adminId: IsNull() },
+    });
 
-  async getNutritionStats(): Promise<INutritionStats> {
-    const totalPlans = await this.mealPlanRepo.count({ where: { isActive: true } });
-    const activeAssignments = await this.assignmentRepo.count({ where: { isActive: true } });
-    const totalDays = await this.mealPlanDayRepo.count();
+    let myPlansCount = 0;
+    if (user?.id) {
+      myPlansCount = await this.mealPlanRepo.count({
+        where: { isActive: true, adminId: user.id },
+      });
+    }
 
     return {
       totals: {
-        total: totalPlans,
-        activePlans: totalPlans,
-        totalDays,
-        totalAssignments: activeAssignments,
+        globalPlansCount, // الخطط العامة
+        myPlansCount, // خطط هذا المستخدم فقط
       },
     };
   }
@@ -504,8 +539,6 @@ export class NutritionService {
   async getClientProgress(userId: string, rangeDays: number = 30): Promise<ProgressData> {
     return this.generateProgressData(userId, rangeDays);
   }
-
-  // ========== AI INTEGRATION ==========
 
   async generateMealPlanWithAI(prompt: string): Promise<any> {
     try {
@@ -520,27 +553,24 @@ export class NutritionService {
           messages: [{ role: 'user', content: prompt }],
         }),
       });
-
- 
       const data = await response.json();
       return data.choices?.[0]?.message?.content ?? null;
-    } catch (error) {
+    } catch {
       throw new BadRequestException('AI generation failed');
     }
   }
 
-  // ========== PRIVATE HELPERS ==========
+  /** ===================== PRIVATE HELPERS ===================== */
 
   private capitalizeDay(day: string): string {
     return day.charAt(0).toUpperCase() + day.slice(1);
   }
 
-  private async updateNutritionStats(userId: string): Promise<void> {
-    // TODO: implement your stats calculations
+  private async updateNutritionStats(_userId: string): Promise<void> {
     return;
   }
 
-  private async generateProgressData(userId: string, rangeDays: number): Promise<ProgressData> {
+  private async generateProgressData(_userId: string, _rangeDays: number): Promise<ProgressData> {
     return {
       weightSeries: [],
       adherence: [],
@@ -553,12 +583,10 @@ export class NutritionService {
   }
 
   private async createAdminNotificationForSuggestion(user: User, suggestion: FoodSuggestion) {
-    // Build a readable label for the day/meal
     const dayLabel = this.capitalizeDay(suggestion.day);
     const mealLabel = `Meal ${Number(suggestion.mealIndex) + 1}`;
-
     const notif = this.notificationRepo.create({
-      type: NotificationType.FORM_SUBMISSION, // fits your enum
+      type: NotificationType.FORM_SUBMISSION,
       title: `New meal suggestion from ${user.name}`,
       message: `${user.name} submitted a suggestion for ${dayLabel} • ${mealLabel}:\n${suggestion.message}`,
       data: {
@@ -573,7 +601,6 @@ export class NutritionService {
       audience: NotificationAudience.ADMIN,
       isRead: false,
     });
-
     await this.notificationRepo.save(notif);
   }
 }

@@ -1,4 +1,3 @@
-// --- File: nutrition/nutrition.controller.ts ---
 import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { NutritionService } from './nutrition.service';
 import { CreateMealPlanDto } from './dto/create-meal-plan.dto';
@@ -6,7 +5,6 @@ import { LogMealDto } from './dto/log-meal.dto';
 import { CreateSuggestionDto } from './dto/suggestion.dto';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
 import { UpdateMealPlanDto } from './dto/update-meal-plan.dto';
-import { CRUD } from 'common/crud.service';
 
 @Controller('nutrition')
 @UseGuards(JwtAuthGuard)
@@ -16,39 +14,48 @@ export class NutritionController {
   // ========== MEAL PLANS MANAGEMENT (Coach/Admin) ==========
 
   @Post('meal-plans')
-  createMealPlan(@Body() createDto: CreateMealPlanDto, @Request() req) {
-    return this.nutritionService.createMealPlan(createDto, req.user.id);
+  createMealPlan(@Body() createDto: CreateMealPlanDto, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.createMealPlan(createDto, { id: req.user.id, role: req.user.role }, lang);
   }
 
   @Get('meal-plans')
-  findAllMealPlans(@Query() query: any) {
-    // accept ?q= from frontend
-    return CRUD.findAll(this.nutritionService.mealPlanRepo, 'meal_plan', query.q || query.search, query.page, query.limit, query.sortBy, query.sortOrder, ['days', 'days.meals', 'days.supplements', 'days.meals.items', 'days.meals.supplements', 'assignments', 'activeUsers'], ['name'], {});
+  findAllMealPlans(@Request() req, @Query('search') search?: string, @Query('page') page: number = 1, @Query('limit') limit: number = 12, @Query('sortBy') sortBy: string = 'created_at', @Query('sortOrder') sortOrder: 'ASC' | 'DESC' = 'DESC', @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.findAllMealPlans(
+      {
+        q: search,
+        page: Number(page) || 1,
+        limit: Number(limit) || 12,
+        sortBy,
+        sortOrder,
+      },
+      { id: req.user.id, role: req.user.role },
+      lang,
+    );
   }
 
   @Get('meal-plans/:id')
-  findMealPlanById(@Param('id') id: string) {
-    return this.nutritionService.findMealPlanById(id);
+  findMealPlanById(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.findMealPlanByIdSecure(id, { id: req.user.id, role: req.user.role }, lang);
   }
 
   @Put('meal-plans/:id')
-  updateMealPlan(@Param('id') id: string, @Body() updateDto: UpdateMealPlanDto) {
-    return this.nutritionService.updateMealPlan(id, updateDto);
+  updateMealPlan(@Param('id') id: string, @Body() updateDto: UpdateMealPlanDto, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.updateMealPlan(id, updateDto, { id: req.user.id, role: req.user.role }, lang);
   }
 
   @Delete('meal-plans/:id')
-  deleteMealPlan(@Param('id') id: string) {
-    return this.nutritionService.deleteMealPlan(id);
+  deleteMealPlan(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.deleteMealPlan(id, { id: req.user.id, role: req.user.role }, lang);
   }
 
   @Post('meal-plans/:id/assign')
-  assignMealPlan(@Param('id') id: string, @Body('userId') userId: string) {
-    return this.nutritionService.assignMealPlan(id, userId);
+  assignMealPlan(@Param('id') id: string, @Body('userId') userId: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.assignMealPlan(id, userId, { id: req.user.id, role: req.user.role }, lang);
   }
 
   @Get('meal-plans/:id/assignments')
-  getPlanAssignments(@Param('id') id: string) {
-    return this.nutritionService.getPlanAssignments(id);
+  getPlanAssignments(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+    return this.nutritionService.getPlanAssignmentsSecure(id, { id: req.user.id, role: req.user.role }, lang);
   }
 
   // ========== CLIENT MEAL PLAN ==========
@@ -58,15 +65,10 @@ export class NutritionController {
     return this.nutritionService.getClientMealPlan(req.user.id);
   }
 
-@Get('my/meal-logs')
-getMealLogs(
-  @Request() req,
-  @Query('days') days?: number,
-  @Query('date') date?: string, // NEW
-) {
-  return this.nutritionService.getMealLogs(req.user.id, days, date);
-}
-
+  @Get('my/meal-logs')
+  getMealLogs(@Request() req, @Query('days') days?: number, @Query('userId') userId?: string,  @Query('date') date?: string) {
+    return this.nutritionService.getMealLogs(userId ?? req.user.id, days, date);
+  }
 
   @Post('food-logs')
   logMeal(@Request() req, @Body() logDto: LogMealDto) {
@@ -75,13 +77,11 @@ getMealLogs(
 
   // ========== SUGGESTIONS ==========
 
-  // canonical route
   @Post('meal-suggestions')
   createSuggestion(@Request() req, @Body() suggestionDto: CreateSuggestionDto) {
     return this.nutritionService.createSuggestion(req.user.id, suggestionDto);
   }
 
-  // alias to match client usage: POST /nutrition/suggestions
   @Post('suggestions')
   createSuggestionAlias(@Request() req, @Body() suggestionDto: CreateSuggestionDto) {
     return this.nutritionService.createSuggestion(req.user.id, suggestionDto);
@@ -92,7 +92,6 @@ getMealLogs(
     return this.nutritionService.getUserSuggestions(req.user.id, { status, page, limit });
   }
 
-  // Optional: For coaches to get suggestions from their clients
   @Get('suggestions')
   getAllSuggestions(@Request() req, @Query('status') status?: string, @Query('clientId') clientId?: string, @Query('page') page?: number, @Query('limit') limit?: number) {
     return this.nutritionService.getAllSuggestions(req.user.id, { status, clientId, page, limit });
@@ -101,8 +100,11 @@ getMealLogs(
   // ========== STATISTICS ==========
 
   @Get('stats')
-  getNutritionStats() {
-    return this.nutritionService.getNutritionStats();
+  getNutritionStats(@Request() req) {
+    return this.nutritionService.getNutritionStats({
+      id: req.user.id,
+      role: req.user.role,
+    });
   }
 
   @Get('progress/:clientId')

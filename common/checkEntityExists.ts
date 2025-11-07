@@ -1,4 +1,3 @@
-// src/utils/entity.utils.ts
 import { NotFoundException } from '@nestjs/common';
 
 export async function checkEntityExists ( repository: { findOne: (options: any) => Promise<any> }, id: number, message: string )  

@@ -1,780 +1,126 @@
 {
   "info": {
-    "name": "Profile Module API",
-    "description": "Complete API collection for Profile Module - Progress Photos & Body Measurements",
+    "name": "Checkouts API",
+    "_postman_id": "7c03df88-bacb-4b81-9e6a-9b14a4ef6c99",
+    "description": "Collection for testing Checkout module (NestJS + PostgreSQL)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
-  "variable": [
-    {
-      "key": "baseUrl",
-      "value": "http://localhost:3000",
-      "type": "string"
-    },
-    {
-      "key": "authToken",
-      "value": "your-jwt-token-here",
-      "type": "string"
-    },
-    {
-      "key": "userId",
-      "value": "user-uuid-here",
-      "type": "string"
-    }
-  ],
   "item": [
     {
-      "name": "Profile Stats",
-      "item": [
-        {
-          "name": "Get Profile Stats",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "stats"]
-            },
-            "description": "Get user profile with statistics including measurements and photos count"
-          }
-        }
-      ]
+      "name": "Create Checkout (POST /checkouts)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "name", "value": "Ahmed Mostafa", "type": "text" },
+            { "key": "countryCode", "value": "+20", "type": "text" },
+            { "key": "phone", "value": "115554433", "type": "text" },
+            { "key": "email", "value": "ahmed@example.com", "type": "text" },
+            { "key": "agreed", "value": "true", "type": "text" },
+            { "key": "notes", "value": "تجربة الدفع التجريبية", "type": "text" },
+            { "key": "file", "type": "file", "src": "" }
+          ]
+        },
+        "url": { "raw": "http://localhost:3000/checkouts", "protocol": "http", "host": ["localhost"], "port": "3000", "path": ["checkouts"] }
+      },
+      "response": []
     },
     {
-      "name": "Progress Photos",
-      "item": [
-        {
-          "name": "Create Progress Photo Set",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json",
-                "type": "text"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"takenAt\": \"2024-12-19\",\n  \"weight\": 75.5,\n  \"note\": \"Monthly progress check\",\n  \"sides\": {\n    \"front\": \"https://example.com/photos/front.jpg\",\n    \"back\": \"https://example.com/photos/back.jpg\",\n    \"left\": \"https://example.com/photos/left.jpg\",\n    \"right\": \"https://example.com/photos/right.jpg\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/profile/photos",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "photos"]
-            },
-            "description": "Create new progress photo set with front, back, left, right sides"
-          }
-        },
-        {
-          "name": "Get Photos Timeline",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/photos/timeline?months=12",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "photos", "timeline"],
-              "query": [
-                {
-                  "key": "months",
-                  "value": "12",
-                  "description": "Number of months to look back (default: 12)"
-                }
-              ]
-            },
-            "description": "Get progress photos timeline grouped by month"
-          }
-        },
-        {
-          "name": "Get Specific Photo Set",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/photos/{{photoId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "photos", "{{photoId}}"]
-            },
-            "description": "Get specific progress photo set by ID"
-          }
-        },
-        {
-          "name": "Delete Photo Set",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/photos/{{photoId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "photos", "{{photoId}}"]
-            },
-            "description": "Delete progress photo set"
-          }
+      "name": "Get All Checkouts (GET /checkouts)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/checkouts?page=1&limit=10&status=pending",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["checkouts"],
+          "query": [
+            { "key": "page", "value": "1" },
+            { "key": "limit", "value": "10" },
+            { "key": "status", "value": "pending" }
+          ]
         }
-      ]
+      },
+      "response": []
     },
     {
-      "name": "Body Measurements",
-      "item": [
-        {
-          "name": "Create Body Measurement",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json",
-                "type": "text"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"date\": \"2024-12-19\",\n  \"weight\": 75.5,\n  \"waist\": 82.5,\n  \"chest\": 95.0,\n  \"hips\": 92.0,\n  \"arms\": 35.5,\n  \"thighs\": 58.0\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements"]
-            },
-            "description": "Add new body measurement entry"
-          }
-        },
-        {
-          "name": "Get Measurements History",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements?days=120",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements"],
-              "query": [
-                {
-                  "key": "days",
-                  "value": "120",
-                  "description": "Number of days to look back (default: 120)"
-                }
-              ]
-            },
-            "description": "Get body measurements history for specified period"
-          }
-        },
-        {
-          "name": "Get Latest Measurement",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements/latest",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements", "latest"]
-            },
-            "description": "Get the most recent body measurement"
-          }
-        },
-        {
-          "name": "Get Measurements Stats",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements", "stats"]
-            },
-            "description": "Get body measurements statistics and progress"
-          }
-        },
-        {
-          "name": "Update Measurement",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json",
-                "type": "text"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"date\": \"2024-12-19\",\n  \"weight\": 74.8,\n  \"waist\": 81.0,\n  \"chest\": 94.5,\n  \"hips\": 91.5,\n  \"arms\": 35.0,\n  \"thighs\": 57.5\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements/{{measurementId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements", "{{measurementId}}"]
-            },
-            "description": "Update existing body measurement"
-          }
-        },
-        {
-          "name": "Delete Measurement",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements/{{measurementId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements", "{{measurementId}}"]
-            },
-            "description": "Delete body measurement"
-          }
+      "name": "Get Checkout by ID (GET /checkouts/:id)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/checkouts/{{checkout_id}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["checkouts", "{{checkout_id}}"]
         }
-      ]
+      },
+      "response": []
     },
     {
-      "name": "Test Data",
-      "item": [
-        {
-          "name": "Create Multiple Test Measurements",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json",
-                "type": "text"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "[\n  {\n    \"date\": \"2024-09-15\",\n    \"weight\": 78.0,\n    \"waist\": 85.0,\n    \"chest\": 98.0,\n    \"hips\": 95.0,\n    \"arms\": 36.0,\n    \"thighs\": 60.0\n  },\n  {\n    \"date\": \"2024-10-15\",\n    \"weight\": 77.0,\n    \"waist\": 84.0,\n    \"chest\": 97.0,\n    \"hips\": 94.0,\n    \"arms\": 35.8,\n    \"thighs\": 59.5\n  },\n  {\n    \"date\": \"2024-11-15\",\n    \"weight\": 76.0,\n    \"waist\": 83.0,\n    \"chest\": 96.0,\n    \"hips\": 93.0,\n    \"arms\": 35.5,\n    \"thighs\": 59.0\n  },\n  {\n    \"date\": \"2024-12-15\",\n    \"weight\": 75.5,\n    \"waist\": 82.5,\n    \"chest\": 95.0,\n    \"hips\": 92.0,\n    \"arms\": 35.5,\n    \"thighs\": 58.0\n  }\n]"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/profile/measurements/bulk",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "measurements", "bulk"]
-            },
-            "description": "Bulk create test measurements (you might need to implement this endpoint)"
-          }
+      "name": "Update Checkout (PATCH /checkouts/:id)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"notes\": \"تم تعديل البيانات بعد مراجعة البريد الإلكتروني\"\n}"
         },
-        {
-          "name": "Create Multiple Test Photos",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json",
-                "type": "text"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "[\n  {\n    \"takenAt\": \"2024-09-15\",\n    \"weight\": 78.0,\n    \"note\": \"Start of transformation journey\",\n    \"sides\": {\n      \"front\": \"https://example.com/photos/sep-front.jpg\",\n      \"back\": \"https://example.com/photos/sep-back.jpg\",\n      \"left\": \"https://example.com/photos/sep-left.jpg\",\n      \"right\": \"https://example.com/photos/sep-right.jpg\"\n    }\n  },\n  {\n    \"takenAt\": \"2024-10-15\",\n    \"weight\": 77.0,\n    \"note\": \"One month progress\",\n    \"sides\": {\n      \"front\": \"https://example.com/photos/oct-front.jpg\",\n      \"back\": \"https://example.com/photos/oct-back.jpg\",\n      \"left\": \"https://example.com/photos/oct-left.jpg\",\n      \"right\": \"https://example.com/photos/oct-right.jpg\"\n    }\n  },\n  {\n    \"takenAt\": \"2024-11-15\",\n    \"weight\": 76.0,\n    \"note\": \"Two months - great progress!\",\n    \"sides\": {\n      \"front\": \"https://example.com/photos/nov-front.jpg\",\n      \"back\": \"https://example.com/photos/nov-back.jpg\",\n      \"left\": \"https://example.com/photos/nov-left.jpg\",\n      \"right\": \"https://example.com/photos/nov-right.jpg\"\n    }\n  },\n  {\n    \"takenAt\": \"2024-12-15\",\n    \"weight\": 75.5,\n    \"note\": \"Three months - almost at goal\",\n    \"sides\": {\n      \"front\": \"https://example.com/photos/dec-front.jpg\",\n      \"back\": \"https://example.com/photos/dec-back.jpg\",\n      \"left\": \"https://example.com/photos/dec-left.jpg\",\n      \"right\": \"https://example.com/photos/dec-right.jpg\"\n    }\n  }\n]"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/profile/photos/bulk",
-              "host": ["{{baseUrl}}"],
-              "path": ["profile", "photos", "bulk"]
-            },
-            "description": "Bulk create test photos (you might need to implement this endpoint)"
-          }
+        "url": {
+          "raw": "http://localhost:3000/checkouts/{{checkout_id}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["checkouts", "{{checkout_id}}"]
         }
-      ]
+      },
+      "response": []
     },
     {
-      "name": "Weekly Reports - Client",
-      "description": "Endpoints for clients to manage their weekly reports",
-      "item": [
-        {
-          "name": "Submit Weekly Report",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"weekOf\": \"2024-01-15\",\n  \"diet\": {\n    \"hungry\": \"yes\",\n    \"mentalComfort\": \"no\",\n    \"wantSpecific\": \"More protein options please\",\n    \"foodTooMuch\": \"no\",\n    \"dietDeviation\": {\n      \"hasDeviation\": \"yes\",\n      \"times\": \"2\",\n      \"details\": \"Had pizza on weekend with friends\"\n    }\n  },\n  \"training\": {\n    \"intensityOk\": \"yes\",\n    \"daysDeviation\": {\n      \"hasDeviation\": \"no\",\n      \"count\": null,\n      \"reason\": null\n    },\n    \"shapeChange\": \"yes\",\n    \"fitnessChange\": \"yes\",\n    \"sleep\": {\n      \"enough\": \"yes\",\n      \"hours\": \"7\"\n    },\n    \"programNotes\": \"Great program, feeling stronger each week. Should I increase weights?\",\n    \"cardioAdherence\": 4\n  },\n  \"measurements\": {\n    \"date\": \"2024-01-15\",\n    \"weight\": 75.5,\n    \"waist\": 85,\n    \"chest\": 95,\n    \"hips\": 90,\n    \"arms\": 35,\n    \"thighs\": 55\n  },\n  \"photos\": {\n    \"front\": { \"url\": \"https://example.com/photos/front-2024-01-15.jpg\" },\n    \"back\": { \"url\": \"https://example.com/photos/back-2024-01-15.jpg\" },\n    \"left\": { \"url\": \"https://example.com/photos/left-2024-01-15.jpg\" },\n    \"right\": { \"url\": \"https://example.com/photos/right-2024-01-15.jpg\" },\n    \"extras\": []\n  },\n  \"notifyCoach\": true\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports"]
-            }
-          },
-          "response": []
+      "name": "Update Checkout Status (PATCH /checkouts/:id/status)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"verified\",\n  \"notes\": \"تم تأكيد التحويل البنكي\"\n}"
         },
-        {
-          "name": "Get My Weekly Reports",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports?page=1&limit=10",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "10"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Specific Report",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/{{reportId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "{{reportId}}"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Mark Report as Read",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/{{reportId}}/read",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "{{reportId}}", "read"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Report Statistics",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/user/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "user", "stats"]
-            }
-          },
-          "response": []
+        "url": {
+          "raw": "http://localhost:3000/checkouts/{{checkout_id}}/status",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["checkouts", "{{checkout_id}}", "status"]
         }
-      ]
+      },
+      "response": []
     },
     {
-      "name": "Weekly Reports - Coach/Admin",
-      "description": "Endpoints for coaches and admins to manage reports",
-      "item": [
-        {
-          "name": "Get All Athletes Reports (Coach)",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/coach/athletes-reports?page=1&limit=10",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "coach", "athletes-reports"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "10"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Reports by Specific User",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports?userId={{userId}}&page=1&limit=10",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports"],
-              "query": [
-                {
-                  "key": "userId",
-                  "value": "{{userId}}"
-                },
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "10"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Add Coach Feedback to Report",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"coachFeedback\": \"Great progress this week! Your consistency is paying off. I recommend increasing weights by 5% for your main lifts next week. Keep up the good work on cardio - try to maintain that level 4 adherence.\",\n  \"isRead\": true\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/{{reportId}}/feedback",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "{{reportId}}", "feedback"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Delete Report (Admin Only)",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports/{{reportId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports", "{{reportId}}"]
-            }
-          },
-          "response": []
+      "name": "Delete Checkout (DELETE /checkouts/:id)",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/checkouts/{{checkout_id}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["checkouts", "{{checkout_id}}"]
         }
-      ]
-    },
-    {
-      "name": "Notifications",
-      "description": "Notification management endpoints",
-      "item": [
-        {
-          "name": "Get My Notifications",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications?page=1&limit=20",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "20"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get My Notifications (Filter Unread)",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications?page=1&limit=20&isRead=false",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "20"
-                },
-                {
-                  "key": "isRead",
-                  "value": "false"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Admin Notifications",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications/admin?page=1&limit=20",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications", "admin"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "20"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Unread Count",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications/unread-count",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications", "unread-count"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Mark Notification as Read",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications/123/read",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications", "123", "read"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Mark All Notifications as Read",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/notifications/read-all",
-              "host": ["{{baseUrl}}"],
-              "path": ["notifications", "read-all"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Test Data Setup",
-      "description": "Use these to set up test data",
-      "item": [
-        {
-          "name": "Create Test Weekly Report",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{authToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"weekOf\": \"2024-01-08\",\n  \"diet\": {\n    \"hungry\": \"no\",\n    \"mentalComfort\": \"yes\",\n    \"wantSpecific\": \"\",\n    \"foodTooMuch\": \"no\",\n    \"dietDeviation\": {\n      \"hasDeviation\": \"no\",\n      \"times\": null,\n      \"details\": null\n    }\n  },\n  \"training\": {\n    \"intensityOk\": \"yes\",\n    \"daysDeviation\": {\n      \"hasDeviation\": \"yes\",\n      \"count\": \"1\",\n      \"reason\": \"Work emergency\"\n    },\n    \"shapeChange\": \"yes\",\n    \"fitnessChange\": \"yes\",\n    \"sleep\": {\n      \"enough\": \"no\",\n      \"hours\": \"6\"\n    },\n    \"programNotes\": \"Need to improve sleep quality\",\n    \"cardioAdherence\": 3\n  },\n  \"measurements\": {\n    \"date\": \"2024-01-08\",\n    \"weight\": 76.2,\n    \"waist\": 86,\n    \"chest\": 94,\n    \"hips\": 91,\n    \"arms\": 34,\n    \"thighs\": 56\n  },\n  \"photos\": {\n    \"front\": { \"url\": \"https://example.com/photos/front-2024-01-08.jpg\" },\n    \"back\": { \"url\": \"https://example.com/photos/back-2024-01-08.jpg\" },\n    \"left\": { \"url\": \"https://example.com/photos/left-2024-01-08.jpg\" },\n    \"right\": { \"url\": \"https://example.com/photos/right-2024-01-08.jpg\" },\n    \"extras\": []\n  },\n  \"notifyCoach\": true\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/weekly-reports",
-              "host": ["{{baseUrl}}"],
-              "path": ["weekly-reports"]
-            }
-          },
-          "response": []
-        }
-      ]
+      },
+      "response": []
     }
   ],
-  "event": [
-    {
-      "listen": "prerequest",
-      "script": {
-        "type": "text/javascript",
-        "exec": ["console.log('Profile API Collection - Starting request');"]
-      }
-    },
-    {
-      "listen": "test",
-      "script": {
-        "type": "text/javascript",
-        "exec": ["pm.test(\"Status code is 200\", function () {", "    pm.response.to.have.status(200);", "});", "", "pm.test(\"Response time is acceptable\", function () {", "    pm.expect(pm.response.responseTime).to.be.below(1000);", "});"]
-      }
-    }
+  "variable": [
+    { "key": "checkout_id", "value": "f7a5ad0d-9cdb-46c8-8188-9ad2d4b26d7e" }
   ]
 }

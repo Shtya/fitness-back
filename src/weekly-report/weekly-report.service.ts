@@ -10,31 +10,82 @@ import { NotificationService } from '../notification/notification.service';
 export class WeeklyReportService {
   constructor(
     @InjectRepository(WeeklyReport)
-    private readonly weeklyReportRepo: Repository<WeeklyReport>,
+    public readonly weeklyReportRepo: Repository<WeeklyReport>,
     @InjectRepository(User)
-    private readonly userRepo: Repository<User>,
-    private readonly notificationService: NotificationService,
+    public readonly userRepo: Repository<User>,
+    public readonly notificationService: NotificationService,
   ) {}
+
+
+
 
   async createReport(userId: string, createDto: any) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
       relations: ['coach'],
+      select: ['id', 'name', 'coachId', 'adminId', 'email', 'phone', 'status', 'role', 'created_at', 'updated_at'] as any, // keep it light; adjust if you use strict selects
     });
 
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    const report = this.weeklyReportRepo.create({
+    // Normalize/stamp ids from user
+    const stamped = {
       ...createDto,
-      user,
       userId,
+      adminId: user.adminId ?? null,
+      coachId: user.coachId ?? null,
+    };
+
+    let existing = await this.weeklyReportRepo.findOne({
+      where: { userId, weekOf: createDto.weekOf },
     });
 
-    const savedReport:any = await this.weeklyReportRepo.save(report);
+    if (!existing) {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const end = new Date();
+      end.setHours(23, 59, 59, 999);
 
-    // Send notification to coach
+      existing = await this.weeklyReportRepo.createQueryBuilder('wr').where('wr.userId = :userId', { userId }).andWhere('wr.created_at BETWEEN :start AND :end', { start, end }).getOne();
+    }
+
+    // If exists -> update (no duplicate)
+    if (existing) {
+      const merged = this.weeklyReportRepo.merge(existing, stamped);
+      const updated = await this.weeklyReportRepo.save(merged);
+
+      // Optional: notify coach on update (only if requested and coach exists)
+      if (createDto.notifyCoach && user.coachId) {
+        await this.notificationService.create({
+          type: NotificationType.FORM_SUBMISSION,
+          title: 'Weekly Report Updated',
+          message: `${user.name} updated the weekly report for ${updated.weekOf}`,
+          data: {
+            reportId: updated.id,
+            userId: user.id,
+            userName: user.name,
+            weekOf: updated.weekOf,
+            type: 'weekly_report',
+          },
+          audience: NotificationAudience.USER,
+          userId: user.coachId,
+        });
+      }
+
+      return updated;
+    }
+
+    // Else → create a new one
+    const report = this.weeklyReportRepo.create({
+      ...stamped,
+      user, // keep relation set for FK integrity
+    });
+
+    const savedReport: any = await this.weeklyReportRepo.save(report);
+
+    // Notify on new report
     if (createDto.notifyCoach && user.coachId) {
       await this.notificationService.create({
         type: NotificationType.FORM_SUBMISSION,
@@ -45,7 +96,7 @@ export class WeeklyReportService {
           userId: user.id,
           userName: user.name,
           weekOf: createDto.weekOf,
-          type: 'weekly_report'
+          type: 'weekly_report',
         },
         audience: NotificationAudience.USER,
         userId: user.coachId,
@@ -57,7 +108,7 @@ export class WeeklyReportService {
 
   async findUserReports(userId: string, page: number = 1, limit: number = 10) {
     const { take, skip } = this.normalizePagination(page, limit);
-    
+
     const [reports, total] = await this.weeklyReportRepo.findAndCount({
       where: { userId },
       relations: ['reviewedBy'],
@@ -77,7 +128,7 @@ export class WeeklyReportService {
 
   async findAllReports(currentUser: User, userId?: string, page: number = 1, limit: number = 10) {
     const { take, skip } = this.normalizePagination(page, limit);
-    
+
     let whereCondition: any = {};
 
     if (userId) {
@@ -165,7 +216,7 @@ export class WeeklyReportService {
         data: {
           reportId: report.id,
           weekOf: report.weekOf,
-          type: 'weekly_report_feedback'
+          type: 'weekly_report_feedback',
         },
         audience: NotificationAudience.USER,
         userId: report.userId,

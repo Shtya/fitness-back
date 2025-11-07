@@ -75,7 +75,7 @@ export class AuthController {
 
   @Get('users')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN , UserRole.SUPER_ADMIN )
   async listUsers(@Query() query: any, @Req() req: any) {
     return this.authService.listUsersAdvanced(query, req.user);
   }

@@ -1,6 +1,7 @@
 // src/entities/global.entity.ts
 import { Entity, Column, Index, ManyToOne, OneToMany, Unique, JoinColumn, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, BaseEntity } from 'typeorm';
 import { Asset } from './assets.entity';
+import { NotificationLog, PushSubscription, Reminder, UserReminderSettings } from './alert.entity';
 
 export enum UserRole {
   CLIENT = 'client',
@@ -205,6 +206,10 @@ export class MealPlan extends CoreEntity {
 
   @OneToMany(() => User, u => u.activeMealPlan)
   activeUsers!: User[];
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  adminId?: string | null;
 }
 
 @Entity('users')
@@ -322,6 +327,18 @@ export class User extends CoreEntity {
 
   @OneToMany(() => ChatMessage, message => message.sender)
   sentMessages: ChatMessage[];
+
+  @OneToMany(() => Reminder, (reminder) => reminder.user)
+  reminders: Reminder[];
+
+  @OneToMany(() => PushSubscription, (subscription) => subscription.user)
+  pushSubscriptions: PushSubscription[];
+
+  @OneToMany(() => UserReminderSettings, (settings) => settings.user)
+  reminderSettings: UserReminderSettings[];
+
+  @OneToMany(() => NotificationLog, (log) => log.user)
+  notificationLogs: NotificationLog[];
 }
 
 /* =========================================================
@@ -920,6 +937,11 @@ export class ChatMessage extends CoreEntity {
 /* =========================================================
  * Intake (Forms)
  * ======================================================= */
+
+/* 
+	handle here the part of admin ids form every admin have his forms 
+	and handle the submitions to after the admin show it can assign it for user 
+*/
 @Entity()
 export class Form {
   @PrimaryGeneratedColumn()
@@ -936,6 +958,10 @@ export class Form {
 
   @CreateDateColumn()
   created_at: Date;
+
+  @Index()
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  adminId?: string | null;
 }
 
 export enum FieldType {
@@ -1006,6 +1032,16 @@ export class FormSubmission {
 
   @CreateDateColumn()
   created_at: Date;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'assignedToId' })
+  assignedTo?: User | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  assignedToId?: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  assignedAt?: Date | null;
 }
 
 /* =========================================================

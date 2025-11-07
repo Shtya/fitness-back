@@ -1,6 +1,6 @@
-import { IsString, IsArray, IsNumber, IsOptional, IsBoolean, IsEnum, IsObject } from 'class-validator';
+import { IsString, IsArray, IsNumber, IsOptional, IsBoolean, IsEnum, IsObject, IsUUID } from 'class-validator';
 import { FieldType } from 'entities/global.entity';
- 
+
 export class CreateFormFieldDto {
   @IsString()
   label: string;
@@ -63,4 +63,10 @@ export class ReorderFieldsDto {
     id: number;
     order: number;
   }>;
+}
+
+// ⬇️ جديد لتعيين Submission
+export class AssignSubmissionDto {
+  @IsUUID()
+  userId: string;
 }

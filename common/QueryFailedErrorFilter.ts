@@ -1,43 +1,37 @@
-import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus, Inject } from '@nestjs/common';
+import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus } from '@nestjs/common';
 import { QueryFailedError } from 'typeorm';
 import { Response } from 'express';
-import { I18nService } from 'nestjs-i18n';
 
 @Catch(QueryFailedError)
 export class QueryFailedErrorFilter implements ExceptionFilter {
-  
-
-  // @Inject(I18nService)  
-  //   public readonly i18n: I18nService;
-  constructor(private readonly i18n: I18nService) {}
-  
 
   catch(exception: any, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
 
-    if (exception.driverError?.code   === '23503') {
+    // Foreign key constraint violation (e.g., trying to delete a record that is still referenced)
+    if (exception.driverError?.code === '23503') {
       response.status(HttpStatus.BAD_REQUEST).json({
         statusCode: HttpStatus.BAD_REQUEST,
-        message:  this.i18n.t("events.cannot_delete_or_update") ,
-        error:  exception.driverError?.error || 'Foreign Key Constraint Violation',
+        message: "This record cannot be deleted or modified because it is referenced by other data.",
+        error: exception.driverError?.error || 'Foreign Key Constraint Violation',
         details: exception.driverError?.detail,
       });
     } 
+    // Missing table error
     else if (exception.code === '42P01') {
       response.status(HttpStatus.BAD_REQUEST).json({
         statusCode: HttpStatus.BAD_REQUEST,
-        message: this.i18n.t("events.missing_table_in_from_clause") ,
+        message: "The referenced table does not exist in the database.",
         error: 'Missing FROM Clause Entry Error',
         details: exception.driverError?.detail,
       });
     }
-    
+    // General database error
     else {
-      // Handle other database errors
       response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
         statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-        message:  this.i18n.t("events.unexpected_database_error") ,
+        message: "An unexpected database error has occurred.",
         error: 'Database Error',
         details: exception?.message,
       });

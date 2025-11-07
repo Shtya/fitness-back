@@ -1,22 +1,11 @@
 // weekly-report/weekly-report.controller.ts
-import {
-  Controller,
-  Post,
-  Get,
-  Put,
-  Delete,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-  Request,
-} from '@nestjs/common';
+import { Controller, Post, Get, Put, Delete, Body, Param, Query, UseGuards, Request, BadRequestException } from '@nestjs/common';
 import { WeeklyReportService } from './weekly-report.service';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
 import { RolesGuard } from 'common/guards/roles.guard';
 import { UserRole } from 'entities/global.entity';
 import { Roles } from 'common/decorators/roles.decorator';
- 
+import { CRUD } from 'common/crud.service';
 
 @Controller('weekly-reports')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -25,35 +14,16 @@ export class WeeklyReportController {
 
   @Post()
   @Roles(UserRole.CLIENT)
-  async create(
-    @Request() req,
-    @Body() createDto: any,
-  ) {
+  async create(@Request() req, @Body() createDto: any) {
     return this.weeklyReportService.createReport(req.user.id, createDto);
   }
 
   @Get()
-  async findAll(
-    @Request() req,
-    @Query('page') page = '1',
-    @Query('limit') limit = '10',
-    @Query('userId') userId?: string,
-  ) {
-    // Clients can only see their own reports
-    // Coaches/Admins can see reports from their athletes or all reports
+  async findAll(@Request() req, @Query() query, @Query('page') page = '1', @Query('limit') limit = '10', @Query('userId') userId?: string) {
     if (req.user.role === UserRole.CLIENT) {
-      return this.weeklyReportService.findUserReports(
-        req.user.id,
-        Number(page),
-        Number(limit),
-      );
+      return this.weeklyReportService.findUserReports(req.user.id, Number(page), Number(limit));
     } else {
-      return this.weeklyReportService.findAllReports(
-        req.user,
-        userId,
-        Number(page),
-        Number(limit),
-      );
+      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', [], ['weekOf'], query.filters);
     }
   }
 
@@ -62,26 +32,26 @@ export class WeeklyReportController {
     return this.weeklyReportService.findReportById(id, req.user);
   }
 
+  @Get('admins/:adminId/clients')
+  async getAdminClients(@Param('adminId') adminId: string, @Query() query: any) {
+    if (!adminId) throw new BadRequestException('adminId required');
+    return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ["user"], ['weekOf'], { adminId: adminId });
+  }
+
+  @Get('users/:userId/weekly-reports')
+  async getUserReports(@Param('userId') userId: string, @Query() query: any) {
+    return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', [], ['weekOf'], { userId: userId });
+  }
+
   @Put(':id/feedback')
   @Roles(UserRole.COACH, UserRole.ADMIN)
-  async updateFeedback(
-    @Param('id') id: string,
-    @Body() updateDto: { coachFeedback?: string; isRead?: boolean },
-    @Request() req,
-  ) {
-    return this.weeklyReportService.updateFeedback(
-      id,
-      updateDto,
-      req.user.id,
-    );
+  async updateFeedback(@Param('id') id: string, @Body() updateDto: { coachFeedback?: string; isRead?: boolean }, @Request() req) {
+    return this.weeklyReportService.updateFeedback(id, updateDto, req.user.id);
   }
 
   @Put(':id/read')
   @Roles(UserRole.CLIENT)
-  async markAsRead(
-    @Param('id') id: string,
-    @Request() req,
-  ) {
+  async markAsRead(@Param('id') id: string, @Request() req) {
     return this.weeklyReportService.markAsRead(id, req.user.id);
   }
 
@@ -99,16 +69,7 @@ export class WeeklyReportController {
 
   @Get('coach/athletes-reports')
   @Roles(UserRole.COACH, UserRole.ADMIN)
-  async getAthletesReports(
-    @Request() req,
-    @Query('page') page = '1',
-    @Query('limit') limit = '10',
-  ) {
-    return this.weeklyReportService.findAllReports(
-      req.user,
-      undefined,
-      Number(page),
-      Number(limit),
-    );
+  async getAthletesReports(@Request() req, @Query('page') page = '1', @Query('limit') limit = '10') {
+    return this.weeklyReportService.findAllReports(req.user, undefined, Number(page), Number(limit));
   }
 }

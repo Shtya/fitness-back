@@ -90,15 +90,6 @@ export class CRUD {
       );
     }
 
-    // if (relations?.length > 0) {
-    //   const invalidRelations = relations.filter(relation => !repository.metadata.relations.some(rel => rel.propertyName === relation));
-    //   if (invalidRelations.length > 0) {
-    //     throw new BadRequestException(`Invalid relations: ${invalidRelations.join(', ')}`);
-    //   }
-    //   relations.forEach(relation => {
-    //     query.leftJoinAndSelect(`${entityName}.${relation}`, relation);
-    //   });
-    // }
     if (relations?.length) {
       CRUD.joinNestedRelations(query, repository, entityName, relations);
     }

@@ -12,6 +12,12 @@ export class WeeklyReport extends CoreEntity {
   @Column({ type: 'uuid' })
   userId: string;
 
+  @Column({ type: 'uuid' , nullable : true })
+  coachId: string;
+
+  @Column({ type: 'uuid' , nullable : true })
+  adminId: string;
+
   @Column({ type: 'date' })
   weekOf: string;
 
