@@ -15,84 +15,55 @@ export class ChatController {
 
   @Post('conversations')
   async createConversation(@Req() req: any, @Body() body: any) {
-    return this.chatService.createConversation(
-      req.user,
-      body.participantIds,
-      body.name,
-      body.isGroup
-    );
+    return this.chatService.createConversation(req.user, body.participantIds, body.name, body.isGroup);
+  }
+
+  // chat.controller.ts
+  @Get('unread')
+  async getUnread(@Req() req: any) {
+    return this.chatService.getUnreadOverview(req.user.id);
   }
 
   @Get('conversations')
-  async getUserConversations(
-    @Req() req: any,
-    @Query('page') page: number = 1,
-    @Query('limit') limit: number = 50
-  ) {
+  async getUserConversations(@Req() req: any, @Query('page') page: number = 1, @Query('limit') limit: number = 50) {
     return this.chatService.getUserConversations(req.user.id, page, limit);
   }
 
   @Get('conversations/:id/messages')
-  async getConversationMessages(
-    @Req() req: any,
-    @Param('id') id: string,
-    @Query('page') page: number = 1,
-    @Query('limit') limit: number = 50
-  ) {
+  async getConversationMessages(@Req() req: any, @Param('id') id: string, @Query('page') page: number = 1, @Query('limit') limit: number = 50) {
     return this.chatService.getConversationMessages(id, req.user.id, page, limit);
   }
 
   @Post('conversations/:id/participants')
-  async addParticipants(
-    @Req() req: any,
-    @Param('id') id: string,
-    @Body() body: any
-  ) {
+  async addParticipants(@Req() req: any, @Param('id') id: string, @Body() body: any) {
     return this.chatService.addParticipants(id, body.userIds, req.user.id);
   }
 
   @Delete('conversations/:conversationId/participants/:userId')
-  async removeParticipant(
-    @Req() req: any,
-    @Param('conversationId') conversationId: string,
-    @Param('userId') userId: string
-  ) {
+  async removeParticipant(@Req() req: any, @Param('conversationId') conversationId: string, @Param('userId') userId: string) {
     return this.chatService.removeParticipant(conversationId, userId, req.user.id);
   }
 
   @Get('coach/conversations')
   @Roles(UserRole.COACH, UserRole.ADMIN)
-  async getCoachConversations(
-    @Req() req: any,
-    @Query('clientId') clientId?: string
-  ) {
+  async getCoachConversations(@Req() req: any, @Query('clientId') clientId?: string) {
     return this.chatService.getConversationForCoach(req.user.id, clientId);
   }
 
   @Get('search')
-  async searchConversations(
-    @Req() req: any,
-    @Query('q') query: string
-  ) {
+  async searchConversations(@Req() req: any, @Query('q') query: string) {
     return this.chatService.searchConversations(req.user.id, query);
   }
 
   // Search users endpoint
   @Get('users/search')
-  async searchUsers(
-    @Req() req: any,
-    @Query('q') query: string,
-    @Query('role') role?: UserRole
-  ) {
+  async searchUsers(@Req() req: any, @Query('q') query: string, @Query('role') role?: UserRole) {
     return this.chatService.searchUsers(req.user.id, query, role);
   }
 
   // Get or create direct conversation
   @Post('conversations/direct/:userId')
-  async getOrCreateDirectConversation(
-    @Req() req: any,
-    @Param('userId') userId: string
-  ) {
+  async getOrCreateDirectConversation(@Req() req: any, @Param('userId') userId: string) {
     return this.chatService.getOrCreateDirectConversation(req.user.id, userId);
   }
 
@@ -113,7 +84,7 @@ export class ChatController {
   @Post('upload/video')
   @UseInterceptors(FileInterceptor('file', chatVideoUploadOptions))
   async uploadVideo(@UploadedFile() file: any) {
-     return {
+    return {
       url: `/uploads/chat/videos/${file.filename}`,
       path: file.path,
       filename: file.filename,

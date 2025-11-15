@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, EntityManager } from 'typeorm';
 import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
+import { RedisService } from '../redis/redis.service';
 
 const DAY_ALIASES: Record<string, DayOfWeek> = {
   mon: DayOfWeek.MONDAY,
@@ -58,6 +59,7 @@ export class PlanService {
     @InjectRepository(ExercisePlanDayExercise) private readonly pdeRepo: Repository<ExercisePlanDayExercise>,
     @InjectRepository(Exercise) private readonly exRepo: Repository<Exercise>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
+    private readonly redisService: RedisService, // Inject Redis service
   ) {}
 
   private assertCanAccessPlan(plan: ExercisePlan, actor: { id: string; role: UserRole }, action: 'view' | 'edit' | 'delete' | 'assign') {
@@ -75,13 +77,11 @@ export class PlanService {
   private scopedPlanQB(actor: { id: string; role: UserRole }) {
     const qb = this.planRepo.createQueryBuilder('p');
 
-    // SUPER_ADMIN sees all
     if (actor.role === UserRole.SUPER_ADMIN) {
       return qb;
     }
 
-    // ADMIN sees public (adminId NULL) or their own
-    if (actor.role === UserRole.ADMIN) {
+    if (actor.role === UserRole.ADMIN || actor.role === UserRole.COACH) {
       qb.where('(p."adminId" IS NULL OR p."adminId" = :adminId)', { adminId: actor.id });
       return qb;
     }
@@ -228,6 +228,9 @@ export class PlanService {
         });
       }
 
+      // Invalidate plans cache after import
+      await this.invalidatePlansCache(actor.id);
+
       return {
         ok: true,
         totalPlans: batchResults.length,
@@ -241,6 +244,21 @@ export class PlanService {
   async getActivePlan(userId: string) {
     if (!userId) return { status: 'error', error: 'userId is required' as const };
 
+    const cacheKey = `active_plan:${userId}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<{
+      status: string;
+      error?: string;
+      id?: string;
+      name?: string;
+      program?: any;
+    }>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) return { status: 'error', error: 'User not found' as const };
 
@@ -252,7 +270,12 @@ export class PlanService {
     });
     if (!active) return { status: 'none', error: 'Active plan not found' as const };
 
-    return this.planToFrontendShape(active);
+    const result = this.planToFrontendShape(active);
+
+    // Cache for 5 minutes
+    await this.redisService.set(cacheKey, { status: 'success', ...result }, 300);
+
+    return result;
   }
 
   async createPlanWithContent(input: any, actor: { id: string; role: UserRole }) {
@@ -313,19 +336,33 @@ export class PlanService {
         order: { days: { created_at: 'ASC' as any } },
       });
 
+      // Invalidate plans cache after creation
+      await this.invalidatePlansCache(actor.id);
+
       return this.planToFrontendShape(full as any);
     });
   }
 
   async list(q: any, actor: { id: string; role: UserRole }) {
-    // we'll basically use your CRUD.findAll but enforce adminId visibility
-    // If CRUD.findAll doesn't support extra where easily, we do manual QB:
-
     const page = Number(q.page) || 1;
     const limit = Math.min(Number(q.limit) || 12, 100);
     const search = (q.search || '').trim();
     const sortBy = (q.sortBy as any) || 'created_at';
     const sortOrder: 'ASC' | 'DESC' = String(q.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    const cacheKey = ['plans:list', actor.id, actor.role, page, limit, sortBy, sortOrder, search || '_'].join(':');
+
+    // Try cache with Redis service
+    const cachedResult = await this.redisService.get<{
+      total_records: number;
+      current_page: number;
+      per_page: number;
+      records: any[];
+    }>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
 
     const SORTABLE: Record<string, string> = {
       created_at: 'p.created_at',
@@ -347,22 +384,40 @@ export class PlanService {
 
     const [rows, total] = await qb.getManyAndCount();
 
-    return {
+    const result = {
       total_records: total,
       current_page: page,
       per_page: limit,
       records: rows.map(plan => this.planToFrontendShape(plan)),
     };
+
+    // Store in Redis cache for 60 seconds
+    await this.redisService.set(cacheKey, result, 60);
+
+    return result;
   }
 
-  async getOneDeep(id: string, actor: { id: string; role: UserRole }) {
+  async getOneDeep(id: string) {
+    const cacheKey = `plan:${id}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<any>(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const plan = await this.planRepo.findOne({
       where: { id },
       relations: ['days', 'days.items', 'days.items.exercise'],
     });
     if (!plan) throw new NotFoundException('Plan not found');
 
-    return this.planToFrontendShape(plan);
+    const result = this.planToFrontendShape(plan);
+
+    // Cache for 5 minutes
+    await this.redisService.set(cacheKey, result, 300);
+
+    return result;
   }
 
   /* ---------- Update (days + items) ---------- */
@@ -378,8 +433,6 @@ export class PlanService {
         relations: ['days', 'days.items', 'days.items.exercise'],
       });
       if (!plan) throw new NotFoundException('Plan not found');
-
-      console.log(plan?.adminId, actor);
 
       this.assertCanAccessPlan(plan, actor, 'edit');
 
@@ -474,6 +527,9 @@ export class PlanService {
         relations: ['days', 'days.items', 'days.items.exercise'],
       });
 
+      // Invalidate caches after update
+      await this.invalidatePlanCaches(id, actor.id);
+
       return this.planToFrontendShape(full as any);
     });
   }
@@ -485,6 +541,10 @@ export class PlanService {
     this.assertCanAccessPlan(plan, actor, 'delete');
 
     await this.planRepo.remove(plan);
+
+    // Invalidate caches after deletion
+    await this.invalidatePlanCaches(id, actor.id);
+
     return { message: 'Plan deleted' };
   }
 
@@ -525,8 +585,14 @@ export class PlanService {
 
       for (const u of users) {
         await manager.update(User, { id: u.id }, { activeExercisePlanId: shouldPointUserNow ? planId : null });
+
+        // Invalidate active plan cache for each user
+        await this.redisService.del(`active_plan:${u.id}`);
       }
     });
+
+    // Invalidate plan caches
+    await this.invalidatePlanCaches(planId, actor.id);
 
     return this.listAssignees(planId);
   }
@@ -535,6 +601,24 @@ export class PlanService {
     // no join-table: just return users pointing to this plan
     const users = await this.userRepo.find({ where: { activeExercisePlanId: planId } });
     return users;
+  }
+
+  /* ---------- Cache Invalidation Methods ---------- */
+  private async invalidatePlansCache(actorId: string) {
+    const pattern = `plans:list:${actorId}:*`;
+    await this.redisService.deletePattern(pattern);
+  }
+
+  private async invalidatePlanCaches(planId: string, actorId: string) {
+    // Invalidate specific plan cache
+    await this.redisService.del(`plan:${planId}`);
+
+    // Invalidate plans list cache for this actor
+    await this.invalidatePlansCache(actorId);
+
+    // Invalidate any active plan caches that might reference this plan
+    const pattern = `active_plan:*`;
+    await this.redisService.deletePattern(pattern);
   }
 
   /* ---------- FE shape ---------- */
@@ -583,6 +667,20 @@ export class PlanService {
   async listPlansWithStats(q: ListPlansWithStatsQuery, actor: { id: string; role: UserRole }) {
     const search = (q.search || '').trim();
 
+    const cacheKey = ['plans:stats', actor.id, actor.role, search || '_'].join(':');
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<{
+      plans: {
+        total: number;
+        totalPlansPersonal: number;
+      };
+    }>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     // قاعدة الاستعلام الأساسية
     const qb = this.scopedPlanQB(actor);
 
@@ -598,12 +696,17 @@ export class PlanService {
 
     const [publicAgg, personalAgg] = await Promise.all([publicPlansQb.getRawOne<{ publicPlansTotal: string }>(), personalPlansQb.getRawOne<{ personalPlansTotal: string }>()]);
 
-    return {
+    const result = {
       plans: {
         total: Number(publicAgg?.publicPlansTotal || 0),
         totalPlansPersonal: Number(personalAgg?.personalPlansTotal || 0),
       },
     };
+
+    // Cache for 2 minutes
+    await this.redisService.set(cacheKey, result, 120);
+
+    return result;
   }
 }
 
@@ -614,3 +717,10 @@ type ListPlansWithStatsQuery = {
   sortBy?: 'name' | 'isActive' | 'created_at';
   sortOrder?: 'ASC' | 'DESC';
 };
+
+/* 
+	⏱️ Request took: 334ms
+	⏱️ Request took: 296ms
+	⏱️ Request took: 411ms
+	⏱️ Request took: 1522ms
+*/

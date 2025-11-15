@@ -1,0 +1,476 @@
+{
+  "info": {
+    "_postman_id": "b7b0a8b3-4b0a-4d7f-9b31-123456789abc",
+    "name": "Reminders API",
+    "description": "Collection to test Reminders module (NestJS). Set {{baseUrl}} and {{token}} before using.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8081/api/v1"
+    },
+    {
+      "key": "token",
+      "value": "YOUR_JWT_TOKEN_HERE"
+    }
+  ],
+  "item": [
+    {
+      "name": "Get User Settings",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/settings/user",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "settings",
+            "user"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Update User Settings",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"timezone\": \"Africa/Cairo\",\n  \"city\": \"Cairo\",\n  \"country\": \"Egypt\",\n  \"defaultSnooze\": 10,\n  \"quietHours\": { \"start\": \"10:00 PM\", \"end\": \"07:00 AM\" },\n  \"priorityDefault\": \"normal\",\n  \"soundDefault\": \"chime\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/settings/user",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "settings",
+            "user"
+          ]
+        }
+      }
+    },
+    {
+      "name": "List Reminders",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders?active=true&completed=false",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders"
+          ],
+          "query": [
+            {
+              "key": "active",
+              "value": "true"
+            },
+            {
+              "key": "completed",
+              "value": "false"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Reminder by ID",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Reminder",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Drink Water\",\n  \"notes\": \"2 cups of water\",\n  \"type\": \"custom\",\n  \"priority\": \"normal\",\n  \"active\": true,\n  \"completed\": false,\n  \"sound\": {\n    \"id\": \"chime\",\n    \"volume\": 0.8\n  },\n  \"schedule\": {\n    \"mode\": \"daily\",\n    \"times\": [\"09:00\", \"14:00\"],\n    \"daysOfWeek\": [],\n    \"interval\": null,\n    \"prayer\": null,\n    \"startDate\": \"2025-11-13\",\n    \"endDate\": null,\n    \"timezone\": \"Africa/Cairo\",\n    \"exdates\": [],\n    \"rrule\": \"\"\n  },\n  \"reminderTime\": null\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Update Reminder",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Drink Water (Updated)\",\n  \"notes\": \"3 cups of water\",\n  \"priority\": \"high\",\n  \"active\": true,\n  \"sound\": {\n    \"id\": \"soft\",\n    \"volume\": 0.9\n  },\n  \"schedule\": {\n    \"mode\": \"daily\",\n    \"times\": [\"10:00\", \"16:00\"],\n    \"daysOfWeek\": [],\n    \"interval\": null,\n    \"prayer\": null,\n    \"startDate\": \"2025-11-13\",\n    \"endDate\": null,\n    \"timezone\": \"Africa/Cairo\",\n    \"exdates\": [],\n    \"rrule\": \"\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Delete Reminder",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Toggle Reminder Active",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id/toggle",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id",
+            "toggle"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Complete Reminder",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id/complete",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id",
+            "complete"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Snooze Reminder",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"minutes\": 15\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id/snooze",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id",
+            "snooze"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Send Now (manual payload)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Test Push\",\n  \"body\": \"This is a test push notification\",\n  \"icon\": \"/icons/bell.png\",\n  \"url\": \"/\",\n  \"data\": {\"foo\": \"bar\"},\n  \"requireInteraction\": false\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/send-now",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "send-now"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Send Now For Reminder (by ID)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"requireInteraction\": true\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/:id/send-now",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            ":id",
+            "send-now"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get VAPID Public Key",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/reminders/push/vapid-key",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "push",
+            "vapid-key"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Subscribe Push",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"endpoint\": \"https://fcm.googleapis.com/fcm/send/your-endpoint-here\",\n  \"expirationTime\": null,\n  \"keys\": {\n    \"p256dh\": \"BASE64URL_P256DH_HERE\",\n    \"auth\": \"BASE64URL_AUTH_HERE\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/push/subscribe",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "push",
+            "subscribe"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Send Push to Me (using stored subs)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payload\": {\n    \"title\": \"Manual Push\",\n    \"body\": \"From /reminders/push/send endpoint\",\n    \"icon\": \"/icons/bell.png\",\n    \"url\": \"/\",\n    \"data\": {\"custom\": true}\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/push/send",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "push",
+            "send"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Admin Broadcast Push (all subs)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payload\": {\n    \"title\": \"Admin Broadcast\",\n    \"body\": \"This will go to all subscriptions\",\n    \"icon\": \"/icons/bell.png\",\n    \"url\": \"/\",\n    \"data\": {\"admin\": true}\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/reminders/push/admin-broadcast",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "reminders",
+            "push",
+            "admin-broadcast"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -7,7 +7,6 @@ import { Roles } from './decorators/roles.decorator';
 import { RolesGuard } from './guard/roles.guard';
 import { UserRole, UserStatus } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, RefreshDto, PagedQueryDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
-import { CRUD } from 'common/crud.service';
 
 @Controller('auth')
 export class AuthController {
@@ -73,11 +72,26 @@ export class AuthController {
 
   /* ---------------------- Admin-only helpers ---------------------- */
 
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN)
+  @Get('super-admin/overview')
+  superAdminOverview(@Query() q: any) {
+    return this.authService.superAdminOverview(q);
+  }
+
+  //  i need endpoint like this response buy return the clients that assign to this coach
   @Get('users')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN , UserRole.SUPER_ADMIN )
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COACH)
   async listUsers(@Query() query: any, @Req() req: any) {
     return this.authService.listUsersAdvanced(query, req.user);
+  }
+
+  @Get('coaches/:coachId/clients')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COACH)
+  async listCoachClients(@Param('coachId') coachId: string, @Query() query: any, @Req() req: any) {
+    return this.authService.listCoachClientsAdvanced({ ...query, coachId }, req.user);
   }
 
   @Delete('user/:id')
@@ -111,7 +125,7 @@ export class AuthController {
   // Admin creates any user (client/coach/trainer) with auto-password, can also assign their coach right away
   @Post('admin/users')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  // @Roles(UserRole.ADMIN)
   createUserByAdmin(@Body() body: any, @Req() req: any) {
     return this.authService.adminCreateUser(body, req?.user.id);
   }

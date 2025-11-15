@@ -19,7 +19,7 @@ export class NutritionController {
   }
 
   @Get('meal-plans')
-  findAllMealPlans(@Request() req, @Query('search') search?: string, @Query('page') page: number = 1, @Query('limit') limit: number = 12, @Query('sortBy') sortBy: string = 'created_at', @Query('sortOrder') sortOrder: 'ASC' | 'DESC' = 'DESC', @Query('lang') lang?: 'ar' | 'en') {
+  findAllMealPlans(@Request() req, @Query('user_id') user_id :any , @Query('search') search?: string, @Query('page') page: number = 1, @Query('limit') limit: number = 12, @Query('sortBy') sortBy: string = 'created_at', @Query('sortOrder') sortOrder: 'ASC' | 'DESC' = 'DESC', @Query('lang') lang?: 'ar' | 'en') {
     return this.nutritionService.findAllMealPlans(
       {
         q: search,
@@ -28,7 +28,7 @@ export class NutritionController {
         sortBy,
         sortOrder,
       },
-      { id: req.user.id, role: req.user.role },
+      { id: user_id?? req.user.id, role: req.user.role },
       lang,
     );
   }

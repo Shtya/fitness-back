@@ -14,6 +14,33 @@ export class ChatService {
     @InjectRepository(User) private userRepo: Repository<User>,
   ) {}
 
+  // chat.service.ts
+  async getUnreadOverview(userId: string) {
+    // One grouped query: unread per conversation + total
+    const rows = await this.messageRepo
+      .createQueryBuilder('m')
+      .select('c.id', 'conversationId')
+      .addSelect(
+        `
+      COUNT(m.id) FILTER (
+        WHERE m.isDeleted = false
+          AND m.senderId != :userId
+          AND (p.lastReadAt IS NULL OR m.created_at > p.lastReadAt)
+      )
+    `,
+        'unread',
+      )
+      .innerJoin('m.conversation', 'c')
+      .innerJoin(ChatParticipant, 'p', 'p.conversationId = c.id AND p.userId = :userId AND p.isActive = true', { userId })
+      .groupBy('c.id')
+      .getRawMany<{ conversationId: string; unread: string }>();
+
+    const conversations = rows.map(r => ({ id: r.conversationId, unreadCount: Number(r.unread) }));
+    const totalUnread = conversations.reduce((a, b) => a + b.unreadCount, 0);
+
+    return { totalUnread, conversations };
+  }
+
   async getUserConversations(userId: string, page: number = 1, limit: number = 50) {
     const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
     const take = Math.max(1, limit || 1);

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import * as path from 'path';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
@@ -20,11 +20,14 @@ import { StatsModule } from './stats/stats.module';
 import { SettingsModule } from './settings/settings.module';
 import { AboutUserModule } from './about-user/about-user.module';
 import { ReminderModule } from './reminder/reminder.module';
- 
+import { ScheduleModule } from '@nestjs/schedule';
+import { CacheModule } from '@nestjs/cache-manager';
+import { redisStore } from 'cache-manager-redis-yet';
+
 @Module({
   imports: [
     ConfigModule.forRoot(),
-
+    ScheduleModule.forRoot(),
     TypeOrmModule.forRoot({
       type: 'postgres',
       host: process.env.DATABASE_HOST,
@@ -33,7 +36,7 @@ import { ReminderModule } from './reminder/reminder.module';
       password: process.env.DATABASE_PASSWORD,
       database: process.env.DATABASE_NAME,
       entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-      synchronize: true,
+      synchronize: false,
     }),
 
     AuthModule,

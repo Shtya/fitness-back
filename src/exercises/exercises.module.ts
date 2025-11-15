@@ -4,9 +4,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Exercise, ExerciseVideo } from 'entities/global.entity';
 import { PlanExercisesController } from './exercises.controller';
 import { ExercisesService } from './exercises.service';
+import { RedisModule } from 'src/redis/redis.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Exercise, ExerciseVideo])],
+  imports: [TypeOrmModule.forFeature([Exercise, ExerciseVideo]) , RedisModule],
   controllers: [PlanExercisesController],
   providers: [ExercisesService],
   exports: [ExercisesService],

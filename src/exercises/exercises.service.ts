@@ -1,8 +1,9 @@
 // src/exercises/exercises.service.ts
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { Exercise, ExerciseVideo, UserRole } from 'entities/global.entity';
+import { RedisService } from 'src/redis/redis.service';
 
 type PublicExercise = {
   id: string;
@@ -43,6 +44,7 @@ export class ExercisesService {
     @InjectRepository(Exercise) public readonly repo: Repository<Exercise>,
     @InjectRepository(ExerciseVideo) private readonly exerciseVideoRepo: Repository<ExerciseVideo>,
     private readonly dataSource: DataSource,
+    private redisService: RedisService,
   ) {}
 
   async saveExerciseVideo(dto: { userId: string; exerciseName: string; videoUrl: string; workoutDate?: string; setNumber?: number; weight?: number; reps?: number; notes?: string }) {
@@ -62,21 +64,48 @@ export class ExercisesService {
   }
 
   async getUserExerciseVideos(userId: string) {
-    return await this.exerciseVideoRepo.find({
+    const cacheKey = `exercise_videos:user:${userId}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<any[]>(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
+    const result = await this.exerciseVideoRepo.find({
       where: { userId },
       order: { created_at: 'DESC' },
       relations: ['coach', 'user'],
     });
+
+    // Cache for 2 minutes
+    await this.redisService.set(cacheKey, result, 120);
+
+    return result;
   }
 
   async getVideosForCoach(coachId: string, status?: string) {
+    const cacheKey = `exercise_videos:coach:${coachId}:${status || 'all'}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<any[]>(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const where: any = { coachId };
     if (status) where.status = status;
-    return await this.exerciseVideoRepo.find({
+
+    const result = await this.exerciseVideoRepo.find({
       where,
       order: { created_at: 'DESC' },
       relations: ['user'],
     });
+
+    // Cache for 2 minutes
+    await this.redisService.set(cacheKey, result, 120);
+
+    return result;
   }
 
   async updateVideoFeedback(videoId: string, coachId: string, feedback: { status: string; coachFeedback: string }) {
@@ -87,7 +116,12 @@ export class ExercisesService {
     video.status = feedback.status;
     video.coachFeedback = feedback.coachFeedback;
 
-    return await this.exerciseVideoRepo.save(video);
+    const result = await this.exerciseVideoRepo.save(video);
+
+    // Invalidate relevant caches
+    await this.invalidateVideoCaches(video.userId, coachId);
+
+    return result;
   }
 
   private toPublic(e: Exercise): PublicExercise {
@@ -112,7 +146,6 @@ export class ExercisesService {
     const qb = this.repo.createQueryBuilder('e');
     qb.andWhere('(e."adminId" IS NULL OR e."adminId" = :adminId)', { adminId });
 
-    // if (q?.search) qb.andWhere('e.name ILIKE :s', { s: `%${q.search}%` });
     if (q?.category) qb.andWhere('e.category ILIKE :c', { c: `%${q.category}%` });
     if (q?.search) {
       const s = String(q.search).trim();
@@ -143,20 +176,18 @@ export class ExercisesService {
         { q: s, like },
       );
 
-      // Make each term contribute (simple AND-ish behavior)
       terms.forEach((t, i) => {
         const k = `t${i}`;
         qb.andWhere(`(e.name ILIKE :${k} OR e.details ILIKE :${k} OR e.category ILIKE :${k})`, { [k]: `%${t}%` });
       });
 
-      // Order by relevance first, then recency
       qb.orderBy('rank', 'DESC').addOrderBy('e.created_at', 'DESC').addOrderBy('e.id', 'DESC');
     }
 
     return qb;
   }
 
-  async list(q: any, userId) {
+  async list(q: any, userId: string) {
     const page = Math.max(1, parseInt(q?.page ?? '1', 10));
     const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
     const sortKey = String(q?.sortBy ?? 'created_at');
@@ -168,6 +199,23 @@ export class ExercisesService {
     const sortByExpr = SORTABLE[sortKey] ?? SORTABLE.created_at;
     const sortOrder: 'ASC' | 'DESC' = String(q?.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+    const search = (q?.search ?? '').toString();
+    const category = (q?.category ?? '').toString();
+
+    const cacheKey = ['exercises:list', userId || 'anon', page, limit, sortKey, sortOrder, search || '_', category || '_'].join(':');
+
+    // Try cache with Redis service
+    const cachedResult = await this.redisService.get<{
+      total_records: number;
+      current_page: number;
+      per_page: number;
+      records: PublicExercise[];
+    }>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const qb = this.baseQB(q, userId);
 
     if (q?.category) qb.andWhere('e.category ILIKE :cat', { cat: `%${q.category}%` });
@@ -178,21 +226,61 @@ export class ExercisesService {
       .take(limit);
 
     const [rows, total] = await qb.getManyAndCount();
-    return {
+
+    const result = {
       total_records: total,
       current_page: page,
       per_page: limit,
       records: rows.map(r => this.toPublic(r)),
     };
+
+    // Store in Redis cache for 60 seconds
+    await this.redisService.set(cacheKey, result, 60);
+
+    return result;
   }
 
   async categories(): Promise<string[]> {
+    const cacheKey = 'exercises:categories';
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<string[]>(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const rows = await this.repo.createQueryBuilder('e').select('DISTINCT e.category', 'category').where("e.category IS NOT NULL AND TRIM(e.category) <> ''").orderBy('e.category', 'ASC').getRawMany<{ category: string }>();
 
-    return rows.map(r => r.category);
+    const result = rows.map(r => r.category);
+
+    // Cache for 10 minutes (categories don't change often)
+    await this.redisService.set(cacheKey, result, 600);
+
+    return result;
   }
 
   async stats(_q?: any, actor?: { id: string; role: UserRole }) {
+    const cacheKey = `exercises:stats:${actor?.id || 'global'}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<{
+      success: boolean;
+      totals: {
+        totalGlobalExercise: number;
+        totalPersonalExercise: number | null;
+        withImage: number;
+        withVideo: number;
+        avgRest: number;
+        avgTargetSets: number;
+        created7d: number;
+        created30d: number;
+      };
+    }>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     // --- Global statistics (for all exercises) ---
     const global = await this.repo.createQueryBuilder('e').select(['COUNT(*)::int AS total', `SUM(CASE WHEN e.img IS NOT NULL AND e.img <> '' THEN 1 ELSE 0 END)::int AS with_image`, `SUM(CASE WHEN e.video IS NOT NULL AND e.video <> '' THEN 1 ELSE 0 END)::int AS with_video`, `COALESCE(AVG(e.rest),0)::float AS avg_rest`, `COALESCE(AVG(e."targetSets"),0)::float AS avg_sets`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END)::int AS created_7d`, `SUM(CASE WHEN e.created_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)::int AS created_30d`]).getRawOne<{
       total: number;
@@ -215,7 +303,7 @@ export class ExercisesService {
     }
 
     // --- Return all stats (all metrics global, only counts separated) ---
-    return {
+    const result = {
       success: true,
       totals: {
         totalGlobalExercise: globalCount,
@@ -228,10 +316,15 @@ export class ExercisesService {
         created30d: global?.created_30d ?? 0,
       },
     };
+
+    // Cache for 5 minutes
+    await this.redisService.set(cacheKey, result, 300);
+
+    return result;
   }
 
   async bulkCreate(items: CreateExerciseInput[]) {
-    return this.dataSource.transaction(async manager => {
+    const result = await this.dataSource.transaction(async manager => {
       const repo = manager.getRepository(Exercise);
 
       const rows = items.map(i => ({
@@ -255,12 +348,31 @@ export class ExercisesService {
 
       return fresh.map(e => this.toPublic(e));
     });
+
+    // Invalidate exercises cache after bulk create
+    await this.invalidateExercisesCache();
+
+    return result;
   }
 
   async get(id: string): Promise<PublicExercise> {
+    const cacheKey = `exercise:${id}`;
+
+    // Try cache first
+    const cachedResult = await this.redisService.get<PublicExercise>(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
-    return this.toPublic(ex);
+
+    const result = this.toPublic(ex);
+
+    // Cache for 5 minutes
+    await this.redisService.set(cacheKey, result, 300);
+
+    return result;
   }
 
   async create(dto: CreateExerciseInput): Promise<PublicExercise> {
@@ -279,7 +391,13 @@ export class ExercisesService {
       adminId: dto.userId,
     } as any);
     const saved: any = await this.repo.save(entity);
-    return this.toPublic(saved);
+
+    const result = this.toPublic(saved);
+
+    // Invalidate exercises cache after creation
+    await this.invalidateExercisesCache();
+
+    return result;
   }
 
   async update(id: string, dto: UpdateExerciseInput): Promise<PublicExercise> {
@@ -299,7 +417,12 @@ export class ExercisesService {
     if (dto.video !== undefined) ex.video = dto.video;
 
     const saved = await this.repo.save(ex);
-    return this.toPublic(saved);
+    const result = this.toPublic(saved);
+
+    // Invalidate caches after update
+    await this.invalidateExerciseCaches(id);
+
+    return result;
   }
 
   async remove(id: string, actor?: { id: string; role: UserRole; lang?: string }) {
@@ -312,39 +435,69 @@ export class ExercisesService {
 
     if (actor?.role === UserRole.SUPER_ADMIN) {
       await this.repo.remove(ex);
-      return {
-        deleted: true,
-        id,
-        message: lang === 'ar' ? 'تم حذف التمرين بنجاح' : 'Exercise deleted successfully',
-      };
-    }
-
-    if (actor?.role === UserRole.ADMIN) {
+    } else if (actor?.role === UserRole.ADMIN) {
       if (ex.adminId !== actor.id) {
         throw new ForbiddenException(lang === 'ar' ? 'لا يمكنك حذف التمارين التي لم تنشئها' : 'You can only delete exercises you created.');
       }
       await this.repo.remove(ex);
-      return {
-        deleted: true,
-        id,
-        message: lang === 'ar' ? 'تم حذف التمرين بنجاح' : 'Exercise deleted successfully',
-      };
+    } else {
+      throw new ForbiddenException(lang === 'ar' ? 'غير مسموح بحذف التمارين' : 'Not allowed to delete exercises.');
     }
 
-    throw new ForbiddenException(lang === 'ar' ? 'غير مسموح بحذف التمارين' : 'Not allowed to delete exercises.');
+    // Invalidate caches after deletion
+    await this.invalidateExerciseCaches(id);
+
+    return {
+      deleted: true,
+      id,
+      message: lang === 'ar' ? 'تم حذف التمرين بنجاح' : 'Exercise deleted successfully',
+    };
   }
 
   async updateImage(id: string, path: string): Promise<PublicExercise> {
     const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
     ex.img = path;
-    return this.toPublic(await this.repo.save(ex));
+    const result = this.toPublic(await this.repo.save(ex));
+
+    // Invalidate caches after image update
+    await this.invalidateExerciseCaches(id);
+
+    return result;
   }
 
   async updateVideo(id: string, path: string): Promise<PublicExercise> {
     const ex = await this.repo.findOne({ where: { id } });
     if (!ex) throw new NotFoundException('Exercise not found');
     ex.video = path;
-    return this.toPublic(await this.repo.save(ex));
+    const result = this.toPublic(await this.repo.save(ex));
+
+    // Invalidate caches after video update
+    await this.invalidateExerciseCaches(id);
+
+    return result;
+  }
+
+  /* ---------- Cache Invalidation Methods ---------- */
+  private async invalidateExercisesCache() {
+    const pattern = 'exercises:list:*';
+    await this.redisService.deletePattern(pattern);
+    await this.redisService.deletePattern('exercises:categories');
+    await this.redisService.deletePattern('exercises:stats:*');
+  }
+
+  private async invalidateExerciseCaches(exerciseId: string) {
+    // Invalidate specific exercise cache
+    await this.redisService.del(`exercise:${exerciseId}`);
+
+    // Invalidate lists and other caches
+    await this.invalidateExercisesCache();
+  }
+
+  private async invalidateVideoCaches(userId: string, coachId: string) {
+    // Invalidate user video cache
+    await this.redisService.del(`exercise_videos:user:${userId}`);
+
+    await this.redisService.deletePattern(`exercise_videos:coach:${coachId}:*`);
   }
 }

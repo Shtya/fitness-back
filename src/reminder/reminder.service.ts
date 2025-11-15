@@ -1,22 +1,26 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, FindOptionsWhere, LessThanOrEqual, DataSource } from 'typeorm';
+import { Repository, FindOptionsWhere } from 'typeorm';
 import * as webpush from 'web-push';
 
-import { Reminder, UserReminderSettings, PushSubscription, NotificationLog } from 'entities/alert.entity';
+import { Reminder, UserReminderSettings, PushSubscription, NotificationLog, ReminderSchedule, ScheduleMode, ReminderType, Priority, IntervalUnit } from 'entities/alert.entity';
+import { GreenApiService } from './green-api/green-api.service';
 
 @Injectable()
 export class RemindersService {
   private readonly logger = new Logger(RemindersService.name);
 
   constructor(
-    @InjectRepository(Reminder) private readonly remindersRepo: Repository<Reminder>,
-    @InjectRepository(UserReminderSettings) private readonly settingsRepo: Repository<UserReminderSettings>,
-    @InjectRepository(PushSubscription) private readonly subsRepo: Repository<PushSubscription>,
-    @InjectRepository(NotificationLog) private readonly logsRepo: Repository<NotificationLog>,
-		private readonly db: DataSource,
+    @InjectRepository(Reminder)
+    private readonly remindersRepo: Repository<Reminder>,
+    @InjectRepository(UserReminderSettings)
+    private readonly settingsRepo: Repository<UserReminderSettings>,
+    @InjectRepository(PushSubscription)
+    private readonly subsRepo: Repository<PushSubscription>,
+    @InjectRepository(NotificationLog)
+    private readonly logsRepo: Repository<NotificationLog>,
+    public readonly greenApiService: GreenApiService,
   ) {
-    // web-push config
     const pub = process.env.VAPID_PUBLIC_KEY;
     const priv = process.env.VAPID_PRIVATE_KEY;
     const sub = process.env.PUSH_SUBJECT || 'mailto:admin@example.com';
@@ -27,7 +31,253 @@ export class RemindersService {
     }
   }
 
-  /* ---------------- Helpers ---------------- */
+  async sendPushToUser(userId: string, payload: Record<string, any>) {
+    const subs = await this.subsRepo.find({
+      where: { userId },
+    });
+
+    if (!subs.length) {
+      this.logger.warn(`⚠️ No push subscriptions found for user ${userId}`);
+      return [];
+    }
+
+    const results: any[] = [];
+
+    // إرسال مباشر بدون التحقق المسبق (لأن التحقق يبطئ العملية)
+    // سنتعامل مع الأخطاء أثناء الإرسال
+    for (const sub of subs) {
+      try {
+        const result = await this.logAndSend(sub, userId, payload);
+        results.push(result);
+      } catch (error) {
+        this.logger.error(`Error sending to subscription ${sub.endpoint}:`, error);
+        results.push({
+          endpoint: sub.endpoint,
+          ok: false,
+          error: String(error),
+        });
+      }
+    }
+
+    const successCount = results.filter(r => r.ok).length;
+    return results;
+  }
+  private reminderGateway: any = null;
+  setReminderGateway(gateway: any) {
+    this.reminderGateway = gateway;
+  }
+	
+
+  async processDueReminders(now: Date = new Date()) {
+    // Load reminders with user relations to get phone numbers
+    const active = await this.remindersRepo.find({
+      where: { isActive: true, isCompleted: false },
+      relations: ['user'], // This is important for WhatsApp integration
+    });
+
+    const pastWindowMs = 30_000; // 30 seconds in the past
+    const futureWindowMs = 60_000; // 1 minute in the future
+    let sentCount = 0;
+    let whatsappSentCount = 0;
+    let pushSentCount = 0;
+    let websocketSentCount = 0;
+
+    this.logger.debug(`Checking ${active.length} active reminders at ${now.toISOString()}`);
+
+    for (const rem of active) {
+      try {
+        let next: Date | null = null;
+        if (rem.reminderTime && rem.reminderTime.getTime() > now.getTime() - pastWindowMs) {
+          next = rem.reminderTime;
+        } else {
+          next = this.computeNextOccurrence(rem, now);
+          // Save reminderTime for next time
+          if (next) {
+            rem.reminderTime = next;
+            await this.remindersRepo.save(rem);
+          }
+        }
+
+        if (!next) continue;
+
+        const diff = next.getTime() - now.getTime();
+
+        // Check if reminder is within the time window (30 seconds past to 1 minute future)
+        if (diff >= -pastWindowMs && diff <= futureWindowMs) {
+          const payload = {
+            title: rem.title,
+            body: rem.description ?? 'Reminder',
+            icon: '/icons/bell.png',
+            url: '/dashboard/reminders',
+            data: {
+              reminderId: rem.id,
+              type: rem.type,
+            },
+            requireInteraction: true,
+            reminderId: rem.id,
+          };
+
+          // 1. Try WebSocket first (if user is online)
+          let sentViaWebSocket = false;
+          if (this.reminderGateway?.isUserConnected(rem.userId)) {
+            sentViaWebSocket = this.reminderGateway.sendReminderToUser(rem.userId, rem);
+            if (sentViaWebSocket) {
+              websocketSentCount++;
+            } else {
+              this.logger.warn(`⚠️ Failed to send reminder ${rem.id} via WebSocket to user ${rem.userId}`);
+            }
+          } else {
+            this.logger.debug(`User ${rem.userId} is not connected via WebSocket`);
+          }
+
+          // 2. Send push notification (works even when browser is closed)
+          try {
+            const pushResults = await this.sendPushToUser(rem.userId, payload);
+            if (pushResults && pushResults.length > 0) {
+              const successCount = pushResults.filter((r: any) => r.ok).length;
+              if (successCount > 0) {
+                pushSentCount++;
+              }
+            } else {
+              this.logger.warn(`⚠️ No push subscriptions found for user ${rem.userId}`);
+            }
+          } catch (pushError) {
+            this.logger.error(`❌ Failed to send push notification for reminder ${rem.id}:`, pushError);
+          }
+
+          // 3. Send WhatsApp notification (NEW INTEGRATION)
+          try {
+            await this.sendWhatsAppReminder(rem);
+            whatsappSentCount++;
+          } catch (whatsappError) {
+            this.logger.error(`❌ Failed to send WhatsApp reminder for ${rem.id}:`, whatsappError);
+          }
+
+          sentCount++;
+
+          // Update reminderTime for next occurrence (after 1 minute from now)
+          const future = this.computeNextOccurrence(rem, new Date(now.getTime() + 60_000));
+          rem.reminderTime = future;
+          await this.remindersRepo.save(rem);
+        }
+      } catch (error) {
+        this.logger.error(`❌ Failed to process reminder ${rem.id}:`, error);
+      }
+    }
+
+    // Log summary
+    if (sentCount > 0) {
+      // this.logger.log(`✅ Sent ${sentCount} reminder(s) successfully - ` + `WebSocket: ${websocketSentCount}, Push: ${pushSentCount}, WhatsApp: ${whatsappSentCount}`);
+    } else {
+      // this.logger.debug(`No reminders due at ${now.toISOString()}`);
+    }
+  }
+
+  private async sendWhatsAppReminder(reminder: Reminder) {
+    try {
+      // Get user's phone number from the user entity
+      const user = reminder.user;
+
+      if (!user) {
+        this.logger.warn(`User not found for reminder ${reminder.id}`);
+        return;
+      }
+
+      // Check if user has phone number - you might need to add this field to your User entity
+      const phoneNumber = (user as any).phoneNumber || (user as any).whatsappNumber;
+
+      if (!phoneNumber) {
+        this.logger.debug(`No phone number found for user ${reminder.userId}, skipping WhatsApp`);
+        return;
+      }
+
+      const message = this.formatWhatsAppMessage(reminder);
+
+      await this.greenApiService.sendMessage(phoneNumber, message);
+
+    } catch (error) {
+      this.logger.error(`❌ Failed to send WhatsApp reminder for reminder ${reminder.id}:`, error);
+      throw error; 
+    }
+  }
+
+  private formatWhatsAppMessage(reminder: Reminder): string {
+    const schedule: any = reminder.schedule || {};
+    const times = (schedule.times || []).map(time => this.formatTimeForWhatsApp(time)).join(', ');
+    const typeMap = {
+      adhkar: 'أذكار',
+      water: 'شرب الماء',
+      medicine: 'الدواء',
+      appointment: 'موعد',
+      routine: 'روتين',
+      custom: 'تذكير',
+    };
+
+    let scheduleText = '';
+    switch (schedule.mode) {
+      case 'once':
+        scheduleText = `مرة واحدة - ${times}`;
+        break;
+      case 'daily':
+        scheduleText = `يومي - ${times}`;
+        break;
+      case 'weekly':
+        const days = (schedule.daysOfWeek || []).map(day => this.getArabicDay(day)).join('، ');
+        scheduleText = `أسبوعي - ${days} - ${times}`;
+        break;
+      case 'monthly':
+        scheduleText = `شهري - ${times}`;
+        break;
+      case 'interval':
+        const interval = schedule.interval;
+        if (interval) {
+          const unitMap = {
+            minute: 'دقيقة',
+            hour: 'ساعة',
+            day: 'يوم',
+          };
+          scheduleText = `كل ${interval.every} ${unitMap[interval.unit as keyof typeof unitMap] || interval.unit}`;
+        }
+        break;
+      case 'prayer':
+        const prayer = schedule.prayer;
+        if (prayer) {
+          const direction = prayer.direction === 'before' ? 'قبل' : 'بعد';
+          scheduleText = `${prayer.name} - ${direction} ${prayer.offsetMin} دقيقة`;
+        }
+        break;
+      default:
+        scheduleText = times;
+    }
+
+    return `🔔 *تذكير*\n\n` + `*العنوان:* ${reminder.title}\n` + `*الموعد:* ${scheduleText}\n` + `*النوع:* ${typeMap[reminder.type as keyof typeof typeMap] || reminder.type}\n` + `${reminder.description ? `*ملاحظات:* ${reminder.description}\n` : ''}\n` + `_هذا تذكير آلي من تطبيقك_`;
+  }
+
+  private formatTimeForWhatsApp(time: string): string {
+    if (!time) return '--:--';
+
+    try {
+      const [hours, minutes] = time.split(':').map(Number);
+      const isPM = hours >= 12;
+      const displayHours = hours % 12 || 12;
+      return `${displayHours}:${minutes.toString().padStart(2, '0')} ${isPM ? 'PM' : 'AM'}`;
+    } catch {
+      return time;
+    }
+  }
+
+  private getArabicDay(dayKey: string): string {
+    const dayMap: { [key: string]: string } = {
+      SU: 'الأحد',
+      MO: 'الإثنين',
+      TU: 'الثلاثاء',
+      WE: 'الأربعاء',
+      TH: 'الخميس',
+      FR: 'الجمعة',
+      SA: 'السبت',
+    };
+    return dayMap[dayKey] || dayKey;
+  }
 
   private async getReminderOrThrow(userId: string, id: string) {
     const rem = await this.remindersRepo.findOne({ where: { id, userId } });
@@ -39,11 +289,172 @@ export class RemindersService {
     if (rem.userId !== userId) throw new ForbiddenException('Forbidden');
   }
 
-  /* ---------------- Reminders CRUD ---------------- */
+  private combineDateAndTime(dateStr: string, timeStr: string): Date {
+    const [hStr, mStr] = (timeStr || '09:00').split(':');
+    const h = Number(hStr || 9);
+    const m = Number(mStr || 0);
+    const d = new Date(dateStr + 'T00:00:00');
+    d.setHours(h, m, 0, 0);
+    return d;
+  }
 
-	 async sendNow(userId: string, dto: any) {
-    let title = dto.title ?? 'Test';
-    let body = dto.body ?? 'This is a test';
+  private getLocalStartDate(schedule: ReminderSchedule): string | null {
+    if (schedule.startDate) return schedule.startDate;
+    return null;
+  }
+
+  private computeNextOccurrence(rem: Reminder, from: Date): Date | null {
+    const s = rem.schedule;
+    const now = from;
+    const startDateStr = this.getLocalStartDate(s);
+    const times = (s.times || []).length ? [...s.times] : ['09:00'];
+
+    times.sort();
+
+    const endDateStr = s.endDate || null;
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const isAfterEnd = (d: Date) => {
+      if (!endDateStr) return false;
+      const end = new Date(endDateStr + 'T23:59:59');
+      return d.getTime() > end.getTime();
+    };
+
+    const clampToStart = (d: Date) => {
+      if (!startDateStr) return d;
+      const start = new Date(startDateStr + 'T00:00:00');
+      if (d.getTime() < start.getTime()) return start;
+      return d;
+    };
+
+    const mode = s.mode;
+
+    // once
+    if (mode === ScheduleMode.ONCE) {
+      if (!startDateStr) return null;
+      const d = this.combineDateAndTime(startDateStr, times[0]);
+      if (d.getTime() < now.getTime()) {
+        return null; // once وعدّى – مش هيكرر
+      }
+      return d;
+    }
+
+    // daily
+    if (mode === ScheduleMode.DAILY) {
+      let base = clampToStart(today);
+      for (let i = 0; i < 366; i++) {
+        const day = new Date(base);
+        day.setDate(base.getDate() + i);
+        if (isAfterEnd(day)) return null;
+        for (const t of times) {
+          const dt = this.combineDateAndTime(day.toISOString().slice(0, 10), t);
+          if (dt.getTime() >= now.getTime()) return dt;
+        }
+      }
+      return null;
+    }
+
+    // weekly
+    if (mode === ScheduleMode.WEEKLY) {
+      const daysOfWeek = s.daysOfWeek?.length ? s.daysOfWeek : ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+      const map = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+
+      let base = clampToStart(today);
+      for (let i = 0; i < 7 * 52; i++) {
+        const day = new Date(base);
+        day.setDate(base.getDate() + i);
+        if (isAfterEnd(day)) return null;
+        const code = map[day.getDay()];
+        if (!daysOfWeek.includes(code as any)) continue;
+        for (const t of times) {
+          const dt = this.combineDateAndTime(day.toISOString().slice(0, 10), t);
+          if (dt.getTime() >= now.getTime()) return dt;
+        }
+      }
+      return null;
+    }
+
+    // monthly – على نفس يوم startDate أو نفس اليوم الحالي
+    if (mode === ScheduleMode.MONTHLY) {
+      const baseDay = startDateStr != null ? new Date(startDateStr + 'T00:00:00').getDate() : today.getDate();
+      let year = today.getFullYear();
+      let month = today.getMonth();
+
+      for (let i = 0; i < 24; i++) {
+        const d = new Date(year, month, baseDay);
+        if (d.getTime() < now.getTime()) {
+          month++;
+          if (month > 11) {
+            month = 0;
+            year++;
+          }
+          continue;
+        }
+        if (isAfterEnd(d)) return null;
+        const dt = this.combineDateAndTime(d.toISOString().slice(0, 10), times[0]);
+        if (dt.getTime() >= now.getTime()) return dt;
+
+        month++;
+        if (month > 11) {
+          month = 0;
+          year++;
+        }
+      }
+      return null;
+    }
+
+    // interval – نبدأ من startDate/times[0] ونكرر حسب interval
+    if (mode === ScheduleMode.INTERVAL && s.interval) {
+      if (!startDateStr) return null;
+      const base = this.combineDateAndTime(startDateStr, times[0]);
+      if (base.getTime() > now.getTime()) return base;
+
+      let stepMs = 0;
+      const every = s.interval.every || 1;
+      switch (s.interval.unit) {
+        case IntervalUnit.MINUTE:
+          stepMs = every * 60_000;
+          break;
+        case IntervalUnit.HOUR:
+          stepMs = every * 60 * 60_000;
+          break;
+        case IntervalUnit.DAY:
+        default:
+          stepMs = every * 24 * 60 * 60_000;
+          break;
+      }
+
+      const maxLoops = 10000;
+      let candidate = base;
+      for (let i = 0; i < maxLoops; i++) {
+        if (candidate.getTime() >= now.getTime()) {
+          if (isAfterEnd(candidate)) return null;
+          return candidate;
+        }
+        candidate = new Date(candidate.getTime() + stepMs);
+      }
+      return null;
+    }
+
+    // PRAYER mode – هنا بنسيب الحساب للـ frontend أو لحقل reminderTime
+    if (mode === ScheduleMode.PRAYER && rem.reminderTime) {
+      if (rem.reminderTime.getTime() >= now.getTime()) {
+        return rem.reminderTime;
+      }
+      return null;
+    }
+
+    // fallback: daily
+    if (startDateStr) {
+      const d = this.combineDateAndTime(startDateStr, times[0]);
+      if (d.getTime() >= now.getTime()) return d;
+    }
+    return null;
+  }
+
+  async sendNow(userId: string, dto: any) {
+    let title = dto.title ?? 'Reminder';
+    let body = dto.body ?? '';
     let icon = dto.icon ?? '/icons/bell.png';
     let url = dto.url ?? '/';
     let data = dto.data ?? {};
@@ -51,102 +462,89 @@ export class RemindersService {
     let reminderId: string | null = null;
 
     if (dto.reminderId) {
-      const rem = await this.remindersRepo.findOne({ where: { id: dto.reminderId, userId } as any });
+      const rem = await this.remindersRepo.findOne({
+        where: { id: dto.reminderId, userId },
+      });
       if (!rem) throw new NotFoundException('Reminder not found');
-      reminderId = rem.id as any;
+      reminderId = rem.id;
 
-      // ⬇ Map your fields as you already do in your module (no new logic)
       title = rem.title ?? title;
-      body = (rem.description as any) ?? body;
-      // If you keep user-facing link per reminder, map it here:
-      // url = rem.deepLink || url;
-      // Any metadata you store on reminder can also be attached:
-      data = { ...data, reminderId: rem.id, type: rem.type ?? 'custom' };
+      body = rem.description ?? body;
+      data = {
+        ...data,
+        reminderId: rem.id,
+        type: rem.type ?? ReminderType.CUSTOM,
+      };
     }
 
-    // target subscriptions (reuse your table)
-    const targets = dto.subscriptionId
-      ? await this.subsRepo.find({ where: { id: dto.subscriptionId, userId } as any })
-      : await this.subsRepo.find({ where: { userId } as any });
+    const payload = {
+      title,
+      body,
+      icon,
+      url,
+      data,
+      requireInteraction,
+      reminderId,
+    };
 
-    const results: Array<{ subscriptionId: string; ok: boolean; status?: number | null; error?: string }> = [];
-    for (const sub of targets) {
-      try {
-        const payload = JSON.stringify({
-          title,
-          body,
-          icon,
-          data: { ...data, url },
-          requireInteraction,
-        });
-
-        await webpush.sendNotification(
-          { endpoint: sub.endpoint, keys: { p256dh: (sub as any).p256dh, auth: (sub as any).auth } },
-          payload,
-        );
-
-        results.push({ subscriptionId: (sub as any).id, ok: true });
-      } catch (err: any) {
-        const status = err?.statusCode || null;
-        results.push({ subscriptionId: (sub as any).id, ok: false, status, error: err?.message || 'unknown' });
-
-        // Clean up dead subs—keeps your current logic
-        if (status === 404 || status === 410) {
-          await this.subsRepo.delete((sub as any).id);
-        }
-      }
+    if (dto.subscriptionId) {
+      return this.sendPushToSpecificSubs(userId, [dto.subscriptionId], payload);
     }
 
-    // Optional logging using your EXISTING logs table (if present)
-    // Adjust table/column names to your schema. Wrapped in try/catch so it
-    // won’t break if you don’t have a logs table.
-    try {
-      await this.db.createQueryRunner().manager.query(
-        `
-        INSERT INTO reminders_logs (user_id, reminder_id, title, body, payload, results, created_at)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, NOW())
-        `,
-        [
-          userId,
-          reminderId,
-          title,
-          body,
-          JSON.stringify({ icon, url, data, requireInteraction }),
-          JSON.stringify(results),
-        ],
-      );
-    } catch (e) {
-      // If you don’t have a logs table, we just skip. No new entity created.
-      this.logger.verbose('Skipping log insert (no reminders_logs table or different shape).');
+    // تحقق من وجود اشتراكات قبل الإرسال
+    const subs = await this.subsRepo.find({
+      where: { userId },
+    });
+
+    if (!subs.length) {
+      this.logger.warn(`⚠️ No push subscriptions found for user ${userId} - cannot send push notification`);
+      return {
+        success: false,
+        message: 'No push subscriptions found for this user',
+        subscriptionsCount: 0,
+      };
     }
 
-    return { sentTo: results.length, results };
+    const results = await this.sendPushToUser(userId, payload);
+
+    return {
+      success: true,
+      subscriptionsCount: subs.length,
+      results,
+    };
   }
 
-
-  async list(userId: string, q: { active?: boolean; completed?: boolean; type?: string; fromDate?: string; toDate?: string }) {
+  async list(
+    userId: string,
+    q: {
+      active?: boolean;
+      completed?: boolean;
+      type?: string;
+      fromDate?: string;
+      toDate?: string;
+    },
+  ) {
     const where: FindOptionsWhere<Reminder> = { userId };
 
-    if (typeof q.active === 'boolean') where.isActive = q.active;
-    if (typeof q.completed === 'boolean') where.isCompleted = q.completed;
-    if (q.type) (where as any).type = q.type;
+    if (typeof q.active === 'boolean') (where as any).isActive = q.active;
+    if (typeof q.completed === 'boolean') (where as any).isCompleted = q.completed;
+    if (q.type) (where as any).type = q.type as any;
 
-    // base fetch
     const list = await this.remindersRepo.find({
       where,
       order: { createdAt: 'DESC' },
     });
 
-    // optional date-window intersect
     if (q.fromDate || q.toDate) {
       const from = q.fromDate ? new Date(q.fromDate) : null;
       const to = q.toDate ? new Date(q.toDate) : null;
       return list.filter(r => {
         const s = r.schedule;
-        const start = new Date(s.startDate + 'T00:00:00');
+        const start = s.startDate ? new Date(s.startDate + 'T00:00:00') : null;
         const end = s.endDate ? new Date(s.endDate + 'T23:59:59') : null;
+
         if (from && end && end < from) return false;
-        if (to && start > to) return false;
+        if (to && start && start > to) return false;
         return true;
       });
     }
@@ -158,12 +556,46 @@ export class RemindersService {
   }
 
   async create(userId: string, dto: any) {
+    const schedule: ReminderSchedule = {
+      mode: dto.schedule.mode ?? ScheduleMode.DAILY,
+      times: dto.schedule.times ?? [],
+      daysOfWeek: dto.schedule.daysOfWeek ?? [],
+      interval: dto.schedule.interval ?? null,
+      prayer: dto.schedule.prayer ?? null,
+      startDate: dto.schedule.startDate ?? null,
+      endDate: dto.schedule.endDate ?? null,
+      timezone: dto.schedule.timezone ?? 'Africa/Cairo',
+      exdates: dto.schedule.exdates ?? [],
+      rrule: dto.schedule.rrule ?? '',
+    };
+
     const rem = this.remindersRepo.create({
       userId,
-      ...dto,
-      isActive: dto.isActive ?? true,
-      isCompleted: dto.isCompleted ?? false,
+      type: dto.type ?? ReminderType.CUSTOM,
+      title: dto.title,
+      description: dto.notes ?? null,
+      priority: dto.priority ?? Priority.NORMAL,
+      schedule,
+      soundSettings: {
+        id: dto.sound?.id ?? 'chime',
+        volume: typeof dto.sound?.volume === 'number' ? dto.sound.volume : 0.8,
+      },
+      reminderTime: dto.reminderTime ? new Date(dto.reminderTime) : null,
+      isActive: dto.active ?? true,
+      isCompleted: dto.completed ?? false,
+      metrics: {
+        streak: 0,
+        doneCount: 0,
+        skipCount: 0,
+        lastAckAt: null,
+      },
     });
+
+    // لو reminderTime مش مبعوت، نحاول نحسب أول occurrence
+    if (!rem.reminderTime) {
+      const next = this.computeNextOccurrence(rem, new Date());
+      rem.reminderTime = next;
+    }
 
     return this.remindersRepo.save(rem);
   }
@@ -171,7 +603,45 @@ export class RemindersService {
   async update(userId: string, id: string, dto: any) {
     const rem = await this.getReminderOrThrow(userId, id);
     this.ensureOwner(rem, userId);
-    Object.assign(rem, dto);
+
+    if (dto.title !== undefined) rem.title = dto.title;
+    if (dto.notes !== undefined) rem.description = dto.notes;
+    if (dto.type !== undefined) rem.type = dto.type;
+    if (dto.priority !== undefined) rem.priority = dto.priority;
+    if (dto.active !== undefined) rem.isActive = dto.active;
+    if (dto.completed !== undefined) rem.isCompleted = dto.completed;
+
+    if (dto.sound) {
+      rem.soundSettings = {
+        id: dto.sound.id ?? rem.soundSettings.id,
+        volume: typeof dto.sound.volume === 'number' ? dto.sound.volume : rem.soundSettings.volume,
+      };
+    }
+
+    if (dto.schedule) {
+      rem.schedule = {
+        ...rem.schedule,
+        mode: dto.schedule.mode ?? rem.schedule.mode,
+        times: dto.schedule.times ?? rem.schedule.times,
+        daysOfWeek: dto.schedule.daysOfWeek ?? rem.schedule.daysOfWeek,
+        interval: dto.schedule.interval !== undefined ? dto.schedule.interval : rem.schedule.interval,
+        prayer: dto.schedule.prayer !== undefined ? dto.schedule.prayer : rem.schedule.prayer,
+        startDate: dto.schedule.startDate ?? rem.schedule.startDate ?? null,
+        endDate: dto.schedule.endDate !== undefined ? dto.schedule.endDate : rem.schedule.endDate,
+        timezone: dto.schedule.timezone ?? rem.schedule.timezone ?? 'Africa/Cairo',
+        exdates: dto.schedule.exdates ?? rem.schedule.exdates,
+        rrule: dto.schedule.rrule ?? rem.schedule.rrule,
+      };
+    }
+
+    if (dto.reminderTime !== undefined) {
+      rem.reminderTime = dto.reminderTime ? new Date(dto.reminderTime) : null;
+    } else {
+      // إعادة حساب الـ reminderTime لو الجدول اتغيّر
+      const next = this.computeNextOccurrence(rem, new Date());
+      rem.reminderTime = next;
+    }
+
     return this.remindersRepo.save(rem);
   }
 
@@ -204,17 +674,21 @@ export class RemindersService {
   }
 
   async snooze(userId: string, id: string, minutes: number) {
-    if (!Number.isFinite(minutes) || minutes <= 0) throw new BadRequestException('minutes must be > 0');
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      throw new BadRequestException('minutes must be > 0');
+    }
     const rem = await this.getReminderOrThrow(userId, id);
     this.ensureOwner(rem, userId);
+
+    const base = new Date();
+    const next = new Date(base.getTime() + minutes * 60_000);
+    rem.reminderTime = next;
     rem.metrics = {
       ...rem.metrics,
       skipCount: (rem.metrics?.skipCount ?? 0) + 1,
     };
     return this.remindersRepo.save(rem);
   }
-
-  /* ---------------- User Settings ---------------- */
 
   async getUserSettings(userId: string) {
     let s = await this.settingsRepo.findOne({ where: { userId } });
@@ -240,19 +714,38 @@ export class RemindersService {
     return this.settingsRepo.save(s);
   }
 
-  /* ---------------- Push (VAPID) ---------------- */
-
   getVapidPublicKey() {
     const key = process.env.VAPID_PUBLIC_KEY;
-    if (!key) throw new BadRequestException('VAPID_PUBLIC_KEY not set');
-    return { publicKey: key };
+    if (!key) {
+      throw new BadRequestException('VAPID_PUBLIC_KEY not set');
+    }
+
+    const cleaned = key.trim();
+    if (cleaned.length < 80 || cleaned.length > 90) {
+      this.logger.warn(`VAPID_PUBLIC_KEY length is ${cleaned.length}, expected ~87 characters`);
+    }
+
+    return { publicKey: cleaned };
   }
 
-  async subscribePush(userId: string | null, body: { endpoint: string; keys: { p256dh: string; auth: string }; expirationTime?: string | null }, ua?: string, ip?: string) {
+  async subscribePush(
+    userId: string | null,
+    body: {
+      endpoint: string;
+      keys: { p256dh: string; auth: string };
+      expirationTime?: string | null;
+    },
+    ua?: string,
+    ip?: string,
+  ) {
     if (!body?.endpoint || !body?.keys?.p256dh || !body?.keys?.auth) {
+      this.logger.error('Invalid subscription data received');
       throw new BadRequestException('Invalid subscription');
     }
-    let found = await this.subsRepo.findOne({ where: { endpoint: body.endpoint } });
+
+    let found = await this.subsRepo.findOne({
+      where: { endpoint: body.endpoint },
+    });
 
     if (!found) {
       found = this.subsRepo.create({
@@ -263,79 +756,125 @@ export class RemindersService {
         expirationTime: body.expirationTime ? new Date(body.expirationTime) : null,
         userAgent: ua || null,
         ipAddress: ip || null,
+        failures: 0,
       });
     } else {
-      // update ownership if became known
-      if (userId && !found.userId) found.userId = userId;
+
+      // دائماً نحدث userId إذا كان موجوداً (حتى لو كان مختلفاً)
+      if (userId) {
+        if (found.userId !== userId) {
+          found.userId = userId;
+        } else {
+          this.logger.log(`✅ Subscription already linked to user ${userId}`);
+        }
+      }
+
       found.p256dh = body.keys.p256dh;
       found.auth = body.keys.auth;
       found.userAgent = ua || found.userAgent;
       found.ipAddress = ip || found.ipAddress;
+      found.failures = 0; // Reset failures when subscription is updated
     }
 
     await this.subsRepo.save(found);
-    return { ok: true };
+    return { ok: true, subscriptionId: found.id };
   }
 
-  async sendPushToUser(userId: string, payload: Record<string, any>) {
-    const subs = await this.subsRepo.find({ where: [{ userId }, { userId: null }] }); // تقدر تغيّر الاستراتيجية
+  private async logAndSend(sub: PushSubscription, userId: string | null, payload: Record<string, any>) {
+    let log: any = this.logsRepo.create({
+      userId,
+      reminderId: payload?.reminderId || null,
+      status: 'queued',
+      payload,
+      error: null,
+      sentAt: null,
+    });
+    log = await this.logsRepo.save(log);
+
+    try {
+      // حسب dev.to article: يجب أن يكون payload في تنسيق { notification: { ... } }
+      // لكن web-push library يقبل أيضاً التنسيق المباشر
+      // سنستخدم التنسيق المباشر لأنه أبسط وأكثر توافقاً
+      const notificationPayload = {
+        title: payload.title || 'Reminder',
+        body: payload.body || payload.description || '',
+        icon: payload.icon || '/icons/bell.png',
+        badge: '/icons/badge.png',
+        data: {
+          ...(payload.data || {}),
+          reminderId: payload.reminderId || null,
+          url: payload.url || '/dashboard/reminders',
+        },
+        requireInteraction: payload.requireInteraction !== false,
+        vibrate: [200, 100, 200],
+        tag: `reminder-${payload.reminderId || Date.now()}`,
+      };
+
+      const res = await webpush.sendNotification(
+        {
+          endpoint: sub.endpoint,
+          keys: {
+            p256dh: sub.p256dh,
+            auth: sub.auth,
+          },
+        } as any,
+        JSON.stringify(notificationPayload),
+        {
+          TTL: 86400, // 24 hours - ensures notification is delivered even if device is offline
+          urgency: 'high',
+        },
+      );
+
+      sub.lastSentAt = new Date();
+      sub.failures = 0; // Reset failures on success
+      await this.subsRepo.save(sub);
+
+      log.status = 'sent';
+      log.sentAt = new Date();
+      await this.logsRepo.save(log);
+
+      this.logger.log(`✅ Push sent successfully, status: ${res.statusCode}`);
+      return { endpoint: sub.endpoint, ok: true, status: res.statusCode };
+    } catch (err: any) {
+      this.logger.error(`❌ Push failed for ${sub.endpoint}:`, {
+        statusCode: err?.statusCode,
+        message: err?.message,
+        endpoint: err?.endpoint,
+      });
+
+      sub.failures = (sub.failures ?? 0) + 1;
+      await this.subsRepo.save(sub);
+
+      log.status = 'failed';
+      log.error = {
+        code: err?.statusCode,
+        message: String(err?.message || err),
+        endpoint: err?.endpoint as any,
+      };
+      await this.logsRepo.save(log);
+
+      // حذف الاشتراكات المنتهية أو غير الصالحة
+      if (err?.statusCode === 404 || err?.statusCode === 410 || err?.statusCode === 403) {
+        this.logger.warn(`Removing invalid subscription: ${sub.endpoint} (status: ${err?.statusCode})`);
+        await this.subsRepo.remove(sub);
+      }
+
+      return {
+        endpoint: sub.endpoint,
+        ok: false,
+        status: err?.statusCode,
+        error: err?.message,
+      };
+    }
+  }
+
+  async sendPushToSpecificSubs(userId: string, subscriptionIds: string[], payload: Record<string, any>) {
+    const subs = await this.subsRepo.findByIds(subscriptionIds);
     if (!subs.length) return [];
 
     const results: any[] = [];
     for (const s of subs) {
-      const log = this.logsRepo.create({
-        userId,
-        reminderId: payload?.reminderId || null,
-        status: 'queued',
-        payload,
-      });
-      const savedLog = await this.logsRepo.save(log);
-
-      try {
-        const res = await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } } as any, JSON.stringify(payload));
-        s.lastSentAt = new Date();
-        await this.subsRepo.save(s);
-
-        savedLog.status = 'sent';
-        savedLog.sentAt = new Date();
-        await this.logsRepo.save(savedLog);
-
-        results.push({ endpoint: s.endpoint, ok: true, status: res.statusCode });
-      } catch (err: any) {
-        this.logger.warn(`Push failed ${s.endpoint}: ${err?.statusCode || ''}`);
-
-        s.failures = (s.failures ?? 0) + 1;
-        await this.subsRepo.save(s);
-
-        savedLog.status = 'failed';
-        savedLog.error = { code: err?.statusCode, message: String(err?.message || err) };
-        await this.logsRepo.save(savedLog);
-
-        // تنظيف الاشتراكات المنتهية
-        if (err?.statusCode === 404 || err?.statusCode === 410) {
-          await this.subsRepo.remove(s);
-        }
-        results.push({ endpoint: s.endpoint, ok: false, status: err?.statusCode });
-      }
-    }
-    return results;
-  }
-
-  async adminBroadcast(payload: Record<string, any>) {
-    const subs = await this.subsRepo.find();
-    const results: any[] = [];
-    for (const s of subs) {
-      try {
-        const res = await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } } as any, JSON.stringify(payload));
-        s.lastSentAt = new Date();
-        await this.subsRepo.save(s);
-        results.push({ endpoint: s.endpoint, ok: true, status: res.statusCode });
-      } catch (err: any) {
-        if (err?.statusCode === 404 || err?.statusCode === 410) {
-          await this.subsRepo.remove(s);
-        }
-        results.push({ endpoint: s.endpoint, ok: false, status: err?.statusCode });
-      }
+      results.push(await this.logAndSend(s, userId, payload));
     }
     return results;
   }

@@ -26,6 +26,34 @@ export class WeeklyReportController {
       return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', [], ['weekOf'], query.filters);
     }
   }
+  @Get('coach')
+  async findAllCoach(@Query() query: any, @Query('user_id') userId?: string) {
+    const { search = '', page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'DESC', filters } = query ?? {};
+
+    console.log(userId);
+    let parsedFilters: Record<string, any> = {};
+
+    if (typeof filters === 'string') {
+      try {
+        parsedFilters = JSON.parse(filters);
+      } catch {
+        parsedFilters = {};
+      }
+    } else if (filters && typeof filters === 'object') {
+      parsedFilters = { ...filters };
+    }
+
+    const known = new Set(['search', 'page', 'limit', 'sortBy', 'sortOrder', 'filters', 'userId']);
+    for (const [k, v] of Object.entries(query || {})) {
+      if (!known.has(k) && typeof v !== 'undefined') parsedFilters[k] = v;
+    }
+
+    if (userId) parsedFilters.coachId = userId;
+
+    console.log(parsedFilters);
+
+    return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', search, Number(page), Number(limit), sortBy, (sortOrder || 'DESC') as 'ASC' | 'DESC', [], ['weekOf'], parsedFilters);
+  }
 
   @Get(':id')
   async findOne(@Param('id') id: string, @Request() req) {
@@ -35,7 +63,7 @@ export class WeeklyReportController {
   @Get('admins/:adminId/clients')
   async getAdminClients(@Param('adminId') adminId: string, @Query() query: any) {
     if (!adminId) throw new BadRequestException('adminId required');
-    return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ["user"], ['weekOf'], { adminId: adminId });
+    return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ['user'], ['weekOf'], { adminId: adminId });
   }
 
   @Get('users/:userId/weekly-reports')

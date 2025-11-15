@@ -8,11 +8,11 @@ import { PlanService } from './plans.service';
 import { Roles } from 'common/decorators/roles.decorator';
 
 @Controller('plans')
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class PlanController {
   constructor(private readonly svc: PlanService) {}
 
   @Get('overview')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   async overview(@Req() req: any, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string, @Query('sortBy') sortBy?: string, @Query('sortOrder') sortOrder?: 'ASC' | 'DESC') {
     return this.svc.listPlansWithStats(
       {
@@ -28,19 +28,21 @@ export class PlanController {
 
   // IMPORT predefined plan(s) into DB -> associate with this admin
   @Post('import')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   importPlan(@Body() body: any, @Req() req: any) {
     return this.svc.importAndActivate(body, { id: req.user.id, role: req.user.role });
   }
 
-  // which plan is active for a specific user (unchanged, this is per athlete)
   @Get('active')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   active(@Req() req: any) {
     return this.svc.getActivePlan(req.user.id);
   }
 
   // CREATE manual plan
   @Post()
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async create(@Body() body: any, @Req() req: any) {
     const dto = body?.payload ?? body;
@@ -48,20 +50,21 @@ export class PlanController {
     return this.svc.createPlanWithContent(dto, { id: req.user.id, role: req.user.role });
   }
 
-  // LIST all plans (scoped to vendor visibility)
   @Get()
-  async list(@Query() q: any, @Req() req: any) {
-    return this.svc.list(q, { id: req.user.id, role: req.user.role });
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  async list(@Query() q: any, @Req() req: any, @Query('user_id') user_id: any) {
+    return this.svc.list(q, { id: user_id ?? req.user.id, role: req.user.role });
   }
 
   // GET one plan deep (must be allowed to see it)
   @Get(':id')
   async getOne(@Param('id') id: string, @Req() req: any) {
-    return this.svc.getOneDeep(id, { id: req.user.id, role: req.user.role });
+    return this.svc.getOneDeep(id);
   }
 
   // UPDATE plan (only owner admin or super admin)
   @Put(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any, @Req() req: any) {
     return this.svc.updatePlanAndContent(id, dto, { id: req.user.id, role: req.user.role });
@@ -69,6 +72,7 @@ export class PlanController {
 
   // DELETE a plan (only owner admin or super admin)
   @Delete(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async remove(@Param('id') id: string, @Req() req: any) {
     return this.svc.remove(id, { id: req.user.id, role: req.user.role });
@@ -76,6 +80,7 @@ export class PlanController {
 
   // ASSIGN plan to athletes
   @Post(':id/assign')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async bulkAssign(
     @Param('id') planId: string,
@@ -95,6 +100,7 @@ export class PlanController {
   }
 
   @Get(':id/assignees')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   async assignees(@Param('id') id: string) {
     return this.svc.listAssignees(id);
   }

@@ -1,111 +1,230 @@
+// src/modules/reminders/reminder.controller.ts
 import { Body, Controller, Delete, Get, Headers, Ip, Param, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
-import { RemindersService } from './reminder.service';
-
-// -------- DTOs (محلية لتقليل الملفات) --------
-import { IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsNotEmpty, IsOptional, IsString, ValidateNested, IsIn, IsObject } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsNotEmpty, IsOptional, IsString, IsIn, IsObject, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
+
 import { IntervalUnit, Priority, ReminderType, ScheduleMode } from 'entities/alert.entity';
+import { RemindersService } from './reminder.service';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
 
-// استبدلها بـ AuthGuard الفعلي عندك
 function currentUserId(req: any): string {
-  return String(req.user?.id);
+  return req.user?.id ?? req.userId;
 }
 
-/* --- DTOs --- */
 class IntervalDto {
-  @IsInt() every!: number;
-  @IsEnum(IntervalUnit) unit!: IntervalUnit;
+  @IsInt()
+  every!: number;
+
+  @IsEnum(IntervalUnit)
+  unit!: IntervalUnit;
 }
+
 class PrayerDto {
-  @IsIn(['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']) name!: 'Fajr' | 'Dhuhr' | 'Asr' | 'Maghrib' | 'Isha';
-  @IsIn(['before', 'after']) direction!: 'before' | 'after';
-  @IsInt() offsetMin!: number;
+  @IsIn(['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'])
+  name!: 'Fajr' | 'Dhuhr' | 'Asr' | 'Maghrib' | 'Isha';
+
+  @IsIn(['before', 'after'])
+  direction!: 'before' | 'after';
+
+  @IsInt()
+  offsetMin!: number;
 }
 
 class ScheduleDto {
-  @IsEnum(ScheduleMode) mode!: ScheduleMode;
-  @IsArray() @IsString({ each: true }) @IsOptional() times?: string[];
-  @IsArray() @IsString({ each: true }) @IsOptional() daysOfWeek?: ('SU' | 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA')[];
-  @ValidateNested() @Type(() => IntervalDto) @IsOptional() interval?: IntervalDto;
-  @ValidateNested() @Type(() => PrayerDto) @IsOptional() prayer?: PrayerDto;
-  @IsDateString() startDate!: string;
-  @IsOptional() @IsDateString() endDate?: string | null;
-  @IsString() timezone!: string;
-  @IsArray() @IsOptional() exdates?: string[];
-  @IsString() @IsOptional() rrule?: string;
-}
-class SoundSettingsDto {
-  @IsString() id!: string;
-  @IsOptional() volume?: number;
+  @IsEnum(ScheduleMode)
+  mode!: ScheduleMode;
+
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  times?: string[];
+
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  daysOfWeek?: ('SU' | 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA')[];
+
+  @ValidateNested()
+  @Type(() => IntervalDto)
+  @IsOptional()
+  interval?: IntervalDto;
+
+  @ValidateNested()
+  @Type(() => PrayerDto)
+  @IsOptional()
+  prayer?: PrayerDto;
+
+  @IsDateString()
+  @IsOptional()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string | null;
+
+  @IsString()
+  @IsOptional()
+  timezone?: string;
+
+  @IsArray()
+  @IsOptional()
+  exdates?: string[];
+
+  @IsString()
+  @IsOptional()
+  rrule?: string;
 }
 
-class CreateReminderDto {
-  @IsString() @IsNotEmpty() title!: string;
-  @IsString() @IsOptional() description?: string;
-  @IsEnum(ReminderType) type!: ReminderType;
-  @IsEnum(Priority) @IsOptional() priority?: Priority;
-  @IsBoolean() @IsOptional() isActive?: boolean;
-  @IsBoolean() @IsOptional() isCompleted?: boolean;
-  @ValidateNested() @Type(() => SoundSettingsDto) soundSettings!: SoundSettingsDto;
-  @ValidateNested() @Type(() => ScheduleDto) schedule!: ScheduleDto;
-  @IsOptional() @IsDateString() reminderTime?: string;
+class SoundSettingsDto {
+  @IsString()
+  id!: string;
+
+  @IsOptional()
+  volume?: number;
 }
+
 class UpdateReminderDto {
-  @IsString() @IsOptional() title?: string;
-  @IsString() @IsOptional() description?: string;
-  @IsEnum(ReminderType) @IsOptional() type?: ReminderType;
-  @IsEnum(Priority) @IsOptional() priority?: Priority;
-  @IsBoolean() @IsOptional() isActive?: boolean;
-  @IsBoolean() @IsOptional() isCompleted?: boolean;
-  @ValidateNested() @Type(() => SoundSettingsDto) @IsOptional() soundSettings?: SoundSettingsDto;
-  @ValidateNested() @Type(() => ScheduleDto) @IsOptional() schedule?: ScheduleDto;
-  @IsOptional() @IsDateString() reminderTime?: string;
+  @IsString()
+  @IsOptional()
+  title?: string;
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @IsEnum(ReminderType)
+  @IsOptional()
+  type?: ReminderType;
+
+  @IsEnum(Priority)
+  @IsOptional()
+  priority?: Priority;
+
+  @IsBoolean()
+  @IsOptional()
+  active?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  completed?: boolean;
+
+  @ValidateNested()
+  @Type(() => SoundSettingsDto)
+  @IsOptional()
+  sound?: SoundSettingsDto;
+
+  @ValidateNested()
+  @Type(() => ScheduleDto)
+  @IsOptional()
+  schedule?: ScheduleDto;
+
+  @IsOptional()
+  @IsDateString()
+  reminderTime?: string;
 }
 
 class SnoozeDto {
-  @IsInt() minutes!: number;
+  @IsInt()
+  minutes!: number;
 }
 
 class UpdateUserSettingsDto {
-  @IsString() @IsOptional() timezone?: string;
-  @IsString() @IsOptional() city?: string;
-  @IsString() @IsOptional() country?: string;
-  @IsInt() @IsOptional() defaultSnooze?: number;
-  @IsObject() @IsOptional() quietHours?: { start: string; end: string };
-  @IsIn(['low', 'normal', 'high']) @IsOptional() priorityDefault?: 'low' | 'normal' | 'high';
-  @IsString() @IsOptional() soundDefault?: string;
+  @IsString()
+  @IsOptional()
+  timezone?: string;
+
+  @IsString()
+  @IsOptional()
+  city?: string;
+
+  @IsString()
+  @IsOptional()
+  country?: string;
+
+  @IsInt()
+  @IsOptional()
+  defaultSnooze?: number;
+
+  @IsObject()
+  @IsOptional()
+  quietHours?: { start: string; end: string };
+
+  @IsIn(['low', 'normal', 'high'])
+  @IsOptional()
+  priorityDefault?: 'low' | 'normal' | 'high';
+
+  @IsString()
+  @IsOptional()
+  soundDefault?: string;
 }
 
 class PushSubscribeDto {
-  @IsString() endpoint!: string;
-  @IsOptional() expirationTime?: string | null;
-  @IsObject() keys!: { p256dh: string; auth: string };
-}
-class PushSendDto {
-  @IsObject() payload!: Record<string, any>;
+  @IsString()
+  endpoint!: string;
+
+  @IsOptional()
+  expirationTime?: string | null;
+
+  @IsObject()
+  keys!: { p256dh: string; auth: string };
 }
 
 @Controller('reminders')
 export class RemindersController {
   constructor(private readonly svc: RemindersService) {}
 
+  @Post('whatsapp-test')
+  async sendTestWhatsApp(@Body() body: { phoneNumber: string; message: string }) {
+    const { phoneNumber, message } = body;
+
+    if (!phoneNumber || !message) {
+      return {
+        success: false,
+        error: 'phoneNumber and message fields are required.',
+      };
+    }
+
+    try {
+      const response = await this.svc.greenApiService.sendMessage(phoneNumber, message);
+
+      return {
+        success: true,
+        phoneNumber,
+        message,
+        apiResponse: response,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message || error,
+      };
+    }
+  }
+
+	  /* -------------------- Test endpoint (for debugging) -------------------- */
+  @Post('test-whatsapp')
+  @UseGuards(JwtAuthGuard)
+  async testWhatsApp(@Req() req: any, @Body() body: { phoneNumber: string }) {
+    const userId = currentUserId(req);
+
+    await this.svc.updateUserSettings(userId, { phoneNumber: body.phoneNumber });
+
+    return this.svc.sendNow(userId, {
+      title: 'WhatsApp Test',
+      body: 'Testing WhatsApp integration',
+      sendWhatsApp: true,
+    });
+  }
+
+  /* -------------------- Send now (manual trigger) -------------------- */
+
   @Post('send-now')
   @UseGuards(JwtAuthGuard)
-  sendNow(@Req() req: any, @Body() dto: any) {
-    const userId: string = req.user?.id || req.userId; // adapt to your auth
+  async sendNow(@Req() req: any, @Body() dto: any) {
+    const userId: string = currentUserId(req);
     return this.svc.sendNow(userId, dto);
   }
 
-  // POST /reminders/:id/send-now  (hydrate from an existing reminder)
-  @Post(':id/send-now')
-  @UseGuards(JwtAuthGuard)
-  sendNowForReminder(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
-    const userId: string = req.user?.id || req.userId;
-    return this.svc.sendNow(userId, { ...dto, reminderId: id });
-  }
-
-  /* Reminders CRUD */
   @Get('settings/user')
   @UseGuards(JwtAuthGuard)
   async getSettings(@Req() req: any) {
@@ -122,9 +241,8 @@ export class RemindersController {
 
   @Post()
   @UseGuards(JwtAuthGuard)
-  async create(@Req() req: any, @Body() dto: CreateReminderDto) {
+  async create(@Req() req: any, @Body() dto: any) {
     const uid = currentUserId(req);
-    console.log('here');
     return this.svc.create(uid, dto);
   }
 
@@ -163,7 +281,7 @@ export class RemindersController {
     return this.svc.snooze(uid, id, body.minutes);
   }
 
-  /* User Settings */
+  /* -------------------------- User Settings -------------------------- */
 
   @Put('settings/user')
   @UseGuards(JwtAuthGuard)
@@ -172,28 +290,18 @@ export class RemindersController {
     return this.svc.updateUserSettings(uid, patch);
   }
 
+  /* ------------------------------ Push ------------------------------- */
+
   @Get('push/vapid-key')
   vapidKey() {
     return this.svc.getVapidPublicKey();
   }
 
   @Post('push/subscribe')
-  async subscribe(@Req() req: any, @Body() dto: PushSubscribeDto, @Headers('user-agent') ua: string, @Ip() ip: string) {
-    const uid = currentUserId(req);
-    return this.svc.subscribePush(uid, dto, ua, ip);
-  }
-
-  @Post('push/send')
   @UseGuards(JwtAuthGuard)
-  async sendToMe(@Req() req: any, @Body() body: PushSendDto) {
-    const uid = currentUserId(req);
-    return this.svc.sendPushToUser(uid, body.payload);
-  }
-
-  // بثّ عام (استخدمه إدارياً فقط)
-  @Post('push/admin-broadcast')
-  async broadcast(@Body() body: PushSendDto) {
-    return this.svc.adminBroadcast(body.payload);
+  async subscribe(@Req() req: any, @Body() dto: PushSubscribeDto, @Headers('user-agent') ua: string, @Ip() ip: string) {
+    const uid = currentUserId(req) ?? null;
+    return this.svc.subscribePush(uid, dto, ua, ip);
   }
 
   @Get(':id')
@@ -202,4 +310,6 @@ export class RemindersController {
     const uid = currentUserId(req);
     return this.svc.get(uid, id);
   }
+
+
 }

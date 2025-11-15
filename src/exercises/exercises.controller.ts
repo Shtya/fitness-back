@@ -47,15 +47,14 @@ function parseStringArray(input: unknown): string[] | undefined {
     .filter(Boolean);
 }
 
-@Controller('plan-exercises') // keep route for backward compatibility
+@Controller('plan-exercises')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
 export class PlanExercisesController {
   constructor(private readonly svc: ExercisesService) {}
 
   @Get()
   async list(@Query() q: any, @Req() req: any) {
-    return this.svc.list(q, req?.user?.id);
+    return this.svc.list(q, q?.user_id ?? req?.user?.id);
   }
 
   @Get('categories')

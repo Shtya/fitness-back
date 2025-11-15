@@ -10,9 +10,10 @@ import {
   ExercisePlanDay,
   ExercisePlanDayExercise,
 } from 'entities/global.entity';
+import { RedisModule } from 'src/redis/redis.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, Exercise, User])],
+  imports: [TypeOrmModule.forFeature([ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, Exercise, User]) , RedisModule],
   providers: [PlanService],
   controllers: [PlanController],
   exports: [PlanService],
