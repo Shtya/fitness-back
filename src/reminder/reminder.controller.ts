@@ -248,7 +248,7 @@ export class RemindersController {
 
   @Put(':id')
   @UseGuards(JwtAuthGuard)
-  async update(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateReminderDto) {
+  async update(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
     const uid = currentUserId(req);
     return this.svc.update(uid, id, dto);
   }
