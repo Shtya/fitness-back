@@ -893,10 +893,13 @@ export class AuthService {
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
-    // Update allowed fields
-    const allowedFields = ['name', 'phone', 'gender', 'membership', 'defaultRestSeconds'];
+     const allowedFields: any[] = ['name', 'phone', 'gender', 'membership', 'defaultRestSeconds', 'caloriesTarget', 'proteinPerDay', 'carbsPerDay', 'fatsPerDay', 'activityLevel', 'notes'];
+
     allowedFields.forEach(field => {
-      if (dto[field] !== undefined) user[field] = dto[field];
+      if (dto[field] !== undefined) {
+        // @ts-ignore (if using TS strict) or cast user as any for this loop
+        user[field] = dto[field] as any;
+      }
     });
 
     await this.userRepo.save(user);

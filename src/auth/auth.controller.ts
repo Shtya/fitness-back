@@ -12,8 +12,6 @@ import { RegisterDto, LoginDto, UpdateProfileDto, RefreshDto, PagedQueryDto, Res
 export class AuthController {
   constructor(private authService: AuthService) {}
 
-  /* ---------------------- Email/Password Auth ---------------------- */
-
   @Post('register')
   async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
@@ -60,7 +58,7 @@ export class AuthController {
 
   @Put('profile/:id')
   @UseGuards(JwtAuthGuard)
-  async updateProfiles(@Param('id') id: string, @Body() dto: UpdateProfileDto) {
+  async updateProfiles(@Param('id') id: string, @Body() dto: any) {
     return this.authService.updateUserProfile(id, dto);
   }
 
