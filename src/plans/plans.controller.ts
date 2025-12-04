@@ -81,7 +81,7 @@ export class PlanController {
   // ASSIGN plan to athletes
   @Post(':id/assign')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  // @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async bulkAssign(
     @Param('id') planId: string,
     @Req() req: any,

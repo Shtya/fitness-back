@@ -7,6 +7,7 @@ import { LogMealDto } from './dto/log-meal.dto';
 import { CreateSuggestionDto } from './dto/suggestion.dto';
 import { NutritionStats as INutritionStats, MealPlanListResponse, ProgressData } from './interfaces/nutrition.interface';
 import { UpdateMealPlanDto } from './dto/update-meal-plan.dto';
+import { GymSettings } from '../../entities/settings.entity';
 
 /** ---------- i18n helpers ---------- */
 type Lang = 'ar' | 'en';
@@ -213,8 +214,8 @@ export class NutritionService {
     });
     if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
 
-    const canView = plan.adminId === null || plan.adminId === user.id || user.role === UserRole.SUPER_ADMIN;
-    if (!canView) throw new ForbiddenException(t(lang, 'forbidden_view'));
+    // const canView = plan.adminId === null || plan.adminId === user.id || user.role === UserRole.SUPER_ADMIN;
+    // if (!canView) throw new ForbiddenException(t(lang, 'forbidden_view'));
 
     return plan;
   }
@@ -540,13 +541,29 @@ export class NutritionService {
     return this.generateProgressData(userId, rangeDays);
   }
 
-  async generateMealPlanWithAI(prompt: string): Promise<any> {
+  private async getAiKeyForAdmin(adminId: string): Promise<string> {
+    const repo = this.dataSource.getRepository(GymSettings);
+    const settings = await repo.findOne({
+      where: { adminId },
+    });
+
+    const aiKey = settings?.aiSecretKey;
+
+    if (!aiKey) {
+      throw new BadRequestException('AI key is not configured for this account.');
+    }
+
+    return aiKey;
+  }
+
+  async generateMealPlanWithAI(prompt: string, adminId: any): Promise<any> {
+    const aiKey = await this.getAiKeyForAdmin(adminId);
     try {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${aiKey}`,
         },
         body: JSON.stringify({
           model: 'openai/gpt-3.5-turbo',

@@ -1,476 +1,382 @@
 {
   "info": {
-    "_postman_id": "b7b0a8b3-4b0a-4d7f-9b31-123456789abc",
-    "name": "Reminders API",
-    "description": "Collection to test Reminders module (NestJS). Set {{baseUrl}} and {{token}} before using.",
+    "name": "Forms Module Test",
+    "_postman_id": "11111111-1111-1111-1111-111111111111",
+    "description": "Collection to test Forms module endpoints with fake data.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
-  "variable": [
-    {
-      "key": "baseUrl",
-      "value": "http://localhost:8081/api/v1"
-    },
-    {
-      "key": "token",
-      "value": "YOUR_JWT_TOKEN_HERE"
-    }
-  ],
   "item": [
     {
-      "name": "Get User Settings",
+      "name": "Create Form (protected)",
       "request": {
-        "method": "GET",
+        "method": "POST",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/reminders/settings/user",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders",
-            "settings",
-            "user"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Update User Settings",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"timezone\": \"Africa/Cairo\",\n  \"city\": \"Cairo\",\n  \"country\": \"Egypt\",\n  \"defaultSnooze\": 10,\n  \"quietHours\": { \"start\": \"10:00 PM\", \"end\": \"07:00 AM\" },\n  \"priorityDefault\": \"normal\",\n  \"soundDefault\": \"chime\"\n}"
+          "raw": "{\n  \"title\": \"Demo Contact Form\",\n  \"fields\": [\n    {\n      \"label\": \"Full Name\",\n      \"key\": \"fullName\",\n      \"placeholder\": \"Enter your full name\",\n      \"type\": \"text\",\n      \"required\": true,\n      \"order\": 1\n    },\n    {\n      \"label\": \"Email\",\n      \"key\": \"email\",\n      \"placeholder\": \"Enter your email\",\n      \"type\": \"email\",\n      \"required\": true,\n      \"order\": 2\n    },\n    {\n      \"label\": \"Phone Number\",\n      \"key\": \"phone\",\n      \"placeholder\": \"Enter your phone number\",\n      \"type\": \"phone\",\n      \"required\": false,\n      \"order\": 3\n    },\n    {\n      \"label\": \"Preferred Contact Method\",\n      \"key\": \"preferredContact\",\n      \"type\": \"radio\",\n      \"options\": [\n        \"email\",\n        \"phone\"\n      ],\n      \"required\": true,\n      \"order\": 4\n    },\n    {\n      \"label\": \"Services Interested In\",\n      \"key\": \"services\",\n      \"type\": \"checkbox\",\n      \"options\": [\n        \"Coaching\",\n        \"Nutrition Plan\",\n        \"Workout Plan\"\n      ],\n      \"required\": false,\n      \"order\": 5\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
-          "raw": "{{baseUrl}}/reminders/settings/user",
+          "raw": "{{baseUrl}}/forms",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "settings",
-            "user"
+            "forms"
           ]
         }
       }
     },
     {
-      "name": "List Reminders",
+      "name": "Update Form (protected)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": 1,\n  \"title\": \"Demo Contact Form (Updated)\",\n  \"fields\": [\n    {\n      \"id\": 1,\n      \"label\": \"Full Name\",\n      \"key\": \"fullName\",\n      \"placeholder\": \"Your full legal name\",\n      \"type\": \"text\",\n      \"required\": true,\n      \"order\": 1\n    },\n    {\n      \"id\": 2,\n      \"label\": \"Email Address\",\n      \"key\": \"email\",\n      \"placeholder\": \"email@example.com\",\n      \"type\": \"email\",\n      \"required\": true,\n      \"order\": 2\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/forms",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "forms"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get All Forms (protected)",
       "request": {
         "method": "GET",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "url": {
-          "raw": "{{baseUrl}}/reminders?active=true&completed=false",
+          "raw": "{{baseUrl}}/forms?page=1&limit=10&includeGlobal=true",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders"
+            "forms"
           ],
           "query": [
             {
-              "key": "active",
-              "value": "true"
+              "key": "page",
+              "value": "1"
             },
             {
-              "key": "completed",
-              "value": "false"
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "includeGlobal",
+              "value": "true"
             }
           ]
         }
       }
     },
     {
-      "name": "Get Reminder by ID",
+      "name": "Get Form By Id (protected)",
       "request": {
         "method": "GET",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "url": {
-          "raw": "{{baseUrl}}/reminders/:id",
+          "raw": "{{baseUrl}}/forms/{{formId}}",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            ":id"
+            "forms",
+            "{{formId}}"
           ]
         }
       }
     },
     {
-      "name": "Create Reminder",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"title\": \"Drink Water\",\n  \"notes\": \"2 cups of water\",\n  \"type\": \"custom\",\n  \"priority\": \"normal\",\n  \"active\": true,\n  \"completed\": false,\n  \"sound\": {\n    \"id\": \"chime\",\n    \"volume\": 0.8\n  },\n  \"schedule\": {\n    \"mode\": \"daily\",\n    \"times\": [\"09:00\", \"14:00\"],\n    \"daysOfWeek\": [],\n    \"interval\": null,\n    \"prayer\": null,\n    \"startDate\": \"2025-11-13\",\n    \"endDate\": null,\n    \"timezone\": \"Africa/Cairo\",\n    \"exdates\": [],\n    \"rrule\": \"\"\n  },\n  \"reminderTime\": null\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/reminders",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Update Reminder",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"title\": \"Drink Water (Updated)\",\n  \"notes\": \"3 cups of water\",\n  \"priority\": \"high\",\n  \"active\": true,\n  \"sound\": {\n    \"id\": \"soft\",\n    \"volume\": 0.9\n  },\n  \"schedule\": {\n    \"mode\": \"daily\",\n    \"times\": [\"10:00\", \"16:00\"],\n    \"daysOfWeek\": [],\n    \"interval\": null,\n    \"prayer\": null,\n    \"startDate\": \"2025-11-13\",\n    \"endDate\": null,\n    \"timezone\": \"Africa/Cairo\",\n    \"exdates\": [],\n    \"rrule\": \"\"\n  }\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/reminders/:id",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders",
-            ":id"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Delete Reminder",
+      "name": "Delete Form (protected)",
       "request": {
         "method": "DELETE",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "url": {
-          "raw": "{{baseUrl}}/reminders/:id",
+          "raw": "{{baseUrl}}/forms/{{formId}}",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            ":id"
+            "forms",
+            "{{formId}}"
           ]
         }
       }
     },
     {
-      "name": "Toggle Reminder Active",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/reminders/:id/toggle",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders",
-            ":id",
-            "toggle"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Complete Reminder",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/reminders/:id/complete",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders",
-            ":id",
-            "complete"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Snooze Reminder",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"minutes\": 15\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/reminders/:id/snooze",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "reminders",
-            ":id",
-            "snooze"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Send Now (manual payload)",
+      "name": "Add Fields To Form (protected)",
       "request": {
         "method": "POST",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"title\": \"Test Push\",\n  \"body\": \"This is a test push notification\",\n  \"icon\": \"/icons/bell.png\",\n  \"url\": \"/\",\n  \"data\": {\"foo\": \"bar\"},\n  \"requireInteraction\": false\n}"
+          "raw": "{\n  \"fields\": [\n    {\n      \"label\": \"Date of Birth\",\n      \"key\": \"dob\",\n      \"placeholder\": \"YYYY-MM-DD\",\n      \"type\": \"date\",\n      \"required\": false,\n      \"order\": 10\n    },\n    {\n      \"label\": \"Notes\",\n      \"key\": \"notes\",\n      \"placeholder\": \"Anything else you want to share\",\n      \"type\": \"textarea\",\n      \"required\": false,\n      \"order\": 11\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
-          "raw": "{{baseUrl}}/reminders/send-now",
+          "raw": "{{baseUrl}}/forms/{{formId}}/fields",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "send-now"
+            "forms",
+            "{{formId}}",
+            "fields"
           ]
         }
       }
     },
     {
-      "name": "Send Now For Reminder (by ID)",
+      "name": "Delete Field From Form (protected)",
       "request": {
-        "method": "POST",
+        "method": "DELETE",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"requireInteraction\": true\n}"
-        },
         "url": {
-          "raw": "{{baseUrl}}/reminders/:id/send-now",
+          "raw": "{{baseUrl}}/forms/{{formId}}/fields/{{fieldId}}",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            ":id",
-            "send-now"
+            "forms",
+            "{{formId}}",
+            "fields",
+            "{{fieldId}}"
           ]
         }
       }
     },
     {
-      "name": "Get VAPID Public Key",
+      "name": "Reorder Fields (protected)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fields\": [\n    { \"id\": 1, \"order\": 1 },\n    { \"id\": 2, \"order\": 2 },\n    { \"id\": 3, \"order\": 3 }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/forms/re-order",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "forms",
+            "re-order"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Form Submissions (protected)",
       "request": {
         "method": "GET",
-        "header": [],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}",
+            "type": "text"
+          }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/reminders/push/vapid-key",
+          "raw": "{{baseUrl}}/forms/{{formId}}/submissions?page=1&limit=10",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "push",
-            "vapid-key"
+            "forms",
+            "{{formId}}",
+            "submissions"
+          ],
+          "query": [
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "limit",
+              "value": "10"
+            }
           ]
         }
       }
     },
     {
-      "name": "Subscribe Push",
+      "name": "Assign Submission To User (protected)",
       "request": {
         "method": "POST",
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
+            "value": "Bearer {{accessToken}}",
             "type": "text"
           }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"endpoint\": \"https://fcm.googleapis.com/fcm/send/your-endpoint-here\",\n  \"expirationTime\": null,\n  \"keys\": {\n    \"p256dh\": \"BASE64URL_P256DH_HERE\",\n    \"auth\": \"BASE64URL_AUTH_HERE\"\n  }\n}"
+          "raw": "{\n  \"userId\": \"{{assigneeId}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
-          "raw": "{{baseUrl}}/reminders/push/subscribe",
+          "raw": "{{baseUrl}}/forms/{{formId}}/submissions/{{submissionId}}/assign",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "push",
-            "subscribe"
+            "forms",
+            "{{formId}}",
+            "submissions",
+            "{{submissionId}}",
+            "assign"
           ]
         }
       }
     },
     {
-      "name": "Send Push to Me (using stored subs)",
+      "name": "Get Form By Id (public)",
       "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{token}}",
-            "type": "text"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"payload\": {\n    \"title\": \"Manual Push\",\n    \"body\": \"From /reminders/push/send endpoint\",\n    \"icon\": \"/icons/bell.png\",\n    \"url\": \"/\",\n    \"data\": {\"custom\": true}\n  }\n}"
-        },
+        "method": "GET",
         "url": {
-          "raw": "{{baseUrl}}/reminders/push/send",
+          "raw": "{{baseUrl}}/forms/{{formId}}/public",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "push",
-            "send"
+            "forms",
+            "{{formId}}",
+            "public"
           ]
         }
       }
     },
     {
-      "name": "Admin Broadcast Push (all subs)",
+      "name": "Submit Form (public)",
       "request": {
         "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          }
-        ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"payload\": {\n    \"title\": \"Admin Broadcast\",\n    \"body\": \"This will go to all subscriptions\",\n    \"icon\": \"/icons/bell.png\",\n    \"url\": \"/\",\n    \"data\": {\"admin\": true}\n  }\n}"
+          "raw": "{\n  \"email\": \"john.doe@example.com\",\n  \"phone\": \"+201234567890\",\n  \"answers\": {\n    \"fullName\": \"John Doe\",\n    \"email\": \"john.doe@example.com\",\n    \"phone\": \"+201234567890\",\n    \"preferredContact\": \"email\",\n    \"services\": [\n      \"Coaching\",\n      \"Workout Plan\"\n    ],\n    \"dob\": \"1990-01-01\",\n    \"notes\": \"Looking for an online coaching program.\"\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
-          "raw": "{{baseUrl}}/reminders/push/admin-broadcast",
+          "raw": "{{baseUrl}}/forms/{{formId}}/submit",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
-            "reminders",
-            "push",
-            "admin-broadcast"
+            "forms",
+            "{{formId}}",
+            "submit"
           ]
         }
       }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8081/api/v1"
+    },
+    {
+      "key": "accessToken",
+      "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjYzM2M3NzM5LTMxYmItNGI0MS1iZjFkLWRkOTk0ZDU1NzY5NCIsImlhdCI6MTc2NDc2NjEyNiwiZXhwIjoxNzY0OTM4OTI2fQ.45eWpGZEGPraaID0PlotZ0-5pdiJRaCQ06cxI8yEYk0"
+    },
+    {
+      "key": "formId",
+      "value": "2"
+    },
+    {
+      "key": "fieldId",
+      "value": "1"
+    },
+    {
+      "key": "submissionId",
+      "value": "1"
+    },
+    {
+      "key": "assigneeId",
+      "value": "00000000-0000-0000-0000-000000000000"
     }
   ]
 }

@@ -12,10 +12,10 @@ export class WeeklyReport extends CoreEntity {
   @Column({ type: 'uuid' })
   userId: string;
 
-  @Column({ type: 'uuid' , nullable : true })
+  @Column({ type: 'uuid', nullable: true })
   coachId: string;
 
-  @Column({ type: 'uuid' , nullable : true })
+  @Column({ type: 'uuid', nullable: true })
   adminId: string;
 
   @Column({ type: 'date' })
@@ -76,6 +76,7 @@ export class WeeklyReport extends CoreEntity {
     extras: any[];
   };
 
+  // هل العميل قرأ ملاحظة الكوتش/الأدمن؟
   @Column({ type: 'boolean', default: false })
   isRead: boolean;
 

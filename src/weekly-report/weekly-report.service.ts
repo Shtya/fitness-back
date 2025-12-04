@@ -16,21 +16,17 @@ export class WeeklyReportService {
     public readonly notificationService: NotificationService,
   ) {}
 
-
-
-
   async createReport(userId: string, createDto: any) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
       relations: ['coach'],
-      select: ['id', 'name', 'coachId', 'adminId', 'email', 'phone', 'status', 'role', 'created_at', 'updated_at'] as any, // keep it light; adjust if you use strict selects
+      select: ['id', 'name', 'coachId', 'adminId', 'email', 'phone', 'status', 'role', 'created_at', 'updated_at'] as any,
     });
 
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    // Normalize/stamp ids from user
     const stamped = {
       ...createDto,
       userId,
@@ -51,12 +47,10 @@ export class WeeklyReportService {
       existing = await this.weeklyReportRepo.createQueryBuilder('wr').where('wr.userId = :userId', { userId }).andWhere('wr.created_at BETWEEN :start AND :end', { start, end }).getOne();
     }
 
-    // If exists -> update (no duplicate)
     if (existing) {
       const merged = this.weeklyReportRepo.merge(existing, stamped);
       const updated = await this.weeklyReportRepo.save(merged);
 
-      // Optional: notify coach on update (only if requested and coach exists)
       if (createDto.notifyCoach && user.coachId) {
         await this.notificationService.create({
           type: NotificationType.FORM_SUBMISSION,
@@ -77,15 +71,13 @@ export class WeeklyReportService {
       return updated;
     }
 
-    // Else → create a new one
     const report = this.weeklyReportRepo.create({
       ...stamped,
-      user, // keep relation set for FK integrity
+      user,
     });
 
     const savedReport: any = await this.weeklyReportRepo.save(report);
 
-    // Notify on new report
     if (createDto.notifyCoach && user.coachId) {
       await this.notificationService.create({
         type: NotificationType.FORM_SUBMISSION,
@@ -132,7 +124,6 @@ export class WeeklyReportService {
     let whereCondition: any = {};
 
     if (userId) {
-      // Check if coach has access to this user's reports
       if (currentUser.role === UserRole.COACH && currentUser.id !== userId) {
         const athlete = await this.userRepo.findOne({
           where: { id: userId, coachId: currentUser.id },
@@ -143,7 +134,6 @@ export class WeeklyReportService {
       }
       whereCondition.userId = userId;
     } else if (currentUser.role === UserRole.COACH) {
-      // Coach can see all their athletes' reports
       whereCondition.user = { coachId: currentUser.id };
     }
 
@@ -174,7 +164,6 @@ export class WeeklyReportService {
       throw new NotFoundException('Report not found');
     }
 
-    // Authorization check
     if (currentUser.role === UserRole.CLIENT && report.userId !== currentUser.id) {
       throw new ForbiddenException('Access denied');
     }
@@ -186,7 +175,8 @@ export class WeeklyReportService {
     return report;
   }
 
-  async updateFeedback(id: string, updateDto: { coachFeedback?: string; isRead?: boolean }, coachId: string) {
+  // ✅ تحديث الملاحظة بدون لعب في isRead (isRead للعميل فقط)
+  async updateFeedback(id: string, updateDto: { coachFeedback?: string }, coachId: string) {
     const report = await this.weeklyReportRepo.findOne({
       where: { id },
       relations: ['user'],
@@ -196,18 +186,22 @@ export class WeeklyReportService {
       throw new NotFoundException('Report not found');
     }
 
-    const updateData: any = {
-      ...updateDto,
+    const updateData: Partial<WeeklyReport> = {
       reviewedAt: new Date(),
       reviewedById: coachId,
     };
+
+    if (typeof updateDto.coachFeedback === 'string') {
+      updateData.coachFeedback = updateDto.coachFeedback;
+      // كل ما الكوتش يكتب/يعدّل ملاحظة => تعتبر جديدة على العميل
+      updateData.isRead = false;
+    }
 
     const updatedReport = await this.weeklyReportRepo.save({
       ...report,
       ...updateData,
     });
 
-    // Notify user about coach feedback
     if (updateDto.coachFeedback) {
       await this.notificationService.create({
         type: NotificationType.FORM_SUBMISSION,
@@ -271,6 +265,31 @@ export class WeeklyReportService {
     await this.weeklyReportRepo.save(report);
 
     return report;
+  }
+
+  // ✅ عدد التقارير غير المُراجَعة للأدمن (reviewedAt is null)
+  async countUnreviewedReportsForAdmin(adminId: string) {
+    const count = await this.weeklyReportRepo.count({
+      where: {
+        adminId,
+        reviewedAt: IsNull(),
+      },
+    });
+
+    return { count };
+  }
+
+  // ✅ عدد الملاحظات (feedback) غير المقروءة للعميل
+  async countUnreadFeedbackForUser(userId: string) {
+    const count = await this.weeklyReportRepo.count({
+      where: {
+        userId,
+        coachFeedback: Not(IsNull()),
+        isRead: false,
+      },
+    });
+
+    return { count };
   }
 
   private normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {

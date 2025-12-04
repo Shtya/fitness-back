@@ -1,13 +1,6 @@
- import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  UpdateDateColumn,
-  ManyToOne,
-} from 'typeorm';
+// entities/assets.entity.ts
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne } from 'typeorm';
 import { User } from './global.entity';
- 
 
 @Entity('assets')
 export class Asset {
@@ -17,10 +10,13 @@ export class Asset {
   @Column()
   filename: string;
 
+  @Column({ nullable: true })
+  ipAddress: string;
+
   @Column()
   url: string;
 
-  @Column({nullable : true , default : "other"})
+  @Column({ nullable: true, default: 'other' })
   type: string;
 
   @Column()
@@ -30,7 +26,7 @@ export class Asset {
   mimeType: string;
 
   @Column({ nullable: true })
-  size: number; 
+  size: number;
 
   @ManyToOne(() => User, user => user.uploads, { eager: false, onDelete: 'SET NULL' })
   user: User;

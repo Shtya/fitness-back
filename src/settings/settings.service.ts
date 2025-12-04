@@ -1,7 +1,7 @@
 // src/modules/settings/settings.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository } from 'typeorm';
 import { GymSettings, DhikrItem, ReminderSetting } from 'entities/settings.entity';
 import { UpdateSettingsDto } from './settings.dto';
 
@@ -16,11 +16,19 @@ export class SettingsService {
     private readonly reminderRepo: Repository<ReminderSetting>,
   ) {}
 
-  async getOrCreate(): Promise<GymSettings> {
-    const found = await this.settingsRepo.find({ take: 1 });
-    if (found.length) return found[0];
+  /**
+   * Get or create settings row for a specific adminId (userId).
+   */
+  async getOrCreate(adminId: string): Promise<GymSettings> {
+    let found = await this.settingsRepo.findOne({
+      where: { adminId },
+    });
 
+    if (found) return found;
+
+    // Create new settings with defaults for this admin
     const created = this.settingsRepo.create({
+      adminId,
       orgName: 'My Gym',
       defaultLang: 'ar',
       timezone: 'Africa/Cairo',
@@ -59,16 +67,20 @@ export class SettingsService {
     return this.settingsRepo.save(created);
   }
 
-  async get(): Promise<GymSettings> {
-    return this.getOrCreate();
+  async get(adminId: string): Promise<GymSettings> {
+    return this.getOrCreate(adminId);
   }
 
   /**
    * Bulk upsert for nested arrays by replacing collections
    * (orphanedRowAction: 'delete' on relations will clean removed rows).
+   * Always scoped by adminId (userId).
    */
-  async update(dto: UpdateSettingsDto): Promise<GymSettings> {
-    const s = await this.getOrCreate();
+  async update(adminId: string, dto: UpdateSettingsDto): Promise<GymSettings> {
+    const s = await this.getOrCreate(adminId);
+
+    // ensure settings row is associated with this admin
+    s.adminId = adminId;
 
     // simple scalar assignments
     s.organizationKey = dto.organizationKey ?? s.organizationKey ?? null;
@@ -82,6 +94,8 @@ export class SettingsService {
     s.metaKeywords = dto.metaKeywords ?? null;
     s.ogImageUrl = dto.ogImageUrl ?? null;
     s.homeTitle = dto.homeTitle ?? null;
+
+    s.aiSecretKey = dto.aiSecretKey ?? s.aiSecretKey ?? null;
 
     s.loaderEnabled = dto.loaderEnabled;
     s.loaderMessage = dto.loaderMessage;
@@ -105,22 +119,32 @@ export class SettingsService {
     s.reportCustomMessage = dto.reportCustomMessage;
 
     // replace Dhikr collection
-    const nextDhikr = (dto.dhikrItems || []).map((d) =>
-      this.dhikrRepo.create({ id: (d as any).id, text: d.text, settings: s }),
+    const nextDhikr = (dto.dhikrItems || []).map(d =>
+      this.dhikrRepo.create({
+        id: (d as any).id,
+        text: d.text,
+        settings: s,
+      }),
     );
     s.dhikrItems = nextDhikr;
 
     // replace Reminders collection
-    const nextReminders = (dto.reminders || []).map((r) =>
-      this.reminderRepo.create({ id: (r as any).id, title: r.title, time: r.time, settings: s }),
+    const nextReminders = (dto.reminders || []).map(r =>
+      this.reminderRepo.create({
+        id: (r as any).id,
+        title: r.title,
+        time: r.time,
+        settings: s,
+      }),
     );
     s.reminders = nextReminders;
 
     return this.settingsRepo.save(s);
   }
 
-  async setOgImageUrl(url: string): Promise<GymSettings> {
-    const s = await this.getOrCreate();
+  async setOgImageUrl(adminId: string, url: string): Promise<GymSettings> {
+    const s = await this.getOrCreate(adminId);
+    s.adminId = adminId;
     s.ogImageUrl = url;
     return this.settingsRepo.save(s);
   }

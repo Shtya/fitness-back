@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Request, Req } from '@nestjs/common';
 import { NutritionService } from './nutrition.service';
 import { CreateMealPlanDto } from './dto/create-meal-plan.dto';
 import { LogMealDto } from './dto/log-meal.dto';
@@ -115,7 +115,7 @@ export class NutritionController {
   // ========== AI INTEGRATION ==========
 
   @Post('ai/generate')
-  generateWithAI(@Body('prompt') prompt: string) {
-    return this.nutritionService.generateMealPlanWithAI(prompt);
+  generateWithAI(@Body('prompt') prompt: string , @Req() req:any) {
+    return this.nutritionService.generateMealPlanWithAI(prompt , req?.user?.id);
   }
 }

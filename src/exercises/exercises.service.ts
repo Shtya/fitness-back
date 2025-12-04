@@ -124,7 +124,7 @@ export class ExercisesService {
     return result;
   }
 
-  private toPublic(e: Exercise): PublicExercise {
+  private toPublic(e: Exercise) {
     return {
       id: e.id,
       name: e.name,
@@ -138,6 +138,7 @@ export class ExercisesService {
       tempo: e.tempo ?? null,
       img: e.img ?? null,
       video: e.video ?? null,
+      adminId: e.adminId ?? null,
       created_at: (e as any).created_at ?? null,
     };
   }
@@ -433,18 +434,7 @@ export class ExercisesService {
       throw new NotFoundException(lang === 'ar' ? 'التمرين غير موجود' : 'Exercise not found');
     }
 
-    if (actor?.role === UserRole.SUPER_ADMIN) {
-      await this.repo.remove(ex);
-    } else if (actor?.role === UserRole.ADMIN) {
-      if (ex.adminId !== actor.id) {
-        throw new ForbiddenException(lang === 'ar' ? 'لا يمكنك حذف التمارين التي لم تنشئها' : 'You can only delete exercises you created.');
-      }
-      await this.repo.remove(ex);
-    } else {
-      throw new ForbiddenException(lang === 'ar' ? 'غير مسموح بحذف التمارين' : 'Not allowed to delete exercises.');
-    }
-
-    // Invalidate caches after deletion
+    await this.repo.remove(ex);
     await this.invalidateExerciseCaches(id);
 
     return {

@@ -38,6 +38,7 @@ export type ThemePalette = {
 
 @Entity('gym_settings')
 @Unique(['organizationKey'])
+@Unique(['adminId']) // one settings row per admin (user)
 export class GymSettings extends CoreEntity {
   @Index()
   @Column({ type: 'varchar', length: 120, nullable: true })
@@ -45,6 +46,9 @@ export class GymSettings extends CoreEntity {
 
   @Column({ type: 'varchar', length: 120, nullable: true })
   organizationKey!: string | null;
+
+  @Column({ type: 'varchar', length: 256, nullable: true })
+  aiSecretKey!: string | null;
 
   @Column({ type: 'varchar', length: 160 })
   orgName!: string;
@@ -77,7 +81,11 @@ export class GymSettings extends CoreEntity {
   @Column({ type: 'boolean', default: true })
   loaderEnabled!: boolean;
 
-  @Column({ type: 'varchar', length: 240, default: 'جارٍ التحميل… لحظات ونكون معك' })
+  @Column({
+    type: 'varchar',
+    length: 240,
+    default: 'جارٍ التحميل… لحظات ونكون معك',
+  })
   loaderMessage!: string;
 
   @Column({ type: 'int', default: 2 })
@@ -98,7 +106,8 @@ export class GymSettings extends CoreEntity {
 
   @Column({
     type: 'jsonb',
-    default: () => `'{
+    default: () =>
+      `'{
     "primary":"#0f172b",
     "onPrimary":"#ffffff",
     "secondary":"#6366f1",
@@ -117,7 +126,11 @@ export class GymSettings extends CoreEntity {
   @Column({ type: 'boolean', default: true })
   reportEnabled!: boolean;
 
-  @Column({ type: 'enum', enum: ReportWeekday, default: ReportWeekday.Sunday })
+  @Column({
+    type: 'enum',
+    enum: ReportWeekday,
+    default: ReportWeekday.Sunday,
+  })
   reportDay!: ReportWeekday;
 
   @Column({ type: 'varchar', length: 5, default: '09:00' })
@@ -144,7 +157,10 @@ export class GymSettings extends CoreEntity {
   @Column({ type: 'boolean', default: false })
   rptLatestPhotos!: boolean;
 
-  @Column({ type: 'text', default: 'عمل ممتاز هذا الأسبوع، {name}! استمر.' })
+  @Column({
+    type: 'text',
+    default: 'عمل ممتاز هذا الأسبوع، {name}! استمر.',
+  })
   reportCustomMessage!: string;
 
   @OneToMany(() => ReminderSetting, r => r.settings, {

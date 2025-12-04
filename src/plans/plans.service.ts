@@ -623,10 +623,10 @@ export class PlanService {
 
   /* ---------- FE shape ---------- */
   planToFrontendShape(plan: ExercisePlan) {
-    const daysRaw = Array.isArray((plan as any)?.days) ? (plan as any).days : [];
 
-    const days = daysRaw
-      .map((d: ExercisePlanDay & { items?: ExercisePlanDayExercise[] }) => {
+		const daysRaw = Array.isArray((plan as any)?.days) ? (plan as any).days : [];
+
+    const days = daysRaw.map((d: any & { items?: ExercisePlanDayExercise[] }) => {
         const dayOfWeek = String(d.day).toLowerCase();
         const items = Array.isArray(d.items) ? d.items.slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0)) : [];
 
@@ -648,6 +648,7 @@ export class PlanService {
           id: dayOfWeek,
           dayOfWeek,
           name: d.name ?? dayOfWeek,
+          
           exercises,
         };
       })
@@ -660,6 +661,7 @@ export class PlanService {
       deleted_at: (plan as any).deleted_at ?? null,
       name: plan.name,
       isActive: !!plan.isActive,
+			adminId: plan?.adminId ,
       program: { days },
     };
   }

@@ -23,14 +23,14 @@ export class WeeklyReportController {
     if (req.user.role === UserRole.CLIENT) {
       return this.weeklyReportService.findUserReports(req.user.id, Number(page), Number(limit));
     } else {
-      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', [], ['weekOf'], query.filters);
+      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ['user'], ['weekOf'], query.filters);
     }
   }
+
   @Get('coach')
   async findAllCoach(@Query() query: any, @Query('user_id') userId?: string) {
     const { search = '', page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'DESC', filters } = query ?? {};
 
-    console.log(userId);
     let parsedFilters: Record<string, any> = {};
 
     if (typeof filters === 'string') {
@@ -50,9 +50,21 @@ export class WeeklyReportController {
 
     if (userId) parsedFilters.coachId = userId;
 
-    console.log(parsedFilters);
-
     return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', search, Number(page), Number(limit), sortBy, (sortOrder || 'DESC') as 'ASC' | 'DESC', [], ['weekOf'], parsedFilters);
+  }
+
+  // ✅ عدّاد التقارير غير المراجَعة للأدمن
+  @Get('admin/unreviewed/count')
+  @Roles(UserRole.ADMIN)
+  async getAdminUnreviewedCount(@Request() req) {
+    return this.weeklyReportService.countUnreviewedReportsForAdmin(req.user.id);
+  }
+
+  // ✅ عدّاد ملاحظات الكوتش غير المقروءة للعميل
+  @Get('user/unread-feedback/count')
+  @Roles(UserRole.CLIENT)
+  async getUserUnreadFeedbackCount(@Request() req) {
+    return this.weeklyReportService.countUnreadFeedbackForUser(req.user.id);
   }
 
   @Get(':id')
@@ -71,9 +83,10 @@ export class WeeklyReportController {
     return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', [], ['weekOf'], { userId: userId });
   }
 
+  // ✅ شلنا isRead من الـ DTO (العميل بس اللي يغيّر isRead)
   @Put(':id/feedback')
   @Roles(UserRole.COACH, UserRole.ADMIN)
-  async updateFeedback(@Param('id') id: string, @Body() updateDto: { coachFeedback?: string; isRead?: boolean }, @Request() req) {
+  async updateFeedback(@Param('id') id: string, @Body() updateDto: { coachFeedback?: string }, @Request() req) {
     return this.weeklyReportService.updateFeedback(id, updateDto, req.user.id);
   }
 

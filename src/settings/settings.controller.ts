@@ -1,28 +1,32 @@
 // src/modules/settings/settings.controller.ts
-import { Controller, Get, Put, Body, Post, UseInterceptors, UploadedFile, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Put, Query, Body, Post, UseInterceptors, UploadedFile, BadRequestException, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
+import { Request } from 'express';
 import { SettingsService } from './settings.service';
 import { UpdateSettingsDto } from './settings.dto';
+import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 
 function ensureDir(p: string) {
   if (!existsSync(p)) mkdirSync(p, { recursive: true });
 }
 
 @Controller('settings')
+@UseGuards(JwtAuthGuard)
 export class SettingsController {
   constructor(private readonly service: SettingsService) {}
 
   @Get()
-  async get() {
-    return this.service.get();
+  async get(@Req() req: any, @Query('user_id') user_id: any) {
+		console.log(user_id);
+    return this.service.get(user_id || req?.user?.id);
   }
 
   @Put()
-  async update(@Body() dto: UpdateSettingsDto) {
-    return this.service.update(dto);
+  async update(@Req() req: any, @Body() dto: UpdateSettingsDto) {
+    return this.service.update(req?.user?.id, dto);
   }
 
   /**
@@ -40,7 +44,7 @@ export class SettingsController {
         },
         filename: (req, file, cb) => {
           const safe = file.originalname.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9_.-]/g, '');
-          const name = Date.now() + '-' + safe;
+          const name = Date.now() + '-' + safe + extname(file.originalname);
           cb(null, name);
         },
       }),
@@ -51,11 +55,12 @@ export class SettingsController {
       limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
     }),
   )
-  async uploadOg(@UploadedFile() file?: any) {
+  async uploadOg(@Req() req: any, @UploadedFile() file?: any) {
     if (!file) throw new BadRequestException('No file uploaded');
-    // adjust to your static host; here we assume /uploads is served at /static
+
     const publicUrl = `/static/og/${file.filename}`;
-    const updated = await this.service.setOgImageUrl(publicUrl);
+    const updated = await this.service.setOgImageUrl(req?.user?.id, publicUrl);
+
     return { url: publicUrl, settings: updated };
   }
 }

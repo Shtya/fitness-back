@@ -41,6 +41,11 @@ export class UpdateSettingsDto {
 
   @IsOptional() @IsString() @MaxLength(160) homeSlug?: string | null;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  aiSecretKey?: string | null;
+
   // -------- landing meta --------
   @IsOptional() @IsString() @MaxLength(180) metaTitle?: string | null;
 
