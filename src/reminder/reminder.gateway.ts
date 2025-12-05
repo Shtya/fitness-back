@@ -31,11 +31,8 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
   async handleConnection(client: Socket) {
     try {
       // Try multiple ways to get the token
-      const token = 
-        client.handshake.auth?.token || 
-        client.handshake.headers?.authorization?.replace('Bearer ', '') ||
-        client.handshake.headers?.token;
-      
+      const token = client.handshake.auth?.token || client.handshake.headers?.authorization?.replace('Bearer ', '') || client.handshake.headers?.token;
+
       if (!token) {
         this.logger.warn(`Connection rejected: No token provided for socket ${client.id}`);
         client.disconnect();
@@ -55,7 +52,7 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
 
       this.connectedUsers.set(user.id, client.id);
       client.join(`user_${user.id}`);
-      
+
       this.logger.log(`User ${user.id} connected to reminders gateway (socket: ${client.id})`);
     } catch (error) {
       this.logger.error(`Connection error for socket ${client.id}:`, error);
@@ -96,14 +93,12 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
         timestamp: new Date().toISOString(),
       };
 
-      // إرسال إلى room المستخدم
-      this.server.to(`user_${userId}`).emit('reminder_due', reminderPayload);
-      
-      // أيضاً إرسال مباشر إلى socket المحدد (للتأكد)
-      const client = this.server.sockets.sockets.get(socketId);
-      if (client) {
-        client.emit('reminder_due', reminderPayload);
-      }
+       this.server.to(`user_${userId}`).emit('reminder_due', reminderPayload);
+
+      //  const client = this.server.sockets.sockets.get(socketId);
+      // if (client) {
+      //   client.emit('reminder_due', reminderPayload);
+      // }
 
       this.logger.log(`✅ Sent reminder ${reminder.id} to user ${userId} via WebSocket (socket: ${socketId})`);
       return true;
@@ -113,6 +108,8 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
     }
   }
 
+ 
+
   /**
    * Check if a user is currently connected
    */
@@ -120,4 +117,3 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
     return this.connectedUsers.has(userId);
   }
 }
-

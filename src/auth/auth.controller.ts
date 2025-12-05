@@ -153,10 +153,21 @@ export class AuthController {
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
   @Get('admin/:adminId/clients')
-  async getClientsByAdmin(@Param('adminId') adminId: string, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
-    return this.authService.getClientsByAdmin(adminId, { page, limit, search });
+  async getClientsByAdmin(
+    @Param('adminId') adminId: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('coachId') coachId?: string, // ✅ هنا
+  ) {
+		console.log(coachId);
+    return this.authService.getClientsByAdmin(adminId, {
+      page,
+      limit,
+      search,
+      coachId, // ✅ نبعته للـ service
+    });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

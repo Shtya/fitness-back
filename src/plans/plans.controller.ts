@@ -43,11 +43,11 @@ export class PlanController {
   // CREATE manual plan
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  async create(@Body() body: any, @Req() req: any) {
+  async create(@Body() body: any, @Req() req: any, @Query('lang') lang: any) {
     const dto = body?.payload ?? body;
     if (!dto?.name || !dto?.program) throw new BadRequestException('name and program are required');
-    return this.svc.createPlanWithContent(dto, { id: req.user.id, role: req.user.role });
+
+    return this.svc.createPlanWithContent(dto, lang, { id: req.user.id, role: req.user.role });
   }
 
   @Get()
@@ -65,15 +65,13 @@ export class PlanController {
   // UPDATE plan (only owner admin or super admin)
   @Put(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any, @Req() req: any) {
-    return this.svc.updatePlanAndContent(id, dto, { id: req.user.id, role: req.user.role });
+  async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any, @Req() req: any, @Query('lang') lang: any) {
+    return this.svc.updatePlanAndContent(id, dto,lang, { id: req.user.id, role: req.user.role });
   }
 
   // DELETE a plan (only owner admin or super admin)
   @Delete(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async remove(@Param('id') id: string, @Req() req: any) {
     return this.svc.remove(id, { id: req.user.id, role: req.user.role });
   }
@@ -81,7 +79,6 @@ export class PlanController {
   // ASSIGN plan to athletes
   @Post(':id/assign')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  // @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async bulkAssign(
     @Param('id') planId: string,
     @Req() req: any,

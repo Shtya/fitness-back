@@ -97,9 +97,8 @@ export class NutritionService {
 
   /** ===================== MEAL PLANS (MULTI-VENDOR) ===================== */
 
-  async createMealPlan(createDto: CreateMealPlanDto, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
-    // super_admin → global (adminId = null), otherwise adminId = user.id
-    const adminId = user.role === UserRole.SUPER_ADMIN ? null : user.id;
+  async createMealPlan(createDto: CreateMealPlanDto, user: any, lang?: Lang): Promise<MealPlan> {
+    const adminId = user.role === UserRole.COACH ? user?.adminId : user.id;
 
     const mealPlan = this.mealPlanRepo.create({
       name: createDto.name,
@@ -220,17 +219,11 @@ export class NutritionService {
     return plan;
   }
 
-  async updateMealPlan(id: string, updateDto: UpdateMealPlanDto, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
+  async updateMealPlan(id: string, updateDto: UpdateMealPlanDto, user: any, lang?: Lang): Promise<MealPlan> {
     const plan = await this.mealPlanRepo.findOne({ where: { id } });
     if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
-
-    // edit permissions
-    if (plan.adminId === null && user.role !== UserRole.SUPER_ADMIN) {
-      throw new ForbiddenException(t(lang, 'forbidden_edit_global'));
-    }
-    if (plan.adminId !== null && plan.adminId !== user.id && user.role !== UserRole.SUPER_ADMIN) {
-      throw new ForbiddenException(t(lang, 'forbidden_edit_others'));
-    }
+    const adminId = user.role === UserRole.COACH ? user?.adminId : user.id;
+    plan.adminId = adminId;
 
     if (updateDto.name !== undefined) plan.name = updateDto.name;
     if (updateDto.description !== undefined) plan.desc = updateDto.description;
@@ -244,14 +237,6 @@ export class NutritionService {
   async deleteMealPlan(id: string, user: { id: string; role: UserRole }, lang?: Lang): Promise<{ success: true }> {
     const plan = await this.mealPlanRepo.findOne({ where: { id } });
     if (!plan) throw new NotFoundException(t(lang, 'plan_not_found'));
-
-    // delete permissions
-    if (plan.adminId === null && user.role !== UserRole.SUPER_ADMIN) {
-      throw new ForbiddenException(t(lang, 'forbidden_edit_global'));
-    }
-    if (plan.adminId !== null && plan.adminId !== user.id && user.role !== UserRole.SUPER_ADMIN) {
-      throw new ForbiddenException(t(lang, 'forbidden_edit_others'));
-    }
 
     await this.mealPlanRepo.softRemove(plan);
     return { success: true };
@@ -547,7 +532,7 @@ export class NutritionService {
       where: { adminId },
     });
 
-    const aiKey = settings?.aiSecretKey;
+    const aiKey = settings?.aiSecretKey || process.env.aiSecretKey;
 
     if (!aiKey) {
       throw new BadRequestException('AI key is not configured for this account.');

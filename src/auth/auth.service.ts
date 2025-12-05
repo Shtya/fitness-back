@@ -53,14 +53,47 @@ export class AuthService {
   }
 
   /** Return clients owned by an admin (via adminId) */
-  async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string }) {
+  // async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string }) {
+  //   const { page, limit, skip } = this.normPaged(opts);
+  //   const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+
+  //   const s = this.likeable(opts?.search);
+  //   if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+
+  //   const [items, total] = await qb.getManyAndCount();
+  //   return {
+  //     items: items.map(u => ({
+  //       id: u.id,
+  //       name: u.name,
+  //       email: u.email,
+  //       phone: u.phone,
+  //       status: u.status,
+  //       coach: u.coach ? { id: u.coach.id, name: (u.coach as any).name } : null,
+  //       created_at: u.created_at,
+  //     })),
+  //     total,
+  //     page,
+  //     totalPages: Math.ceil(total / limit),
+  //   };
+  // }
+  async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string; coachId?: string }) {
     const { page, limit, skip } = this.normPaged(opts);
+
     const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
 
+    // فلترة بالبحث لو موجود
     const s = this.likeable(opts?.search);
-    if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+    if (s) {
+      qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
+    }
+
+    // ✅ فلترة بالـ coachId لو مبعوت
+    if (opts?.coachId) {
+      qb.andWhere('u.coachId = :coachId', { coachId: opts.coachId });
+    }
 
     const [items, total] = await qb.getManyAndCount();
+
     return {
       items: items.map(u => ({
         id: u.id,
@@ -893,7 +926,7 @@ export class AuthService {
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
-     const allowedFields: any[] = ['name', 'phone', 'gender', 'membership', 'defaultRestSeconds', 'caloriesTarget', 'proteinPerDay', 'carbsPerDay', 'fatsPerDay', 'activityLevel', 'notes'];
+    const allowedFields: any[] = ['name', 'phone', 'gender', 'membership', 'defaultRestSeconds', 'caloriesTarget', 'proteinPerDay', 'carbsPerDay', 'fatsPerDay', 'activityLevel', 'notes'];
 
     allowedFields.forEach(field => {
       if (dto[field] !== undefined) {

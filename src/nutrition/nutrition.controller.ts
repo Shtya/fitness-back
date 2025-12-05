@@ -12,14 +12,13 @@ export class NutritionController {
   constructor(private readonly nutritionService: NutritionService) {}
 
   // ========== MEAL PLANS MANAGEMENT (Coach/Admin) ==========
-
   @Post('meal-plans')
   createMealPlan(@Body() createDto: CreateMealPlanDto, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.createMealPlan(createDto, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.createMealPlan(createDto, req?.user, lang);
   }
 
   @Get('meal-plans')
-  findAllMealPlans(@Request() req, @Query('user_id') user_id :any , @Query('search') search?: string, @Query('page') page: number = 1, @Query('limit') limit: number = 12, @Query('sortBy') sortBy: string = 'created_at', @Query('sortOrder') sortOrder: 'ASC' | 'DESC' = 'DESC', @Query('lang') lang?: 'ar' | 'en') {
+  findAllMealPlans(@Request() req, @Query('user_id') user_id: any, @Query('search') search?: string, @Query('page') page: number = 1, @Query('limit') limit: number = 12, @Query('sortBy') sortBy: string = 'created_at', @Query('sortOrder') sortOrder: 'ASC' | 'DESC' = 'DESC', @Query('lang') lang?: 'ar' | 'en') {
     return this.nutritionService.findAllMealPlans(
       {
         q: search,
@@ -28,34 +27,34 @@ export class NutritionController {
         sortBy,
         sortOrder,
       },
-      { id: user_id?? req.user.id, role: req.user.role },
+      { id: user_id ?? req.user.id, role: req.user.role },
       lang,
     );
   }
 
   @Get('meal-plans/:id')
   findMealPlanById(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.findMealPlanByIdSecure(id, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.findMealPlanByIdSecure(id, req?.user, lang);
   }
 
   @Put('meal-plans/:id')
   updateMealPlan(@Param('id') id: string, @Body() updateDto: UpdateMealPlanDto, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.updateMealPlan(id, updateDto, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.updateMealPlan(id, updateDto, req?.user, lang);
   }
 
   @Delete('meal-plans/:id')
   deleteMealPlan(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.deleteMealPlan(id, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.deleteMealPlan(id, req?.user, lang);
   }
 
   @Post('meal-plans/:id/assign')
   assignMealPlan(@Param('id') id: string, @Body('userId') userId: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.assignMealPlan(id, userId, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.assignMealPlan(id, userId, req?.user, lang);
   }
 
   @Get('meal-plans/:id/assignments')
   getPlanAssignments(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.getPlanAssignmentsSecure(id, { id: req.user.id, role: req.user.role }, lang);
+    return this.nutritionService.getPlanAssignmentsSecure(id, req?.user, lang);
   }
 
   // ========== CLIENT MEAL PLAN ==========
@@ -66,7 +65,7 @@ export class NutritionController {
   }
 
   @Get('my/meal-logs')
-  getMealLogs(@Request() req, @Query('days') days?: number, @Query('userId') userId?: string,  @Query('date') date?: string) {
+  getMealLogs(@Request() req, @Query('days') days?: number, @Query('userId') userId?: string, @Query('date') date?: string) {
     return this.nutritionService.getMealLogs(userId ?? req.user.id, days, date);
   }
 
@@ -115,7 +114,7 @@ export class NutritionController {
   // ========== AI INTEGRATION ==========
 
   @Post('ai/generate')
-  generateWithAI(@Body('prompt') prompt: string , @Req() req:any) {
-    return this.nutritionService.generateMealPlanWithAI(prompt , req?.user?.id);
+  generateWithAI(@Body('prompt') prompt: string, @Req() req: any) {
+    return this.nutritionService.generateMealPlanWithAI(prompt, req?.user?.id);
   }
 }

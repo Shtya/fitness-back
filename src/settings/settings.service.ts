@@ -26,7 +26,6 @@ export class SettingsService {
 
     if (found) return found;
 
-    // Create new settings with defaults for this admin
     const created = this.settingsRepo.create({
       adminId,
       orgName: 'My Gym',
@@ -62,6 +61,7 @@ export class SettingsService {
       reportCustomMessage: 'عمل ممتاز هذا الأسبوع، {name}! استمر.',
       dhikrItems: [],
       reminders: [],
+			aiSecretKey : process.env.aiSecretKey
     } as Partial<GymSettings>);
 
     return this.settingsRepo.save(created);
@@ -71,11 +71,6 @@ export class SettingsService {
     return this.getOrCreate(adminId);
   }
 
-  /**
-   * Bulk upsert for nested arrays by replacing collections
-   * (orphanedRowAction: 'delete' on relations will clean removed rows).
-   * Always scoped by adminId (userId).
-   */
   async update(adminId: string, dto: UpdateSettingsDto): Promise<GymSettings> {
     const s = await this.getOrCreate(adminId);
 

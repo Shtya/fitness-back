@@ -278,16 +278,25 @@ export class PlanService {
     return result;
   }
 
-  async createPlanWithContent(input: any, actor: { id: string; role: UserRole }) {
-    const { name, isActive = true, program } = input ?? {};
-    if (!name) throw new BadRequestException('name is required');
-    if (!program?.days?.length) throw new BadRequestException('program.days[] required');
+  async createPlanWithContent(input: any, lang: any, actor: { id: string; role: UserRole }) {
+    const { name, isActive = true, program, userId } = input ?? {};
+    const isArabic = String(lang).toLowerCase().startsWith('ar');
+    console.log(lang, isArabic);
 
+    if (!name) {
+      throw new BadRequestException(isArabic ? 'الاسم مطلوب' : 'name is required');
+    }
+
+    if (!program?.days?.length) {
+      throw new BadRequestException(isArabic ? 'حقل الأيام في البرنامج مطلوب' : 'program.days[] required');
+    }
     // validate duplicate days
     const seenDays = new Set<string>();
     for (const d of program.days) {
       const k = String(dayEnum(String(d.dayOfWeek ?? d.id).toLowerCase()));
-      if (seenDays.has(k)) throw new BadRequestException(`Duplicate day: ${k}`);
+      if (seenDays.has(k)) {
+        throw new BadRequestException(isArabic ? `يوجد تكرار في اليوم: ${k}` : `Duplicate day: ${k}`);
+      }
       seenDays.add(k);
     }
 
@@ -297,7 +306,7 @@ export class PlanService {
         manager.create(ExercisePlan, {
           name,
           isActive: !!isActive,
-          adminId: actor.role === UserRole.ADMIN ? actor.id : null,
+          adminId: userId,
         }),
       );
 
@@ -317,7 +326,9 @@ export class PlanService {
         for (const e of exItems) {
           const exId = String(e.exerciseId || e.id || e);
           const ex = await manager.findOne(Exercise, { where: { id: exId } });
-          if (!ex) throw new BadRequestException(`Exercise not found: ${exId}`);
+          if (!ex) {
+            throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
+          }
           rows.push(
             manager.create(ExercisePlanDayExercise, {
               day: dayRow,
@@ -426,15 +437,19 @@ export class PlanService {
    * if her admin check if the exercisePlan have { adminId == this user id } can make any thing if not cannot edit on it
    *
    */
-  async updatePlanAndContent(id: string, dto: any, actor: { id: string; role: UserRole }) {
+  async updatePlanAndContent(id: string, dto: any, lang: any, actor: { id: string; role: UserRole }) {
     return await this.dataSource.transaction(async manager => {
       const plan = await manager.findOne(ExercisePlan, {
         where: { id },
         relations: ['days', 'days.items', 'days.items.exercise'],
       });
-      if (!plan) throw new NotFoundException('Plan not found');
+      const isArabic = String(lang).toLowerCase().startsWith('ar');
 
-      this.assertCanAccessPlan(plan, actor, 'edit');
+      if (!plan) {
+        throw new NotFoundException(isArabic ? 'الخطة غير موجودة' : 'Plan not found');
+      }
+
+      // this.assertCanAccessPlan(plan, actor, 'edit');
 
       if (dto.name !== undefined) plan.name = dto.name;
       if (dto.isActive !== undefined) plan.isActive = !!dto.isActive;
@@ -447,7 +462,9 @@ export class PlanService {
         const seen = new Set<string>();
         for (const d of incomingDays) {
           const k = String(this.normDay(d.dayOfWeek ?? d.id));
-          if (seen.has(k)) throw new BadRequestException(`Duplicate day: ${k}`);
+          if (seen.has(k)) {
+            throw new BadRequestException(isArabic ? `يوجد تكرار في اليوم: ${k}` : `Duplicate day: ${k}`);
+          }
           seen.add(k);
         }
 
@@ -473,7 +490,9 @@ export class PlanService {
             for (const e of src) {
               const exId = String(e.exerciseId || e.id || e);
               const ex = await manager.findOne(Exercise, { where: { id: exId } });
-              if (!ex) throw new BadRequestException(`Exercise not found: ${exId}`);
+              if (!ex) {
+                throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
+              }
               rows.push(
                 manager.create(ExercisePlanDayExercise, {
                   day: cur,
@@ -501,7 +520,9 @@ export class PlanService {
             for (const e of src) {
               const exId = String(e.exerciseId || e.id || e);
               const ex = await manager.findOne(Exercise, { where: { id: exId } });
-              if (!ex) throw new BadRequestException(`Exercise not found: ${exId}`);
+              if (!ex) {
+                throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
+              }
               rows.push(
                 manager.create(ExercisePlanDayExercise, {
                   day: newDay,
@@ -538,7 +559,7 @@ export class PlanService {
     const plan = await this.planRepo.findOne({ where: { id } });
     if (!plan) throw new NotFoundException('Plan not found');
 
-    this.assertCanAccessPlan(plan, actor, 'delete');
+    // this.assertCanAccessPlan(plan, actor, 'delete');
 
     await this.planRepo.remove(plan);
 
@@ -623,10 +644,10 @@ export class PlanService {
 
   /* ---------- FE shape ---------- */
   planToFrontendShape(plan: ExercisePlan) {
+    const daysRaw = Array.isArray((plan as any)?.days) ? (plan as any).days : [];
 
-		const daysRaw = Array.isArray((plan as any)?.days) ? (plan as any).days : [];
-
-    const days = daysRaw.map((d: any & { items?: ExercisePlanDayExercise[] }) => {
+    const days = daysRaw
+      .map((d: any & { items?: ExercisePlanDayExercise[] }) => {
         const dayOfWeek = String(d.day).toLowerCase();
         const items = Array.isArray(d.items) ? d.items.slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0)) : [];
 
@@ -648,7 +669,7 @@ export class PlanService {
           id: dayOfWeek,
           dayOfWeek,
           name: d.name ?? dayOfWeek,
-          
+
           exercises,
         };
       })
@@ -661,7 +682,7 @@ export class PlanService {
       deleted_at: (plan as any).deleted_at ?? null,
       name: plan.name,
       isActive: !!plan.isActive,
-			adminId: plan?.adminId ,
+      adminId: plan?.adminId,
       program: { days },
     };
   }

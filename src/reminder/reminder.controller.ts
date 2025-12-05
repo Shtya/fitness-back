@@ -83,46 +83,6 @@ class SoundSettingsDto {
   volume?: number;
 }
 
-class UpdateReminderDto {
-  @IsString()
-  @IsOptional()
-  title?: string;
-
-  @IsString()
-  @IsOptional()
-  notes?: string;
-
-  @IsEnum(ReminderType)
-  @IsOptional()
-  type?: ReminderType;
-
-  @IsEnum(Priority)
-  @IsOptional()
-  priority?: Priority;
-
-  @IsBoolean()
-  @IsOptional()
-  active?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  completed?: boolean;
-
-  @ValidateNested()
-  @Type(() => SoundSettingsDto)
-  @IsOptional()
-  sound?: SoundSettingsDto;
-
-  @ValidateNested()
-  @Type(() => ScheduleDto)
-  @IsOptional()
-  schedule?: ScheduleDto;
-
-  @IsOptional()
-  @IsDateString()
-  reminderTime?: string;
-}
-
 class SnoozeDto {
   @IsInt()
   minutes!: number;
@@ -172,6 +132,75 @@ class PushSubscribeDto {
 @Controller('reminders')
 export class RemindersController {
   constructor(private readonly svc: RemindersService) {}
+  // Endpoint to test sending reminder via WebSocket
+  @Post('test-send-websocket')
+  async testSendWebSocket(@Body() body: { reminderId: string; userId: string }) {
+    const { reminderId, userId } = body;
+
+    let reminder: any;
+    try {
+      reminder = await this.svc.getReminderRepo().findOne({ where: { id: reminderId } });
+      if (!reminder) {
+        return { success: false, error: 'Reminder not found' };
+      }
+    } catch (err) {
+      return { success: false, error: 'Error fetching reminder', details: err };
+    }
+
+    try {
+      const gateway = this.svc.getReminderGateway();
+      if (!gateway) {
+        return { success: false, error: 'ReminderGateway is undefined' };
+      }
+      // Check if user is connected
+      const isConnected = gateway.isUserConnected(userId);
+      const result = gateway.sendReminderToUser(userId, reminder);
+      return { success: result, debug: { isConnected } };
+    } catch (err) {
+      return { success: false, error: 'Error sending via WebSocket', details: err };
+    }
+  }
+
+  @Post('test-push-direct')
+  async testPushDirect(@Body() body: { userId: string; title?: string; body?: string }) {
+    const { userId, title = 'Test Reminder', body: msgBody = 'This is a test push notification' } = body;
+
+    if (!userId) {
+      return { success: false, error: 'userId is required' };
+    }
+
+    const payload = {
+      title,
+      body: msgBody,
+      icon: '/icons/bell.svg',
+      url: '/dashboard/reminders',
+      data: { type: 'test' },
+      requireInteraction: true,
+      reminderId: null,
+    };
+
+    try {
+      const results = await this.svc.sendPushToUser(userId, payload);
+      const successCount = results.filter((r: any) => r.ok).length;
+      return {
+        success: successCount > 0,
+        totalAttempts: results.length,
+        successCount,
+        results,
+        debug: {
+          userId,
+          timestamp: new Date().toISOString(),
+          message: `Attempted to send push to ${results.length} subscriptions`,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: String(error),
+        debug: { userId, timestamp: new Date().toISOString() },
+      };
+    }
+  }
 
   @Post('whatsapp-test')
   async sendTestWhatsApp(@Body() body: { phoneNumber: string; message: string }) {
@@ -201,7 +230,7 @@ export class RemindersController {
     }
   }
 
-	  /* -------------------- Test endpoint (for debugging) -------------------- */
+  /* -------------------- Test endpoint (for debugging) -------------------- */
   @Post('test-whatsapp')
   @UseGuards(JwtAuthGuard)
   async testWhatsApp(@Req() req: any, @Body() body: { phoneNumber: string }) {
@@ -310,6 +339,4 @@ export class RemindersController {
     const uid = currentUserId(req);
     return this.svc.get(uid, id);
   }
-
-
 }

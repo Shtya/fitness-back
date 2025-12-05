@@ -1091,3 +1091,45 @@ export class Notification {
   @CreateDateColumn()
   created_at: Date;
 }
+
+export enum FeedbackType {
+  ENHANCEMENT = 'enhancement',
+  ISSUE = 'issue',
+  OTHER = 'other',
+}
+
+export enum FeedbackStatus {
+  NEW = 'new',
+  REVIEWED = 'reviewed',
+  RESOLVED = 'resolved',
+  CLOSED = 'closed',
+}
+
+@Entity('feedback')
+export class Feedback extends CoreEntity {
+  @Index()
+  @Column({ type: 'enum', enum: FeedbackType })
+  type!: FeedbackType;
+
+  @Index()
+  @Column({ type: 'varchar', length: 255 })
+  title!: string;
+
+  @Column({ type: 'text' })
+  description!: string;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  email?: string | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  userId?: string | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'user_id' })
+  user?: User | null;
+
+  @Index()
+  @Column({ type: 'enum', enum: FeedbackStatus, default: FeedbackStatus.NEW })
+  status!: FeedbackStatus;
+}

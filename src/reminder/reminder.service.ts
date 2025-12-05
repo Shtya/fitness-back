@@ -25,9 +25,21 @@ export class RemindersService {
     const priv = process.env.VAPID_PRIVATE_KEY;
     const sub = process.env.PUSH_SUBJECT || 'mailto:admin@example.com';
     if (pub && priv) {
-      webpush.setVapidDetails(sub, pub, priv);
+      try {
+        webpush.setVapidDetails(sub, pub, priv);
+        this.logger.log(`✅ [RemindersService] VAPID keys configured successfully`);
+        this.logger.log(`   📌 Public key length: ${pub.length} chars (should be ~87)`);
+        this.logger.log(`   📌 Private key length: ${priv.length} chars (should be ~43)`);
+        this.logger.log(`   📌 Subject: ${sub}`);
+      } catch (vapidError) {
+        this.logger.error(`❌ [RemindersService] Failed to set VAPID details:`, vapidError.message);
+        this.logger.error(`   📌 Public key: ${pub}`);
+        this.logger.error(`   📌 Private key length: ${priv.length}`);
+      }
     } else {
-      this.logger.warn('VAPID keys missing — push endpoints will fail until provided.');
+      this.logger.warn('❌ VAPID keys missing — push endpoints will fail until provided.');
+      this.logger.warn(`   VAPID_PUBLIC_KEY: ${pub ? `present (${pub.length} chars)` : 'MISSING'}`);
+      this.logger.warn(`   VAPID_PRIVATE_KEY: ${priv ? 'present' : 'MISSING'}`);
     }
   }
 
@@ -35,6 +47,8 @@ export class RemindersService {
     const subs = await this.subsRepo.find({
       where: { userId },
     });
+
+    this.logger.log(`📤 [sendPushToUser] Found ${subs.length} subscriptions for user ${userId}`);
 
     if (!subs.length) {
       this.logger.warn(`⚠️ No push subscriptions found for user ${userId}`);
@@ -47,6 +61,7 @@ export class RemindersService {
     // سنتعامل مع الأخطاء أثناء الإرسال
     for (const sub of subs) {
       try {
+        this.logger.log(`📤 [sendPushToUser] Sending to subscription ${sub.endpoint?.substring(0, 50)}...`);
         const result = await this.logAndSend(sub, userId, payload);
         results.push(result);
       } catch (error) {
@@ -60,11 +75,18 @@ export class RemindersService {
     }
 
     const successCount = results.filter(r => r.ok).length;
+    this.logger.log(`📤 [sendPushToUser] Complete - Success: ${successCount}/${subs.length}`);
     return results;
   }
   private reminderGateway: any = null;
   setReminderGateway(gateway: any) {
     this.reminderGateway = gateway;
+  }
+  getReminderRepo() {
+    return this.remindersRepo;
+  }
+  getReminderGateway() {
+    return this.reminderGateway;
   }
 	
 
@@ -82,7 +104,7 @@ export class RemindersService {
     let pushSentCount = 0;
     let websocketSentCount = 0;
 
-    this.logger.debug(`Checking ${active.length} active reminders at ${now.toISOString()}`);
+    this.logger.debug(`⏰ [processDueReminders] Checking ${active.length} active reminders at ${now.toISOString()}`);
 
     for (const rem of active) {
       try {
@@ -104,10 +126,12 @@ export class RemindersService {
 
         // Check if reminder is within the time window (30 seconds past to 1 minute future)
         if (diff >= -pastWindowMs && diff <= futureWindowMs) {
+          this.logger.log(`🔔 [processDueReminders] Reminder DUE: ${rem.title} (ID: ${rem.id})`);
+          
           const payload = {
             title: rem.title,
             body: rem.description ?? 'Reminder',
-            icon: '/icons/bell.png',
+            icon: '/icons/bell.svg',
             url: '/dashboard/reminders',
             data: {
               reminderId: rem.id,
@@ -117,9 +141,11 @@ export class RemindersService {
             reminderId: rem.id,
           };
 
+
           // 1. Try WebSocket first (if user is online)
           let sentViaWebSocket = false;
           if (this.reminderGateway?.isUserConnected(rem.userId)) {
+            this.logger.log(`📱 [processDueReminders] User ${rem.userId} connected, trying WebSocket...`);
             sentViaWebSocket = this.reminderGateway.sendReminderToUser(rem.userId, rem);
             if (sentViaWebSocket) {
               websocketSentCount++;
@@ -127,16 +153,20 @@ export class RemindersService {
               this.logger.warn(`⚠️ Failed to send reminder ${rem.id} via WebSocket to user ${rem.userId}`);
             }
           } else {
-            this.logger.debug(`User ${rem.userId} is not connected via WebSocket`);
+            this.logger.debug(`❌ User ${rem.userId} is not connected via WebSocket, will try push...`);
           }
 
           // 2. Send push notification (works even when browser is closed)
           try {
+            this.logger.log(`💬 [processDueReminders] Attempting push notification for reminder ${rem.id}...`);
             const pushResults = await this.sendPushToUser(rem.userId, payload);
             if (pushResults && pushResults.length > 0) {
               const successCount = pushResults.filter((r: any) => r.ok).length;
               if (successCount > 0) {
+                this.logger.log(`✅ [processDueReminders] Push sent successfully (${successCount}/${pushResults.length})`);
                 pushSentCount++;
+              } else {
+                this.logger.warn(`⚠️ Push send failed for reminder ${rem.id}`);
               }
             } else {
               this.logger.warn(`⚠️ No push subscriptions found for user ${rem.userId}`);
@@ -167,9 +197,7 @@ export class RemindersService {
 
     // Log summary
     if (sentCount > 0) {
-      // this.logger.log(`✅ Sent ${sentCount} reminder(s) successfully - ` + `WebSocket: ${websocketSentCount}, Push: ${pushSentCount}, WhatsApp: ${whatsappSentCount}`);
-    } else {
-      // this.logger.debug(`No reminders due at ${now.toISOString()}`);
+      this.logger.log(`✅ [processDueReminders] Sent ${sentCount} reminder(s) - WebSocket: ${websocketSentCount}, Push: ${pushSentCount}, WhatsApp: ${whatsappSentCount}`);
     }
   }
 
@@ -455,7 +483,7 @@ export class RemindersService {
   async sendNow(userId: string, dto: any) {
     let title = dto.title ?? 'Reminder';
     let body = dto.body ?? '';
-    let icon = dto.icon ?? '/icons/bell.png';
+    let icon = dto.icon ?? '/icons/bell.svg';
     let url = dto.url ?? '/';
     let data = dto.data ?? {};
     let requireInteraction = !!dto.requireInteraction;
@@ -738,16 +766,24 @@ export class RemindersService {
     ua?: string,
     ip?: string,
   ) {
+    this.logger.log(`📝 [subscribePush] Received subscription from userId: ${userId}`);
+    this.logger.log(`📝 [subscribePush] User-Agent: ${ua?.substring(0, 50) || 'unknown'}...`);
+    
     if (!body?.endpoint || !body?.keys?.p256dh || !body?.keys?.auth) {
-      this.logger.error('Invalid subscription data received');
+      this.logger.error('❌ [subscribePush] Invalid subscription data received', { body });
       throw new BadRequestException('Invalid subscription');
     }
+
+    this.logger.log(`📝 [subscribePush] Endpoint: ${body.endpoint.substring(0, 50)}...`);
+    this.logger.log(`📝 [subscribePush] P256DH: ${body.keys.p256dh.substring(0, 20)}... (length: ${body.keys.p256dh.length})`);
+    this.logger.log(`📝 [subscribePush] Auth: ${body.keys.auth.substring(0, 20)}... (length: ${body.keys.auth.length})`);
 
     let found = await this.subsRepo.findOne({
       where: { endpoint: body.endpoint },
     });
 
     if (!found) {
+      this.logger.log(`📝 [subscribePush] Creating NEW subscription for user ${userId}`);
       found = this.subsRepo.create({
         userId: userId || null,
         endpoint: body.endpoint,
@@ -763,12 +799,14 @@ export class RemindersService {
       // دائماً نحدث userId إذا كان موجوداً (حتى لو كان مختلفاً)
       if (userId) {
         if (found.userId !== userId) {
+          this.logger.log(`📝 [subscribePush] Updating subscription from user ${found.userId} to ${userId}`);
           found.userId = userId;
         } else {
-          this.logger.log(`✅ Subscription already linked to user ${userId}`);
+          this.logger.log(`✅ [subscribePush] Subscription already linked to user ${userId}`);
         }
       }
 
+      this.logger.log(`📝 [subscribePush] Updating EXISTING subscription`);
       found.p256dh = body.keys.p256dh;
       found.auth = body.keys.auth;
       found.userAgent = ua || found.userAgent;
@@ -776,8 +814,14 @@ export class RemindersService {
       found.failures = 0; // Reset failures when subscription is updated
     }
 
-    await this.subsRepo.save(found);
-    return { ok: true, subscriptionId: found.id };
+    try {
+      const saved = await this.subsRepo.save(found);
+      this.logger.log(`✅ [subscribePush] Subscription saved successfully, ID: ${saved.id}`);
+      return { ok: true, subscriptionId: saved.id };
+    } catch (saveError) {
+      this.logger.error(`❌ [subscribePush] Failed to save subscription:`, saveError.message);
+      throw new BadRequestException(`Failed to save subscription: ${saveError.message}`);
+    }
   }
 
   private async logAndSend(sub: PushSubscription, userId: string | null, payload: Record<string, any>) {
@@ -792,14 +836,17 @@ export class RemindersService {
     log = await this.logsRepo.save(log);
 
     try {
+      this.logger.log(`🔔 [logAndSend] Starting push send for subscription: ${sub.endpoint?.substring(0, 50)}...`);
+      this.logger.log(`🔔 [logAndSend] P256DH exists: ${!!sub.p256dh}, Auth exists: ${!!sub.auth}`);
+      
       // حسب dev.to article: يجب أن يكون payload في تنسيق { notification: { ... } }
       // لكن web-push library يقبل أيضاً التنسيق المباشر
       // سنستخدم التنسيق المباشر لأنه أبسط وأكثر توافقاً
       const notificationPayload = {
         title: payload.title || 'Reminder',
         body: payload.body || payload.description || '',
-        icon: payload.icon || '/icons/bell.png',
-        badge: '/icons/badge.png',
+        icon: payload.icon || '/icons/bell.svg',
+        badge: '/icons/badge.svg',
         data: {
           ...(payload.data || {}),
           reminderId: payload.reminderId || null,
@@ -809,6 +856,9 @@ export class RemindersService {
         vibrate: [200, 100, 200],
         tag: `reminder-${payload.reminderId || Date.now()}`,
       };
+
+      this.logger.log(`🔔 [logAndSend] Notification payload stringified: ${JSON.stringify(notificationPayload).substring(0, 100)}...`);
+      this.logger.log(`🔔 [logAndSend] Calling webpush.sendNotification...`);
 
       const res = await webpush.sendNotification(
         {
@@ -825,6 +875,8 @@ export class RemindersService {
         },
       );
 
+      this.logger.log(`✅ [logAndSend] Push sent successfully! Status code: ${res.statusCode}`);
+
       sub.lastSentAt = new Date();
       sub.failures = 0; // Reset failures on success
       await this.subsRepo.save(sub);
@@ -833,13 +885,13 @@ export class RemindersService {
       log.sentAt = new Date();
       await this.logsRepo.save(log);
 
-      this.logger.log(`✅ Push sent successfully, status: ${res.statusCode}`);
       return { endpoint: sub.endpoint, ok: true, status: res.statusCode };
     } catch (err: any) {
-      this.logger.error(`❌ Push failed for ${sub.endpoint}:`, {
+      this.logger.error(`❌ [logAndSend] Push FAILED for ${sub.endpoint?.substring(0, 50)}...`, {
         statusCode: err?.statusCode,
         message: err?.message,
         endpoint: err?.endpoint,
+        fullError: String(err),
       });
 
       sub.failures = (sub.failures ?? 0) + 1;

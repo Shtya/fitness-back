@@ -20,6 +20,7 @@ import { StatsModule } from './stats/stats.module';
 import { SettingsModule } from './settings/settings.module';
 import { AboutUserModule } from './about-user/about-user.module';
 import { ReminderModule } from './reminder/reminder.module';
+import { FeedbackModule } from './feedback/feedback.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { CacheModule } from '@nestjs/cache-manager';
 import { redisStore } from 'cache-manager-redis-yet';
@@ -55,6 +56,7 @@ import { redisStore } from 'cache-manager-redis-yet';
     SettingsModule,
     AboutUserModule,
     ReminderModule,
+    FeedbackModule,
   ],
   controllers: [AppController],
   providers: [AppService, QueryFailedErrorFilter],
