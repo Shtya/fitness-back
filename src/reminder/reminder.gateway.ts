@@ -10,7 +10,7 @@ import { User } from 'entities/global.entity';
 @WebSocketGateway({
   namespace: '/reminders',
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: true,
     credentials: true,
   },
 })
@@ -30,7 +30,6 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   async handleConnection(client: Socket) {
     try {
-      // Try multiple ways to get the token
       const token = client.handshake.auth?.token || client.handshake.headers?.authorization?.replace('Bearer ', '') || client.handshake.headers?.token;
 
       if (!token) {
@@ -93,7 +92,7 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
         timestamp: new Date().toISOString(),
       };
 
-       this.server.to(`user_${userId}`).emit('reminder_due', reminderPayload);
+      this.server.to(`user_${userId}`).emit('reminder_due', reminderPayload);
 
       //  const client = this.server.sockets.sockets.get(socketId);
       // if (client) {
@@ -107,8 +106,6 @@ export class ReminderGateway implements OnGatewayConnection, OnGatewayDisconnect
       return false;
     }
   }
-
- 
 
   /**
    * Check if a user is currently connected
