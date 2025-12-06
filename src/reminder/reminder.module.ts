@@ -9,7 +9,7 @@ import { RemindersService } from './reminder.service';
 import { RemindersController } from './reminder.controller';
 import { RemindersScheduler } from './reminders.scheduler';
 import { ReminderGateway } from './reminder.gateway';
-import { GreenApiService } from './green-api/green-api.service'; // Import service directly
+ import { TelegramService } from './telegram.service';
 
 @Module({
   imports: [
@@ -18,15 +18,15 @@ import { GreenApiService } from './green-api/green-api.service'; // Import servi
       secret: process.env.JWT_SECRET,
       signOptions: { expiresIn: '7d' },
     }),
-    HttpModule, // Add HttpModule here
-  ],
+    HttpModule,
+   ],
   controllers: [RemindersController],
   providers: [
     RemindersService,
     RemindersScheduler,
     ReminderGateway,
-    GreenApiService, // Add GreenApiService as provider
-  ],
+		TelegramService
+   ],
   exports: [RemindersService, ReminderGateway],
 })
 export class ReminderModule {}

@@ -199,6 +199,15 @@ export class UserReminderSettings {
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;
+
+	@Column({ type: 'varchar', nullable: true })
+  telegramChatId?: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  telegramEnabled!: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
+  telegramLinkToken?: string | null;
 }
 
 /* =========================================================================
