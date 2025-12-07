@@ -260,6 +260,15 @@ export class RemindersController {
 		return this.svc.subscribePush(uid, dto, ua, ip);
 	}
 
+		@Get('due')
+	@UseGuards(JwtAuthGuard)
+	async getDueReminders(@Req() req: any) {
+		const uid = currentUserId(req);
+		// ممكن تبعت now من هنا لو حابب توحّد التوقيت
+		return this.svc.getDueRemindersForUser(uid, new Date());
+	}
+
+
 	@Get(':id')
 	@UseGuards(JwtAuthGuard)
 	async one(@Req() req: any, @Param('id') id: string) {
@@ -272,6 +281,7 @@ export class RemindersController {
 	async telegramWebhook(@Body() body: any) {
 		return this.svc.handleTelegramWebhook(body);
 	}
+	
 	@Post('telegram/link')
 	@UseGuards(JwtAuthGuard)
 	async createTelegramLink(@Req() req: any) {

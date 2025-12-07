@@ -2,8 +2,8 @@ import { Injectable, NotFoundException, ForbiddenException, BadRequestException,
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, FindOptionsWhere } from 'typeorm';
 import * as webpush from 'web-push';
- import { HttpService } from '@nestjs/axios';              // ⬅️ أضف ده
-import { lastValueFrom } from 'rxjs'; 
+import { HttpService } from '@nestjs/axios';              // ⬅️ أضف ده
+import { lastValueFrom } from 'rxjs';
 
 import { Reminder, UserReminderSettings, PushSubscription, NotificationLog, ReminderSchedule, ScheduleMode, ReminderType, Priority, IntervalUnit } from 'entities/alert.entity';
 import { TelegramService } from './telegram.service';
@@ -71,17 +71,16 @@ export class RemindersService {
 		};
 	}
 
-	// دي بتتندَه من Webhook تبع تيليجرام
 	async handleTelegramWebhook(update: any) {
 		const message = update.message || update.edited_message;
-		console.log(update);
+
 		if (!message || !message.text) {
 			return { ok: true };
 		}
 
 		const text: string = message.text;
 		if (!text.startsWith('/start')) {
- 			return { ok: true };
+			return { ok: true };
 		}
 
 		const parts = text.split(' ');
@@ -159,47 +158,47 @@ export class RemindersService {
 		return this.reminderGateway;
 	}
 
-	  /* ------------------------- Telegram helpers ------------------------- */
+	/* ------------------------- Telegram helpers ------------------------- */
 
-  async sendTelegramMessage(chatId: string, text: string) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) {
-      this.logger.error('❌ TELEGRAM_BOT_TOKEN is not set');
-      throw new BadRequestException('Telegram bot token not configured');
-    }
+	async sendTelegramMessage(chatId: string, text: string) {
+		const token = process.env.TELEGRAM_BOT_TOKEN;
+		if (!token) {
+			this.logger.error('❌ TELEGRAM_BOT_TOKEN is not set');
+			throw new BadRequestException('Telegram bot token not configured');
+		}
 
-    if (!chatId) {
-      throw new BadRequestException('chatId is required');
-    }
+		if (!chatId) {
+			throw new BadRequestException('chatId is required');
+		}
 
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+		const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
-    const payload = {
-      chat_id: chatId,
-      text,
-      parse_mode: 'Markdown',
-    };
+		const payload = {
+			chat_id: chatId,
+			text,
+			parse_mode: 'Markdown',
+		};
 
-    this.logger.log(`📤 [Telegram] Sending message to chatId=${chatId}`);
+		this.logger.log(`📤 [Telegram] Sending message to chatId=${chatId}`);
 
-    try {
-      const res$ = this.http.post(url, payload);
-      const res = await lastValueFrom(res$);
-      this.logger.log(`✅ [Telegram] Message sent successfully`);
-      return res.data;
-    } catch (error: any) {
-      this.logger.error(`❌ [Telegram] Failed to send message`, {
-        message: error?.message,
-        response: error?.response?.data,
-      });
-      throw new BadRequestException('Failed to send telegram message');
-    }
-  }
+		try {
+			const res$ = this.http.post(url, payload);
+			const res = await lastValueFrom(res$);
+			this.logger.log(`✅ [Telegram] Message sent successfully`);
+			return res.data;
+		} catch (error: any) {
+			this.logger.error(`❌ [Telegram] Failed to send message`, {
+				message: error?.message,
+				response: error?.response?.data,
+			});
+			throw new BadRequestException('Failed to send telegram message');
+		}
+	}
 
-  async sendTelegramTestToUser(chatId: string, message?: string) {
-    const text = message || '🔔 Test reminder from So7baFit bot';
-    return this.sendTelegramMessage(chatId, text);
-  }
+	async sendTelegramTestToUser(chatId: string, message?: string) {
+		const text = message || '🔔 Test reminder from So7baFit bot';
+		return this.sendTelegramMessage(chatId, text);
+	}
 
 
 	async processDueReminders(now: Date = new Date()) {
@@ -208,7 +207,6 @@ export class RemindersService {
 			where: { isActive: true, isCompleted: false },
 			relations: ['user'], // This is important for WhatsApp integration
 		});
-		console.log("test get here");
 
 		const pastWindowMs = 30_000; // 30 seconds in the past
 		const futureWindowMs = 60_000; // 1 minute in the future
@@ -295,7 +293,7 @@ export class RemindersService {
 					} catch (tgError) {
 						this.logger.error(`❌ Failed to send Telegram reminder for ${rem.id}:`, tgError);
 					}
-  
+
 
 					sentCount++;
 
@@ -585,6 +583,61 @@ export class RemindersService {
 			});
 		}
 		return list;
+	}
+
+	// داخل class RemindersService
+	async getDueRemindersForUser(userId: string, now: Date = new Date()) {
+		const pastWindowMs = 30_000;  // نفس النافذة بتاعة processDueReminders
+		const futureWindowMs = 60_000;
+
+		// نجيب الـ reminders النشطة وغير المكتملة للمستخدم فقط
+		const active = await this.remindersRepo.find({
+			where: { userId, isActive: true, isCompleted: false },
+		});
+
+		const due: Reminder[] = [];
+
+		for (const rem of active) {
+			try {
+				let next: Date | null = null;
+
+				// لو عندنا reminderTime، نستخدمه
+				if (rem.reminderTime) {
+					next = rem.reminderTime;
+				} else {
+					// احتياطًا: نحسب occurrence لو reminderTime فاضي
+					next = this.computeNextOccurrence(rem, now);
+				}
+
+				if (!next) continue;
+
+				const diff = next.getTime() - now.getTime();
+
+				// نفس منطق الـ window بتاع processDueReminders
+				if (diff >= -pastWindowMs && diff <= futureWindowMs) {
+					due.push(rem);
+				}
+			} catch (err) {
+				this.logger.error(`❌ [getDueRemindersForUser] Failed to process reminder ${rem.id}:`, err);
+			}
+		}
+
+		// هنرجع الـ entities نفسها، والـ frontend يقدر يحولها بـ apiToUiReminder لو حب
+		return due.map(rem => ({
+			id: rem.id,
+			title: rem.title,
+			description: rem.description,
+			type: rem.type,
+			priority: rem.priority,
+			schedule: rem.schedule,
+			soundSettings: rem.soundSettings,
+			isActive: rem.isActive,
+			isCompleted: rem.isCompleted,
+			reminderTime: rem.reminderTime,
+			createdAt: rem.createdAt,
+			updatedAt: rem.updatedAt,
+			metrics: rem.metrics,
+		}));
 	}
 
 	async get(userId: string, id: string) {

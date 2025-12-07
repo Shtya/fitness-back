@@ -21,10 +21,9 @@ import { SettingsModule } from './settings/settings.module';
 import { AboutUserModule } from './about-user/about-user.module';
 import { ReminderModule } from './reminder/reminder.module';
 import { FeedbackModule } from './feedback/feedback.module';
+import { BillingModule } from './billing/billing.module';
 import { ScheduleModule } from '@nestjs/schedule';
-import { CacheModule } from '@nestjs/cache-manager';
-import { redisStore } from 'cache-manager-redis-yet';
-
+ 
 @Module({
   imports: [
     ConfigModule.forRoot(),
@@ -57,6 +56,7 @@ import { redisStore } from 'cache-manager-redis-yet';
     AboutUserModule,
     ReminderModule,
     FeedbackModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [AppService, QueryFailedErrorFilter],
