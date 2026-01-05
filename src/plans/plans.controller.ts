@@ -37,7 +37,7 @@ export class PlanController {
   @Get('active')
   @UseGuards(JwtAuthGuard, RolesGuard)
   active(@Req() req: any) {
-    return this.svc.getActivePlan(req.user.id);
+     return this.svc.getActivePlan(req.user.id);
   }
 
   // CREATE manual plan

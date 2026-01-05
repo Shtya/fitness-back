@@ -1,5 +1,18 @@
-import { IsEnum, IsDecimal, IsString, IsOptional, IsUUID, IsEmail, IsDateString } from 'class-validator';
-import { SubscriptionTier, TransactionType, TransactionStatus, WithdrawalStatus } from '../../../entities/billing.entity';
+// --- File: src/billing/dto/billing.dto.ts ---
+import {
+  IsEnum,
+  IsDecimal,
+  IsString,
+  IsOptional,
+  IsUUID,
+  IsDateString,
+} from 'class-validator';
+import {
+  SubscriptionTier,
+  TransactionType,
+  TransactionStatus,
+  WithdrawalStatus,
+} from '../../../entities/billing.entity';
 
 // Wallet DTOs
 export class WalletDto {
@@ -12,8 +25,8 @@ export class WalletDto {
   createdAt: Date;
   updatedAt: Date;
 
-	@IsOptional()
-	lang?: string;
+  @IsOptional()
+  lang?: string;
 }
 
 // Transaction DTOs
@@ -42,8 +55,8 @@ export class CreateTransactionDto {
   @IsOptional()
   metadata?: Record<string, any>;
 
-	@IsOptional()
-	lang?: string;
+  @IsOptional()
+  lang?: string;
 }
 
 export class TransactionDto {
@@ -56,8 +69,10 @@ export class TransactionDto {
   description?: string;
   referenceId?: string;
   createdAt: Date;
-  updatedAt: Date;@IsOptional()
-	lang?: string;
+  updatedAt: Date;
+
+  @IsOptional()
+  lang?: string;
 }
 
 export class TransactionFilterDto {
@@ -65,8 +80,8 @@ export class TransactionFilterDto {
   @IsEnum(TransactionType)
   type?: TransactionType;
 
-	@IsOptional()
-	lang?: string;
+  @IsOptional()
+  lang?: string;
 
   @IsOptional()
   @IsEnum(TransactionStatus)
@@ -95,8 +110,8 @@ export class CreateSubscriptionDto {
   @IsEnum(SubscriptionTier)
   tier: SubscriptionTier;
 
-	@IsOptional()
-	lang?: string;
+  @IsOptional()
+  lang?: string;
 
   @IsOptional()
   @IsDecimal()
@@ -121,8 +136,8 @@ export class SubscriptionDto {
   createdAt: Date;
   updatedAt: Date;
 
-	@IsOptional()
-	lang?: string;
+  @IsOptional()
+  lang?: string;
 }
 
 // Withdrawal DTOs
@@ -144,8 +159,9 @@ export class CreateWithdrawalDto {
 
   @IsOptional()
   metadata?: Record<string, any>;
-	@IsOptional()
-	lang?: string;
+
+  @IsOptional()
+  lang?: string;
 }
 
 export class WithdrawalDto {
@@ -172,9 +188,9 @@ export class UpdateWithdrawalStatusDto {
 
   @IsOptional()
   metadata?: Record<string, any>;
-	
-	@IsOptional()
-	lang?: string;
+
+  @IsOptional()
+  lang?: string;
 }
 
 // Client Payment DTOs
@@ -195,7 +211,14 @@ export class CreateClientPaymentDto {
   @IsOptional()
   @IsString()
   invoiceId?: string;
-	
+
+  @IsOptional()
+  @IsDateString()
+  periodStart?: string;
+
+  @IsOptional()
+  @IsDateString()
+  periodEnd?: string;
 }
 
 export class ClientPaymentDto {
@@ -208,6 +231,32 @@ export class ClientPaymentDto {
   status: TransactionStatus;
   createdAt: Date;
   paidAt?: Date;
+  periodStart?: Date;
+  periodEnd?: Date;
+}
+
+export class ClientPaymentFilterDto {
+  @IsOptional()
+  page?: number;
+
+  @IsOptional()
+  limit?: number;
+
+  @IsOptional()
+  @IsUUID()
+  clientId?: string;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
+  @IsOptional()
+  @IsString()
+  sort?: 'newest' | 'oldest' | 'amount_high' | 'amount_low';
 }
 
 // Admin Analytics DTOs

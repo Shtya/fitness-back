@@ -1,3 +1,4 @@
+// --- File: src/entities/billing.entity.ts ---
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -6,6 +7,7 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Index,
+	JoinColumn,
 } from 'typeorm';
 import { User } from 'entities/global.entity';
 
@@ -229,6 +231,10 @@ export class ClientPayment {
   @Column('uuid')
   clientId: string;
 
+	@ManyToOne(() => User, { eager: false, nullable: false })
+  @JoinColumn({ name: 'clientId' })
+  client: User;
+
   @Column('decimal', { precision: 12, scale: 2 })
   amount: number;
 
@@ -253,4 +259,10 @@ export class ClientPayment {
 
   @Column({ nullable: true })
   paidAt?: Date;
+
+  @Column({ type: 'date', nullable: true })
+  periodStart?: Date;
+
+  @Column({ type: 'date', nullable: true })
+  periodEnd?: Date;
 }
