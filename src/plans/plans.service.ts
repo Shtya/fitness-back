@@ -2,7 +2,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, EntityManager } from 'typeorm';
-import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole } from 'entities/global.entity';
+import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole, PlanBlock } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
 import { RedisService } from '../redis/redis.service';
 
@@ -245,7 +245,7 @@ export class PlanService {
 	/* ---------- Active plan ---------- */
 	async getActivePlan(userId: string) {
 		if (!userId) return { status: 'error', error: 'userId is required' as const };
- 
+
 		const user = await this.userRepo.findOne({ where: { id: userId } });
 		if (!user) return { status: 'error', error: 'User not found' as const };
 
@@ -255,16 +255,23 @@ export class PlanService {
 			where: { id: user.activeExercisePlanId },
 			relations: ['days', 'days.items', 'days.items.exercise'],
 		});
-		if (!active) return { status: 'none', error: 'Active plan not found' as const }; 
+		if (!active) return { status: 'none', error: 'Active plan not found' as const };
 		const result = this.planToFrontendShape(active)
 
 		return result;
 	}
 
+
 	async createPlanWithContent(input: any, lang: any, actor: { id: string; role: UserRole }) {
-		const { name, isActive = true, program, userId } = input ?? {};
+		const toItems = (arr: any[], block: PlanBlock) =>
+			(Array.isArray(arr) ? arr : []).map((e, idx) => ({
+				e,
+				idx,
+				block,
+			}));
+
+		const { name, isActive = true, program, userId, notes, warmup, cardio } = input ?? {};
 		const isArabic = String(lang).toLowerCase().startsWith('ar');
-		console.log(lang, isArabic);
 
 		if (!name) {
 			throw new BadRequestException(isArabic ? 'الاسم مطلوب' : 'name is required');
@@ -273,6 +280,7 @@ export class PlanService {
 		if (!program?.days?.length) {
 			throw new BadRequestException(isArabic ? 'حقل الأيام في البرنامج مطلوب' : 'program.days[] required');
 		}
+
 		// validate duplicate days
 		const seenDays = new Set<string>();
 		for (const d of program.days) {
@@ -290,6 +298,10 @@ export class PlanService {
 					name,
 					isActive: !!isActive,
 					adminId: userId,
+					notes: Array.isArray(notes) ? notes.filter(Boolean) : [],
+					// keep these if you still have plan-level warmup/cardio fields
+					warmup: warmup ?? null,
+					cardio: cardio ?? null,
 				}),
 			);
 
@@ -303,28 +315,42 @@ export class PlanService {
 					}),
 				);
 
-				const exItems = Array.isArray(d.exercises) ? d.exercises : [];
+				// ✅ merge 3 blocks into one save batch
+				const merged = [
+					...toItems(d.warmupExercises, PlanBlock.WARMUP),
+					...toItems(d.exercises, PlanBlock.MAIN),
+					...toItems(d.cardioExercises, PlanBlock.CARDIO),
+				];
+
 				let order = 0;
 				const rows: ExercisePlanDayExercise[] = [];
-				for (const e of exItems) {
-					const exId = String(e.exerciseId || e.id || e);
+
+				for (const { e, idx, block } of merged) {
+					const exId = String(e?.exerciseId || e?.id || e);
+					if (!exId) continue;
+
 					const ex = await manager.findOne(Exercise, { where: { id: exId } });
 					if (!ex) {
 						throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
 					}
+
 					rows.push(
 						manager.create(ExercisePlanDayExercise, {
 							day: dayRow,
 							exercise: ex,
-							orderIndex: (e.orderIndex ?? e.order ?? order) as number,
-							// ✅ NEW save overrides
-							targetSets: e.targetSets ?? null,
-							targetReps: e.targetReps ?? null,
-							tempo: e.tempo ?? null,
+							block, // ✅ NEW
+							orderIndex: (e?.orderIndex ?? e?.order ?? idx ?? order) as number,
+
+							// ✅ overrides (optional)
+							targetSets: e?.targetSets ?? null,
+							targetReps: e?.targetReps ?? null,
+							tempo: e?.tempo ?? null,
 						}),
 					);
+
 					order++;
 				}
+
 				if (rows.length) await manager.save(ExercisePlanDayExercise, rows);
 			}
 
@@ -334,12 +360,12 @@ export class PlanService {
 				order: { days: { created_at: 'ASC' as any } },
 			});
 
-			// Invalidate plans cache after creation
 			await this.invalidatePlansCache(actor.id);
 
 			return this.planToFrontendShape(full as any);
 		});
 	}
+
 
 	async list(q: any, actor: { id: string; role: UserRole }) {
 		const page = Number(q.page) || 1;
@@ -418,13 +444,14 @@ export class PlanService {
 		return result;
 	}
 
-	/* ---------- Update (days + items) ---------- */
-	/**
-	 * i need here if he super_admin can make any thing
-	 * if her admin check if the exercisePlan have { adminId == this user id } can make any thing if not cannot edit on it
-	 *
-	 */
 	async updatePlanAndContent(id: string, dto: any, lang: any, actor: { id: string; role: UserRole }) {
+		const toItems = (arr: any[], block: PlanBlock) =>
+			(Array.isArray(arr) ? arr : []).map((e, idx) => ({
+				e,
+				idx,
+				block,
+			}));
+
 		return await this.dataSource.transaction(async manager => {
 			const plan = await manager.findOne(ExercisePlan, {
 				where: { id },
@@ -440,6 +467,13 @@ export class PlanService {
 
 			if (dto.name !== undefined) plan.name = dto.name;
 			if (dto.isActive !== undefined) plan.isActive = !!dto.isActive;
+
+			if (dto.notes !== undefined) {
+				plan.notes = Array.isArray(dto.notes) ? dto.notes.filter(Boolean) : [];
+			}
+			if (dto.warmup !== undefined) plan.warmup = dto.warmup ?? null;
+			if (dto.cardio !== undefined) plan.cardio = dto.cardio ?? null;
+
 			await manager.save(ExercisePlan, plan);
 
 			if (dto.program?.days) {
@@ -464,35 +498,48 @@ export class PlanService {
 					const dayKey = this.normDay(d.dayOfWeek ?? d.id);
 					const cur = byDay.get(dayKey);
 
+					const merged = [
+						...toItems(d.warmupExercises, PlanBlock.WARMUP),
+						...toItems(d.exercises, PlanBlock.MAIN),
+						...toItems(d.cardioExercises, PlanBlock.CARDIO),
+					];
+
 					if (cur) {
 						cur.name = d.nameOfWeek || d.name || (cur.name ?? String(dayKey));
 						await manager.save(ExercisePlanDay, cur);
 
-						// replace items (simple approach)
+						// replace items
 						await manager.delete(ExercisePlanDayExercise, { day: { id: cur.id } as any });
 
-						const src = toArray(d.exercises);
 						let ord = 0;
 						const rows: ExercisePlanDayExercise[] = [];
-						for (const e of src) {
-							const exId = String(e.exerciseId || e.id || e);
+
+						for (const { e, idx, block } of merged) {
+							const exId = String(e?.exerciseId || e?.id || e);
+							if (!exId) continue;
+
 							const ex = await manager.findOne(Exercise, { where: { id: exId } });
 							if (!ex) {
 								throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
 							}
+
 							rows.push(
 								manager.create(ExercisePlanDayExercise, {
 									day: cur,
 									exercise: ex,
-									orderIndex: (e.orderIndex ?? e.order ?? ord) as number,
-									// ✅ NEW save overrides
-									targetSets: e.targetSets ?? null,
-									targetReps: e.targetReps ?? null,
-									tempo: e.tempo ?? null,
+									block, // ✅ NEW
+									orderIndex: (e?.orderIndex ?? e?.order ?? idx ?? ord) as number,
+
+									// ✅ overrides
+									targetSets: e?.targetSets ?? null,
+									targetReps: e?.targetReps ?? null,
+									tempo: e?.tempo ?? null,
 								}),
 							);
+
 							ord++;
 						}
+
 						if (rows.length) await manager.save(ExercisePlanDayExercise, rows);
 						byDay.delete(dayKey);
 					} else {
@@ -505,28 +552,35 @@ export class PlanService {
 							}),
 						);
 
-						const src = toArray(d.exercises);
 						let ord = 0;
 						const rows: ExercisePlanDayExercise[] = [];
-						for (const e of src) {
-							const exId = String(e.exerciseId || e.id || e);
+
+						for (const { e, idx, block } of merged) {
+							const exId = String(e?.exerciseId || e?.id || e);
+							if (!exId) continue;
+
 							const ex = await manager.findOne(Exercise, { where: { id: exId } });
 							if (!ex) {
 								throw new BadRequestException(isArabic ? `التمرين غير موجود: ${exId}` : `Exercise not found: ${exId}`);
 							}
+
 							rows.push(
 								manager.create(ExercisePlanDayExercise, {
 									day: newDay,
 									exercise: ex,
-									orderIndex: (e.orderIndex ?? e.order ?? ord) as number,
-									// ✅ NEW save overrides
-									targetSets: e.targetSets ?? null,
-									targetReps: e.targetReps ?? null,
-									tempo: e.tempo ?? null,
+									block, // ✅ NEW
+									orderIndex: (e?.orderIndex ?? e?.order ?? idx ?? ord) as number,
+
+									// ✅ overrides
+									targetSets: e?.targetSets ?? null,
+									targetReps: e?.targetReps ?? null,
+									tempo: e?.tempo ?? null,
 								}),
 							);
+
 							ord++;
 						}
+
 						if (rows.length) await manager.save(ExercisePlanDayExercise, rows);
 					}
 				}
@@ -543,12 +597,12 @@ export class PlanService {
 				relations: ['days', 'days.items', 'days.items.exercise'],
 			});
 
-			// Invalidate caches after update
 			await this.invalidatePlanCaches(id, actor.id);
 
 			return this.planToFrontendShape(full as any);
 		});
 	}
+
 
 	async remove(id: string, actor: { id: string; role: UserRole }) {
 		const plan = await this.planRepo.findOne({ where: { id } });
@@ -644,15 +698,17 @@ export class PlanService {
 		const days = daysRaw
 			.map((d: any & { items?: ExercisePlanDayExercise[] }) => {
 				const dayOfWeek = String(d.day).toLowerCase();
-				const items = Array.isArray(d.items) ? d.items.slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0)) : [];
+				const items = Array.isArray(d.items)
+					? d.items.slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0))
+					: [];
 
-				const exercises = items.map(e => {
+				const mapItem = (e: any) => {
 					const x = e.exercise;
 					return {
 						id: x.id,
 						name: x.name,
 
-						// ✅ NEW: override first, fallback to exercise defaults
+						// override first, fallback to exercise defaults
 						targetSets: e.targetSets ?? x.targetSets,
 						targetReps: e.targetReps ?? x.targetReps,
 						tempo: e.tempo ?? x.tempo,
@@ -660,16 +716,33 @@ export class PlanService {
 						rest: x.rest ?? null,
 						img: x.img ?? null,
 						video: x.video ?? null,
-					};
-				});
 
+						orderIndex: e.orderIndex ?? 0,
+					};
+				};
+
+				const warmupExercises = items
+					.filter(i => i.block === PlanBlock.WARMUP)
+					.map(mapItem)
+					.sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0));
+
+				const exercises = items
+					.filter(i => (i.block ?? PlanBlock.MAIN) === PlanBlock.MAIN)
+					.map(mapItem)
+					.sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0));
+
+				const cardioExercises = items
+					.filter(i => i.block === PlanBlock.CARDIO)
+					.map(mapItem)
+					.sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0));
 
 				return {
 					id: dayOfWeek,
 					dayOfWeek,
 					name: d.name ?? dayOfWeek,
-
+					warmupExercises,
 					exercises,
+					cardioExercises,
 				};
 			})
 			.sort((a: any, b: any) => this.weekIndex(a.dayOfWeek) - this.weekIndex(b.dayOfWeek));
@@ -682,9 +755,15 @@ export class PlanService {
 			name: plan.name,
 			isActive: !!plan.isActive,
 			adminId: plan?.adminId,
+
+			notes: Array.isArray((plan as any).notes) ? (plan as any).notes : [],
+			warmup: (plan as any).warmup ?? null,
+			cardio: (plan as any).cardio ?? null,
+
 			program: { days },
 		};
 	}
+
 
 	async listPlansWithStats(q: ListPlansWithStatsQuery, actor: { id: string; role: UserRole }) {
 		const search = (q.search || '').trim();
@@ -740,9 +819,3 @@ type ListPlansWithStatsQuery = {
 	sortOrder?: 'ASC' | 'DESC';
 };
 
-/* 
-	⏱️ Request took: 334ms
-	⏱️ Request took: 296ms
-	⏱️ Request took: 411ms
-	⏱️ Request took: 1522ms
-*/

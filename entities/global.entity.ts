@@ -134,6 +134,17 @@ export class ExercisePlan extends CoreEntity {
 	@OneToMany(() => ExercisePlanDay, d => d.plan, { cascade: true })
 	days!: ExercisePlanDay[];
 
+	// ✅ NEW: notes list
+	@Column('text', { array: true, default: '{}' })
+	notes!: string[];
+
+	// ✅ NEW: warmup & cardio
+	@Column({ type: 'text', nullable: true })
+	warmup?: string | null;
+
+	@Column({ type: 'text', nullable: true })
+	cardio?: string | null;
+
 	@Index()
 	@Column({ type: 'uuid', nullable: true })
 	adminId?: string | null;
@@ -156,8 +167,15 @@ export class ExercisePlanDay extends CoreEntity {
 	items!: ExercisePlanDayExercise[];
 }
 
+export enum PlanBlock {
+	WARMUP = 'warmup',
+	MAIN = 'main',
+	CARDIO = 'cardio',
+}
+
+
 @Entity('exercise_plan_day_exercises')
-@Unique(['day', 'exercise'])
+@Unique(['day', 'exercise', 'block'])
 export class ExercisePlanDayExercise extends CoreEntity {
 	@ManyToOne(() => ExercisePlanDay, d => d.items, { onDelete: 'CASCADE' })
 	@JoinColumn({ name: 'day_id' })
@@ -171,7 +189,6 @@ export class ExercisePlanDayExercise extends CoreEntity {
 	@Column({ name: 'order_index', type: 'int', default: 0 })
 	orderIndex!: number;
 
-	// ✅ NEW: per-plan/per-day overrides
 	@Column({ name: 'target_sets', type: 'int', nullable: true })
 	targetSets?: number | null;
 
@@ -180,6 +197,10 @@ export class ExercisePlanDayExercise extends CoreEntity {
 
 	@Column({ name: 'tempo', type: 'varchar', length: 64, nullable: true })
 	tempo?: string | null;
+
+	@Column({ type: 'varchar', length: 16, default: PlanBlock.MAIN })
+	block!: PlanBlock;
+
 }
 
 @Entity('meal_plans')
@@ -291,6 +312,10 @@ export class User extends CoreEntity {
 
 	@Column({ type: 'int', nullable: true })
 	caloriesTarget?: number | null;
+
+
+	@Column({ type: 'int', nullable: true })
+	FiberTarget?: number | null;
 
 	@Column({ type: 'int', nullable: true })
 	proteinPerDay?: number | null;

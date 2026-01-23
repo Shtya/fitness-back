@@ -47,6 +47,11 @@ export class UpdateProfileDto {
   @IsPositive()
   caloriesTarget?: number; // kcal/day
 
+
+  @IsOptional()
+  @IsInt() 
+  FiberTarget?: number; 
+
   @IsOptional()
   @IsInt()
   @Min(0)
