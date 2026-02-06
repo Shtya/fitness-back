@@ -2,7 +2,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, MoreThanOrEqual, LessThanOrEqual, In, IsNull, Not } from 'typeorm';
-import { User, ExerciseRecord, MealLog, ExercisePlan, MealPlan, Notification, FoodSuggestion, UserRole, UserStatus } from 'entities/global.entity';
+// import { User, ExerciseRecord, MealLog, ExercisePlan, MealPlan, Notification, FoodSuggestion, UserRole, UserStatus } from 'entities/global.entity';
+import { User, ExerciseRecord,  ExercisePlan,  Notification,  UserRole, UserStatus } from 'entities/global.entity';
+import { MealLog,
+MealPlan,
+FoodSuggestion,} from "entities/meal_plans.entity";
+
 import { WeeklyReport } from 'entities/weekly-report.entity';
 import { BodyMeasurement, ProgressPhoto } from 'entities/profile.entity';
 

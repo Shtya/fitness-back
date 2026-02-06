@@ -13,7 +13,7 @@ export class NutritionController {
 
   // ========== MEAL PLANS MANAGEMENT (Coach/Admin) ==========
   @Post('meal-plans')
-  createMealPlan(@Body() createDto: CreateMealPlanDto, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+  createMealPlan(@Body() createDto: any, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
     return this.nutritionService.createMealPlan(createDto, req?.user, lang);
   }
 
@@ -52,10 +52,10 @@ export class NutritionController {
     return this.nutritionService.assignMealPlan(id, userId, req?.user, lang);
   }
 
-  @Get('meal-plans/:id/assignments')
-  getPlanAssignments(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
-    return this.nutritionService.getPlanAssignmentsSecure(id, req?.user, lang);
-  }
+  // @Get('meal-plans/:id/assignments')
+  // getPlanAssignments(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
+  //   return this.nutritionService.getPlanAssignmentsSecure(id, req?.user, lang);
+  // }
 
   // ========== CLIENT MEAL PLAN ==========
 
@@ -86,15 +86,15 @@ export class NutritionController {
     return this.nutritionService.createSuggestion(req.user.id, suggestionDto);
   }
 
-  @Get('my/suggestions')
-  getMySuggestions(@Request() req, @Query('status') status?: string, @Query('page') page?: number, @Query('limit') limit?: number) {
-    return this.nutritionService.getUserSuggestions(req.user.id, { status, page, limit });
-  }
+  // @Get('my/suggestions')
+  // getMySuggestions(@Request() req, @Query('status') status?: string, @Query('page') page?: number, @Query('limit') limit?: number) {
+  //   return this.nutritionService.getUserSuggestions(req.user.id, { status, page, limit });
+  // }
 
-  @Get('suggestions')
-  getAllSuggestions(@Request() req, @Query('status') status?: string, @Query('clientId') clientId?: string, @Query('page') page?: number, @Query('limit') limit?: number) {
-    return this.nutritionService.getAllSuggestions(req.user.id, { status, clientId, page, limit });
-  }
+  // @Get('suggestions')
+  // getAllSuggestions(@Request() req, @Query('status') status?: string, @Query('clientId') clientId?: string, @Query('page') page?: number, @Query('limit') limit?: number) {
+  //   return this.nutritionService.getAllSuggestions(req.user.id, { status, clientId, page, limit });
+  // }
 
   // ========== STATISTICS ==========
 

@@ -4,12 +4,13 @@ import { Repository, Not, In, IsNull } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 
-import { MealPlan, Notification, NotificationAudience, NotificationType, ExercisePlan, User, UserRole, UserStatus, FoodSuggestion } from 'entities/global.entity';
+import {  Notification, NotificationAudience, NotificationType, ExercisePlan, User, UserRole, UserStatus  } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
 import { ConfigService } from '@nestjs/config';
 import { MailService } from 'common/nodemailer';
 import * as crypto from 'crypto';
 import { isUUID } from 'class-validator';
+import { FoodSuggestion, MealPlan } from '../../entities/meal_plans.entity';
 
 @Injectable()
 export class AuthService {
@@ -400,7 +401,7 @@ export class AuthService {
 								name: d.name,
 								foods: (d.foods || [])
 									.sort((a, b) => a.orderIndex - b.orderIndex)
-									.map(f => ({
+									.map((f:any) => ({
 										id: f.id,
 										name: f.name,
 										category: f.category,

@@ -179,8 +179,6 @@ export class PlanService {
 							day: dayRow,
 							exercise,
 							orderIndex: (src?.orderIndex ?? src?.order ?? order) as number,
-
-
 						});
 						items.push(item);
 						order++;
@@ -345,6 +343,9 @@ export class PlanService {
 							targetSets: e?.targetSets ?? null,
 							targetReps: e?.targetReps ?? null,
 							tempo: e?.tempo ?? null,
+
+							durationSeconds: e?.durationSeconds ?? null,
+							note: e?.note ?? null,
 						}),
 					);
 
@@ -534,6 +535,9 @@ export class PlanService {
 									targetSets: e?.targetSets ?? null,
 									targetReps: e?.targetReps ?? null,
 									tempo: e?.tempo ?? null,
+
+									durationSeconds: e?.durationSeconds ?? null,
+									note: e?.note ?? null,
 								}),
 							);
 
@@ -575,6 +579,9 @@ export class PlanService {
 									targetSets: e?.targetSets ?? null,
 									targetReps: e?.targetReps ?? null,
 									tempo: e?.tempo ?? null,
+
+									durationSeconds: e?.durationSeconds ?? null,
+									note: e?.note ?? null,
 								}),
 							);
 
@@ -718,6 +725,8 @@ export class PlanService {
 						video: x.video ?? null,
 
 						orderIndex: e.orderIndex ?? 0,
+						durationSeconds: e.durationSeconds ?? null,
+						note: e.note ?? null,
 					};
 				};
 

@@ -1,10 +1,17 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
-  User, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, MealPlan, MealPlanDay,
-  MealPlanFood, Meal, MealItem, Supplement, MealPlanAssignment, MealLog, MealLogItem,
-  ExtraFood, SupplementLog, ChatMessage, ChatConversation
+  User, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise,  ChatMessage, ChatConversation
 } from 'entities/global.entity';
+import { MealPlan, MealPlanDay,
+  MealPlanFood, Meal, MealItem, Supplement, MealPlanAssignment, MealLog, MealLogItem,
+  ExtraFood, SupplementLog,} from "entities/meal_plans.entity";
+	
+// import {
+//   User, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, MealPlan, MealPlanDay,
+//   MealPlanFood, Meal, MealItem, Supplement, MealPlanAssignment, MealLog, MealLogItem,
+//   ExtraFood, SupplementLog, ChatMessage, ChatConversation
+// } from 'entities/global.entity';
 import { BodyMeasurement, ProgressPhoto } from 'entities/profile.entity';
 import { AboutUserController } from './about-user.controller';
 import { AboutUserService } from './about-user.service';

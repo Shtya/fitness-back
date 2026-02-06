@@ -8,7 +8,8 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { RolesGuard } from './guard/roles.guard';
-import { MealPlan, Notification, ExercisePlan, User, FoodSuggestion } from 'entities/global.entity';
+import {  Notification, ExercisePlan, User } from 'entities/global.entity';
+import { FoodSuggestion, MealPlan } from "entities/meal_plans.entity";
 import { MailService } from 'common/nodemailer';
 
 @Module({

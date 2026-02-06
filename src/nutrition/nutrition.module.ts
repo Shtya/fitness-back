@@ -1,14 +1,13 @@
-// --- File: nutrition/nutrition.module.ts ---
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { NutritionController } from './nutrition.controller';
 import { NutritionService } from './nutrition.service';
+
 import {
   MealPlan,
   MealPlanDay,
   MealPlanFood,
   MealPlanAssignment,
-  User,
   Meal,
   MealItem,
   Supplement,
@@ -18,8 +17,9 @@ import {
   SupplementLog,
   FoodSuggestion,
   NutritionStats,
-  Notification as NotificationEntity, // <-- add notifications repo
-} from 'entities/global.entity';
+} from '../../entities/meal_plans.entity';
+
+import { User, Notification as NotificationEntity } from 'entities/global.entity'; // ✅ خلي User/Notification من global
 
 @Module({
   imports: [
@@ -28,7 +28,6 @@ import {
       MealPlanDay,
       MealPlanFood,
       MealPlanAssignment,
-      User,
       Meal,
       MealItem,
       Supplement,
@@ -38,7 +37,8 @@ import {
       SupplementLog,
       FoodSuggestion,
       NutritionStats,
-      NotificationEntity,  
+      User,
+      NotificationEntity,
     ]),
   ],
   controllers: [NutritionController],

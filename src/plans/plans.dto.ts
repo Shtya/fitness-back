@@ -24,6 +24,9 @@ export class ImportPlanDto {
 				video?: string | null;
 				video2?: string | null;
 				desc?: string | null;
+
+				durationSeconds?: number | null;
+				note?: string | null;
 			}>;
 		}>;
 	};

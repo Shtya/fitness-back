@@ -1,6 +1,6 @@
 import { IsString, IsOptional, IsArray, IsBoolean, ValidateNested, IsNumber } from 'class-validator';
 import { Type } from 'class-transformer';
-import { DayOfWeek } from 'entities/global.entity';
+import { DayOfWeek } from '../../../entities/meal_plans.entity'; // ✅ بدل global.entity
 
 export class MealItemDto {
   @IsString()
@@ -12,8 +12,6 @@ export class MealItemDto {
 
   @IsNumber()
   calories!: number;
-
-  // REMOVED: description, protein, carbs, fat
 }
 
 export class SupplementDto {
@@ -24,6 +22,7 @@ export class SupplementDto {
   @IsString()
   time?: string;
 
+  // ✅ timing optional (frontend مش بيبعت)
   @IsOptional()
   @IsString()
   timing?: string;
