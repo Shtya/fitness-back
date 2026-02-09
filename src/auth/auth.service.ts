@@ -212,22 +212,31 @@ export class AuthService {
 
 		const whereBase = { adminId };
 
-		const [totalUsers, activeUsers, coaches, clients] = await Promise.all([
-			this.userRepo.count({ where: whereBase }),
-			this.userRepo.count({
-				where: { ...whereBase, status: UserStatus.ACTIVE },
-			}),
-			this.userRepo.count({
-				where: { ...whereBase, role: UserRole.COACH },
-			}),
-			this.userRepo.count({
-				where: { ...whereBase, role: UserRole.CLIENT },
-			}),
-		]);
+		const [totalUsers, activeUsers, pendingUsers, suspendedUsers, coaches, clients] =
+			await Promise.all([
+				this.userRepo.count({ where: whereBase }),
+				this.userRepo.count({
+					where: { ...whereBase, status: UserStatus.ACTIVE },
+				}),
+				this.userRepo.count({
+					where: { ...whereBase, status: UserStatus.PENDING },
+				}),
+				this.userRepo.count({
+					where: { ...whereBase, status: UserStatus.SUSPENDED },
+				}),
+				this.userRepo.count({
+					where: { ...whereBase, role: UserRole.COACH },
+				}),
+				this.userRepo.count({
+					where: { ...whereBase, role: UserRole.CLIENT },
+				}),
+			]);
 
 		return {
 			totalUsers,
 			activeUsers,
+			pendingUsers,
+			suspendedUsers,
 			coaches,
 			clients,
 		};
@@ -255,6 +264,7 @@ export class AuthService {
 		const sortOrder: 'ASC' | 'DESC' = (String(query.sortOrder || 'DESC').toUpperCase() as any) === 'ASC' ? 'ASC' : 'DESC';
 		const search = (query.search || '').trim();
 		const role = (query.role || '').toLowerCase();
+		const status = (query.status || '').toLowerCase();
 		const includePlans = String(query.includePlans || '').toLowerCase() === 'true';
 		const includeMeals = String(query.includeMeals || '').toLowerCase() === 'true';
 		const myOnly = ['1', 'true', true].includes((query.myOnly ?? '').toString().toLowerCase());
@@ -315,6 +325,14 @@ export class AuthService {
 				} else if (VALID_ROLES.includes(role as any)) {
 					qb.andWhere('user.role = :role', { role });
 				}
+			}
+		}
+
+		// ====== Status filter (optional) ======
+		if (status) {
+			const VALID_STATUSES = ['pending', 'active', 'suspended'] as const;
+			if (VALID_STATUSES.includes(status as any)) {
+				qb.andWhere('user.status = :status', { status });
 			}
 		}
 
@@ -671,6 +689,72 @@ export class AuthService {
 
 		return {
 			message: 'User created by admin',
+			tempPassword: tempPass,
+			user: this.serialize(user),
+		};
+	}
+
+	/**
+	 * Coach creates a CLIENT user.
+	 * - New client is always created with role=CLIENT
+	 * - Status starts as PENDING so admin must approve it
+	 * - Client is attached to the coach (coachId) and to the coach's admin (adminId)
+	 */
+	async coachCreateClient(body: any, actor: { id: string; role: UserRole }) {
+		const { name, email, phone, gender, membership, subscriptionStart, subscriptionEnd, password } = body || {};
+
+		if (!actor || actor.role !== UserRole.COACH) {
+			throw new ForbiddenException('Only coaches can create clients via this endpoint');
+		}
+
+		if (!name || !email) throw new BadRequestException('name and email are required');
+
+		const exists = await this.userRepo.findOne({ where: { email } });
+		if (exists) throw new ConflictException('Email already registered');
+
+		// Load coach from DB to get its adminId
+		const coach = await this.userRepo.findOne({ where: { id: actor.id } });
+		if (!coach || coach.role !== UserRole.COACH) {
+			throw new ForbiddenException('Coach not found or invalid');
+		}
+
+		// generate strong temp password (or use provided)
+		const tempPass = password || crypto.randomBytes(6).toString('base64url');
+
+		const today = new Date().toISOString().slice(0, 10);
+
+		const user = this.userRepo.create({
+			name,
+			email,
+			phone: phone || null,
+			membership: membership || null,
+			gender: gender || null,
+			password: await bcrypt.hash(tempPass, 12),
+			role: UserRole.CLIENT,
+			status: UserStatus.PENDING, // Coach-created accounts start pending and require admin approval
+			subscriptionStart: subscriptionStart ?? today,
+			subscriptionEnd: subscriptionEnd ?? null,
+			activeExercisePlanId: null,
+			defaultRestSeconds: 90,
+			lastLogin: null,
+			resetPasswordToken: null,
+			resetPasswordExpires: null,
+			adminId: coach.adminId ?? coach.id,
+			coachId: coach.id,
+			coach,
+		});
+
+		await this.userRepo.save(user);
+
+		// Optional: email temp password to user
+		try {
+			await this.emailService.sendWelcomeWithPassword(email, name, tempPass);
+		} catch {
+			// ignore mail errors
+		}
+
+		return {
+			message: 'Client created by coach; pending admin approval',
 			tempPassword: tempPass,
 			user: this.serialize(user),
 		};

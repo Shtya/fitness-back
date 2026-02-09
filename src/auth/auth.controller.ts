@@ -149,6 +149,14 @@ export class AuthController {
 		return this.authService.setStatus(id, status);
 	}
 
+	// Coach creates a client; account starts as PENDING and must be approved by admin
+	@Post('coach/users')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(UserRole.COACH)
+	createUserByCoach(@Body() body: any, @Req() req: any) {
+		return this.authService.coachCreateClient(body, req.user);
+	}
+
 	// Admin creates any user (client/coach/trainer) with auto-password, can also assign their coach right away
 	@Post('admin/users')
 	@UseGuards(JwtAuthGuard, RolesGuard)
