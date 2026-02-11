@@ -108,6 +108,7 @@ export class NutritionService {
       items: (m?.items || []).map((it, ii) => ({
         name: String(it?.name || '').trim(),
         quantity: it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity),
+				unit: it?.unit === 'count' ? 'count' : 'g',
         calories: Number(it?.calories ?? 0),
         orderIndex: ii,
       })),
@@ -213,6 +214,7 @@ export class NutritionService {
                 meal,
                 name: it.name,
                 quantity: it.quantity ?? null,
+								unit: it.unit === 'count' ? 'count' : 'g',
                 calories: it.calories,
                 orderIndex: it.orderIndex,
               }),
@@ -380,6 +382,7 @@ export class NutritionService {
                   meal,
                   name: it.name,
                   quantity: it.quantity ?? null,
+									unit: it.unit === 'count' ? 'count' : 'g',
                   calories: it.calories,
                   orderIndex: it.orderIndex,
                 }),

@@ -1,106 +1,114 @@
-import { IsString, IsOptional, IsArray, IsBoolean, ValidateNested, IsNumber, Min, Max, IsDateString } from 'class-validator';
+import { IsString, IsOptional, IsArray, IsBoolean, ValidateNested, IsNumber, Min, Max, IsDateString, IsIn } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class MealLogItemDto {
-  @IsString()
-  name!: string;
+	@IsString()
+	name!: string;
 
-  @IsBoolean()
-  taken!: boolean;
+	@IsBoolean()
+	taken!: boolean;
 
-  @IsOptional()
-  @IsNumber()
-  qty?: number;
+	@IsOptional()
+	@IsNumber()
+	qty?: number;
+
+	@IsOptional()
+	@IsIn(['g', 'count'])
+	unit?: string;
 }
 
 export class ExtraFoodDto {
-  @IsString()
-  name!: string;
+	@IsString()
+	name!: string;
 
-  @IsOptional()
-  @IsNumber()
-  quantity?: number;
+	@IsOptional()
+	@IsNumber()
+	quantity?: number;
 
-  @IsOptional()
-  @IsNumber()
-  calories?: number;
+	@IsOptional()
+	@IsNumber()
+	calories?: number;
 
-  @IsOptional()
-  @IsNumber()
-  protein?: number;
+	@IsOptional()
+	@IsNumber()
+	protein?: number;
 
-  @IsOptional()
-  @IsNumber()
-  carbs?: number;
+	@IsOptional()
+	@IsNumber()
+	carbs?: number;
 
-  @IsOptional()
-  @IsNumber()
-  fat?: number;
+	@IsOptional()
+	@IsNumber()
+	fat?: number;
+
+		@IsOptional()
+	@IsIn(['g', 'count'])
+	unit?: string;
 }
 
 export class SupplementTakenDto {
-  @IsString()
-  name!: string;
+	@IsString()
+	name!: string;
 
-  @IsBoolean()
-  taken!: boolean;
+	@IsBoolean()
+	taken!: boolean;
 }
 
 export class Time12Dto {
-  @IsNumber()
-  @Min(1)
-  @Max(12)
-  hour!: number;
+	@IsNumber()
+	@Min(1)
+	@Max(12)
+	hour!: number;
 
-  @IsNumber()
-  @Min(0)
-  @Max(59)
-  minute!: number;
+	@IsNumber()
+	@Min(0)
+	@Max(59)
+	minute!: number;
 
-  @IsString()
-  ampm!: 'AM' | 'PM';
+	@IsString()
+	ampm!: 'AM' | 'PM';
 }
 
 export class LogMealDto {
-  @IsString()
-  planId!: string;
+	@IsString()
+	planId!: string;
 
-  @IsString()
-  day!: string;
+	@IsString()
+	day!: string;
 
-  @IsNumber()
-  mealIndex!: number;
+	@IsNumber()
+	mealIndex!: number;
 
-  @IsDateString()
-  eatenAt!: string;
+	@IsDateString()
+	eatenAt!: string;
 
-  @IsNumber()
-  @Min(1)
-  @Max(5)
-  adherence!: number;
+	@IsNumber()
+	@Min(1)
+	@Max(5)
+	adherence!: number;
 
-  @IsOptional()
-  @IsString()
-  notes?: string;
+	@IsOptional()
+	@IsString()
+	notes?: string;
 
-  @IsString()
-  mealTitle: string;
+	@IsString()
+	mealTitle: string;
 
-  @IsBoolean()
-  notifyCoach!: boolean;
+	@IsBoolean()
+	notifyCoach!: boolean;
 
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => MealLogItemDto)
-  items!: MealLogItemDto[];
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => MealLogItemDto)
+	items!: MealLogItemDto[];
 
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => ExtraFoodDto)
-  extraFoods!: ExtraFoodDto[];
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => ExtraFoodDto)
+	extraFoods!: ExtraFoodDto[];
 
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => SupplementTakenDto)
-  supplementsTaken!: SupplementTakenDto[];
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => SupplementTakenDto)
+	supplementsTaken!: SupplementTakenDto[];
 }
