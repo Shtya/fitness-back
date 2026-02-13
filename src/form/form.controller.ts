@@ -5,6 +5,7 @@ import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { MultipartLoggerInterceptor } from '../../common/MultipartLoggerInterceptor';
 
 function safeName(name: string) {
 	return name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -104,6 +105,7 @@ export class FormController {
 			}),
 			limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
 		}),
+		MultipartLoggerInterceptor,
 	)
 	async submitForm(
 		@Param('id') id: string,

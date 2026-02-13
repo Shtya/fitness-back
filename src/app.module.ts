@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import * as path from 'path';
@@ -25,45 +25,51 @@ import { BillingModule } from './billing/billing.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { BuilderModule } from './builder/builder.module';
 import { CalendarModule } from './calendar/calendar.module';
- 
-@Module({
-  imports: [
-    ConfigModule.forRoot(),
-    ScheduleModule.forRoot(),
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: process.env.DATABASE_HOST,
-      port: parseInt(process.env.DATABASE_PORT, 10),
-      username: process.env.DATABASE_USER,
-      password: process.env.DATABASE_PASSWORD,
-      database: process.env.DATABASE_NAME,
-      entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-      synchronize: false,
-    }),
+import { LoggerMiddleware } from '../common/logger.middleware';
 
-    AuthModule,
-    AssetModule,
-    PlansModule,
-    PrsModule,
-    PlansModule,
-    ChatModule,
-    FormModule,
-    ExercisesModule,
-    NotificationModule,
-    NutritionModule,
-    ProfileModule,
-    WeeklyReportModule,
-    StatsModule,
-    SettingsModule,
-    AboutUserModule,
-    ReminderModule,
-    FeedbackModule,
-    BillingModule,
-    BuilderModule,
-    CalendarModule,
-  ],
-  controllers: [AppController],
-  providers: [AppService, QueryFailedErrorFilter],
-  exports: [],
+@Module({
+	imports: [
+		ConfigModule.forRoot(),
+		ScheduleModule.forRoot(),
+		TypeOrmModule.forRoot({
+			type: 'postgres',
+			host: process.env.DATABASE_HOST,
+			port: parseInt(process.env.DATABASE_PORT, 10),
+			username: process.env.DATABASE_USER,
+			password: process.env.DATABASE_PASSWORD,
+			database: process.env.DATABASE_NAME,
+			entities: [__dirname + '/../**/*.entity{.ts,.js}'],
+			synchronize: false,
+		}),
+
+		AuthModule,
+		AssetModule,
+		PlansModule,
+		PrsModule,
+		PlansModule,
+		ChatModule,
+		FormModule,
+		ExercisesModule,
+		NotificationModule,
+		NutritionModule,
+		ProfileModule,
+		WeeklyReportModule,
+		StatsModule,
+		SettingsModule,
+		AboutUserModule,
+		ReminderModule,
+		FeedbackModule,
+		BillingModule,
+		BuilderModule,
+		CalendarModule,
+	],
+	controllers: [AppController],
+	providers: [AppService, QueryFailedErrorFilter],
+	exports: [],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+	configure(consumer: MiddlewareConsumer) {
+
+		consumer.apply(LoggerMiddleware).forRoutes('*'); // Logs all incoming requests
+	}
+}
