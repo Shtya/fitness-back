@@ -103,7 +103,11 @@ export class FormController {
 					cb(null, `${safeName(file.fieldname)}-${unique}${ext}`);
 				},
 			}),
-			limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
+			limits: {
+  fileSize: 25 * 1024 * 1024, // 25MB
+  files: 10,
+}
+
 		}),
 		MultipartLoggerInterceptor,
 	)
