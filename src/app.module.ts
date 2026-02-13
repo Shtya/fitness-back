@@ -24,6 +24,7 @@ import { FeedbackModule } from './feedback/feedback.module';
 import { BillingModule } from './billing/billing.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { BuilderModule } from './builder/builder.module';
+import { CalendarModule } from './calendar/calendar.module';
  
 @Module({
   imports: [
@@ -37,7 +38,7 @@ import { BuilderModule } from './builder/builder.module';
       password: process.env.DATABASE_PASSWORD,
       database: process.env.DATABASE_NAME,
       entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-      synchronize: true,
+      synchronize: false,
     }),
 
     AuthModule,
@@ -59,6 +60,7 @@ import { BuilderModule } from './builder/builder.module';
     FeedbackModule,
     BillingModule,
     BuilderModule,
+    CalendarModule,
   ],
   controllers: [AppController],
   providers: [AppService, QueryFailedErrorFilter],
