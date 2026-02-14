@@ -1,3 +1,7 @@
+/* 
+
+*/
+
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
@@ -6,7 +10,7 @@ import { CreateFormDto, UpdateFormDto, SubmitFormDto, ReorderFieldsDto } from '.
 import { NotificationService } from 'src/notification/notification.service';
 import { User, UserRole } from 'entities/global.entity';
 
-type Requester = { id: string; role: UserRole };
+type Requester = { id: string; role: UserRole, adminId?: string | null };
 
 @Injectable()
 export class FormService {
@@ -42,13 +46,7 @@ export class FormService {
 	private async ensureCanReadForm(formId: number, requester: Requester): Promise<Form> {
 		const form = await this.formRepository.findOne({ where: { id: formId } });
 		if (!form) throw new NotFoundException('Form not found');
-
-		if (!this.isSuper(requester)) {
-			// can read own or global only
-			if (form.adminId && form.adminId !== requester.id) {
-				throw new ForbiddenException('Not allowed');
-			}
-		}
+ 
 		return form;
 	}
 
@@ -57,7 +55,7 @@ export class FormService {
 	async createForm(dto: CreateFormDto, requester: Requester): Promise<Form> {
 		const form = this.formRepository.create({
 			title: dto.title,
-			adminId: this.isSuper(requester) ? null : requester.id, // ⬅️ Global if super
+			adminId: this.isSuper(requester) ? null : requester.id,  
 		});
 		const savedForm = await this.formRepository.save(form);
 
@@ -100,15 +98,22 @@ export class FormService {
 	}
 
 	async getAllForms(page = 1, limit = 10, requester: Requester, includeGlobal = true) {
+
+		console.log(requester);
 		const skip = (page - 1) * limit;
 
 		let where: any;
-		if (this.isSuper(requester)) {
-			// super: يشوف الكل
-			where = includeGlobal ? {} : { adminId: Not(IsNull()) };
+
+		if (requester?.role == "coach") {
+			where = [{ adminId: requester.id },
+			{ adminId: requester.adminId }, { adminId: IsNull() }]
 		} else {
-			// admin: يشوف بتاعه + global (لو مطلوب)
-			where = includeGlobal ? [{ adminId: requester.id }, { adminId: IsNull() }] : { adminId: requester.id };
+			if (this.isSuper(requester)) {
+				where = includeGlobal ? {} : { adminId: Not(IsNull()) };
+			} else {
+				where = includeGlobal ? [{ adminId: requester.id }, { adminId: IsNull() }] : { adminId: requester.id };
+			}
+
 		}
 
 		const [results, total] = await this.formRepository.findAndCount({
@@ -250,11 +255,23 @@ export class FormService {
 		return saved;
 	}
 
-	async getFormSubmissionsScoped(formId: number, page = 1, limit = 10, requester: Requester) {
+	async getFormSubmissionsScoped(
+		formId: number,
+		page = 1,
+		limit = 10,
+		requester: Requester,
+		assignedTo?: string, // ✅ NEW
+	) {
 		const form = await this.ensureCanReadForm(formId, requester);
 
+		const where: any = { form: { id: form.id } };
+
+		if (assignedTo) {
+			where.assignedToId = assignedTo; // ✅ filter
+		}
+
 		const [results, total] = await this.submissionRepository.findAndCount({
-			where: { form: { id: form.id } },
+			where,
 			relations: ['form', 'assignedTo'],
 			skip: (page - 1) * limit,
 			take: limit,
@@ -268,6 +285,7 @@ export class FormService {
 			last_page: Math.ceil(total / limit),
 		};
 	}
+
 
 	async assignSubmission(formId: number, submissionId: number, userId: string, requester: Requester): Promise<FormSubmission> {
 		// لازم الأدمن يكون يقدر يدير الفورم ده
@@ -296,72 +314,85 @@ export class FormService {
 
 
 	async submitFormMultipart(
-  formId: number,
-  dto: SubmitFormDto,
-  ipAddress: string,
-  files: any[],
-  baseUrl: string,
-): Promise<FormSubmission> {
-  const form = await this.formRepository.findOne({
-    where: { id: formId },
-    relations: ['fields'],
-  });
-  if (!form) throw new NotFoundException('Form not found');
+		formId: number,
+		dto: SubmitFormDto,
+		ipAddress: string,
+		files: any[],
+		reportTo?: string, // ✅ NEW
+	): Promise<FormSubmission> {
+		const form = await this.formRepository.findOne({
+			where: { id: formId },
+			relations: ['fields'],
+		});
+		if (!form) throw new NotFoundException('Form not found');
 
-  // ✅ Map files by fieldname -> array
-  const fileMap: Record<string, any[]> = {};
-  for (const f of files || []) {
-    if (!fileMap[f.fieldname]) fileMap[f.fieldname] = [];
-    fileMap[f.fieldname].push(f);
-  }
+		const fileMap: Record<string, any[]> = {};
+		for (const f of files || []) {
+			if (!fileMap[f.fieldname]) fileMap[f.fieldname] = [];
+			fileMap[f.fieldname].push(f);
+		}
 
-  const finalAnswers: Record<string, any> = { ...(dto.answers || {}) };
+		const finalAnswers: Record<string, any> = { ...(dto.answers || {}) };
 
-  for (const field of form.fields || []) {
-    if (field.type === 'file') {
-      const uploadedList = fileMap[field.key] || [];
+		for (const field of form.fields || []) {
+			if (field.type === 'file') {
+				const uploadedList = fileMap[field.key] || [];
 
-      if (uploadedList.length) {
-        finalAnswers[field.key] = uploadedList.map(
-          (f) => `/uploads/forms/${f.filename}`,
-        );
-      } else {
-        finalAnswers[field.key] = Array.isArray(finalAnswers[field.key])
-          ? finalAnswers[field.key]
-          : [];
-      }
-    }
-  }
+				if (uploadedList.length) {
+					finalAnswers[field.key] = uploadedList.map(
+						(f) => `/uploads/forms/${f.filename}`,
+					);
+				} else {
+					finalAnswers[field.key] = Array.isArray(finalAnswers[field.key])
+						? finalAnswers[field.key]
+						: [];
+				}
+			}
+		}
 
-  const submission = this.submissionRepository.create({
-    form,
-    email: dto.email,
-    phone: dto.phone,
-    ipAddress,
-    answers: finalAnswers,
-  });
+		const submission = this.submissionRepository.create({
+			form,
+			email: dto.email,
+			phone: dto.phone,
+			ipAddress,
+			answers: finalAnswers,
+		});
 
-  const saved = await this.submissionRepository.save(submission);
+		const saved = await this.submissionRepository.save(submission);
 
-  this.notificationService
-    .create({
-      type: NotificationType.FORM_SUBMISSION,
-      title: `New submission on "${form.title}"`,
-      message: `Email: ${dto.email} | Phone: ${dto.phone}`,
-      data: {
-        formId: form.id,
-        formTitle: form.title,
-        submissionId: saved.id,
-        email: dto.email,
-        phone: dto.phone,
-        ipAddress,
-      },
-      audience: NotificationAudience.ADMIN,
-    })
-    .catch(() => {});
+		if (reportTo) {
+			const user = await this.userRepository.findOne({ where: { id: reportTo } });
+			if (!user) {
+				throw new NotFoundException('report_to user not found');
+			}
 
-  return saved;
-}
+			saved.assignedTo = user;
+			saved.assignedToId = user.id;
+			saved.assignedAt = new Date();
+
+			await this.submissionRepository.save(saved);
+		}
+
+
+		this.notificationService
+			.create({
+				type: NotificationType.FORM_SUBMISSION,
+				title: `New submission on "${form.title}"`,
+				message: `Email: ${dto.email} | Phone: ${dto.phone}`,
+				data: {
+					formId: form.id,
+					formTitle: form.title,
+					submissionId: saved.id,
+					email: dto.email,
+					phone: dto.phone,
+					ipAddress,
+				},
+				audience: NotificationAudience.ADMIN,
+			})
+			.catch(() => { });
+
+		return saved;
+	}
 
 
 }

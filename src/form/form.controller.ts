@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Put, Delete, Param, UseGuards, Patch, Req, Query, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, Post, Put, Delete, Param, UseGuards, Patch, Req, Query, UploadedFiles, UseInterceptors, BadRequestException } from '@nestjs/common';
 import { FormService } from './form.service';
 import { CreateFormDto, UpdateFormDto, SubmitFormDto, ReorderFieldsDto, AssignSubmissionDto } from './form.dto';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
@@ -6,6 +6,7 @@ import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { MultipartLoggerInterceptor } from '../../common/MultipartLoggerInterceptor';
+import { isUUID } from 'class-validator';
 
 function safeName(name: string) {
 	return name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -32,7 +33,7 @@ export class FormController {
 	@UseGuards(JwtAuthGuard)
 	@Get()
 	async getAllForms(@Query('page') page = 1, @Query('limit') limit = 10, @Query('includeGlobal') includeGlobal: 'true' | 'false' = 'true', @Req() req: any) {
-		return this.formService.getAllForms(+page, +limit, { id: req.user.id, role: req.user.role }, includeGlobal === 'true');
+		return this.formService.getAllForms(+page, +limit, { ...req.user, id: req.user.id, role: req.user.role }, includeGlobal === 'true');
 	}
 
 	@UseGuards(JwtAuthGuard)
@@ -67,9 +68,22 @@ export class FormController {
 
 	@UseGuards(JwtAuthGuard)
 	@Get(':id/submissions')
-	async getFormSubmissions(@Param('id') id: string, @Query('page') page = 1, @Query('limit') limit = 10, @Req() req: any) {
-		return this.formService.getFormSubmissionsScoped(+id, +page, +limit, { id: req.user.id, role: req.user.role });
+	async getFormSubmissions(
+		@Param('id') id: string,
+		@Query('page') page = 1,
+		@Query('limit') limit = 10,
+		@Req() req: any,
+		@Query('assignedTo') assignedTo?: string,
+	) {
+		return this.formService.getFormSubmissionsScoped(
+			+id,
+			+page,
+			+limit,
+			{ id: req.user.id, role: req.user.role },
+			req.user.id,
+		);
 	}
+
 
 	// ⬇️ تعيين submission لمستخدم
 	@UseGuards(JwtAuthGuard)
@@ -85,13 +99,6 @@ export class FormController {
 		return this.formService.getFormById(+id); // public view allows any form
 	}
 
-	// @Post(':id/submit')
-	// async submitForm(@Param('id') id: string, @Body() dto: SubmitFormDto, @Req() req: any) {
-	//   const ipAddress = req.ip || req.connection?.remoteAddress || '';
-	//   return this.formService.submitForm(+id, dto, ipAddress);
-	// }
-
-
 	@Post(':id/submit')
 	@UseInterceptors(
 		AnyFilesInterceptor({
@@ -104,9 +111,9 @@ export class FormController {
 				},
 			}),
 			limits: {
-  fileSize: 25 * 1024 * 1024, // 25MB
-  files: 10,
-}
+				fileSize: 25 * 1024 * 1024, // 25MB
+				files: 10,
+			}
 
 		}),
 		MultipartLoggerInterceptor,
@@ -116,6 +123,7 @@ export class FormController {
 		@UploadedFiles() files: any[],
 		@Body() body: any,
 		@Req() req: any,
+		@Query('report_to') reportTo?: string,
 	) {
 		const ipAddress = req.ip || req.connection?.remoteAddress || '';
 
@@ -127,9 +135,10 @@ export class FormController {
 			answers,
 		};
 
-		// create public base url (adjust if behind proxy)
-		const baseUrl = `${req.protocol}://${req.get('host')}`;
+		if (reportTo && !isUUID(reportTo)) {
+			throw new BadRequestException('Please review the form using the link again.');
+		}
 
-		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], baseUrl);
+		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], reportTo);
 	}
 }
