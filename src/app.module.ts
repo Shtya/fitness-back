@@ -26,7 +26,8 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { BuilderModule } from './builder/builder.module';
 import { CalendarModule } from './calendar/calendar.module';
 import { LoggerMiddleware } from '../common/logger.middleware';
-
+import { TodoModule } from './todo/todo.module';
+ 
 @Module({
 	imports: [
 		ConfigModule.forRoot(),
@@ -62,6 +63,7 @@ import { LoggerMiddleware } from '../common/logger.middleware';
 		BillingModule,
 		BuilderModule,
 		CalendarModule,
+		TodoModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

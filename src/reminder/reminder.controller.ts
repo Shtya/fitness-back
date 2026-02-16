@@ -11,25 +11,7 @@ function currentUserId(req: any): string {
 	return req.user?.id ?? req.userId;
 }
 
-class IntervalDto {
-	@IsInt()
-	every!: number;
-
-	@IsEnum(IntervalUnit)
-	unit!: IntervalUnit;
-}
-
-class PrayerDto {
-	@IsIn(['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'])
-	name!: 'Fajr' | 'Dhuhr' | 'Asr' | 'Maghrib' | 'Isha';
-
-	@IsIn(['before', 'after'])
-	direction!: 'before' | 'after';
-
-	@IsInt()
-	offsetMin!: number;
-}
-
+ 
 
 class SnoozeDto {
 	@IsInt()
