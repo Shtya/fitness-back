@@ -318,7 +318,7 @@ export class FormService {
 		dto: SubmitFormDto,
 		ipAddress: string,
 		files: any[],
-		reportTo?: string, // ✅ NEW
+		reportTo?: string,
 	): Promise<FormSubmission> {
 		const form = await this.formRepository.findOne({
 			where: { id: formId },
@@ -350,15 +350,35 @@ export class FormService {
 			}
 		}
 
-		const submission = this.submissionRepository.create({
-			form,
-			email: dto.email,
-			phone: dto.phone,
-			ipAddress,
-			answers: finalAnswers,
-		});
+		const emailNormalized = (dto.email || '').trim().toLowerCase();
+		let existingByEmail: FormSubmission | null = null;
 
-		const saved = await this.submissionRepository.save(submission);
+		if (emailNormalized) {
+			existingByEmail = await this.submissionRepository
+				.createQueryBuilder('s')
+				.where('s.formId = :formId', { formId })
+				.andWhere('LOWER(TRIM(s.email)) = :email', { email: emailNormalized })
+				.orderBy('s.created_at', 'DESC')
+				.getOne();
+		}
+
+		let saved: FormSubmission;
+
+		if (existingByEmail) {
+			existingByEmail.phone = dto.phone ?? existingByEmail.phone;
+			existingByEmail.ipAddress = ipAddress || existingByEmail.ipAddress;
+			existingByEmail.answers = finalAnswers;
+			saved = await this.submissionRepository.save(existingByEmail);
+		} else {
+			const submission = this.submissionRepository.create({
+				form,
+				email: dto.email,
+				phone: dto.phone,
+				ipAddress,
+				answers: finalAnswers,
+			});
+			saved = await this.submissionRepository.save(submission);
+		}
 
 		if (reportTo) {
 			const user = await this.userRepository.findOne({ where: { id: reportTo } });
@@ -373,25 +393,51 @@ export class FormService {
 			await this.submissionRepository.save(saved);
 		}
 
-
-		this.notificationService
-			.create({
-				type: NotificationType.FORM_SUBMISSION,
-				title: `New submission on "${form.title}"`,
-				message: `Email: ${dto.email} | Phone: ${dto.phone}`,
-				data: {
-					formId: form.id,
-					formTitle: form.title,
-					submissionId: saved.id,
-					email: dto.email,
-					phone: dto.phone,
-					ipAddress,
-				},
-				audience: NotificationAudience.ADMIN,
-			})
-			.catch(() => { });
+		if (!existingByEmail) {
+			this.notificationService
+				.create({
+					type: NotificationType.FORM_SUBMISSION,
+					title: `New submission on "${form.title}"`,
+					message: `Email: ${dto.email} | Phone: ${dto.phone}`,
+					data: {
+						formId: form.id,
+						formTitle: form.title,
+						submissionId: saved.id,
+						email: dto.email,
+						phone: dto.phone,
+						ipAddress,
+					},
+					audience: NotificationAudience.ADMIN,
+				})
+				.catch(() => { });
+		}
 
 		return saved;
+	}
+
+	async deleteSubmission(formId: number, submissionId: number, requester: Requester): Promise<{ success: true }> {
+		await this.ensureCanMutateForm(formId, requester);
+
+		const submission = await this.submissionRepository.findOne({
+			where: { id: submissionId, form: { id: formId } },
+		});
+		if (!submission) throw new NotFoundException('Submission not found');
+
+		await this.submissionRepository.remove(submission);
+		return { success: true };
+	}
+
+	async setSubmissionReviewed(formId: number, submissionId: number, reviewed: boolean, requester: Requester): Promise<FormSubmission> {
+		await this.ensureCanMutateForm(formId, requester);
+
+		const submission = await this.submissionRepository.findOne({
+			where: { id: submissionId, form: { id: formId } },
+			relations: ['form', 'assignedTo'],
+		});
+		if (!submission) throw new NotFoundException('Submission not found');
+
+		submission.reviewed = !!reviewed;
+		return this.submissionRepository.save(submission);
 	}
 
 

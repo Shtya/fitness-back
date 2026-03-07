@@ -158,6 +158,18 @@ export class MealItem extends CoreEntity {
 	@Column({ type: 'varchar', length: 20, default: 'g' })
 	unit!: string;
 
+	/** Alternative item when main is not available */
+	@Column({ name: 'alternative_name', type: 'varchar', length: 200, nullable: true })
+	alternativeName!: string | null;
+
+	@Column({ name: 'alternative_quantity', type: 'decimal', precision: 10, scale: 2, nullable: true })
+	alternativeQuantity!: number | null;
+
+	@Column({ name: 'alternative_unit', type: 'varchar', length: 20, nullable: true })
+	alternativeUnit!: string | null;
+
+	@Column({ name: 'alternative_calories', type: 'decimal', precision: 8, scale: 2, nullable: true })
+	alternativeCalories!: number | null;
 
 	@ManyToOne(() => Meal, (meal) => meal.items, { onDelete: 'CASCADE' })
 	@JoinColumn({ name: 'meal_id' })

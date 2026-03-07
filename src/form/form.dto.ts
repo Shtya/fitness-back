@@ -65,8 +65,13 @@ export class ReorderFieldsDto {
   }>;
 }
 
-// ⬇️ جديد لتعيين Submission
+// ⬇️ تعيين Submission
 export class AssignSubmissionDto {
   @IsUUID()
   userId: string;
+}
+
+export class SetReviewedDto {
+  @IsBoolean()
+  reviewed: boolean;
 }

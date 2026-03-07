@@ -343,6 +343,7 @@ export class PlanService {
 							targetSets: e?.targetSets ?? null,
 							targetReps: e?.targetReps ?? null,
 							tempo: e?.tempo ?? null,
+							restSeconds: e?.restSeconds ?? null,
 
 							durationSeconds: e?.durationSeconds ?? null,
 							note: e?.note ?? null,
@@ -535,6 +536,7 @@ export class PlanService {
 									targetSets: e?.targetSets ?? null,
 									targetReps: e?.targetReps ?? null,
 									tempo: e?.tempo ?? null,
+									restSeconds: e?.restSeconds ?? null,
 
 									durationSeconds: e?.durationSeconds ?? null,
 									note: e?.note ?? null,
@@ -579,6 +581,7 @@ export class PlanService {
 									targetSets: e?.targetSets ?? null,
 									targetReps: e?.targetReps ?? null,
 									tempo: e?.tempo ?? null,
+									restSeconds: e?.restSeconds ?? null,
 
 									durationSeconds: e?.durationSeconds ?? null,
 									note: e?.note ?? null,
@@ -719,8 +722,9 @@ export class PlanService {
 						targetSets: e.targetSets ?? x.targetSets,
 						targetReps: e.targetReps ?? x.targetReps,
 						tempo: e.tempo ?? x.tempo,
+						restSeconds: e.restSeconds ?? x.rest ?? null,
+						rest: e.restSeconds ?? x.rest ?? null,
 
-						rest: x.rest ?? null,
 						img: x.img ?? null,
 						video: x.video ?? null,
 

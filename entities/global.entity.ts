@@ -199,6 +199,9 @@ export class ExercisePlanDayExercise extends CoreEntity {
 	@Column({ name: 'tempo', type: 'varchar', length: 64, nullable: true })
 	tempo?: string | null;
 
+	@Column({ name: 'rest_seconds', type: 'int', nullable: true })
+	restSeconds?: number | null;
+
 	@Column({ type: 'varchar', length: 16, default: PlanBlock.MAIN })
 	block!: PlanBlock;
 
@@ -669,6 +672,9 @@ export class FormSubmission {
 
 	@Column({ type: 'timestamptz', nullable: true })
 	assignedAt?: Date | null;
+
+	@Column({ type: 'boolean', default: false })
+	reviewed!: boolean;
 }
 
 /* =========================================================

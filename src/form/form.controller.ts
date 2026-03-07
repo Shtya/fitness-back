@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post, Put, Delete, Param, UseGuards, Patch, Req, Query, UploadedFiles, UseInterceptors, BadRequestException } from '@nestjs/common';
 import { FormService } from './form.service';
-import { CreateFormDto, UpdateFormDto, SubmitFormDto, ReorderFieldsDto, AssignSubmissionDto } from './form.dto';
+import { CreateFormDto, UpdateFormDto, SubmitFormDto, ReorderFieldsDto, AssignSubmissionDto, SetReviewedDto } from './form.dto';
 import { JwtAuthGuard } from 'src/auth/guard/jwt-auth.guard';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -85,11 +85,28 @@ export class FormController {
 	}
 
 
-	// ⬇️ تعيين submission لمستخدم
+	// تعيين submission لمستخدم
 	@UseGuards(JwtAuthGuard)
 	@Post(':formId/submissions/:submissionId/assign')
 	async assignSubmission(@Param('formId') formId: string, @Param('submissionId') submissionId: string, @Body() body: AssignSubmissionDto, @Req() req: any) {
 		return this.formService.assignSubmission(+formId, +submissionId, body.userId, { id: req.user.id, role: req.user.role });
+	}
+
+	@UseGuards(JwtAuthGuard)
+	@Delete(':formId/submissions/:submissionId')
+	async deleteSubmission(@Param('formId') formId: string, @Param('submissionId') submissionId: string, @Req() req: any) {
+		return this.formService.deleteSubmission(+formId, +submissionId, { id: req.user.id, role: req.user.role });
+	}
+
+	@UseGuards(JwtAuthGuard)
+	@Patch(':formId/submissions/:submissionId')
+	async setSubmissionReviewed(
+		@Param('formId') formId: string,
+		@Param('submissionId') submissionId: string,
+		@Body() body: SetReviewedDto,
+		@Req() req: any,
+	) {
+		return this.formService.setSubmissionReviewed(+formId, +submissionId, body.reviewed, { id: req.user.id, role: req.user.role });
 	}
 
 	// ============ Public (submission) ============

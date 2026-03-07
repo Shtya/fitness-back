@@ -2,6 +2,22 @@ import { IsString, IsOptional, IsArray, IsBoolean, ValidateNested, IsNumber, IsI
 import { Type } from 'class-transformer';
 import { DayOfWeek } from '../../../entities/meal_plans.entity'; // ✅ بدل global.entity
 
+export class AlternativeItemDto {
+	@IsString()
+	name!: string;
+
+	@IsOptional()
+	@IsNumber()
+	quantity?: number;
+
+	@IsOptional()
+	@IsIn(['g', 'count'])
+	unit?: string;
+
+	@IsNumber()
+	calories!: number;
+}
+
 export class MealItemDto {
 	@IsString()
 	name!: string;
@@ -16,6 +32,11 @@ export class MealItemDto {
 
 	@IsNumber()
 	calories!: number;
+
+	@IsOptional()
+	@ValidateNested()
+	@Type(() => AlternativeItemDto)
+	alternative?: AlternativeItemDto;
 }
 
 export class SupplementDto {

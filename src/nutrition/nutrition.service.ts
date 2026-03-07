@@ -105,13 +105,21 @@ export class NutritionService {
     return (meals || []).map((m, mi) => ({
       title: String(m?.title || `Meal ${mi + 1}`).trim(),
       time: m?.time ? String(m.time) : null,
-      items: (m?.items || []).map((it, ii) => ({
-        name: String(it?.name || '').trim(),
-        quantity: it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity),
-				unit: it?.unit === 'count' ? 'count' : 'g',
-        calories: Number(it?.calories ?? 0),
-        orderIndex: ii,
-      })),
+      items: (m?.items || []).map((it, ii) => {
+        const alt = it?.alternative;
+        const hasAlt = alt && String(alt?.name || '').trim();
+        return {
+          name: String(it?.name || '').trim(),
+          quantity: it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity),
+          unit: it?.unit === 'count' ? 'count' : 'g',
+          calories: Number(it?.calories ?? 0),
+          orderIndex: ii,
+          alternativeName: hasAlt ? String(alt.name).trim() : null,
+          alternativeQuantity: hasAlt && (alt.quantity !== '' && alt.quantity != null) ? Number(alt.quantity) : null,
+          alternativeUnit: hasAlt && alt.unit === 'count' ? 'count' : (hasAlt ? 'g' : null),
+          alternativeCalories: hasAlt ? Number(alt.calories ?? 0) : null,
+        };
+      }),
       supplements: (m?.supplements || []).map((s, si) => ({
         name: String(s?.name || '').trim(),
         time: s?.time ? String(s.time) : null,
@@ -209,14 +217,18 @@ export class NutritionService {
           );
 
           if (m.items?.length) {
-            const items = m.items.map((it) =>
+            const items = m.items.map((it: any) =>
               itemRepo.create({
                 meal,
                 name: it.name,
                 quantity: it.quantity ?? null,
-								unit: it.unit === 'count' ? 'count' : 'g',
+                unit: it.unit === 'count' ? 'count' : 'g',
                 calories: it.calories,
                 orderIndex: it.orderIndex,
+                alternativeName: it.alternativeName ?? null,
+                alternativeQuantity: it.alternativeQuantity ?? null,
+                alternativeUnit: it.alternativeUnit ?? null,
+                alternativeCalories: it.alternativeCalories ?? null,
               }),
             );
             await itemRepo.save(items);
@@ -377,14 +389,18 @@ export class NutritionService {
 
           if (m.items?.length) {
             await itemRepo.save(
-              m.items.map((it) =>
+              m.items.map((it: any) =>
                 itemRepo.create({
                   meal,
                   name: it.name,
                   quantity: it.quantity ?? null,
-									unit: it.unit === 'count' ? 'count' : 'g',
+                  unit: it.unit === 'count' ? 'count' : 'g',
                   calories: it.calories,
                   orderIndex: it.orderIndex,
+                  alternativeName: it.alternativeName ?? null,
+                  alternativeQuantity: it.alternativeQuantity ?? null,
+                  alternativeUnit: it.alternativeUnit ?? null,
+                  alternativeCalories: it.alternativeCalories ?? null,
                 }),
               ),
             );
