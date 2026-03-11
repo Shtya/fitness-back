@@ -1,5 +1,3 @@
-// src/money/money.controller.ts
-
 import {
 	Body,
 	Controller,
@@ -8,23 +6,19 @@ import {
 	Param,
 	Patch,
 	Post,
-	Put,
 	Query,
 	Req,
 	UseGuards,
 } from '@nestjs/common';
 import { MoneyService } from './money.service';
-
-
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
-
+ 
 
 @UseGuards(JwtAuthGuard)
 @Controller('money')
 export class MoneyController {
-	constructor(private readonly moneyService: MoneyService) { }
+	constructor(private readonly moneyService: MoneyService) {}
 
-	// replace this with your auth user logic
 	private getUserId(req: any): string {
 		return req?.user?.id || req?.userId || req?.headers?.['x-user-id'];
 	}
@@ -34,19 +28,18 @@ export class MoneyController {
 	 * ======================================================= */
 
 	@Get('dashboard')
-	getDashboard(@Req() req: any) {
+	getDashboard(@Req() req: any, @Query() query: any) {
 		const userId = this.getUserId(req);
-		return this.moneyService.getDashboard(userId);
+		return this.moneyService.getDashboard(userId, query?.mode );
 	}
 
 	@Get('monthly-summary')
 	getMonthlySummary(
 		@Req() req: any,
-		@Query('from') from?: string,
-		@Query('to') to?: string,
+		@Query() query: any,
 	) {
 		const userId = this.getUserId(req);
-		return this.moneyService.getMonthlySummary(userId, from, to);
+		return this.moneyService.getMonthlySummary(userId, query?.from, query?.to, query?.mode);
 	}
 
 	/* =========================================================
@@ -72,11 +65,7 @@ export class MoneyController {
 	}
 
 	@Patch('wallets/:id')
-	updateWallet(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateWallet(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateWallet(userId, id, dto);
 	}
@@ -110,11 +99,7 @@ export class MoneyController {
 	}
 
 	@Patch('income/:id')
-	updateIncome(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateIncome(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateIncome(userId, id, dto);
 	}
@@ -148,11 +133,7 @@ export class MoneyController {
 	}
 
 	@Patch('expenses/:id')
-	updateExpense(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateExpense(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateExpense(userId, id, dto);
 	}
@@ -186,11 +167,7 @@ export class MoneyController {
 	}
 
 	@Patch('commitments/:id')
-	updateCommitment(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateCommitment(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateCommitment(userId, id, dto);
 	}
@@ -230,11 +207,7 @@ export class MoneyController {
 	}
 
 	@Patch('zakat/:id')
-	updateZakatLog(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateZakatLog(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateZakatLog(userId, id, dto);
 	}
@@ -268,11 +241,7 @@ export class MoneyController {
 	}
 
 	@Patch('notifications/:id')
-	updateNotification(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	updateNotification(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateNotification(userId, id, dto);
 	}
@@ -289,10 +258,9 @@ export class MoneyController {
 		return this.moneyService.deleteNotification(userId, id);
 	}
 
-
 	/* =========================================================
- * Expected
- * ======================================================= */
+	 * Expected
+	 * ======================================================= */
 
 	@Post('expected')
 	createExpected(@Req() req: any, @Body() dto: any) {
@@ -312,12 +280,8 @@ export class MoneyController {
 		return this.moneyService.getExpectedById(userId, id);
 	}
 
-	@Put('expected/:id')
-	updateExpected(
-		@Req() req: any,
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
+	@Patch('expected/:id')
+	updateExpected(@Req() req: any, @Param('id') id: string, @Body() dto: any) {
 		const userId = this.getUserId(req);
 		return this.moneyService.updateExpected(userId, id, dto);
 	}

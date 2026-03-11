@@ -1,5 +1,3 @@
-// src/entities/money.entity.ts
-
 import {
 	Entity,
 	Column,
@@ -47,6 +45,18 @@ export enum FinanceNotificationType {
 	ALERT = 'alert',
 }
 
+export enum WalletAccountType {
+	CASH = 'cash',
+	E_WALLET = 'e_wallet',
+	BANK = 'bank',
+	CARD = 'card',
+	OTHER = 'other',
+}
+
+export enum BalanceMode {
+	MONTH = 'month',
+	TODAY = 'today',
+}
 
 @Entity('wallet_accounts')
 @Unique(['userId', 'name'])
@@ -63,10 +73,18 @@ export class WalletAccount extends CoreEntity {
 	@Column({ type: 'varchar', length: 120, default: 'Main Wallet' })
 	name!: string;
 
+	@Index()
+	@Column({
+		type: 'enum',
+		enum: WalletAccountType,
+		default: WalletAccountType.CASH,
+	})
+	type!: WalletAccountType;
+
 	@Column({ type: 'enum', enum: MoneyCurrency, default: MoneyCurrency.EGP })
 	currency!: MoneyCurrency;
 
-	// this matches your UI seed like: 14250 + net
+	// Manual real balance entered by user
 	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
 	openingBalance!: string;
 
@@ -114,7 +132,6 @@ export class IncomeEntry extends CoreEntity {
 	@Column({ type: 'uuid', name: 'account_id', nullable: true })
 	accountId?: string | null;
 
-	// source in UI: company / freelance / bonus
 	@Index()
 	@Column({ type: 'varchar', length: 180 })
 	source!: string;
@@ -269,15 +286,14 @@ export class FinancialCommitment extends CoreEntity {
 	@Column({ type: 'int', default: 1 })
 	recurrenceEvery!: number;
 
-	/* Jamia only */
 	@Column({ type: 'varchar', length: 7, nullable: true })
-	jamiaStart?: string | null; // YYYY-MM
+	jamiaStart?: string | null;
 
 	@Column({ type: 'varchar', length: 7, nullable: true })
-	jamiaEnd?: string | null; // YYYY-MM
+	jamiaEnd?: string | null;
 
 	@Column({ type: 'varchar', length: 7, nullable: true })
-	jamiaMyMonth?: string | null; // YYYY-MM
+	jamiaMyMonth?: string | null;
 
 	@Column({ type: 'text', nullable: true })
 	notes?: string | null;
@@ -351,7 +367,7 @@ export class FinanceNotification extends CoreEntity {
 	text!: string;
 
 	@Column({ type: 'varchar', length: 100, nullable: true })
-	timeLabel?: string | null; // e.g. "منذ ساعة"
+	timeLabel?: string | null;
 
 	@Column({ type: 'boolean', default: false })
 	isRead!: boolean;
@@ -359,11 +375,6 @@ export class FinanceNotification extends CoreEntity {
 	@Column({ type: 'jsonb', nullable: true })
 	meta?: Record<string, any> | null;
 }
-
-
-
-
-
 
 /* =========================================================
  * Expected Income / Money

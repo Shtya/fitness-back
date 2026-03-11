@@ -13,18 +13,19 @@ import {
 	ExpectedEntry,
 } from 'entities/money.entity';
 
-
 @Module({
-	imports: [TypeOrmModule.forFeature([WalletAccount,
-		IncomeEntry,
-		ExpenseEntry,
-		FinancialCommitment,
-		ZakatLog,
-		FinanceNotification,ExpectedEntry,])],
+	imports: [
+		TypeOrmModule.forFeature([
+			WalletAccount,
+			IncomeEntry,
+			ExpenseEntry,
+			FinancialCommitment,
+			ZakatLog,
+			FinanceNotification,
+			ExpectedEntry,
+		]),
+	],
 	providers: [MoneyService, JwtService],
-	controllers: [MoneyController]
+	controllers: [MoneyController],
 })
-export class MoneyModule { }
-
-
-
+export class MoneyModule {}

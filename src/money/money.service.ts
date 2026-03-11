@@ -1,8 +1,6 @@
-// src/money/money.service.ts
-
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
+import { Repository } from 'typeorm';
 import {
 	WalletAccount,
 	IncomeEntry,
@@ -11,6 +9,10 @@ import {
 	ZakatLog,
 	FinanceNotification,
 	ExpectedEntry,
+	BalanceMode,
+	CommitmentStatus,
+	WalletAccountType,
+	MoneyCurrency,
 } from 'entities/money.entity';
 import {
 	CreateWalletAccountDto,
@@ -25,6 +27,8 @@ import {
 	UpdateZakatLogDto,
 	CreateFinanceNotificationDto,
 	UpdateFinanceNotificationDto,
+	CreateExpectedEntryDto,
+	UpdateExpectedEntryDto,
 } from './money.dto';
 
 @Injectable()
@@ -50,17 +54,77 @@ export class MoneyService {
 
 		@InjectRepository(ExpectedEntry)
 		private readonly expectedRepo: Repository<ExpectedEntry>,
-	) { }
+	) {}
+
+	/* =========================================================
+	 * Helpers
+	 * ======================================================= */
+
+	private getToday(): string {
+		return new Date().toISOString().slice(0, 10);
+	}
+
+	private getMonthStart(date: string): string {
+		return `${date.slice(0, 7)}-01`;
+	}
+
+	private getMonthEnd(date: string): string {
+		const [year, month] = date.slice(0, 7).split('-').map(Number);
+		const end = new Date(Date.UTC(year, month, 0));
+		return end.toISOString().slice(0, 10);
+	}
+
+	private clampDate(date: string, min: string, max: string): string {
+		if (date < min) return min;
+		if (date > max) return max;
+		return date;
+	}
+
+	private isDateInRange(date?: string | null, from?: string | null, to?: string | null): boolean {
+		if (!date) return false;
+		if (from && date < from) return false;
+		if (to && date > to) return false;
+		return true;
+	}
+
+	private normalizeMode(mode?: string): BalanceMode {
+		return mode === BalanceMode.MONTH ? BalanceMode.MONTH : BalanceMode.TODAY;
+	}
+
+	private sumAmounts<T>(rows: T[], getAmount: (row: T) => any): number {
+		return rows.reduce((sum, row) => sum + Number(getAmount(row) || 0), 0);
+	}
+
+	private getDefaultPeriod(mode?: string, from?: string, to?: string) {
+		const today = this.getToday();
+		const periodFrom = from || this.getMonthStart(today);
+		const periodTo = to || this.getMonthEnd(periodFrom);
+		const normalizedMode = this.normalizeMode(mode);
+		const effectiveTo =
+			normalizedMode === BalanceMode.TODAY
+				? this.clampDate(today, periodFrom, periodTo)
+				: periodTo;
+
+		return {
+			today,
+			mode: normalizedMode,
+			periodFrom,
+			periodTo,
+			effectiveTo,
+			currentMonth: today.slice(0, 7),
+		};
+	}
 
 	/* =========================================================
 	 * Wallet Accounts
 	 * ======================================================= */
 
-	async createWallet(userId: string, dto: CreateWalletAccountDto) {
+	async createWallet(userId: string, dto: any) {
 		const wallet = this.walletRepo.create({
 			userId,
 			name: dto.name ?? 'Main Wallet',
-			currency: dto.currency ?? 'EGP',
+			type: dto.type ?? WalletAccountType.CASH,
+			currency: dto.currency ?? MoneyCurrency.EGP,
 			openingBalance: dto.openingBalance ?? 0,
 			isDefault: dto.isDefault ?? false,
 			notes: dto.notes ?? null,
@@ -208,7 +272,7 @@ export class MoneyService {
 			type: dto.type ?? 'التزام',
 			amount: dto.amount,
 			dueDate: dto.dueDate,
-			status: dto.status ?? 'pending',
+			status: dto.status ?? CommitmentStatus.PENDING,
 			recurring: dto.recurring ?? false,
 			recurrenceType: dto.recurrenceType ?? 'monthly',
 			recurrenceEvery: dto.recurrenceEvery ?? 1,
@@ -248,7 +312,10 @@ export class MoneyService {
 
 	async toggleCommitmentStatus(userId: string, id: string) {
 		const commitment: any = await this.getCommitmentById(userId, id);
-		commitment.status = commitment.status === 'paid' ? 'pending' : 'paid';
+		commitment.status =
+			commitment.status === CommitmentStatus.PAID
+				? CommitmentStatus.PENDING
+				: CommitmentStatus.PAID;
 		return this.commitmentRepo.save(commitment);
 	}
 
@@ -347,52 +414,140 @@ export class MoneyService {
 	 * Dashboard Summary
 	 * ======================================================= */
 
-	async getDashboard(userId: string) {
-		const [wallets, incomes, expenses, commitments, zakatLogs, notifications] = await Promise.all([
-			this.getWallets(userId),
-			this.getIncome(userId),
-			this.getExpenses(userId),
-			this.getCommitments(userId),
-			this.getZakatLogs(userId),
-			this.getNotifications(userId),
-		]);
+	async getDashboard(userId: string, mode?: string) {
+		const period = this.getDefaultPeriod(mode);
 
-		const openingBalance = wallets.reduce(
-			(sum, wallet) => sum + Number(wallet.openingBalance || 0),
-			0,
+		const [wallets, incomes, expenses, commitments, zakatLogs, notifications, expectedEntries] =
+			await Promise.all([
+				this.getWallets(userId),
+				this.getIncome(userId),
+				this.getExpenses(userId),
+				this.getCommitments(userId),
+				this.getZakatLogs(userId),
+				this.getNotifications(userId),
+				this.getExpected(userId),
+			]);
+
+		const currentMonthFrom = period.periodFrom;
+		const currentMonthTo = period.periodTo;
+		const effectiveTo = period.effectiveTo;
+
+		const realAccountsTotal = this.sumAmounts(wallets, (wallet) => wallet.openingBalance);
+		const openingBalance = realAccountsTotal;
+
+		const monthIncome = incomes.filter(
+			(item) => item.isActive !== false && this.isDateInRange(item.date, currentMonthFrom, currentMonthTo),
+		);
+		const currentIncomeRows = incomes.filter(
+			(item) => item.isActive !== false && this.isDateInRange(item.date, currentMonthFrom, effectiveTo),
 		);
 
-		const totalIncome = incomes.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-		const totalExpenses = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-		const totalCommitments = commitments
-			.filter((item: any) => item.status !== 'paid')
-			.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-		const totalZakatPaid = zakatLogs.reduce(
-			(sum, item) => sum + Number(item.amount || 0),
-			0,
+		const monthExpense = expenses.filter(
+			(item) => item.isActive !== false && this.isDateInRange(item.date, currentMonthFrom, currentMonthTo),
+		);
+		const currentExpenseRows = expenses.filter(
+			(item) => item.isActive !== false && this.isDateInRange(item.date, currentMonthFrom, effectiveTo),
 		);
 
-		// Real net after all outgoing money
-		const net = totalIncome - totalExpenses - totalCommitments - totalZakatPaid;
+		const monthExpected = expectedEntries.filter((item) =>
+			this.isDateInRange(item.expectedDate, currentMonthFrom, currentMonthTo),
+		);
+		const currentExpectedRows = expectedEntries.filter((item) =>
+			this.isDateInRange(item.expectedDate, currentMonthFrom, effectiveTo),
+		);
 
-		// Final balance
-		const balance = openingBalance + net;
+		const monthCommitmentRows = commitments.filter(
+			(item) =>
+				item.status !== CommitmentStatus.CANCELLED &&
+				this.isDateInRange(item.dueDate, currentMonthFrom, currentMonthTo),
+		);
+		const currentCommitmentRows = commitments.filter(
+			(item) =>
+				item.status !== CommitmentStatus.CANCELLED &&
+				item.status !== CommitmentStatus.PAID &&
+				this.isDateInRange(item.dueDate, currentMonthFrom, effectiveTo),
+		);
+
+		const monthZakatRows = zakatLogs.filter((item) =>
+			this.isDateInRange(item.date, currentMonthFrom, currentMonthTo),
+		);
+		const currentZakatRows = zakatLogs.filter((item) =>
+			this.isDateInRange(item.date, currentMonthFrom, effectiveTo),
+		);
+
+		const monthlyIncome = this.sumAmounts(monthIncome, (item) => item.amount);
+		const currentIncome = this.sumAmounts(currentIncomeRows, (item) => item.amount);
+
+		const monthlyExpenses = this.sumAmounts(monthExpense, (item) => item.amount);
+		const currentExpenses = this.sumAmounts(currentExpenseRows, (item) => item.amount);
+
+		const monthlyExpected = this.sumAmounts(monthExpected, (item) => item.amount);
+		const currentExpectedAvailable = this.sumAmounts(currentExpectedRows, (item) => item.amount);
+
+		const monthlyCommitments = this.sumAmounts(
+			monthCommitmentRows.filter((item) => item.status !== CommitmentStatus.PAID),
+			(item) => item.amount,
+		);
+		const currentCommitmentsDue = this.sumAmounts(currentCommitmentRows, (item) => item.amount);
+
+		const monthlyZakatPaid = this.sumAmounts(monthZakatRows, (item) => item.amount);
+		const currentZakatPaid = this.sumAmounts(currentZakatRows, (item) => item.amount);
+
+		const monthlyBalance =
+			monthlyIncome + monthlyExpected - monthlyExpenses - monthlyCommitments - monthlyZakatPaid;
+
+		const currentMoneyBalance =
+			currentIncome +
+			currentExpectedAvailable -
+			currentExpenses -
+			currentCommitmentsDue -
+			currentZakatPaid;
+
+		const stats = {
+			mode: period.mode,
+			periodFrom: currentMonthFrom,
+			periodTo: currentMonthTo,
+			effectiveTo,
+			openingBalance,
+			realAccountsTotal,
+
+			totalIncome: period.mode === BalanceMode.MONTH ? monthlyIncome : currentIncome,
+			totalExpenses: period.mode === BalanceMode.MONTH ? monthlyExpenses : currentExpenses,
+			totalExpected:
+				period.mode === BalanceMode.MONTH ? monthlyExpected : currentExpectedAvailable,
+			totalCommitments:
+				period.mode === BalanceMode.MONTH ? monthlyCommitments : currentCommitmentsDue,
+			totalZakatPaid:
+				period.mode === BalanceMode.MONTH ? monthlyZakatPaid : currentZakatPaid,
+
+			currentIncome,
+			currentExpenses,
+			currentExpectedAvailable,
+			currentCommitmentsDue,
+			currentZakatPaid,
+
+			monthlyIncome,
+			monthlyExpenses,
+			monthlyExpected,
+			monthlyCommitments,
+			monthlyZakatPaid,
+
+			currentMoneyBalance,
+			monthlyBalance,
+
+			net: period.mode === BalanceMode.MONTH ? monthlyBalance : currentMoneyBalance,
+			balance: period.mode === BalanceMode.MONTH ? monthlyBalance : currentMoneyBalance,
+		};
 
 		return {
+			mode: period.mode,
 			wallets,
-			stats: {
-				openingBalance,
-				totalIncome,
-				totalExpenses,
-				totalCommitments,
-				totalZakatPaid,
-				net,
-				balance,
-			},
+			stats,
 			incomeCount: incomes.length,
 			expenseCount: expenses.length,
 			commitmentCount: commitments.length,
 			zakatCount: zakatLogs.length,
+			expectedCount: expectedEntries.length,
 			unreadNotifications: notifications.filter((n) => !n.isRead).length,
 			latestNotifications: notifications.slice(0, 10),
 		};
@@ -402,74 +557,160 @@ export class MoneyService {
 	 * Month summary
 	 * ======================================================= */
 
-	async getMonthlySummary(userId: string, from?: string, to?: string) {
-		const incomes = await this.incomeRepo.find({
-			where: {
-				userId,
-				...(from ? { date: MoreThanOrEqual(from) } : {}),
-				...(to ? { date: LessThanOrEqual(to) } : {}),
-			},
-			order: { date: 'ASC' },
-		});
+	async getMonthlySummary(userId: string, from?: string, to?: string, mode?: string) {
+		const period = this.getDefaultPeriod(mode, from, to);
 
-		const expenses = await this.expenseRepo.find({
-			where: {
-				userId,
-				...(from ? { date: MoreThanOrEqual(from) } : {}),
-				...(to ? { date: LessThanOrEqual(to) } : {}),
-			},
-			order: { date: 'ASC' },
-		});
+		const [incomes, expenses, commitments, expectedEntries, zakatLogs] = await Promise.all([
+			this.getIncome(userId),
+			this.getExpenses(userId),
+			this.getCommitments(userId),
+			this.getExpected(userId),
+			this.getZakatLogs(userId),
+		]);
 
-		const commitments = await this.commitmentRepo.find({
-			where: {
-				userId,
-				...(from ? { dueDate: MoreThanOrEqual(from) } : {}),
-				...(to ? { dueDate: LessThanOrEqual(to) } : {}),
-			},
-			order: { dueDate: 'ASC' },
-		});
+		const rangeFrom = period.periodFrom;
+		const rangeTo = period.periodTo;
 
-		const map: Record<string, any> = {};
+		const map: Record<
+			string,
+			{
+				month: string;
+				income: number;
+				expenses: number;
+				expected: number;
+				commitments: number;
+				zakat: number;
+				currentIncome: number;
+				currentExpenses: number;
+				currentExpected: number;
+				currentCommitments: number;
+				currentZakat: number;
+			}
+		> = {};
+
+		const ensureMonth = (month: string) => {
+			if (!map[month]) {
+				const monthStart = `${month}-01`;
+				const monthEnd = this.getMonthEnd(monthStart);
+				const effectiveTo =
+					period.mode === BalanceMode.TODAY && month === period.currentMonth
+						? this.clampDate(period.today, monthStart, monthEnd)
+						: monthEnd;
+
+				map[month] = {
+					month,
+					income: 0,
+					expenses: 0,
+					expected: 0,
+					commitments: 0,
+					zakat: 0,
+					currentIncome: 0,
+					currentExpenses: 0,
+					currentExpected: 0,
+					currentCommitments: 0,
+					currentZakat: 0,
+				};
+
+				return { monthStart, monthEnd, effectiveTo };
+			}
+
+			const monthStart = `${month}-01`;
+			const monthEnd = this.getMonthEnd(monthStart);
+			const effectiveTo =
+				period.mode === BalanceMode.TODAY && month === period.currentMonth
+					? this.clampDate(period.today, monthStart, monthEnd)
+					: monthEnd;
+
+			return { monthStart, monthEnd, effectiveTo };
+		};
 
 		for (const item of incomes) {
-			const month = item.date?.slice(0, 7);
-			if (!map[month]) map[month] = { month, income: 0, expenses: 0, commitments: 0 };
+			if (item.isActive === false || !this.isDateInRange(item.date, rangeFrom, rangeTo)) continue;
+			const month = item.date.slice(0, 7);
+			const { effectiveTo } = ensureMonth(month);
 			map[month].income += Number(item.amount || 0);
+			if (item.date <= effectiveTo) map[month].currentIncome += Number(item.amount || 0);
 		}
 
 		for (const item of expenses) {
-			const month = item.date?.slice(0, 7);
-			if (!map[month]) map[month] = { month, income: 0, expenses: 0, commitments: 0 };
+			if (item.isActive === false || !this.isDateInRange(item.date, rangeFrom, rangeTo)) continue;
+			const month = item.date.slice(0, 7);
+			const { effectiveTo } = ensureMonth(month);
 			map[month].expenses += Number(item.amount || 0);
+			if (item.date <= effectiveTo) map[month].currentExpenses += Number(item.amount || 0);
+		}
+
+		for (const item of expectedEntries) {
+			if (!this.isDateInRange(item.expectedDate, rangeFrom, rangeTo)) continue;
+			const month = item.expectedDate.slice(0, 7);
+			const { effectiveTo } = ensureMonth(month);
+			map[month].expected += Number(item.amount || 0);
+			if (item.expectedDate <= effectiveTo) {
+				map[month].currentExpected += Number(item.amount || 0);
+			}
 		}
 
 		for (const item of commitments) {
-			const month = item.dueDate?.slice(0, 7);
-			if (!map[month]) map[month] = { month, income: 0, expenses: 0, commitments: 0 };
-			map[month].commitments += Number(item.amount || 0);
+			if (
+				item.status === CommitmentStatus.CANCELLED ||
+				!this.isDateInRange(item.dueDate, rangeFrom, rangeTo)
+			) {
+				continue;
+			}
+
+			const month = item.dueDate.slice(0, 7);
+			const { effectiveTo } = ensureMonth(month);
+
+			if (item.status !== CommitmentStatus.PAID) {
+				map[month].commitments += Number(item.amount || 0);
+				if (item.dueDate <= effectiveTo) {
+					map[month].currentCommitments += Number(item.amount || 0);
+				}
+			}
+		}
+
+		for (const item of zakatLogs) {
+			if (!this.isDateInRange(item.date, rangeFrom, rangeTo)) continue;
+			const month = item.date.slice(0, 7);
+			const { effectiveTo } = ensureMonth(month);
+			map[month].zakat += Number(item.amount || 0);
+			if (item.date <= effectiveTo) map[month].currentZakat += Number(item.amount || 0);
 		}
 
 		return Object.values(map)
-			.sort((a: any, b: any) => a.month.localeCompare(b.month))
-			.map((row: any) => ({
-				...row,
-				net: row.income - row.expenses,
-				remaining: row.income - row.expenses - row.commitments,
+			.sort((a, b) => a.month.localeCompare(b.month))
+			.map((row) => ({
+				month: row.month,
+				income: row.income,
+				expenses: row.expenses,
+				expected: row.expected,
+				commitments: row.commitments,
+				zakat: row.zakat,
+
+				currentIncome: row.currentIncome,
+				currentExpenses: row.currentExpenses,
+				currentExpected: row.currentExpected,
+				currentCommitments: row.currentCommitments,
+				currentZakat: row.currentZakat,
+
+				net: row.income + row.expected - row.expenses,
+				remaining: row.income + row.expected - row.expenses - row.commitments - row.zakat,
+
+				currentNet: row.currentIncome + row.currentExpected - row.currentExpenses,
+				currentRemaining:
+					row.currentIncome +
+					row.currentExpected -
+					row.currentExpenses -
+					row.currentCommitments -
+					row.currentZakat,
 			}));
 	}
 
-
-
-
-
-
-
 	/* =========================================================
- * Expected Entries
- * ======================================================= */
+	 * Expected Entries
+	 * ======================================================= */
 
-	async createExpected(userId: string, dto: any) {
+	async createExpected(userId: string, dto: CreateExpectedEntryDto) {
 		const expected = this.expectedRepo.create({
 			userId,
 			accountId: dto.accountId ?? null,
@@ -495,7 +736,7 @@ export class MoneyService {
 		return expected;
 	}
 
-	async updateExpected(userId: string, id: string, dto: any) {
+	async updateExpected(userId: string, id: string, dto: UpdateExpectedEntryDto) {
 		const expected = await this.getExpectedById(userId, id);
 		Object.assign(expected, dto);
 		return this.expectedRepo.save(expected);
