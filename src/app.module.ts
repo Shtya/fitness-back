@@ -27,6 +27,8 @@ import { BuilderModule } from './builder/builder.module';
 import { CalendarModule } from './calendar/calendar.module';
 import { LoggerMiddleware } from '../common/logger.middleware';
 import { TodoModule } from './todo/todo.module';
+import { RecipesModule } from './recipes/recipes.module';
+import { MoneyModule } from './money/money.module';
  
 @Module({
 	imports: [
@@ -40,7 +42,7 @@ import { TodoModule } from './todo/todo.module';
 			password: process.env.DATABASE_PASSWORD,
 			database: process.env.DATABASE_NAME,
 			entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-			synchronize: true,
+			synchronize: false,
 		}),
 
 		AuthModule,
@@ -64,6 +66,8 @@ import { TodoModule } from './todo/todo.module';
 		BuilderModule,
 		CalendarModule,
 		TodoModule,
+		RecipesModule,
+		MoneyModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],
