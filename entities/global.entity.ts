@@ -744,6 +744,11 @@ export class Feedback extends CoreEntity {
 	@Column({ type: 'enum', enum: FeedbackType })
 	type!: FeedbackType;
 
+	// Optional human name of the submitter (for contact forms, etc.)
+	@Index()
+	@Column({ type: 'varchar', length: 255, nullable: true })
+	name?: string | null;
+
 	@Index()
 	@Column({ type: 'varchar', length: 255 })
 	title!: string;
@@ -753,6 +758,15 @@ export class Feedback extends CoreEntity {
 
 	@Column({ type: 'varchar', length: 255, nullable: true })
 	email?: string | null;
+
+	// Optional phone number for contact-style feedback
+	@Column({ type: 'varchar', length: 64, nullable: true })
+	phone?: string | null;
+
+	// Optional category such as "contact", "subscription", "inquiry", etc.
+	@Index()
+	@Column({ type: 'varchar', length: 64, nullable: true })
+	category?: string | null;
 
 	@Index()
 	@Column({ type: 'uuid', nullable: true })

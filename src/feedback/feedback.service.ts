@@ -17,10 +17,13 @@ export class FeedbackService {
   async createFeedback(createFeedbackDto: CreateFeedbackDto, userId?: string) {
     try {
       const feedback = this.feedbackRepo.create({
+        name: createFeedbackDto.name || null,
         type: createFeedbackDto.type,
         title: createFeedbackDto.title,
         description: createFeedbackDto.description,
         email: createFeedbackDto.email || null,
+        phone: createFeedbackDto.phone || null,
+        category: createFeedbackDto.category || null,
         userId: userId || null,
         status: FeedbackStatus.NEW,
       });
@@ -46,6 +49,7 @@ export class FeedbackService {
     type?: string,
     status?: string,
     userId?: string,
+    category?: string,
   ) {
     const query = this.feedbackRepo.createQueryBuilder('feedback');
 
@@ -59,6 +63,10 @@ export class FeedbackService {
 
     if (userId) {
       query.andWhere('feedback.userId = :userId', { userId });
+    }
+
+    if (category) {
+      query.andWhere('feedback.category = :category', { category });
     }
 
     query.orderBy('feedback.created_at', 'DESC').skip(skip).take(take);

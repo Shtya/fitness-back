@@ -12,7 +12,7 @@ export class FeedbackController {
   constructor(private readonly feedbackService: FeedbackService) {}
  
   @Post()
-  async createFeedback(@Body() createFeedbackDto: CreateFeedbackDto, @Req() req: any) {
+  async createFeedback(@Body() createFeedbackDto: any, @Req() req: any) {
     const userId = req.user?.id || null;
     return this.feedbackService.createFeedback(createFeedbackDto, userId);
   }
@@ -29,6 +29,7 @@ export class FeedbackController {
     @Query('type') type?: string,
     @Query('status') status?: string,
     @Query('userId') userId?: string,
+    @Query('category') category?: string,
   ) {
     return this.feedbackService.getAllFeedbacks(
       parseInt(skip, 10),
@@ -36,6 +37,7 @@ export class FeedbackController {
       type,
       status,
       userId,
+      category,
     );
   }
 
