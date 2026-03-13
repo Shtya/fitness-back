@@ -1,30 +1,28 @@
-// --- File: src/billing/billing.module.ts ---
+// src/modules/billing/billing.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BillingService } from './billing.service';
-import { BillingController } from './billing.controller';
 import {
-  Wallet,
-  Transaction,
-  AdminSubscription,
-  WithdrawalRequest,
-  ClientPayment,
-} from 'entities/billing.entity';
-import { User } from 'entities/global.entity';
+  BillingInvoice,
+  BillingPlan,
+  PaymentTransaction,
+  UserSubscription,
+} from '../../entities/billing.entity';
+import { User } from '../../entities/global.entity';
+import { BillingController } from './billing.controller';
+import { BillingService } from './billing.service';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      Wallet,
-      Transaction,
-      AdminSubscription,
-      WithdrawalRequest,
-      ClientPayment,
+      BillingPlan,
+      UserSubscription,
+      BillingInvoice,
+      PaymentTransaction,
       User,
     ]),
   ],
-  providers: [BillingService],
   controllers: [BillingController],
+  providers: [BillingService],
   exports: [BillingService],
 })
 export class BillingModule {}

@@ -23,7 +23,8 @@ export class WeeklyReportController {
     if (req.user.role === UserRole.CLIENT) {
       return this.weeklyReportService.findUserReports(req.user.id, Number(page), Number(limit));
     } else {
-      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ['user'], ['weekOf'], query.filters);
+			console.log(query.search);
+      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ['user'], [''], query.filters);
     }
   }
 

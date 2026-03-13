@@ -1,638 +1,523 @@
-// --- File: src/billing/billing.service.ts ---
+// src/modules/billing/billing.service.ts
 import {
+	BadRequestException,
 	Injectable,
 	NotFoundException,
-	BadRequestException,
-	ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import {
-	Wallet,
-	Transaction,
-	AdminSubscription,
-	WithdrawalRequest,
-	ClientPayment,
-	TransactionType,
-	TransactionStatus,
-	SubscriptionTier,
-	WithdrawalStatus,
+	BillingInvoice,
+	BillingPlan,
+	BillingPlanStatus,
+	InvoiceStatus,
+	PaymentStatus,
+	PaymentTransaction,
+	SubscriptionStatus,
+	UserSubscription,
 } from 'entities/billing.entity';
-
-import {
-	CreateTransactionDto,
-	CreateSubscriptionDto,
-	CreateWithdrawalDto,
-	CreateClientPaymentDto,
-	AdminAnalyticsDto,
-	SystemBillingReportDto,
-	TransactionFilterDto,
-	ClientPaymentFilterDto,
-} from './dto/billing.dto';
-
+import { User } from 'entities/global.entity';
 @Injectable()
 export class BillingService {
 	constructor(
-		@InjectRepository(Wallet) private walletRepo: Repository<Wallet>,
-		@InjectRepository(Transaction)
-		private transactionRepo: Repository<Transaction>,
-		@InjectRepository(AdminSubscription)
-		private subscriptionRepo: Repository<AdminSubscription>,
-		@InjectRepository(WithdrawalRequest)
-		private withdrawalRepo: Repository<WithdrawalRequest>,
-		@InjectRepository(ClientPayment)
-		private clientPaymentRepo: Repository<ClientPayment>,
+		@InjectRepository(BillingPlan)
+		private readonly planRepo: Repository<BillingPlan>,
+
+		@InjectRepository(UserSubscription)
+		private readonly subscriptionRepo: Repository<UserSubscription>,
+
+		@InjectRepository(BillingInvoice)
+		private readonly invoiceRepo: Repository<BillingInvoice>,
+
+		@InjectRepository(PaymentTransaction)
+		private readonly paymentRepo: Repository<PaymentTransaction>,
+
+		@InjectRepository(User)
+		private readonly userRepo: Repository<User>,
 	) { }
 
-	// ============= WALLET OPERATIONS =============
-
-	async getOrCreateWallet(adminId: string): Promise<Wallet> {
-		let wallet = await this.walletRepo.findOne({ where: { adminId } });
-		if (!wallet) {
-			wallet = this.walletRepo.create({
-				adminId,
-				balance: 0,
-				totalEarned: 0,
-				totalWithdrawn: 0,
-				currency: 'USD',
-			});
-			await this.walletRepo.save(wallet);
-		}
-		return wallet;
+	private paginate(page = 1, limit = 20) {
+		const take = Math.min(limit || 20, 100);
+		const skip = (page - 1) * take;
+		return { take, skip, page, limit: take };
 	}
 
-	async getWalletBalance(adminId: string): Promise<Wallet> {
-		const wallet = await this.walletRepo.findOne({ where: { adminId } });
-		if (!wallet) throw new NotFoundException('Wallet not found');
-		return wallet;
+	private buildInvoiceNumber() {
+		return `INV-${Date.now()}`;
 	}
 
-	async addFundsToWallet(
-		adminId: string,
-		amount: number,
-		type: TransactionType,
-	): Promise<Wallet> {
-		if (amount <= 0) throw new BadRequestException('Amount must be greater than 0');
+	private async recalculateInvoice(invoiceId: string) {
+		const invoice = await this.invoiceRepo.findOne({ where: { id: invoiceId } });
+		if (!invoice) return null;
 
-		const wallet = await this.getOrCreateWallet(adminId);
-		wallet.balance += amount;
-		wallet.totalEarned += amount;
-
-		return this.walletRepo.save(wallet);
-	}
-
-	async deductFromWallet(
-		adminId: string,
-		amount: number,
-		type: TransactionType,
-	): Promise<Wallet> {
-		if (amount <= 0) throw new BadRequestException('Amount must be greater than 0');
-
-		const wallet = await this.getOrCreateWallet(adminId);
-		if (wallet.balance < amount) throw new BadRequestException('Insufficient wallet balance');
-
-		wallet.balance -= amount;
-		wallet.totalWithdrawn += amount;
-
-		return this.walletRepo.save(wallet);
-	}
-
-	// ============= TRANSACTION OPERATIONS =============
-
-	async createTransaction(dto: CreateTransactionDto): Promise<Transaction> {
-		const transaction = this.transactionRepo.create({
-			...dto,
-			status: TransactionStatus.COMPLETED,
+		const payments = await this.paymentRepo.find({
+			where: { invoiceId, status: PaymentStatus.SUCCEEDED },
 		});
 
-		const saved = await this.transactionRepo.save(transaction);
+		const paid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+		const total = Number(invoice.total || 0);
+		const due = Math.max(total - paid, 0);
 
-		if (dto.type === TransactionType.DEPOSIT) {
-			await this.addFundsToWallet(dto.adminId, dto.amount, dto.type);
-		} else if (
-			dto.type === TransactionType.WITHDRAWAL ||
-			dto.type === TransactionType.CLIENT_PAYMENT
-		) {
-			await this.deductFromWallet(dto.adminId, dto.amount, dto.type);
+		invoice.amountPaid = paid.toFixed(2);
+		invoice.amountDue = due.toFixed(2);
+		invoice.status = due <= 0 ? InvoiceStatus.PAID : invoice.status;
+		if (due <= 0 && !invoice.paidAt) {
+			invoice.paidAt = new Date().toISOString().slice(0, 10);
+		}
+
+		return this.invoiceRepo.save(invoice);
+	}
+
+	private applyDateRange(qb: any, alias: string, dateFrom?: string, dateTo?: string, column = 'created_at') {
+		if (dateFrom) qb.andWhere(`${alias}.${column} >= :dateFrom`, { dateFrom });
+		if (dateTo) qb.andWhere(`${alias}.${column} <= :dateTo`, { dateTo });
+	}
+
+	async createPlan(dto: any) {
+		const exists = await this.planRepo.findOne({ where: { name: dto.name } });
+		if (exists) throw new BadRequestException('Billing plan name already exists');
+
+		const plan = this.planRepo.create({
+			...dto,
+			intervalCount: dto.intervalCount ?? 1,
+			currency: dto.currency ?? 'EGP',
+			isPopular: dto.isPopular ?? false,
+			status: dto.status ?? BillingPlanStatus.ACTIVE,
+			features: dto.features ?? [],
+		});
+
+		return this.planRepo.save(plan);
+	}
+
+	async updatePlan(id: string, dto: any) {
+		const plan = await this.findPlanById(id);
+		Object.assign(plan, dto);
+		return this.planRepo.save(plan);
+	}
+
+	async removePlan(id: string) {
+		const plan = await this.findPlanById(id);
+		plan.status = BillingPlanStatus.ARCHIVED;
+		return this.planRepo.save(plan);
+	}
+
+	async findPlanById(id: string) {
+		const plan = await this.planRepo.findOne({ where: { id } });
+		if (!plan) throw new NotFoundException('Billing plan not found');
+		return plan;
+	}
+
+	async getPlans(query: any) {
+		const { take, skip, page, limit } = this.paginate(query.page, query.limit);
+
+		const qb = this.planRepo.createQueryBuilder('plan')
+			.orderBy('plan.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
+
+		if (query.q) {
+			qb.andWhere(
+				new Brackets((sq) => {
+					sq.where('LOWER(plan.name) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('LOWER(plan.description) LIKE LOWER(:q)', { q: `%${query.q}%` });
+				}),
+			);
+		}
+
+		if (query.status) qb.andWhere('plan.status = :status', { status: query.status });
+		if (query.currency) qb.andWhere('plan.currency = :currency', { currency: query.currency });
+
+		const [items, total] = await qb.getManyAndCount();
+
+		return {
+			items,
+			meta: {
+				total,
+				page,
+				limit,
+				totalPages: Math.ceil(total / limit),
+			},
+		};
+	}
+
+	async createSubscription(dto: any) {
+		const user = await this.userRepo.findOne({ where: { id: dto.userId } });
+		if (!user) throw new NotFoundException('User not found');
+
+		const plan = await this.planRepo.findOne({ where: { id: dto.planId } });
+		if (!plan) throw new NotFoundException('Plan not found');
+
+		const currentActive = await this.subscriptionRepo.findOne({
+			where: {
+				userId: dto.userId,
+				status: SubscriptionStatus.ACTIVE,
+			},
+			order: { created_at: 'DESC' },
+		});
+
+		if (currentActive) {
+			currentActive.status = SubscriptionStatus.CANCELED;
+			currentActive.canceledAt = new Date().toISOString().slice(0, 10);
+			currentActive.cancelReason = 'Replaced by new subscription';
+			await this.subscriptionRepo.save(currentActive);
+		}
+
+		const start = dto.startDate ?? new Date().toISOString().slice(0, 10);
+
+		const sub = this.subscriptionRepo.create({
+			...dto,
+			startDate: start,
+			autoRenew: dto.autoRenew ?? true,
+			currency: plan.currency,
+			priceAtPurchase: plan.price,
+			status: dto.status ?? SubscriptionStatus.ACTIVE,
+			provider: dto.provider ?? null,
+		});
+
+		const saved:any = await this.subscriptionRepo.save(sub);
+
+		user.membership = plan.name;
+		user.subscriptionStart = saved.startDate;
+		user.subscriptionEnd = saved.endDate ?? null;
+		await this.userRepo.save(user);
+
+		return saved;
+	}
+
+	async updateSubscription(id: string, dto: any) {
+		const sub = await this.findSubscriptionById(id);
+		Object.assign(sub, dto);
+		const saved = await this.subscriptionRepo.save(sub);
+
+		if (saved.userId) {
+			const user = await this.userRepo.findOne({ where: { id: saved.userId } });
+			if (user && saved.status === SubscriptionStatus.ACTIVE) {
+				user.subscriptionStart = saved.startDate;
+				user.subscriptionEnd = saved.endDate;
+				if (saved.plan) user.membership = saved.plan.name;
+				await this.userRepo.save(user);
+			}
 		}
 
 		return saved;
 	}
 
-	async getTransactions(adminId: string, filter?: TransactionFilterDto) {
-		const { page = 1, limit = 20, type, status, startDate, endDate } = filter || {};
-		const skip = (page - 1) * limit;
+	async cancelSubscription(id: string, reason?: string) {
+		const sub = await this.findSubscriptionById(id);
+		sub.status = SubscriptionStatus.CANCELED;
+		sub.canceledAt = new Date().toISOString().slice(0, 10);
+		sub.cancelReason = reason ?? null;
 
-		const qb = this.transactionRepo
-			.createQueryBuilder('t')
-			.where('t.adminId = :adminId', { adminId })
-			.orderBy('t.createdAt', 'DESC')
-			.skip(skip)
-			.take(limit);
+		const saved = await this.subscriptionRepo.save(sub);
 
-		if (type) qb.andWhere('t.type = :type', { type });
-		if (status) qb.andWhere('t.status = :status', { status });
-
-		if (startDate && endDate) {
-			qb.andWhere('t.createdAt BETWEEN :start AND :end', {
-				start: new Date(startDate),
-				end: new Date(endDate),
-			});
+		const user = await this.userRepo.findOne({ where: { id: sub.userId } });
+		if (user) {
+			user.subscriptionEnd = sub.canceledAt;
+			await this.userRepo.save(user);
 		}
 
-		const [transactions, total] = await qb.getManyAndCount();
+		return saved;
+	}
 
-		const pages = Math.ceil(total / limit);
+	async findSubscriptionById(id: string) {
+		const sub = await this.subscriptionRepo.findOne({
+			where: { id },
+			relations: ['user'],
+		});
+		if (!sub) throw new NotFoundException('Subscription not found');
+		return sub;
+	}
+
+	async getSubscriptions(query: any) {
+		const { take, skip, page, limit } = this.paginate(query.page, query.limit);
+
+		const qb = this.subscriptionRepo.createQueryBuilder('sub')
+			.leftJoinAndSelect('sub.user', 'user')
+			.leftJoinAndSelect('sub.plan', 'plan')
+			.orderBy('sub.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
+
+		if (query.userId) qb.andWhere('sub.userId = :userId', { userId: query.userId });
+		if (query.planId) qb.andWhere('sub.planId = :planId', { planId: query.planId });
+		if (query.status) qb.andWhere('sub.status = :status', { status: query.status });
+		if (query.dateFrom) qb.andWhere('sub.startDate >= :dateFrom', { dateFrom: query.dateFrom });
+		if (query.dateTo) qb.andWhere('sub.startDate <= :dateTo', { dateTo: query.dateTo });
+
+		const [items, total] = await qb.getManyAndCount();
 
 		return {
-			data: transactions,
-			total,
-			page,
-			limit,
-			pages,
-			hasNext: page < pages,
-			hasPrev: page > 1,
+			items,
+			meta: {
+				total,
+				page,
+				limit,
+				totalPages: Math.ceil(total / limit),
+			},
 		};
 	}
 
-	async getSystemTransactions(filter?: TransactionFilterDto) {
-		const { page = 1, limit = 20, type, status, startDate, endDate } = filter || {};
-		const skip = (page - 1) * limit;
-
-		const qb = this.transactionRepo
-			.createQueryBuilder('t')
-			.orderBy('t.createdAt', 'DESC')
-			.skip(skip)
-			.take(limit);
-
-		if (type) qb.andWhere('t.type = :type', { type });
-		if (status) qb.andWhere('t.status = :status', { status });
-
-		if (startDate && endDate) {
-			qb.andWhere('t.createdAt BETWEEN :start AND :end', {
-				start: new Date(startDate),
-				end: new Date(endDate),
-			});
-		}
-
-		const [transactions, total] = await qb.getManyAndCount();
-		const pages = Math.ceil(total / limit);
-
-		return {
-			data: transactions,
-			total,
-			page,
-			limit,
-			pages,
-			hasNext: page < pages,
-			hasPrev: page > 1,
-		};
-	}
-
-	// ============= SUBSCRIPTION OPERATIONS =============
-
-	async createSubscription(dto: CreateSubscriptionDto): Promise<AdminSubscription> {
-		await this.subscriptionRepo.update(
-			{ adminId: dto.adminId, isActive: true },
-			{ isActive: false },
-		);
-
-		const subscription = this.subscriptionRepo.create(dto);
-		return this.subscriptionRepo.save(subscription);
-	}
-
-	async getSubscription(adminId: string): Promise<AdminSubscription> {
-		const subscription = await this.subscriptionRepo.findOne({
-			where: { adminId },
-			order: { createdAt: 'DESC' },
-		});
-
-		if (!subscription) {
-			return this.createSubscription({
-				adminId,
-				tier: SubscriptionTier.FREE,
-				expiresAt: new Date('2099-12-31'),
-			} as any);
-		}
-
-		return subscription;
-	}
-
-	// ✅ FIX: renew by subscription id (matches controller route /subscriptions/:id/renew)
-	async renewSubscription(subscriptionId: string): Promise<AdminSubscription> {
-		const current = await this.subscriptionRepo.findOne({
-			where: { id: subscriptionId },
-		});
-
-		if (!current) throw new NotFoundException('Subscription not found');
-
-		if (current.tier === SubscriptionTier.FREE) {
-			throw new BadRequestException('Cannot renew free subscription');
-		}
-
-		// deactivate current
-		await this.subscriptionRepo.update(
-			{ adminId: current.adminId, isActive: true },
-			{ isActive: false },
-		);
-
-		const expiresAt = new Date();
-		expiresAt.setMonth(expiresAt.getMonth() + 1);
-
-		const renewed = this.subscriptionRepo.create({
-			adminId: current.adminId,
-			tier: current.tier,
-			monthlyPrice: current.monthlyPrice,
-			expiresAt,
-			autoRenew: current.autoRenew,
-			isActive: true,
-		});
-
-		return this.subscriptionRepo.save(renewed);
-	}
-
-	async getActiveSubscriptions(adminId: string): Promise<AdminSubscription[]> {
-		return this.subscriptionRepo.find({
-			where: { adminId, isActive: true },
+	async getCurrentSubscription(userId: string) {
+		return this.subscriptionRepo.findOne({
+			where: { userId, status: SubscriptionStatus.ACTIVE },
+			order: { created_at: 'DESC' },
 		});
 	}
 
-	// ============= WITHDRAWAL OPERATIONS =============
+	async createInvoice(dto: any) {
+		const user = await this.userRepo.findOne({ where: { id: dto.userId } });
+		if (!user) throw new NotFoundException('User not found');
 
-	async requestWithdrawal(dto: CreateWithdrawalDto): Promise<WithdrawalRequest> {
-		const wallet = await this.getWalletBalance(dto.adminId);
-
-		if (wallet.balance < dto.amount) {
-			throw new BadRequestException('Insufficient balance for withdrawal');
+		if (dto.planId) {
+			const plan = await this.planRepo.findOne({ where: { id: dto.planId } });
+			if (!plan) throw new NotFoundException('Plan not found');
 		}
 
-		const withdrawal = this.withdrawalRepo.create(dto);
-		return this.withdrawalRepo.save(withdrawal);
-	}
-
-	async getWithdrawalRequests(
-		adminId?: string,
-		status?: WithdrawalStatus,
-		page = 1,
-		limit = 20,
-	) {
-		const skip = (page - 1) * limit;
-
-		const qb = this.withdrawalRepo
-			.createQueryBuilder('w')
-			.orderBy('w.createdAt', 'DESC')
-			.skip(skip)
-			.take(limit);
-
-		if (adminId) qb.where('w.adminId = :adminId', { adminId });
-		if (status) qb.andWhere('w.status = :status', { status });
-
-		const [withdrawals, total] = await qb.getManyAndCount();
-		const pages = Math.ceil(total / limit);
-
-		return {
-			data: withdrawals,
-			total,
-			page,
-			limit,
-			pages,
-			hasNext: page < pages,
-			hasPrev: page > 1,
-		};
-	}
-
-	async approveWithdrawal(withdrawalId: string, processedBy: string): Promise<WithdrawalRequest> {
-		const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
-		if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-
-		withdrawal.status = WithdrawalStatus.APPROVED;
-		withdrawal.processedBy = processedBy;
-		withdrawal.processedAt = new Date();
-
-		return this.withdrawalRepo.save(withdrawal);
-	}
-
-	async rejectWithdrawal(
-		withdrawalId: string,
-		reason: string,
-		processedBy: string,
-	): Promise<WithdrawalRequest> {
-		const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
-		if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-
-		if (withdrawal.status === WithdrawalStatus.PROCESSING) {
-			const wallet = await this.getOrCreateWallet(withdrawal.adminId);
-			wallet.balance += withdrawal.amount;
-			wallet.totalWithdrawn -= withdrawal.amount;
-			await this.walletRepo.save(wallet);
-		}
-
-		withdrawal.status = WithdrawalStatus.REJECTED;
-		withdrawal.rejectionReason = reason;
-		withdrawal.processedBy = processedBy;
-		withdrawal.processedAt = new Date();
-
-		return this.withdrawalRepo.save(withdrawal);
-	}
-
-	async completeWithdrawal(withdrawalId: string, processedBy: string): Promise<WithdrawalRequest> {
-		const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
-		if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-
-		withdrawal.status = WithdrawalStatus.COMPLETED;
-		withdrawal.processedBy = processedBy;
-		withdrawal.processedAt = new Date();
-
-		return this.withdrawalRepo.save(withdrawal);
-	}
-
-	// ============= CLIENT PAYMENT OPERATIONS =============
-
-	async recordClientPayment(dto: CreateClientPaymentDto): Promise<ClientPayment> {
-		const payment = this.clientPaymentRepo.create({
-			adminId: dto.adminId,
-			clientId: dto.clientId,
-			amount: dto.amount,
-			description: dto.description,
-			invoiceId: dto.invoiceId,
-			periodStart: dto.periodStart ? new Date(dto.periodStart) : undefined,
-			periodEnd: dto.periodEnd ? new Date(dto.periodEnd) : undefined,
-			status: TransactionStatus.PENDING as any,
+		const invoice = this.invoiceRepo.create({
+			...dto,
+			invoiceNumber: dto.invoiceNumber ?? this.buildInvoiceNumber(),
+			status: dto.status ?? InvoiceStatus.OPEN,
+			discount: dto.discount ?? '0',
+			tax: dto.tax ?? '0',
+			amountPaid: dto.amountPaid ?? '0',
+			amountDue: dto.amountDue ?? dto.total,
+			currency: dto.currency ?? 'EGP',
+			issueDate: dto.issueDate ?? new Date().toISOString().slice(0, 10),
 		});
 
-		const saved = await this.clientPaymentRepo.save(payment);
-
-		// ✅ return with relations
-		const full = await this.clientPaymentRepo.findOne({
-			where: { id: saved.id },
-			relations: { client: true, admin: true } as any,
-		});
-
-		return full ?? saved;
+		return this.invoiceRepo.save(invoice);
 	}
 
-	// ✅ UPDATED: relation + paid filter + null dates + hasNext/hasPrev
-	async getClientPayments(adminId: string, filter: ClientPaymentFilterDto = {}) {
-		const {
-			page = 1,
-			limit = 20,
-			clientId,
-			startDate,
-			endDate,
-			sort = 'newest',
-			paid = 'all', // ✅ NEW: all | paid | unpaid
-		} = filter as any;
+	async updateInvoice(id: string, dto: any) {
+		const invoice = await this.findInvoiceById(id);
+		Object.assign(invoice, dto);
+		const saved = await this.invoiceRepo.save(invoice);
+		await this.recalculateInvoice(saved.id);
+		return this.findInvoiceById(saved.id);
+	}
 
-		const skip = (page - 1) * limit;
+	async markInvoicePaid(id: string) {
+		const invoice = await this.findInvoiceById(id);
+		invoice.status = InvoiceStatus.PAID;
+		invoice.amountPaid = invoice.total;
+		invoice.amountDue = '0';
+		invoice.paidAt = new Date().toISOString().slice(0, 10);
+		return this.invoiceRepo.save(invoice);
+	}
 
-		const qb = this.clientPaymentRepo
-			.createQueryBuilder('cp')
-			.leftJoinAndSelect('cp.client', 'client')
-			.where('cp.adminId = :adminId', { adminId });
+	async findInvoiceById(id: string) {
+		const invoice = await this.invoiceRepo.findOne({
+			where: { id },
+			relations: ['payments', 'subscription'],
+		});
+		if (!invoice) throw new NotFoundException('Invoice not found');
+		return invoice;
+	}
 
-		if (clientId) qb.andWhere('cp.clientId = :clientId', { clientId });
+	async getInvoices(query: any) {
+		const { take, skip, page, limit } = this.paginate(query.page, query.limit);
 
-		// ✅ paid filter
-		if (paid === 'paid') {
-			qb.andWhere('cp.status IN (:...st)', { st: [TransactionStatus.COMPLETED, 'paid'] });
-		} else if (paid === 'unpaid') {
-			qb.andWhere('cp.status = :st', { st: TransactionStatus.PENDING });
-		}
+		const qb = this.invoiceRepo.createQueryBuilder('invoice')
+			.leftJoinAndSelect('invoice.user', 'user')
+			.leftJoinAndSelect('invoice.plan', 'plan')
+			.leftJoinAndSelect('invoice.subscription', 'subscription')
+			.orderBy('invoice.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
 
-		// ✅ ignore date filter unless both exist (null by default)
-		if (startDate && endDate) {
-			const start = new Date(startDate);
-			const end = new Date(endDate);
+		if (query.userId) qb.andWhere('invoice.userId = :userId', { userId: query.userId });
+		if (query.planId) qb.andWhere('invoice.planId = :planId', { planId: query.planId });
+		if (query.subscriptionId) qb.andWhere('invoice.subscriptionId = :subscriptionId', { subscriptionId: query.subscriptionId });
+		if (query.status) qb.andWhere('invoice.status = :status', { status: query.status });
+
+		if (query.q) {
 			qb.andWhere(
-				'(cp.periodStart BETWEEN :start AND :end OR cp.createdAt BETWEEN :start AND :end)',
-				{ start, end },
+				new Brackets((sq) => {
+					sq.where('LOWER(invoice.invoiceNumber) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('LOWER(invoice.description) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('LOWER(user.name) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('LOWER(user.email) LIKE LOWER(:q)', { q: `%${query.q}%` });
+				}),
 			);
 		}
 
-		switch (sort) {
-			case 'oldest':
-				qb.orderBy('cp.createdAt', 'ASC');
-				break;
-			case 'amount_high':
-				qb.orderBy('cp.amount', 'DESC');
-				break;
-			case 'amount_low':
-				qb.orderBy('cp.amount', 'ASC');
-				break;
-			case 'newest':
-			default:
-				qb.orderBy('cp.createdAt', 'DESC');
-				break;
+		if (query.dateFrom) qb.andWhere('invoice.issueDate >= :dateFrom', { dateFrom: query.dateFrom });
+		if (query.dateTo) qb.andWhere('invoice.issueDate <= :dateTo', { dateTo: query.dateTo });
+
+		const [items, total] = await qb.getManyAndCount();
+
+		return {
+			items,
+			meta: {
+				total,
+				page,
+				limit,
+				totalPages: Math.ceil(total / limit),
+			},
+		};
+	}
+
+	async createPayment(dto: any) {
+		const user = await this.userRepo.findOne({ where: { id: dto.userId } });
+		if (!user) throw new NotFoundException('User not found');
+
+		if (dto.invoiceId) {
+			const invoice = await this.invoiceRepo.findOne({ where: { id: dto.invoiceId } });
+			if (!invoice) throw new NotFoundException('Invoice not found');
 		}
 
-		const [payments, total] = await qb.skip(skip).take(limit).getManyAndCount();
-		const pages = Math.ceil(total / limit);
+		const payment = this.paymentRepo.create({
+			...dto,
+			status: dto.status ?? PaymentStatus.PENDING,
+			currency: dto.currency ?? 'EGP',
+		});
+
+		const saved: any = await this.paymentRepo.save(payment);
+
+		if (saved.invoiceId && saved.status === PaymentStatus.SUCCEEDED) {
+			await this.recalculateInvoice(saved.invoiceId);
+		}
+
+		return this.findPaymentById(saved.id);
+	}
+
+	async updatePayment(id: string, dto: any) {
+		const payment = await this.findPaymentById(id);
+		Object.assign(payment, dto);
+		const saved = await this.paymentRepo.save(payment);
+
+		if (saved.invoiceId) {
+			await this.recalculateInvoice(saved.invoiceId);
+		}
+
+		return this.findPaymentById(saved.id);
+	}
+
+	async findPaymentById(id: string) {
+		const payment = await this.paymentRepo.findOne({
+			where: { id },
+			relations: ['invoice'],
+		});
+		if (!payment) throw new NotFoundException('Payment not found');
+		return payment;
+	}
+
+	async getPayments(query: any) {
+		const { take, skip, page, limit } = this.paginate(query.page, query.limit);
+
+		const qb = this.paymentRepo.createQueryBuilder('payment')
+			.leftJoinAndSelect('payment.user', 'user')
+			.leftJoinAndSelect('payment.invoice', 'invoice')
+			.orderBy('payment.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
+
+		if (query.userId) qb.andWhere('payment.userId = :userId', { userId: query.userId });
+		if (query.invoiceId) qb.andWhere('payment.invoiceId = :invoiceId', { invoiceId: query.invoiceId });
+		if (query.status) qb.andWhere('payment.status = :status', { status: query.status });
+		if (query.provider) qb.andWhere('LOWER(payment.provider) = LOWER(:provider)', { provider: query.provider });
+
+		this.applyDateRange(qb, 'payment', query.dateFrom, query.dateTo);
+
+		const [items, total] = await qb.getManyAndCount();
 
 		return {
-			data: payments,
-			total,
-			page,
-			limit,
-			pages,
-			hasNext: page < pages,
-			hasPrev: page > 1,
+			items,
+			meta: {
+				total,
+				page,
+				limit,
+				totalPages: Math.ceil(total / limit),
+			},
 		};
 	}
 
-	// ✅ UPDATED: guard + return with relations
-	async markPaymentAsPaid(paymentId: string, adminId: string): Promise<ClientPayment> {
-		const payment = await this.clientPaymentRepo.findOne({ where: { id: paymentId } });
-		if (!payment) throw new NotFoundException('Payment not found');
-		if (payment.adminId !== adminId) throw new ForbiddenException('Not allowed');
+	async getStats(query: any) {
+		const invoiceQb = this.invoiceRepo.createQueryBuilder('invoice');
+		const paymentQb = this.paymentRepo.createQueryBuilder('payment');
+		const subscriptionQb = this.subscriptionRepo.createQueryBuilder('sub');
 
-		payment.status = TransactionStatus.COMPLETED as any;
-		payment.paidAt = new Date();
+		if (query.dateFrom) {
+			invoiceQb.andWhere('invoice.created_at >= :dateFrom', { dateFrom: query.dateFrom });
+			paymentQb.andWhere('payment.created_at >= :dateFrom', { dateFrom: query.dateFrom });
+			subscriptionQb.andWhere('sub.created_at >= :dateFrom', { dateFrom: query.dateFrom });
+		}
 
-		await this.clientPaymentRepo.save(payment);
+		if (query.dateTo) {
+			invoiceQb.andWhere('invoice.created_at <= :dateTo', { dateTo: query.dateTo });
+			paymentQb.andWhere('payment.created_at <= :dateTo', { dateTo: query.dateTo });
+			subscriptionQb.andWhere('sub.created_at <= :dateTo', { dateTo: query.dateTo });
+		}
 
-		const full = await this.clientPaymentRepo.findOne({
-			where: { id: paymentId },
-			relations: { client: true, admin: true } as any,
-		});
+		const [
+			totalPlans,
+			activePlans,
+			totalSubscriptions,
+			activeSubscriptions,
+			canceledSubscriptions,
+			totalInvoices,
+			paidInvoices,
+			openInvoices,
+			totalPayments,
+			succeededPayments,
+			failedPayments,
+			paidRevenueRaw,
+			dueRaw,
+		] = await Promise.all([
+			this.planRepo.count(),
+			this.planRepo.count({ where: { status: BillingPlanStatus.ACTIVE } }),
+			subscriptionQb.getCount(),
+			this.subscriptionRepo.count({ where: { status: SubscriptionStatus.ACTIVE } }),
+			this.subscriptionRepo.count({ where: { status: SubscriptionStatus.CANCELED } }),
+			invoiceQb.getCount(),
+			this.invoiceRepo.count({ where: { status: InvoiceStatus.PAID } }),
+			this.invoiceRepo.count({ where: { status: InvoiceStatus.OPEN } }),
+			paymentQb.getCount(),
+			this.paymentRepo.count({ where: { status: PaymentStatus.SUCCEEDED } }),
+			this.paymentRepo.count({ where: { status: PaymentStatus.FAILED } }),
+			this.paymentRepo
+				.createQueryBuilder('payment')
+				.select('COALESCE(SUM(payment.amount), 0)', 'sum')
+				.where('payment.status = :status', { status: PaymentStatus.SUCCEEDED })
+				.getRawOne(),
+			this.invoiceRepo
+				.createQueryBuilder('invoice')
+				.select('COALESCE(SUM(invoice.amountDue), 0)', 'sum')
+				.where('invoice.status != :status', { status: InvoiceStatus.PAID })
+				.getRawOne(),
+		]);
 
-		return full ?? payment;
-	}
-
-	// ✅ NEW: delete payment
-	async deleteClientPayment(paymentId: string, adminId: string) {
-		const payment = await this.clientPaymentRepo.findOne({ where: { id: paymentId } });
-		if (!payment) throw new NotFoundException('Payment not found');
-		if (payment.adminId !== adminId) throw new ForbiddenException('Not allowed');
-
-		await this.clientPaymentRepo.delete(paymentId);
-		return { ok: true };
-	}
-
-	// ============= ADMIN ANALYTICS =============
-
-	async getAdminAnalytics(adminId: string): Promise<AdminAnalyticsDto> {
-		const wallet = await this.getOrCreateWallet(adminId);
-		const subscriptions = await this.getActiveSubscriptions(adminId);
-		const [, transactionCount] = await this.transactionRepo.findAndCount({
-			where: { adminId },
-		});
-
-		const transactions = await this.transactionRepo.find({ where: { adminId } });
-
-		const avgTransaction =
-			transactions?.length > 0
-				? transactions.reduce((sum, t) => sum + Number(t.amount), 0) / transactions.length
-				: 0;
-
-		return {
-			totalBalance: Number(wallet.balance),
-			totalEarned: Number(wallet.totalEarned),
-			totalWithdrawn: Number(wallet.totalWithdrawn),
-			totalSubscribers: subscriptions.length,
-			activeSubscriptions: subscriptions.filter((s) => s.isActive).length,
-			expiredSubscriptions: subscriptions.filter(
-				(s) => !s.isActive || new Date(s.expiresAt) < new Date(),
-			).length,
-			pendingWithdrawals: await this.withdrawalRepo.count({
-				where: { adminId, status: WithdrawalStatus.REQUESTED },
-			}),
-			transactionCount,
-			averageTransactionAmount: avgTransaction,
-		} as any;
-	}
-
-	async getAdminBillingOverview(adminId: string) {
-		const wallet = await this.getWalletBalance(adminId);
-		const subscription = await this.getSubscription(adminId);
-
-		const recentTransactions = await this.transactionRepo.find({
-			where: { adminId },
-			order: { createdAt: 'DESC' },
-			take: 10,
-		});
-
-		const withdrawalRequests = await this.withdrawalRepo.find({
-			where: { adminId },
-			order: { createdAt: 'DESC' },
-			take: 5,
-		});
-
-		const monthStart = new Date();
-		monthStart.setDate(1);
-		monthStart.setHours(0, 0, 0, 0);
-
-		const monthTransactions = await this.transactionRepo.find({
-			where: { adminId, createdAt: MoreThan(monthStart) },
-		});
-
-		const moneyInThisMonth = monthTransactions.reduce((sum, t) => {
-			if (t.type === TransactionType.DEPOSIT || t.type === TransactionType.CLIENT_PAYMENT) {
-				return sum + Number(t.amount);
-			}
-			return sum;
-		}, 0);
-
-		const moneyOutThisMonth = monthTransactions.reduce((sum, t) => {
-			if (t.type === TransactionType.WITHDRAWAL) {
-				return sum + Number(t.amount);
-			}
-			return sum;
-		}, 0);
-
-		const pendingPaymentsCount = await this.clientPaymentRepo.count({
-			where: { adminId, status: TransactionStatus.PENDING as any },
-		});
-
-		const paidPaymentsThisMonth = await this.clientPaymentRepo
-			.createQueryBuilder('cp')
-			.where('cp.adminId = :adminId', { adminId })
-			.andWhere('cp.status = :st', { st: TransactionStatus.COMPLETED })
-			.andWhere('cp.paidAt >= :monthStart', { monthStart })
-			.getCount();
+		const planDistribution = await this.subscriptionRepo
+			.createQueryBuilder('sub')
+			.leftJoin('sub.plan', 'plan')
+			.select('plan.id', 'planId')
+			.addSelect('plan.name', 'planName')
+			.addSelect('COUNT(sub.id)', 'count')
+			.groupBy('plan.id')
+			.addGroupBy('plan.name')
+			.getRawMany();
 
 		return {
-			wallet: {
-				balance: Number(wallet.balance),
-				totalEarned: Number(wallet.totalEarned),
-				totalWithdrawn: Number(wallet.totalWithdrawn),
-				currency: wallet.currency,
+			cards: {
+				totalPlans,
+				activePlans,
+				totalSubscriptions,
+				activeSubscriptions,
+				canceledSubscriptions,
+				totalInvoices,
+				paidInvoices,
+				openInvoices,
+				totalPayments,
+				succeededPayments,
+				failedPayments,
+				revenueCollected: Number(paidRevenueRaw?.sum || 0),
+				outstandingAmount: Number(dueRaw?.sum || 0),
 			},
-			month: {
-				start: monthStart,
-				moneyIn: moneyInThisMonth,
-				moneyOut: moneyOutThisMonth,
-				net: moneyInThisMonth - moneyOutThisMonth,
-				paidPayments: paidPaymentsThisMonth,
-			},
-			pendingPayments: pendingPaymentsCount,
-			subscriptionStatus: {
-				tier: subscription.tier,
-				expiresAt: subscription.expiresAt,
-				isActive: subscription.isActive,
-			},
-			recentTransactions: recentTransactions || [],
-			withdrawalRequests: withdrawalRequests || [],
-		};
-	}
-
-	// ============= SUPER ADMIN REPORTS =============
-
-	async getSystemBillingReport(): Promise<SystemBillingReportDto> {
-		const allWallets = await this.walletRepo.find();
-		const allTransactions = await this.transactionRepo.find();
-		const allSubscriptions = await this.subscriptionRepo.find({ where: { isActive: true } });
-		const allWithdrawals = await this.withdrawalRepo.find({
-			where: { status: WithdrawalStatus.REQUESTED },
-		});
-
-		const totalAdmins = (
-			await this.walletRepo.query('SELECT COUNT(DISTINCT "adminId") FROM wallets')
-		)[0].count;
-
-		const totalBalance = allWallets?.reduce((sum, w) => sum + Number(w.balance), 0) || 0;
-
-		const totalRevenue =
-			allTransactions?.reduce((sum, t) => {
-				if (t.type === TransactionType.DEPOSIT || t.type === TransactionType.CLIENT_PAYMENT) {
-					return sum + Number(t.amount);
-				}
-				return sum;
-			}, 0) || 0;
-
-		const avgWalletBalance = totalAdmins > 0 ? totalBalance / totalAdmins : 0;
-
-		return {
-			totalAdmins,
-			totalBalance,
-			totalTransactions: allTransactions?.length || 0,
-			totalRevenue,
-			activeSubscriptions: allSubscriptions?.length || 0,
-			pendingWithdrawals: allWithdrawals?.length || 0,
-			averageWalletBalance: avgWalletBalance,
-		} as any;
-	}
-
-	async getAllAdminWallets(page = 1, limit = 20) {
-		const skip = (page - 1) * limit;
-
-		const [wallets, total] = await this.walletRepo
-			.createQueryBuilder('w')
-			.leftJoinAndSelect('w.admin', 'admin')
-			.orderBy('w.balance', 'DESC')
-			.skip(skip)
-			.take(limit)
-			.getManyAndCount();
-
-		const pages = Math.ceil(total / limit);
-
-		return {
-			data: wallets,
-			total,
-			page,
-			limit,
-			pages,
-			hasNext: page < pages,
-			hasPrev: page > 1,
+			planDistribution: planDistribution.map((i) => ({
+				planId: i.planId,
+				planName: i.planName,
+				count: Number(i.count),
+			})),
 		};
 	}
 }

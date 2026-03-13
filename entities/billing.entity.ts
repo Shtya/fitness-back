@@ -1,268 +1,314 @@
-// --- File: src/entities/billing.entity.ts ---
+// src/entities/billing.entity.ts
 import {
   Entity,
-  PrimaryGeneratedColumn,
   Column,
-  ManyToOne,
-  CreateDateColumn,
-  UpdateDateColumn,
   Index,
-	JoinColumn,
+  JoinColumn,
+  ManyToOne,
+  OneToMany,
+  Unique,
 } from 'typeorm';
-import { User } from 'entities/global.entity';
+import { CoreEntity } from './core.entity';
+import { User } from './global.entity';
 
-export enum SubscriptionTier {
-  FREE = 'free',
-  BASIC = 'basic',
-  PROFESSIONAL = 'professional',
-  ENTERPRISE = 'enterprise',
+export enum BillingInterval {
+  MONTHLY = 'monthly',
+  QUARTERLY = 'quarterly',
+  YEARLY = 'yearly',
+  ONE_TIME = 'one_time',
 }
 
-export enum TransactionType {
-  DEPOSIT = 'deposit',
-  WITHDRAWAL = 'withdrawal',
-  CLIENT_PAYMENT = 'client_payment',
-  SUBSCRIPTION_CHARGE = 'subscription_charge',
-  REFUND = 'refund',
-  COMMISSION = 'commission',
+export enum BillingPlanStatus {
+  ACTIVE = 'active',
+  INACTIVE = 'inactive',
+  ARCHIVED = 'archived',
 }
 
-export enum TransactionStatus {
+export enum SubscriptionStatus {
   PENDING = 'pending',
-  COMPLETED = 'completed',
+  ACTIVE = 'active',
+  PAST_DUE = 'past_due',
+  CANCELED = 'canceled',
+  EXPIRED = 'expired',
+  TRIALING = 'trialing',
+}
+
+export enum InvoiceStatus {
+  DRAFT = 'draft',
+  OPEN = 'open',
+  PAID = 'paid',
+  VOID = 'void',
+  UNCOLLECTIBLE = 'uncollectible',
+  REFUNDED = 'refunded',
+}
+
+export enum PaymentStatus {
+  PENDING = 'pending',
+  SUCCEEDED = 'succeeded',
   FAILED = 'failed',
-  CANCELLED = 'cancelled',
+  CANCELED = 'canceled',
+  REFUNDED = 'refunded',
 }
 
-export enum WithdrawalStatus {
-  REQUESTED = 'requested',
-  APPROVED = 'approved',
-  PROCESSING = 'processing',
-  COMPLETED = 'completed',
-  REJECTED = 'rejected',
+export enum PaymentMethodType {
+  CASH = 'cash',
+  CARD = 'card',
+  WALLET = 'wallet',
+  BANK_TRANSFER = 'bank_transfer',
+  FAWRY = 'fawry',
+  PAYMOB = 'paymob',
+  STRIPE = 'stripe',
+  PAYPAL = 'paypal',
+  OTHER = 'other',
 }
 
-@Entity('wallets')
-@Index(['adminId'])
-export class Wallet {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+@Entity('billing_plans')
+@Unique(['name'])
+export class BillingPlan extends CoreEntity {
+  @Index()
+  @Column({ type: 'varchar', length: 120 })
+  name!: string;
 
+  @Column({ type: 'text', nullable: true })
+  description?: string | null;
+
+  @Column({ type: 'enum', enum: BillingInterval, default: BillingInterval.MONTHLY })
+  interval!: BillingInterval;
+
+  @Column({ type: 'int', default: 1 })
+  intervalCount!: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  price!: string;
+
+  @Column({ type: 'varchar', length: 10, default: 'EGP' })
+  currency!: string;
+
+  @Column({ type: 'int', nullable: true })
+  durationDays?: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  trialDays?: number | null;
+
+  @Column({ type: 'boolean', default: false })
+  isPopular!: boolean;
+
+  @Column({ type: 'enum', enum: BillingPlanStatus, default: BillingPlanStatus.ACTIVE })
+  status!: BillingPlanStatus;
+
+  @Column('text', { array: true, default: '{}' })
+  features!: string[];
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  adminId?: string | null;
+
+  @OneToMany(() => UserSubscription, (sub) => sub.plan)
+  subscriptions!: UserSubscription[];
+
+  @OneToMany(() => BillingInvoice, (invoice) => invoice.plan)
+  invoices!: BillingInvoice[];
+}
+
+@Entity('user_subscriptions')
+@Index(['userId', 'status'])
+export class UserSubscription extends CoreEntity {
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  admin: User;
+  @JoinColumn({ name: 'userId' })
+  user!: User;
 
-  @Column('uuid')
-  adminId: string;
+  @Index()
+  @Column({ type: 'uuid' })
+  userId!: string;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0 })
-  balance: number;
+  @ManyToOne(() => BillingPlan, { nullable: true, onDelete: 'SET NULL', eager: true })
+  @JoinColumn({ name: 'planId' })
+  plan!: BillingPlan | null;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0 })
-  totalEarned: number;
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  planId!: string | null;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0 })
-  totalWithdrawn: number;
-
-  @Column({ default: 'USD' })
-  currency: string;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
-
-@Entity('transactions')
-@Index(['adminId'])
-@Index(['type'])
-@Index(['status'])
-@Index(['createdAt'])
-export class Transaction {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  admin: User;
-
-  @Column('uuid')
-  adminId: string;
-
-  @Column('uuid', { nullable: true })
-  clientId?: string;
-
-  @Column({
-    type: 'enum',
-    enum: TransactionType,
-  })
-  type: TransactionType;
-
-  @Column({
-    type: 'enum',
-    enum: TransactionStatus,
-    default: TransactionStatus.PENDING,
-  })
-  status: TransactionStatus;
-
-  @Column('decimal', { precision: 12, scale: 2 })
-  amount: number;
-
-  @Column({ nullable: true })
-  description?: string;
-
-  @Column({ nullable: true })
-  referenceId?: string;
-
-  @Column('json', { nullable: true })
-  metadata?: Record<string, any>;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
-
-@Entity('admin_subscriptions')
-@Index(['adminId'])
-export class AdminSubscription {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  admin: User;
-
-  @Column('uuid')
-  adminId: string;
-
-  @Column({
-    type: 'enum',
-    enum: SubscriptionTier,
-    default: SubscriptionTier.FREE,
-  })
-  tier: SubscriptionTier;
-
-  @Column('decimal', { precision: 10, scale: 2, nullable: true })
-  monthlyPrice?: number;
-
-  @Column()
-  expiresAt: Date;
-
-  @Column({ default: false })
-  autoRenew: boolean;
-
-  @Column({ default: true })
-  isActive: boolean;
-
-  @Column('json', { nullable: true })
-  features?: Record<string, any>;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
-
-@Entity('withdrawal_requests')
-@Index(['adminId'])
-@Index(['status'])
-export class WithdrawalRequest {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  admin: User;
-
-  @Column('uuid')
-  adminId: string;
-
-  @Column('decimal', { precision: 12, scale: 2 })
-  amount: number;
-
-  @Column({
-    type: 'enum',
-    enum: WithdrawalStatus,
-    default: WithdrawalStatus.REQUESTED,
-  })
-  status: WithdrawalStatus;
-
-  @Column({ nullable: true })
-  bankAccountNumber?: string;
-
-  @Column({ nullable: true })
-  bankName?: string;
-
-  @Column({ nullable: true })
-  accountHolderName?: string;
-
-  @Column({ nullable: true })
-  rejectionReason?: string;
-
-  @Column('json', { nullable: true })
-  metadata?: Record<string, any>;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-
-  @Column({ nullable: true })
-  processedAt?: Date;
-
-  @Column('uuid', { nullable: true })
-  processedBy?: string;
-}
-
-@Entity('client_payments')
-@Index(['adminId'])
-@Index(['clientId'])
-export class ClientPayment {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  admin: User;
-
-  @Column('uuid')
-  adminId: string;
-
-  @Column('uuid')
-  clientId: string;
-
-	@ManyToOne(() => User, { eager: false, nullable: false })
-  @JoinColumn({ name: 'clientId' })
-  client: User;
-
-  @Column('decimal', { precision: 12, scale: 2 })
-  amount: number;
-
-  @Column('text', { nullable: true })
-  description?: string;
-
-  @Column({ nullable: true })
-  invoiceId?: string;
-
-  @Column({
-    type: 'enum',
-    enum: TransactionStatus,
-    default: TransactionStatus.PENDING,
-  })
-  status: TransactionStatus;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-
-  @Column({ nullable: true })
-  paidAt?: Date;
+  @Column({ type: 'enum', enum: SubscriptionStatus, default: SubscriptionStatus.PENDING })
+  status!: SubscriptionStatus;
 
   @Column({ type: 'date', nullable: true })
-  periodStart?: Date;
+  startDate!: string | null;
 
   @Column({ type: 'date', nullable: true })
-  periodEnd?: Date;
+  endDate!: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  renewAt!: string | null;
+
+  @Column({ type: 'boolean', default: true })
+  autoRenew!: boolean;
+
+  @Column({ type: 'date', nullable: true })
+  canceledAt!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  cancelReason?: string | null;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  externalSubscriptionId?: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  provider?: string | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  priceAtPurchase?: string | null;
+
+  @Column({ type: 'varchar', length: 10, default: 'EGP' })
+  currency!: string;
+
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
+  @OneToMany(() => BillingInvoice, (invoice) => invoice.subscription)
+  invoices!: BillingInvoice[];
+}
+
+@Entity('billing_invoices')
+@Unique(['invoiceNumber'])
+@Index(['userId', 'status'])
+export class BillingInvoice extends CoreEntity {
+  @ManyToOne(() => User, { onDelete: 'CASCADE', eager: true })
+  @JoinColumn({ name: 'userId' })
+  user!: User;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  userId!: string;
+
+  @ManyToOne(() => BillingPlan, { nullable: true, onDelete: 'SET NULL', eager: true })
+  @JoinColumn({ name: 'planId' })
+  plan!: BillingPlan | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  planId!: string | null;
+
+  @ManyToOne(() => UserSubscription, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'subscriptionId' })
+  subscription!: UserSubscription | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  subscriptionId!: string | null;
+
+  @Index()
+  @Column({ type: 'varchar', length: 50 })
+  invoiceNumber!: string;
+
+  @Column({ type: 'enum', enum: InvoiceStatus, default: InvoiceStatus.OPEN })
+  status!: InvoiceStatus;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  subtotal!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  discount!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  tax!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  total!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  amountPaid!: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  amountDue!: string;
+
+  @Column({ type: 'varchar', length: 10, default: 'EGP' })
+  currency!: string;
+
+  @Column({ type: 'date', nullable: true })
+  issueDate!: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  dueDate!: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  paidAt!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  description?: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  items?: Array<{
+    title: string;
+    description?: string;
+    qty: number;
+    unitPrice: number;
+    total: number;
+  }> | null;
+
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
+  @OneToMany(() => PaymentTransaction, (payment) => payment.invoice)
+  payments!: PaymentTransaction[];
+}
+
+@Entity('payment_transactions')
+@Index(['userId', 'status'])
+export class PaymentTransaction extends CoreEntity {
+  @ManyToOne(() => User, { onDelete: 'CASCADE', eager: true })
+  @JoinColumn({ name: 'userId' })
+  user!: User;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  userId!: string;
+
+  @ManyToOne(() => BillingInvoice, (invoice) => invoice.payments, {
+    nullable: true,
+    onDelete: 'SET NULL',
+    eager: true,
+  })
+  @JoinColumn({ name: 'invoiceId' })
+  invoice!: BillingInvoice | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  invoiceId!: string | null;
+
+  @Column({ type: 'enum', enum: PaymentMethodType, default: PaymentMethodType.CARD })
+  paymentMethod!: PaymentMethodType;
+
+  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
+  status!: PaymentStatus;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  amount!: string;
+
+  @Column({ type: 'varchar', length: 10, default: 'EGP' })
+  currency!: string;
+
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  provider?: string | null;
+
+  @Column({ type: 'varchar', length: 150, nullable: true })
+  transactionId?: string | null;
+
+  @Column({ type: 'varchar', length: 150, nullable: true })
+  referenceNumber?: string | null;
+
+  @Column({ type: 'varchar', length: 150, nullable: true })
+  externalPaymentIntentId?: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  paidAt!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  failureReason?: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  metadata?: Record<string, any> | null;
 }
