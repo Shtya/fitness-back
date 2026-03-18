@@ -106,4 +106,25 @@ export class ChatController {
       size: file.size,
     };
   }
+
+
+	  @Post('push/register')
+  async registerPushToken(@Req() req: any, @Body() body: { expoPushToken: string }) {
+    return this.chatService.registerExpoPushToken(req.user.id, body.expoPushToken);
+  }
+
+  @Post('push/unregister')
+  async unregisterPushToken(@Req() req: any, @Body() body: { expoPushToken: string }) {
+    return this.chatService.unregisterExpoPushToken(req.user.id, body.expoPushToken);
+  }
+
+  @Get('me/settings')
+  async getChatSettings(@Req() req: any) {
+    return this.chatService.getChatSettings(req.user.id);
+  }
+
+  @Put('me/settings')
+  async updateChatSettings(@Req() req: any, @Body() body: any) {
+    return this.chatService.updateChatSettings(req.user.id, body);
+  }
 }

@@ -7,298 +7,346 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
+import { ChatPushService } from './chat-push.service';
 
 @WebSocketGateway({
-  cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    credentials: true,
-  },
+	cors: {
+		origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+		credentials: true,
+	},
 })
 @Injectable()
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer()
-  server: Server;
+	@WebSocketServer()
+	server: Server;
 
-  private connectedUsers = new Map<string, string>();
+	private connectedUsers = new Map<string, string>();
 
-  constructor(
+	  constructor(
     private jwtService: JwtService,
+    private chatPushService: ChatPushService,
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(ChatConversation) private conversationRepo: Repository<ChatConversation>,
     @InjectRepository(ChatMessage) private messageRepo: Repository<ChatMessage>,
     @InjectRepository(ChatParticipant) private participantRepo: Repository<ChatParticipant>,
   ) {}
 
-  async handleConnection(client: Socket) {
-    try {
-      const token = client.handshake.auth.token || client.handshake.headers.token;
-      if (!token) {
-        client.disconnect();
-        return;
-      }
+	  private buildPushBody(message: ChatMessage, receiverSettings?: any) {
+    if (!receiverSettings?.showPreview) return 'New message';
 
-      const decoded = this.jwtService.verify(token, {
-        secret: process.env.JWT_SECRET!,
-      });
+    if (message.messageType === 'text') return message.content || 'New message';
+    if (message.messageType === 'image') return 'Photo';
+    if (message.messageType === 'file') return 'File';
+    if (message.messageType === 'voice') return 'Voice message';
 
-      const user = await this.userRepo.findOne({ where: { id: decoded.id } });
-      if (!user) {
-        client.disconnect();
-        return;
-      }
-
-      this.connectedUsers.set(user.id, client.id);
-      client.join(`user_${user.id}`);
-
-      // Join all user's conversations
-      const participants = await this.participantRepo.find({
-        where: { user: { id: user.id }, isActive: true },
-        relations: ['conversation'],
-      });
-
-      participants.forEach(participant => {
-        client.join(`conversation_${participant.conversation.id}`);
-      });
-
-      // Notify others about user online status
-      this.server.emit('user_online', { userId: user.id, online: true });
-    } catch (error) {
-      console.error('Connection error:', error);
-      client.disconnect();
-    }
+    return 'New message';
   }
 
-  handleDisconnect(client: Socket) {
-    for (const [userId, socketId] of this.connectedUsers.entries()) {
-      if (socketId === client.id) {
-        this.connectedUsers.delete(userId);
-        this.server.emit('user_online', { userId, online: false });
-        break;
-      }
-    }
-  }
 
-  @SubscribeMessage('join_conversation')
-  async handleJoinConversation(client: Socket, conversationId: string) {
-    client.join(`conversation_${conversationId}`);
-  }
+	async handleConnection(client: Socket) {
+		try {
+			const token = client.handshake.auth.token || client.handshake.headers.token;
+			if (!token) {
+				client.disconnect();
+				return;
+			}
 
-  @SubscribeMessage('leave_conversation')
-  async handleLeaveConversation(client: Socket, conversationId: string) {
-    client.leave(`conversation_${conversationId}`);
-  }
+			const decoded = this.jwtService.verify(token, {
+				secret: process.env.JWT_SECRET!,
+			});
 
-  @SubscribeMessage('send_message')
-  async handleMessage(
-    client: Socket,
-    payload: {
-      conversationId: string;
-      content: string;
-      messageType?: string;
-      attachments?: any[];
-      replyToId?: string;
-      tempId?: string;
-    },
-  ) {
-    try {
-      const token = client.handshake.auth.token;
-      const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
-      const user = await this.userRepo.findOne({ where: { id: decoded.id } });
+			const user = await this.userRepo.findOne({ where: { id: decoded.id } });
+			if (!user) {
+				client.disconnect();
+				return;
+			}
 
-      if (!user) return;
+			this.connectedUsers.set(user.id, client.id);
+			client.join(`user_${user.id}`);
 
-      // Check if user is participant of conversation
-      const participant = await this.participantRepo.findOne({
-        where: {
-          conversation: { id: payload.conversationId },
-          user: { id: user.id },
-          isActive: true,
-        },
-      });
+			// Join all user's conversations
+			const participants = await this.participantRepo.find({
+				where: { user: { id: user.id }, isActive: true },
+				relations: ['conversation'],
+			});
 
-      if (!participant) return;
+			participants.forEach(participant => {
+				client.join(`conversation_${participant.conversation.id}`);
+			});
 
-      // Create and save message
-      const message = this.messageRepo.create({
-        conversation: { id: payload.conversationId },
-        sender: user,
-        content: payload.content,
-        messageType: payload.messageType || 'text',
-        attachments: payload.attachments || null,
-        replyTo: payload.replyToId ? { id: payload.replyToId } : null,
-      });
+			// Notify others about user online status
+			this.server.emit('user_online', { userId: user.id, online: true });
+		} catch (error) {
+			console.error('Connection error:', error);
+			client.disconnect();
+		}
+	}
 
-      const savedMessage = await this.messageRepo.save(message);
+	handleDisconnect(client: Socket) {
+		for (const [userId, socketId] of this.connectedUsers.entries()) {
+			if (socketId === client.id) {
+				this.connectedUsers.delete(userId);
+				this.server.emit('user_online', { userId, online: false });
+				break;
+			}
+		}
+	}
 
-      // Update conversation last message
-      await this.conversationRepo.update(payload.conversationId, {
-        lastMessageAt: new Date(),
-      });
+	@SubscribeMessage('join_conversation')
+	async handleJoinConversation(client: Socket, conversationId: string) {
+		client.join(`conversation_${conversationId}`);
+	}
 
-      // Get complete message with relations
-      const messageWithRelations = await this.messageRepo.findOne({
-        where: { id: savedMessage.id },
-        relations: ['sender', 'conversation', 'replyTo', 'replyTo.sender'],
-      });
+	@SubscribeMessage('leave_conversation')
+	async handleLeaveConversation(client: Socket, conversationId: string) {
+		client.leave(`conversation_${conversationId}`);
+	}
 
-      // Prepare message for emission
-      const messageToEmit = {
-        ...messageWithRelations,
-        tempId: payload.tempId,
-        conversation: {
-          id: messageWithRelations.conversation.id,
-        },
-      };
+	@SubscribeMessage('send_message')
+	async handleMessage(
+		client: Socket,
+		payload: {
+			conversationId: string;
+			content: string | null;
+			messageType?: string;
+			attachments?: {
+				name: string;
+				type?: string;
+				size?: number;
+				url: string;
+				mimeType?: string;
+				duration?: number;
+			}[];
+			replyToId?: string;
+			tempId?: string;
+		},
+	) {
+		try {
+			const token = client.handshake.auth.token;
+			const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
+			const user = await this.userRepo.findOne({ where: { id: decoded.id } });
 
-      // Emit to all participants in the conversation
-      this.server.to(`conversation_${payload.conversationId}`).emit('new_message', messageToEmit);
+			if (!user) return;
 
-      // Update conversation list for all participants
-      const participants = await this.participantRepo.find({
-        where: { conversation: { id: payload.conversationId }, isActive: true },
-        relations: ['user'],
-      });
+			// Check if user is participant of conversation
+			const participant = await this.participantRepo.findOne({
+				where: {
+					conversation: { id: payload.conversationId },
+					user: { id: user.id },
+					isActive: true,
+				},
+			});
 
-      // Emit conversation update to all participants
-      participants.forEach(async participant => {
+			if (!participant) return;
+
+			// Create and save message
+			const message = this.messageRepo.create({
+				conversation: { id: payload.conversationId },
+				sender: user,
+				content: payload.content ?? null,
+				messageType: payload.messageType || 'text',
+				attachments: payload.attachments?.length ? payload.attachments : null,
+				replyTo: payload.replyToId ? { id: payload.replyToId } : null,
+			});
+
+			const savedMessage = await this.messageRepo.save(message);
+
+			// Update conversation last message
+			await this.conversationRepo.update(payload.conversationId, {
+				lastMessageAt: new Date(),
+			});
+
+			// Get complete message with relations
+			const messageWithRelations = await this.messageRepo.findOne({
+				where: { id: savedMessage.id },
+				relations: ['sender', 'conversation', 'replyTo', 'replyTo.sender'],
+			});
+
+			// Prepare message for emission
+			const messageToEmit = {
+				...messageWithRelations,
+				tempId: payload.tempId,
+				conversation: {
+					id: messageWithRelations.conversation.id,
+				},
+				attachments: messageWithRelations.attachments || [],
+			};
+
+			// Emit to all participants in the conversation
+			this.server.to(`conversation_${payload.conversationId}`).emit('new_message', messageToEmit);
+
+			// Update conversation list for all participants
+			const participants = await this.participantRepo.find({
+				where: { conversation: { id: payload.conversationId }, isActive: true },
+				relations: ['user'],
+			});
+
+			      // Emit conversation update to all participants + send push to offline users
+      for (const participant of participants) {
         const userSocketId = this.connectedUsers.get(participant.user.id);
 
-        // Get updated conversation with unread count
-        const updatedConvo = await this.getConversationWithUnreadCount(payload.conversationId, participant.user.id);
+        const updatedConvo = await this.getConversationWithUnreadCount(
+          payload.conversationId,
+          participant.user.id,
+        );
 
         if (userSocketId) {
           this.server.to(userSocketId).emit('conversation_updated', updatedConvo);
         }
-      });
-    } catch (error) {
-      console.error('Error sending message:', error);
-      // Emit error back to sender
-      client.emit('message_error', {
-        tempId: payload.tempId,
-        error: 'Failed to send message',
-      });
-    }
-  }
 
-  private async getConversationWithUnreadCount(conversationId: string, userId: string) {
-    const conversation = await this.conversationRepo.findOne({
-      where: { id: conversationId },
-      relations: ['chatParticipants', 'chatParticipants.user'],
-    });
+        if (participant.user.id !== user.id) {
+          const receiver = await this.userRepo.findOne({
+            where: { id: participant.user.id },
+            select: ['id', 'name', 'email', 'expoPushTokens', 'chatSettings'],
+          });
 
-    if (!conversation) return null;
+          const tokens = receiver?.expoPushTokens || [];
+          const settings:any = receiver?.chatSettings || {};
 
-    // Get last message
-    const lastMessage = await this.messageRepo.findOne({
-      where: { conversation: { id: conversationId } },
-      relations: ['sender'],
-      order: { created_at: 'DESC' },
-    });
+          if (settings?.notificationsEnabled !== false && tokens.length) {
+            await this.chatPushService.sendPushNotifications(tokens, {
+              title: user.name || user.email || 'New message',
+              body: this.buildPushBody(savedMessage as any, settings),
+              data: {
+                conversationId: payload.conversationId,
+                senderId: user.id,
+                messageId: savedMessage.id,
+                type: 'chat_message',
+              },
+              sound: settings?.sound === false ? null : 'default',
+            });
+          }
+        }
+      }
+		} catch (error) {
+			console.error('Error sending message:', error);
+			// Emit error back to sender
+			client.emit('message_error', {
+				tempId: payload.tempId,
+				error: 'Failed to send message',
+			});
+		}
+	}
 
-    // Calculate unread count
-    const participant = await this.participantRepo.findOne({
-      where: {
-        conversation: { id: conversationId },
-        user: { id: userId },
-      },
-    });
+	private async getConversationWithUnreadCount(conversationId: string, userId: string) {
+		const conversation = await this.conversationRepo.findOne({
+			where: { id: conversationId },
+			relations: ['chatParticipants', 'chatParticipants.user'],
+		});
 
-    let unreadCount = 0;
-    if (participant?.lastReadAt) {
-      unreadCount = await this.messageRepo
-        .createQueryBuilder('message')
-        .where('message.conversationId = :conversationId', { conversationId })
-        .andWhere('message.created_at > :lastRead', {
-          lastRead: participant.lastReadAt,
-        })
-        .andWhere('message.senderId != :userId', { userId })
-        .andWhere('message.isDeleted = false')
-        .getCount();
-    } else {
-      unreadCount = await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
-    }
+		if (!conversation) return null;
 
-    return {
-      ...conversation,
-      lastMessage,
-      unreadCount,
-    };
-  }
+		// Get last message
+		const lastMessage = await this.messageRepo.findOne({
+			where: { conversation: { id: conversationId } },
+			relations: ['sender'],
+			order: { created_at: 'DESC' },
+		});
 
-  @SubscribeMessage('typing_start')
-  async handleTypingStart(client: Socket, conversationId: string) {
-    try {
-      const token = client.handshake.auth.token;
-      const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
-      const user = await this.userRepo.findOne({ where: { id: decoded.id } });
+		// Calculate unread count
+		const participant = await this.participantRepo.findOne({
+			where: {
+				conversation: { id: conversationId },
+				user: { id: userId },
+			},
+		});
 
-      if (!user) return;
+		let unreadCount = 0;
+		if (participant?.lastReadAt) {
+			unreadCount = await this.messageRepo
+				.createQueryBuilder('message')
+				.where('message.conversationId = :conversationId', { conversationId })
+				.andWhere('message.created_at > :lastRead', {
+					lastRead: participant.lastReadAt,
+				})
+				.andWhere('message.senderId != :userId', { userId })
+				.andWhere('message.isDeleted = false')
+				.getCount();
+		} else {
+			unreadCount = await this.messageRepo.createQueryBuilder('message').where('message.conversationId = :conversationId', { conversationId }).andWhere('message.senderId != :userId', { userId }).andWhere('message.isDeleted = false').getCount();
+		}
 
-      client.to(`conversation_${conversationId}`).emit('user_typing', {
-        conversationId,
-        userId: user.id,
-        userName: user.name,
-        typing: true,
-      });
-    } catch (error) {
-      console.error('Error handling typing start:', error);
-    }
-  }
+		return {
+			...conversation,
+			lastMessage,
+			unreadCount,
+		};
+	}
 
-  @SubscribeMessage('typing_stop')
-  async handleTypingStop(client: Socket, conversationId: string) {
-    try {
-      const token = client.handshake.auth.token;
-      const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
-      const user = await this.userRepo.findOne({ where: { id: decoded.id } });
+	@SubscribeMessage('typing_start')
+	async handleTypingStart(client: Socket, conversationId: string) {
+		try {
+			const token = client.handshake.auth.token;
+			const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
+			const user = await this.userRepo.findOne({ where: { id: decoded.id } });
 
-      if (!user) return;
+			if (!user) return;
 
-      client.to(`conversation_${conversationId}`).emit('user_typing', {
-        conversationId,
-        userId: user.id,
-        userName: user.name,
-        typing: false,
-      });
-    } catch (error) {
-      console.error('Error handling typing stop:', error);
-    }
-  }
+			client.to(`conversation_${conversationId}`).emit('user_typing', {
+				conversationId,
+				userId: user.id,
+				userName: user.name,
+				typing: true,
+			});
+		} catch (error) {
+			console.error('Error handling typing start:', error);
+		}
+	}
 
-  @SubscribeMessage('mark_as_read')
-  async handleMarkAsRead(client: Socket, conversationId: string) {
-    try {
-      const token = client.handshake.auth.token;
-      const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
-      const user = await this.userRepo.findOne({ where: { id: decoded.id } });
+	@SubscribeMessage('typing_stop')
+	async handleTypingStop(client: Socket, conversationId: string) {
+		try {
+			const token = client.handshake.auth.token;
+			const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
+			const user = await this.userRepo.findOne({ where: { id: decoded.id } });
 
-      if (!user) return;
+			if (!user) return;
 
-      // Update last read time
-      await this.participantRepo.update({ conversation: { id: conversationId }, user: { id: user.id } }, { lastReadAt: new Date() });
+			client.to(`conversation_${conversationId}`).emit('user_typing', {
+				conversationId,
+				userId: user.id,
+				userName: user.name,
+				typing: false,
+			});
+		} catch (error) {
+			console.error('Error handling typing stop:', error);
+		}
+	}
 
-      // Mark messages as read
-      await this.messageRepo
-      .createQueryBuilder()
-      .update(ChatMessage)
-      .set({ readBy: () => 'CURRENT_TIMESTAMP' }) // ✅ timestamptz
-      .where('conversationId = :conversationId', { conversationId })
-      .andWhere('senderId != :userId', { userId: user.id })
-      .andWhere('readBy IS NULL') // ✅ مفيش JSON ولا @>
-      .execute();
+	@SubscribeMessage('mark_as_read')
+	async handleMarkAsRead(client: Socket, conversationId: string) {
+		try {
+			const token = client.handshake.auth.token;
+			const decoded = this.jwtService.verify(token, { secret: process.env.JWT_SECRET! });
+			const user = await this.userRepo.findOne({ where: { id: decoded.id } });
 
-      // Notify others in conversation
-      client.to(`conversation_${conversationId}`).emit('messages_read', {
-        conversationId,
-        userId: user.id,
-        readAt: new Date(),
-      });
+			if (!user) return;
 
-      // Update conversation unread count for user
-      const updatedConvo = await this.getConversationWithUnreadCount(conversationId, user.id);
-      client.emit('conversation_updated', updatedConvo);
-    } catch (error) {
-      console.error('Error marking messages as read:', error);
-    }
-  }
+			// Update last read time
+			await this.participantRepo.update({ conversation: { id: conversationId }, user: { id: user.id } }, { lastReadAt: new Date() });
+
+			// Mark messages as read
+			await this.messageRepo
+				.createQueryBuilder()
+				.update(ChatMessage)
+				.set({ readBy: () => 'CURRENT_TIMESTAMP' }) // ✅ timestamptz
+				.where('conversationId = :conversationId', { conversationId })
+				.andWhere('senderId != :userId', { userId: user.id })
+				.andWhere('readBy IS NULL') // ✅ مفيش JSON ولا @>
+				.execute();
+
+			// Notify others in conversation
+			client.to(`conversation_${conversationId}`).emit('messages_read', {
+				conversationId,
+				userId: user.id,
+				readAt: new Date(),
+			});
+
+			// Update conversation unread count for user
+			const updatedConvo = await this.getConversationWithUnreadCount(conversationId, user.id);
+			client.emit('conversation_updated', updatedConvo);
+		} catch (error) {
+			console.error('Error marking messages as read:', error);
+		}
+	}
 }

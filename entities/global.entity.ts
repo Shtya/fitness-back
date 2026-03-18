@@ -344,6 +344,33 @@ export class User extends CoreEntity {
 
 	@OneToMany(() => NotificationLog, (log) => log.user)
 	notificationLogs: NotificationLog[];
+
+
+	@Column({
+		type: 'jsonb',
+		default: () =>
+			`'{
+      "notificationsEnabled": true,
+      "showPreview": true,
+      "sound": true,
+      "vibration": true,
+      "badge": true,
+      "backgroundOnly": false,
+      "groupByConversation": true
+    }'::jsonb`,
+	})
+	chatSettings!: {
+		notificationsEnabled: boolean;
+		showPreview: boolean;
+		sound: boolean;
+		vibration: boolean;
+		badge: boolean;
+		backgroundOnly: boolean;
+		groupByConversation: boolean;
+	};
+
+	@Column('text', { array: true, default: '{}' })
+	expoPushTokens!: string[];
 }
 
 /* =========================================================
@@ -534,15 +561,17 @@ export class ChatMessage extends CoreEntity {
 	content: string | null;
 
 	@Column({ type: 'varchar', length: 50, default: 'text' })
-	messageType: string; // 'text', 'image', 'file', 'system'
+	messageType: string; // 'text', 'image', 'file', 'voice', 'system'
 
 	@Column({ type: 'jsonb', nullable: true })
-	attachments: {
-		name: string;
-		type: string;
-		size: number;
-		url: string;
-	}[]; // Array of attachment objects
+attachments: {
+  name: string;
+  type?: string;
+  mimeType?: string;
+  size?: number;
+  url: string;
+  duration?: number;
+}[]; // Array of attachment objects
 
 	@Column({ type: 'boolean', default: false })
 	isEdited: boolean;
