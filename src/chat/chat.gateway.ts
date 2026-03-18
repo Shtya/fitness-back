@@ -195,28 +195,29 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         }
 
         if (participant.user.id !== user.id) {
-          const receiver = await this.userRepo.findOne({
-            where: { id: participant.user.id },
-            select: ['id', 'name', 'email', 'expoPushTokens', 'chatSettings'],
-          });
+  const receiver = await this.userRepo.findOne({
+    where: { id: participant.user.id },
+    select: ['id', 'name', 'email', 'expoPushTokens', 'chatSettings'],
+  });
 
-          const tokens = receiver?.expoPushTokens || [];
-          const settings:any = receiver?.chatSettings || {};
+  const tokens = receiver?.expoPushTokens || [];
+  const settings: any = receiver?.chatSettings || {};
 
-          if (settings?.notificationsEnabled !== false && tokens.length) {
-            await this.chatPushService.sendPushNotifications(tokens, {
-              title: user.name || user.email || 'New message',
-              body: this.buildPushBody(savedMessage as any, settings),
-              data: {
-                conversationId: payload.conversationId,
-                senderId: user.id,
-                messageId: savedMessage.id,
-                type: 'chat_message',
-              },
-              sound: settings?.sound === false ? null : 'default',
-            });
-          }
-        }
+  if (settings?.notificationsEnabled !== false && tokens.length) {
+    await this.chatPushService.sendPushNotifications(tokens, {
+      title: user.name || user.email || 'New message',
+      body: this.buildPushBody(savedMessage as any, settings),
+      data: {
+        conversationId: payload.conversationId,
+        senderId: user.id,
+        messageId: savedMessage.id,
+        type: 'chat_message',
+        showPreview: settings?.showPreview ?? true,
+      },
+      sound: settings?.sound === false ? null : 'default',
+    });
+  }
+}
       }
 		} catch (error) {
 			console.error('Error sending message:', error);

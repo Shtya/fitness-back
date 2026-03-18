@@ -207,24 +207,22 @@ export class ChatService {
 			throw new NotFoundException('Conversation not found');
 		}
 
-		const skip = (Math.max(1, page || 1) - 1) * Math.max(1, limit || 1);
-		const take = Math.max(1, limit || 1);
+		const take = Math.max(1, limit || 20);
+		const total = await this.messageRepo.count({
+			where: { conversation: { id: conversationId }, isDeleted: false },
+		});
+		const skip = Math.max(0, total - take * page);
 
 		const messages = await this.messageRepo.find({
-			where: {
-				conversation: { id: conversationId },
-				isDeleted: false,
-			},
+			where: { conversation: { id: conversationId }, isDeleted: false },
 			relations: ['sender', 'replyTo', 'replyTo.sender'],
-			order: { created_at: 'DESC' },
+			order: { created_at: 'ASC' },  // always ASC
 			skip,
 			take,
 		});
-
-		// Mark as read when fetching messages
 		await this.markConversationAsRead(conversationId, userId);
 
-		return messages.reverse(); // Return in ascending order for UI
+		return messages
 	}
 
 	async markConversationAsRead(conversationId: string, userId: string) {
