@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Expo, ExpoPushMessage } from 'expo-server-sdk';
 
 @Injectable()
 export class ChatPushService {
   private readonly logger = new Logger(ChatPushService.name);
-  private expo = new Expo();
+
+  private async getExpoModule() {
+    return await import('expo-server-sdk');
+  }
 
   async sendPushNotifications(
     tokens: string[],
@@ -15,28 +17,35 @@ export class ChatPushService {
       sound?: 'default' | null;
     },
   ) {
-    const validTokens = (tokens || []).filter(token => Expo.isExpoPushToken(token));
+    try {
+      const { Expo } = await this.getExpoModule();
+      const expo = new Expo();
 
-    if (!validTokens.length) return;
+      const validTokens = (tokens || []).filter(token => Expo.isExpoPushToken(token));
 
-    const messages: ExpoPushMessage[] = validTokens.map(token => ({
-      to: token,
-      sound: payload.sound ?? 'default',
-      title: payload.title,
-      body: payload.body,
-      data: payload.data || {},
-      priority: 'high',
-      channelId: 'so7bafit_chat',
-    }));
+      if (!validTokens.length) return;
 
-    const chunks = this.expo.chunkPushNotifications(messages);
+      const messages = validTokens.map(token => ({
+        to: token,
+        sound: payload.sound ?? 'default',
+        title: payload.title,
+        body: payload.body,
+        data: payload.data || {},
+        priority: 'high' as const,
+        channelId: 'so7bafit_chat',
+      }));
 
-    for (const chunk of chunks) {
-      try {
-        await this.expo.sendPushNotificationsAsync(chunk);
-      } catch (error) {
-        this.logger.error('Expo push send error', error);
+      const chunks = expo.chunkPushNotifications(messages);
+
+      for (const chunk of chunks) {
+        try {
+          await expo.sendPushNotificationsAsync(chunk);
+        } catch (error) {
+          this.logger.error('Expo push send error', error);
+        }
       }
+    } catch (error) {
+      this.logger.error('Failed to load expo-server-sdk dynamically', error);
     }
   }
 }
