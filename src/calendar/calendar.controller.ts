@@ -72,6 +72,7 @@ export class CalendarController {
 		return this.service.createType(req.user, dto);
 	}
 
+
 	@Patch('types/:id')
 	updateType(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateCalendarTypeDto) {
 		return this.service.updateType(req.user, id, dto);

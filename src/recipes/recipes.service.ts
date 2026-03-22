@@ -6,6 +6,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsRelations, In, Repository } from 'typeorm';
 import {
 	Recipe,
+	RecipeFavorite,
 	RecipeIngredient,
 	RecipeIngredientGroup,
 	RecipeStep,
@@ -26,6 +27,9 @@ export class RecipesService {
 
 		@InjectRepository(RecipeTip)
 		private readonly tipRepo: Repository<RecipeTip>,
+
+		@InjectRepository(RecipeFavorite)
+		private readonly favoriteRepo: Repository<RecipeFavorite>,
 	) { }
 
 	private recipeRelations: FindOptionsRelations<Recipe> = {
@@ -180,7 +184,7 @@ export class RecipesService {
 		};
 	}
 
-	private toResponse(recipe: Recipe) {
+	private toResponse(recipe: Recipe, favoritedByUserId?: string | null) {
 		const ingredients = [...(recipe.ingredients || [])].sort(
 			(a, b) => a.orderIndex - b.orderIndex,
 		);
@@ -193,6 +197,9 @@ export class RecipesService {
 
 		return {
 			id: recipe.id,
+			is_favorited: favoritedByUserId
+				? (recipe as any).__is_favorited ?? false
+				: undefined,
 			title: recipe.title,
 			image_url: recipe.imageUrl || null,
 			video_url: recipe.videoUrl || null,
@@ -415,9 +422,20 @@ export class RecipesService {
 
 		const total = await baseQb.getCount();
 
+		const sortColumnMap: Record<string, string> = {
+			created_at: 'recipe.created_at',
+			calories: 'recipe.calories',
+			protein: 'recipe.proteinG',
+			carbs: 'recipe.carbsG',
+			fat: 'recipe.fatG',
+			title: 'recipe.title',
+		};
+		const sortCol = sortColumnMap[query.sort_by] ?? 'recipe.created_at';
+		const sortDir: 'ASC' | 'DESC' = query.sort_dir === 'ASC' ? 'ASC' : 'DESC';
+
 		const pagedRecipes = await baseQb
 			.clone()
-			.orderBy('recipe.created_at', 'DESC')
+			.orderBy(sortCol, sortDir)
 			.skip((page - 1) * limit)
 			.take(limit)
 			.select(['recipe.id'])
@@ -612,5 +630,72 @@ export class RecipesService {
 
 	async removeImage(id: string) {
 		return this.updateImage(id, null);
+	}
+
+
+
+
+
+	async addFavorite(userId: string, recipeId: string) {
+		// تأكد الـ recipe موجودة
+		const recipe = await this.recipeRepo.findOne({ where: { id: recipeId } });
+		if (!recipe) throw new NotFoundException('Recipe not found');
+
+		// upsert — لو موجودة خليها، لو مش موجودة عملها
+		await this.favoriteRepo
+			.createQueryBuilder()
+			.insert()
+			.into(RecipeFavorite)
+			.values({ userId, recipeId })
+			.orIgnore()  // UNIQUE constraint → ignore duplicate
+			.execute();
+
+		return { favorited: true, recipeId };
+	}
+
+	async removeFavorite(userId: string, recipeId: string) {
+		await this.favoriteRepo.delete({ userId, recipeId });
+		return { favorited: false, recipeId };
+	}
+
+	async getUserFavorites(userId: string, query: any) {
+		const page = Number(query.page ?? 1);
+		const limit = Number(query.limit ?? 20);
+
+		// Step 1: جيب الـ IDs بس مع pagination
+		const [favs, total] = await this.favoriteRepo.findAndCount({
+			where: { userId },
+			order: { created_at: 'DESC' },
+			skip: (page - 1) * limit,
+			take: limit,
+		});
+
+		const recipeIds = favs.map(f => f.recipeId).filter(Boolean);
+
+		if (!recipeIds.length) {
+			return { total, page, limit, items: [] };
+		}
+
+		// Step 2: جيب الـ recipes الكاملة بالـ relations
+		const recipes = await this.recipeRepo.find({
+			where: { id: In(recipeIds) },
+			relations: {
+				ingredients: true,
+				steps: true,
+				tips: true,
+			},
+		});
+
+		// Step 3: رتبهم بنفس ترتيب الـ favorites
+		const ordered = recipeIds
+			.map(id => recipes.find(r => r.id === id))
+			.filter(Boolean);
+
+		return {
+			total,
+			page,
+			limit,
+			items: ordered.map(r => this.toResponse(r!)),
+		};
 	}
 }

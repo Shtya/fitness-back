@@ -22,6 +22,7 @@ import {
 } from 'dto/calendar.dto';
 import { User, UserRole } from '../../entities/global.entity';
 import { isUUID } from 'class-validator';
+import { ExpoPushService } from '../notification/expo-push.service';
 
 
 const DEFAULT_TYPES = [
@@ -81,6 +82,9 @@ const DEFAULT_TYPES = [
 	},
 ];
 
+
+
+
 @Injectable()
 export class CalendarService {
 	constructor(
@@ -89,30 +93,93 @@ export class CalendarService {
 		@InjectRepository(CalendarCompletion) private readonly completionRepo: Repository<CalendarCompletion>,
 		@InjectRepository(CalendarSettings) private readonly settingsRepo: Repository<CalendarSettings>,
 		@InjectRepository(CommitmentTimer) private readonly commitmentRepo: Repository<CommitmentTimer>,
+		@InjectRepository(User) private readonly userRepo: Repository<User>,
+		private readonly expoPushService: ExpoPushService,
 	) { }
 
+	private toDateKey(d: Date) {
+		const y = d.getFullYear();
+		const m = String(d.getMonth() + 1).padStart(2, '0');
+		const day = String(d.getDate()).padStart(2, '0');
+		return `${y}-${m}-${day}`;
+	}
 
-	private async setCompletion(
-		user: any,
-		payload: { key: string; completed: boolean; itemId?: string; date?: string },
-	) {
+	private toTimeKey(d: Date) {
+		const h = String(d.getHours()).padStart(2, '0');
+		const m = String(d.getMinutes()).padStart(2, '0');
+		return `${h}:${m}`;
+	}
 
-		const settingsRes: any = await this.getSettings(user);
-		const settings = settingsRes?.settings ?? settingsRes ?? {};
-		const completions = settings.completions || {};
+	private isSameOrAfter(a: string, b: string) {
+		return a >= b;
+	}
 
-		const nextCompletions = { ...completions, [payload.key]: payload.completed };
+	private isCalendarItemDueToday(item: CalendarItem, now: Date) {
+		const today = this.toDateKey(now);
+		const nowTime = this.toTimeKey(now);
 
-		// if completed=false you may remove the key to keep it clean:
-		if (payload.completed === false) delete nextCompletions[payload.key];
+		if (!item.startTime) return false;
+		if (item.startTime !== nowTime) return false;
+		if (!item.startDate) return false;
+		if (!this.isSameOrAfter(today, item.startDate)) return false;
 
-		const nextSettings = { ...settings, completions: nextCompletions };
-		await this.updateSettings(user, nextSettings as any);
+		switch (item.recurrence) {
+			case CalendarRecurrence.NONE:
+				return item.startDate === today;
 
-		return { key: payload.key, completed: payload.completed };
+			case CalendarRecurrence.DAILY:
+				return true;
+
+			case CalendarRecurrence.WEEKLY:
+				return new Date(item.startDate).getDay() === now.getDay();
+
+			case CalendarRecurrence.MONTHLY:
+				return new Date(item.startDate).getDate() === now.getDate();
+
+			case CalendarRecurrence.CUSTOM: {
+				const jsDay = now.getDay(); // 0..6
+				const mappedDay = jsDay === 0 ? 6 : jsDay - 1; // لو عندك نظام مختلف عدّله
+				return Array.isArray(item.recurrenceDays) && item.recurrenceDays.includes(mappedDay);
+			}
+
+			default:
+				return false;
+		}
 	}
 
 
+
+	async checkAndSendCalendarNotifications(now: Date = new Date()) {
+		const adminItems = await this.itemRepo.find({
+			where: {},
+		});
+
+		for (const item of adminItems) {
+			try {
+				if (!item.userId) continue;
+				if (!this.isCalendarItemDueToday(item, now)) continue;
+
+				const user = await this.userRepo.findOne({
+					where: { id: item.userId },
+				});
+
+				if (!user?.expoPushTokens?.length) continue;
+
+				await this.expoPushService.sendToTokens(user.expoPushTokens, {
+					title: item.title,
+					body: item.typeKey ? `📅 ${item.typeKey}` : '📅 Calendar reminder',
+					data: {
+						type: 'calendar_item',
+						itemId: item.id,
+						startDate: item.startDate,
+						startTime: item.startTime,
+					},
+				});
+			} catch (error) {
+				console.error(`Failed to send calendar notification for item ${item.id}`, error);
+			}
+		}
+	}
 	async getState(user: any) {
 		const [
 			itemsRes,
@@ -317,6 +384,15 @@ export class CalendarService {
 		const rawType = dto.type ?? dto.typeId ?? null;
 
 		const typeId = rawType && isUUID(rawType) ? rawType : null;
+
+		if (typeId) {
+			const typeExists = await this.typeRepo.findOne({ where: { id: typeId, adminId } });
+			if (!typeExists) {
+				throw new BadRequestException('Invalid typeId');
+			}
+		}
+
+
 		const typeKey = rawType && !isUUID(rawType) ? rawType : null; // "habit", "task", ...
 
 		const item = this.itemRepo.create({
@@ -351,6 +427,14 @@ export class CalendarService {
 		const rawType = dto.type ?? dto.typeId ?? undefined;
 
 		const nextTypeId = rawType !== undefined ? (rawType && isUUID(rawType) ? rawType : null) : item.typeId;
+
+		if (nextTypeId) {
+			const typeExists = await this.typeRepo.findOne({ where: { id: nextTypeId, adminId } });
+			if (!typeExists) {
+				throw new BadRequestException('Invalid typeId');
+			}
+		}
+
 		const nextTypeKey = rawType !== undefined ? (rawType && !isUUID(rawType) ? rawType : null) : item.typeKey;
 
 		Object.assign(item, {
@@ -448,9 +532,13 @@ export class CalendarService {
 		const adminId = this.getTenantAdminId(user);
 		this.assertTenant(adminId);
 
-		// ensure item belongs to user
 		const item = await this.itemRepo.findOne({ where: { id: itemId, adminId, userId: user.id } });
 		if (!item) throw new NotFoundException('Item not found');
+
+		if (dto.completed === false) {
+			await this.completionRepo.delete({ itemId, date, userId: user.id, adminId } as any);
+			return { key, completed: false };
+		}
 
 		let row = await this.completionRepo.findOne({
 			where: { itemId, date, userId: user.id, adminId },
@@ -462,20 +550,15 @@ export class CalendarService {
 				date,
 				userId: user.id,
 				adminId,
-				completed: dto.completed,
+				completed: true,
 			});
 		} else {
-			row.completed = dto.completed;
+			row.completed = true;
 		}
 
 		await this.completionRepo.save(row);
 
-		// if completed=false you can delete row to keep DB clean (optional)
-		if (dto.completed === false) {
-			await this.completionRepo.delete({ itemId, date, userId: user.id } as any);
-		}
-
-		return { key, completed: dto.completed };
+		return { key, completed: true };
 	}
 
 

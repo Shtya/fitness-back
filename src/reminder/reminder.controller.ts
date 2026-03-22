@@ -132,29 +132,7 @@ export class RemindersController {
 		}
 	}
 
-	@Post('telegram-test')
-	@UseGuards(JwtAuthGuard)
-	async testTelegram(@Req() req: any, @Body() body: { chatId: string; message?: string }) {
-		const userId = currentUserId(req);
-
-		if (!body.chatId) {
-			return {
-				success: false,
-				error: 'chatId is required',
-			};
-		}
-
-		const result = await this.svc.sendTelegramTestToUser(body.chatId, body.message);
-
-		return {
-			success: true,
-			userId,
-			chatId: body.chatId,
-			message: body.message || '🔔 Test reminder from So7baFit bot',
-			telegramResponse: result,
-		};
-	}
-
+ 
 
 	@Post('send-now')
 	@UseGuards(JwtAuthGuard)
@@ -257,18 +235,5 @@ export class RemindersController {
 		const uid = currentUserId(req);
 		return this.svc.get(uid, id);
 	}
-
-
-	@Post('telegram/webhook')
-	async telegramWebhook(@Body() body: any) {
-		return this.svc.handleTelegramWebhook(body);
-	}
-	
-	@Post('telegram/link')
-	@UseGuards(JwtAuthGuard)
-	async createTelegramLink(@Req() req: any) {
-		const uid = currentUserId(req);
-		return this.svc.createTelegramLink(uid);
-	}
-
+ 
 }

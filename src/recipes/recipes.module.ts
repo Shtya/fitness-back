@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   Recipe,
+  RecipeFavorite,
   RecipeIngredient,
   RecipeStep,
   RecipeTip,
@@ -16,6 +17,7 @@ import { RecipesService } from './recipes.service';
       RecipeIngredient,
       RecipeStep,
       RecipeTip,
+			RecipeFavorite,
     ]),
   ],
   controllers: [RecipesController],

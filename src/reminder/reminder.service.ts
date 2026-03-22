@@ -2,12 +2,10 @@ import { Injectable, NotFoundException, ForbiddenException, BadRequestException,
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, FindOptionsWhere } from 'typeorm';
 import * as webpush from 'web-push';
-import { HttpService } from '@nestjs/axios';              // ⬅️ أضف ده
-import { lastValueFrom } from 'rxjs';
 
 import { Reminder, UserReminderSettings, PushSubscription, NotificationLog, ReminderSchedule, ScheduleMode, ReminderType, Priority, IntervalUnit } from 'entities/alert.entity';
-import { TelegramService } from './telegram.service';
-import { randomBytes } from 'crypto';
+import { User } from '../../entities/global.entity';
+import { ExpoPushService } from '../notification/expo-push.service';
 
 @Injectable()
 export class RemindersService {
@@ -22,8 +20,12 @@ export class RemindersService {
 		private readonly subsRepo: Repository<PushSubscription>,
 		@InjectRepository(NotificationLog)
 		private readonly logsRepo: Repository<NotificationLog>,
-		private readonly telegramService: TelegramService,
-		private readonly http: HttpService,
+
+		@InjectRepository(User)
+		private readonly userRepo: Repository<User>,
+		private readonly expoPushService: ExpoPushService,
+
+
 	) {
 		const pub = process.env.VAPID_PUBLIC_KEY;
 		const priv = process.env.VAPID_PRIVATE_KEY;
@@ -47,69 +49,6 @@ export class RemindersService {
 		}
 	}
 
-	// ========= TELEGRAM LINK FLOW =========
-
-	async createTelegramLink(userId: string) {
-		const settings = await this.getUserSettings(userId);
-
-		const token = randomBytes(16).toString('hex');
-		settings.telegramLinkToken = token;
-		await this.settingsRepo.save(settings);
-
-		const botUsername = process.env.TELEGRAM_BOT_USERNAME; // حطها في env
-		if (!botUsername) {
-			this.logger.warn('TELEGRAM_BOT_USERNAME is not set');
-		}
-
-		const botUrl = botUsername
-			? `https://t.me/${botUsername}?start=${token}`
-			: `https://t.me/<YOUR_BOT_USERNAME>?start=${token}`;
-
-		return {
-			botUrl,
-			token,
-		};
-	}
-
-	async handleTelegramWebhook(update: any) {
-		const message = update.message || update.edited_message;
-
-		if (!message || !message.text) {
-			return { ok: true };
-		}
-
-		const text: string = message.text;
-		if (!text.startsWith('/start')) {
-			return { ok: true };
-		}
-
-		const parts = text.split(' ');
-		const token = parts[1];
-		if (!token) {
-			return { ok: true };
-		}
-
-		const settings = await this.settingsRepo.findOne({
-			where: { telegramLinkToken: token },
-		});
-
-		if (!settings) {
-			this.logger.warn(`No user settings found for telegram token ${token}`);
-			return { ok: true };
-		}
-
-		settings.telegramChatId = String(message.chat.id);
-		settings.telegramEnabled = true;
-		settings.telegramLinkToken = null;
-		await this.settingsRepo.save(settings);
-
-		await this.telegramService.sendMessage(
-			settings.telegramChatId,
-			'✅ تم ربط حسابك بنجاح بتذكيرات So7baFit. سيتم إرسال التذكيرات هنا.'
-		);
-
-		return { ok: true };
-	}
 
 
 	async sendPushToUser(userId: string, payload: Record<string, any>) {
@@ -158,47 +97,6 @@ export class RemindersService {
 		return this.reminderGateway;
 	}
 
-	/* ------------------------- Telegram helpers ------------------------- */
-
-	async sendTelegramMessage(chatId: string, text: string) {
-		const token = process.env.TELEGRAM_BOT_TOKEN;
-		if (!token) {
-			this.logger.error('❌ TELEGRAM_BOT_TOKEN is not set');
-			throw new BadRequestException('Telegram bot token not configured');
-		}
-
-		if (!chatId) {
-			throw new BadRequestException('chatId is required');
-		}
-
-		const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
-		const payload = {
-			chat_id: chatId,
-			text,
-			parse_mode: 'Markdown',
-		};
-
-		this.logger.log(`📤 [Telegram] Sending message to chatId=${chatId}`);
-
-		try {
-			const res$ = this.http.post(url, payload);
-			const res = await lastValueFrom(res$);
-			this.logger.log(`✅ [Telegram] Message sent successfully`);
-			return res.data;
-		} catch (error: any) {
-			this.logger.error(`❌ [Telegram] Failed to send message`, {
-				message: error?.message,
-				response: error?.response?.data,
-			});
-			throw new BadRequestException('Failed to send telegram message');
-		}
-	}
-
-	async sendTelegramTestToUser(chatId: string, message?: string) {
-		const text = message || '🔔 Test reminder from So7baFit bot';
-		return this.sendTelegramMessage(chatId, text);
-	}
 
 
 	async processDueReminders(now: Date = new Date()) {
@@ -211,18 +109,18 @@ export class RemindersService {
 		const pastWindowMs = 30_000; // 30 seconds in the past
 		const futureWindowMs = 60_000; // 1 minute in the future
 		let sentCount = 0;
-		let whatsappSentCount = 0;
 		let pushSentCount = 0;
 		let websocketSentCount = 0;
+		let expoSentCount = 0;
 
 		for (const rem of active) {
 			try {
 				let next: Date | null = null;
+
 				if (rem.reminderTime && rem.reminderTime.getTime() > now.getTime() - pastWindowMs) {
 					next = rem.reminderTime;
 				} else {
 					next = this.computeNextOccurrence(rem, now);
-					// Save reminderTime for next time
 					if (next) {
 						rem.reminderTime = next;
 						await this.remindersRepo.save(rem);
@@ -233,9 +131,7 @@ export class RemindersService {
 
 				const diff = next.getTime() - now.getTime();
 
-				// Check if reminder is within the time window (30 seconds past to 1 minute future)
 				if (diff >= -pastWindowMs && diff <= futureWindowMs) {
-
 					const payload = {
 						title: rem.title,
 						body: rem.description ?? 'Reminder',
@@ -249,68 +145,60 @@ export class RemindersService {
 						reminderId: rem.id,
 					};
 
-					// 1. Try WebSocket first (if user is online)
 					let sentViaWebSocket = false;
 					if (this.reminderGateway?.isUserConnected(rem.userId)) {
 						sentViaWebSocket = this.reminderGateway.sendReminderToUser(rem.userId, rem);
-						if (sentViaWebSocket) {
-							websocketSentCount++;
-						} else {
-							this.logger.warn(`⚠️ Failed to send reminder ${rem.id} via WebSocket to user ${rem.userId}`);
-						}
-					} else {
-						this.logger.debug(`❌ User ${rem.userId} is not connected via WebSocket, will try push...`);
+						if (sentViaWebSocket) websocketSentCount++;
 					}
 
-					// 2. Send push notification (works even when browser is closed)
 					try {
-						this.logger.log(`💬 [processDueReminders] Attempting push notification for reminder ${rem.id}...`);
+						const user = await this.userRepo.findOne({ where: { id: rem.userId } });
+
+						if (user?.expoPushTokens?.length) {
+							await this.expoPushService.sendToTokens(user.expoPushTokens, {
+								title: rem.title || 'Reminder',
+								body: rem.description ?? '🔔 Reminder',
+								data: {
+									type: 'reminder',
+									reminderId: rem.id,
+								},
+							});
+
+							expoSentCount++;
+						}
+					} catch (expoError) {
+						this.logger.error(`Failed to send Expo push for reminder ${rem.id}:`, expoError);
+					}
+
+					try {
 						const pushResults = await this.sendPushToUser(rem.userId, payload);
-						if (pushResults && pushResults.length > 0) {
+						if (pushResults?.length) {
 							const successCount = pushResults.filter((r: any) => r.ok).length;
 							if (successCount > 0) {
-								this.logger.log(`✅ [processDueReminders] Push sent successfully (${successCount}/${pushResults.length})`);
 								pushSentCount++;
-							} else {
-								this.logger.warn(`⚠️ Push send failed for reminder ${rem.id}`);
 							}
-						} else {
-							this.logger.warn(`⚠️ No push subscriptions found for user ${rem.userId}`);
 						}
 					} catch (pushError) {
-						this.logger.error(`❌ Failed to send push notification for reminder ${rem.id}:`, pushError);
+						this.logger.error(`Failed to send browser push for reminder ${rem.id}:`, pushError);
 					}
-
-					try {
-						const settings = await this.getUserSettings(rem.userId);
-						if (settings.telegramEnabled && settings.telegramChatId) {
-							const text = this.telegramService.buildReminderText(rem);
-							await this.telegramService.sendMessage(settings.telegramChatId, text);
-							this.logger.log(`✅ [processDueReminders] Telegram sent to user ${rem.userId}`);
-						} else {
-							this.logger.debug(`ℹ️ [processDueReminders] Telegram not enabled for user ${rem.userId}`);
-						}
-					} catch (tgError) {
-						this.logger.error(`❌ Failed to send Telegram reminder for ${rem.id}:`, tgError);
-					}
-
 
 					sentCount++;
 
-					// Update reminderTime for next occurrence (after 1 minute from now)
-					const future = this.computeNextOccurrence(rem, new Date(now.getTime() + 60_000));
+					const future = this.computeNextOccurrence(rem, new Date(next.getTime() + 60_000));
 					rem.reminderTime = future;
 					await this.remindersRepo.save(rem);
 				}
 			} catch (error) {
-				this.logger.error(`❌ Failed to process reminder ${rem.id}:`, error);
+				this.logger.error(`Failed to process reminder ${rem.id}:`, error);
 			}
 		}
 
-		// Log summary
 		if (sentCount > 0) {
-			this.logger.log(`✅ [processDueReminders] Sent ${sentCount} reminder(s) - WebSocket: ${websocketSentCount}, Push: ${pushSentCount}, WhatsApp: ${whatsappSentCount}`);
+			this.logger.log(
+				`Sent ${sentCount} reminder(s) - WebSocket: ${websocketSentCount}, Expo: ${expoSentCount}, BrowserPush: ${pushSentCount}`,
+			);
 		}
+
 	}
 
 	private async getReminderOrThrow(userId: string, id: string) {
@@ -324,18 +212,26 @@ export class RemindersService {
 	}
 
 	private combineDateAndTime(dateStr: string, timeStr: string): Date {
-		const [hStr, mStr] = (timeStr || '09:00').split(':');
-		const h = Number(hStr || 9);
-		const m = Number(mStr || 0);
-		const d = new Date(dateStr + 'T00:00:00');
-		d.setHours(h, m, 0, 0);
-		return d;
-	}
+  const [hStr, mStr] = (timeStr || '09:00').split(':');
+  const h = Number(hStr || 9);
+  const m = Number(mStr || 0);
+
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const d = new Date(year, month - 1, day, h, m, 0, 0);
+  return d;
+}
 
 	private getLocalStartDate(schedule: ReminderSchedule): string | null {
 		if (schedule.startDate) return schedule.startDate;
 		return null;
 	}
+
+	private formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 	private computeNextOccurrence(rem: Reminder, from: Date): Date | null {
 		const s = rem.schedule;
@@ -381,7 +277,7 @@ export class RemindersService {
 				day.setDate(base.getDate() + i);
 				if (isAfterEnd(day)) return null;
 				for (const t of times) {
-					const dt = this.combineDateAndTime(day.toISOString().slice(0, 10), t);
+					const dt = this.combineDateAndTime(this.formatLocalDate(day), t);
 					if (dt.getTime() >= now.getTime()) return dt;
 				}
 			}
@@ -401,7 +297,7 @@ export class RemindersService {
 				const code = map[day.getDay()];
 				if (!daysOfWeek.includes(code as any)) continue;
 				for (const t of times) {
-					const dt = this.combineDateAndTime(day.toISOString().slice(0, 10), t);
+					const dt = this.combineDateAndTime(this.formatLocalDate(day), t);
 					if (dt.getTime() >= now.getTime()) return dt;
 				}
 			}

@@ -1,4 +1,3 @@
-// src/modules/calendar/calendar.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
@@ -8,8 +7,11 @@ import {
   CalendarSettings,
   CommitmentTimer,
 } from 'entities/calendar.entity';
+import { User } from 'entities/global.entity';
 import { CalendarService } from './calendar.service';
 import { CalendarController } from './calendar.controller';
+import { NotificationModule } from '../notification/notification.module';
+import { CalendarScheduler } from './calendar.scheduler';
 
 @Module({
   imports: [
@@ -19,10 +21,12 @@ import { CalendarController } from './calendar.controller';
       CalendarCompletion,
       CalendarSettings,
       CommitmentTimer,
+      User,
     ]),
+    NotificationModule,
   ],
   controllers: [CalendarController],
-  providers: [CalendarService],
+  providers: [CalendarService, CalendarScheduler],
   exports: [CalendarService],
 })
 export class CalendarModule {}

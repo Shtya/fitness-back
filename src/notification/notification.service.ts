@@ -1,170 +1,265 @@
 // notification/notification.service.ts (updated)
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository } from 'typeorm';
-import { Notification, NotificationAudience, NotificationType, User } from 'entities/global.entity';
+import { Notification, NotificationAudience, NotificationType, User, UserRole } from 'entities/global.entity';
 import { NotificationGateway } from './notification.gateway';
 
 export function normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
-  const pageNum = Number(pageInput);
-  const limitNum = Number(limitInput);
+	const pageNum = Number(pageInput);
+	const limitNum = Number(limitInput);
 
-  const page = Number.isFinite(pageNum) && pageNum > 0 ? Math.floor(pageNum) : 1;
-  const takeRaw = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : 20;
+	const page = Number.isFinite(pageNum) && pageNum > 0 ? Math.floor(pageNum) : 1;
+	const takeRaw = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : 20;
 
-  const take = Math.min(takeRaw, maxLimit);
-  const skip = (page - 1) * take;
+	const take = Math.min(takeRaw, maxLimit);
+	const skip = (page - 1) * take;
 
-  return { page, take, skip };
+	return { page, take, skip };
 }
 
 @Injectable()
 export class NotificationService {
-  constructor(
-    @InjectRepository(Notification)
-    private readonly repo: Repository<Notification>,
-    private readonly gateway: NotificationGateway,
-  ) {}
+	constructor(
+		@InjectRepository(Notification)
+		private readonly repo: Repository<Notification>,
 
-  async create(opts: { 
-    type: NotificationType; 
-    title: string; 
-    message?: string | null; 
-    data?: Record<string, any> | null; 
-    audience?: NotificationAudience; 
-    userId?: string | null;
-    user?: User;
-  }): Promise<Notification> {
-    const notification = this.repo.create({
-      type: opts.type,
-      title: opts.title,
-      message: opts.message ?? null,
-      data: opts.data ?? null,
-      audience: opts.audience ?? NotificationAudience.ADMIN,
-      user: opts.userId ? ({ id: opts.userId } as any) : opts.user || null,
-    });
-    
-    const saved = await this.repo.save(notification);
+		@InjectRepository(User)
+		private readonly userRepo: Repository<User>,
 
-    // Push realtime event (non-blocking)
-    try {
-      this.gateway.broadcastNew(saved);
-    } catch (e) {
-      // Log error but don't fail the request
-      console.error('WebSocket notification error:', e);
-    }
-    
-    return saved;
-  }
+		private readonly gateway: NotificationGateway,
+	) { }
 
-  async listAdmin(page: number | string = 1, limit: number | string = 20, isRead?: boolean) {
-    const { page: p, take, skip } = normalizePagination(page, limit);
+	async registerExpoPushToken(userId: string, token: string) {
+		if (!token || typeof token !== 'string') {
+			throw new BadRequestException('Invalid Expo push token');
+		}
 
-    const where: FindOptionsWhere<Notification> = {};
-    if (typeof isRead === 'boolean') where.isRead = isRead;
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
 
-    const [items, total] = await this.repo.findAndCount({
-      where,
-      relations: ['user'],
-      order: { created_at: 'DESC' },
-      take,
-      skip,
-    });
+		const existing = user.expoPushTokens ?? [];
 
-    return {
-      items,
-      total,
-      page: p,
-      limit: take,
-      hasMore: skip + take < total,
-    };
-  }
+		if (!existing.includes(token)) {
+			user.expoPushTokens = [...existing, token];
+			await this.userRepo.save(user);
+		}
 
-  async list(page?: number | string, limit?: number | string, isRead?: boolean, userId?: string) {
-    const { page: p, take, skip } = normalizePagination(page, limit);
+		return { ok: true };
+	}
 
-    const where: FindOptionsWhere<Notification> = {};
-    if (userId) where.user = { id: userId } as any;
-    if (typeof isRead === 'boolean') where.isRead = isRead;
+	async unregisterExpoPushToken(userId: string, token: string) {
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
 
-    const [items, total] = await this.repo.findAndCount({
-      where,
-      relations: ['user'],
-      order: { created_at: 'DESC' },
-      take,
-      skip,
-    });
+		const existing = user.expoPushTokens ?? [];
+		user.expoPushTokens = existing.filter(t => t !== token);
 
-    return {
-      items,
-      total,
-      page: p,
-      limit: take,
-      hasMore: skip + take < total,
-    };
-  }
+		await this.userRepo.save(user);
 
-  async markRead(id: number) {
-    await this.repo.update(id, { isRead: true });
-    return { id, isRead: true };
-  }
+		return { ok: true };
+	}
 
-  async markAllRead(userId?: string) {
-    if (userId) {
-      await this.repo.createQueryBuilder()
-        .update()
-        .set({ isRead: true })
-        .where('user.id = :userId', { userId })
-        .execute();
-    } else {
-      await this.repo.createQueryBuilder()
-        .update()
-        .set({ isRead: true })
-        .execute();
-    }
-    
-    return { ok: true };
-  }
 
-  async unreadCount(userId?: string) {
-    const where: FindOptionsWhere<Notification> = { isRead: false };
-    if (userId) where.user = { id: userId } as any;
+	async create(opts: {
+		type: NotificationType;
+		title: string;
+		message?: string | null;
+		data?: Record<string, any> | null;
+		audience?: NotificationAudience;
+		userId?: string | null;
+		user?: User;
+	}): Promise<Notification> {
+		const notification = this.repo.create({
+			type: opts.type,
+			title: opts.title,
+			message: opts.message ?? null,
+			data: opts.data ?? null,
+			audience: opts.audience ?? NotificationAudience.ADMIN,
+			user: opts.userId ? ({ id: opts.userId } as any) : opts.user || null,
+		});
 
-    const count = await this.repo.count({ where });
-    return { count };
-  }
+		const saved = await this.repo.save(notification);
 
-  // Specialized method for weekly report notifications
-  async createWeeklyReportNotification(user: User, weekOf: string, coachId: string) {
-    return this.create({
-      type: NotificationType.FORM_SUBMISSION,
-      title: 'New Weekly Report Submitted',
-      message: `${user.name} has submitted their weekly report for ${weekOf}`,
-      data: {
-        type: 'weekly_report',
-        userId: user.id,
-        userName: user.name,
-        weekOf,
-        timestamp: new Date().toISOString(),
-      },
-      audience: NotificationAudience.USER,
-      userId: coachId,
-    });
-  }
+		// Push realtime event (non-blocking)
+		try {
+			this.gateway.broadcastNew(saved);
+		} catch (e) {
+			// Log error but don't fail the request
+			console.error('WebSocket notification error:', e);
+		}
 
-  async createCoachFeedbackNotification(userId: string, weekOf: string, reportId: string) {
-    return this.create({
-      type: NotificationType.FORM_SUBMISSION,
-      title: 'Coach Feedback Received',
-      message: `Your coach has provided feedback on your weekly report for ${weekOf}`,
-      data: {
-        type: 'weekly_report_feedback',
-        reportId,
-        weekOf,
-        timestamp: new Date().toISOString(),
-      },
-      audience: NotificationAudience.USER,
-      userId,
-    });
-  }
+		return saved;
+	}
+
+	async listAdmin(page: number | string = 1, limit: number | string = 20, isRead?: boolean) {
+		const { page: p, take, skip } = normalizePagination(page, limit);
+
+		const where: FindOptionsWhere<Notification> = {};
+		if (typeof isRead === 'boolean') where.isRead = isRead;
+
+		const [items, total] = await this.repo.findAndCount({
+			where,
+			relations: ['user'],
+			order: { created_at: 'DESC' },
+			take,
+			skip,
+		});
+
+		return {
+			items,
+			total,
+			page: p,
+			limit: take,
+			hasMore: skip + take < total,
+		};
+	}
+
+	async list(page?: number | string, limit?: number | string, isRead?: boolean, userId?: string) {
+		const { page: p, take, skip } = normalizePagination(page, limit);
+
+		const where: FindOptionsWhere<Notification> = {};
+		if (userId) where.user = { id: userId } as any;
+		if (typeof isRead === 'boolean') where.isRead = isRead;
+
+		const [items, total] = await this.repo.findAndCount({
+			where,
+			relations: ['user'],
+			order: { created_at: 'DESC' },
+			take,
+			skip,
+		});
+
+		return {
+			items,
+			total,
+			page: p,
+			limit: take,
+			hasMore: skip + take < total,
+		};
+	}
+
+	async listForUser(
+		user: User,
+		page?: number | string,
+		limit?: number | string,
+		isRead?: boolean,
+	) {
+		const { page: p, take, skip } = normalizePagination(page, limit);
+
+		const qb = this.repo
+			.createQueryBuilder('n')
+			.leftJoinAndSelect('n.user', 'user')
+			.orderBy('n.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
+
+		if (typeof isRead === 'boolean') {
+			qb.andWhere('n.isRead = :isRead', { isRead });
+		}
+
+		if (user.role === UserRole.CLIENT) {
+			qb.andWhere('user.id = :userId', { userId: user.id });
+		} else {
+			qb.andWhere('(n.audience = :adminAudience OR user.id = :userId)', {
+				adminAudience: NotificationAudience.ADMIN,
+				userId: user.id,
+			});
+		}
+
+		const [items, total] = await qb.getManyAndCount();
+
+		return {
+			items,
+			total,
+			page: p,
+			limit: take,
+			hasMore: skip + take < total,
+		};
+	}
+
+	async markRead(id: number) {
+		await this.repo.update(id, { isRead: true });
+		return { id, isRead: true };
+	}
+
+	async unreadCountForUser(user: User) {
+		const qb = this.repo
+			.createQueryBuilder('n')
+			.leftJoin('n.user', 'user')
+			.where('n.isRead = false');
+
+		if (user.role === UserRole.CLIENT) {
+			qb.andWhere('user.id = :userId', { userId: user.id });
+		} else {
+			qb.andWhere('(n.audience = :adminAudience OR user.id = :userId)', {
+				adminAudience: NotificationAudience.ADMIN,
+				userId: user.id,
+			});
+		}
+
+		const count = await qb.getCount();
+		return { count };
+	}
+
+	async markAllRead(userId?: string) {
+		if (userId) {
+			await this.repo
+				.createQueryBuilder()
+				.update(Notification)
+				.set({ isRead: true })
+				.where('user_id = :userId', { userId })
+				.execute();
+		} else {
+			await this.repo
+				.createQueryBuilder()
+				.update(Notification)
+				.set({ isRead: true })
+				.execute();
+		}
+
+		return { ok: true };
+	}
+
+	async unreadCount(userId?: string) {
+		const where: FindOptionsWhere<Notification> = { isRead: false };
+		if (userId) where.user = { id: userId } as any;
+
+		const count = await this.repo.count({ where });
+		return { count };
+	}
+
+	// Specialized method for weekly report notifications
+	async createWeeklyReportNotification(user: User, weekOf: string, coachId: string) {
+		return this.create({
+			type: NotificationType.FORM_SUBMISSION,
+			title: 'New Weekly Report Submitted',
+			message: `${user.name} has submitted their weekly report for ${weekOf}`,
+			data: {
+				type: 'weekly_report',
+				userId: user.id,
+				userName: user.name,
+				weekOf,
+				timestamp: new Date().toISOString(),
+			},
+			audience: NotificationAudience.USER,
+			userId: coachId,
+		});
+	}
+
+	async createCoachFeedbackNotification(userId: string, weekOf: string, reportId: string) {
+		return this.create({
+			type: NotificationType.FORM_SUBMISSION,
+			title: 'Coach Feedback Received',
+			message: `Your coach has provided feedback on your weekly report for ${weekOf}`,
+			data: {
+				type: 'weekly_report_feedback',
+				reportId,
+				weekOf,
+				timestamp: new Date().toISOString(),
+			},
+			audience: NotificationAudience.USER,
+			userId,
+		});
+	}
 }

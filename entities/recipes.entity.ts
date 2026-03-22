@@ -136,3 +136,25 @@ export class RecipeTip extends CoreEntity {
 	@Column({ type: 'text' })
 	text!: string;
 }
+
+
+
+@Entity('recipe_favorites')
+@Unique(['userId', 'recipeId'])
+export class RecipeFavorite extends CoreEntity {
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user!: User;
+
+	@Index()
+	@Column({ type: 'uuid' })
+	userId!: string;
+
+	@ManyToOne(() => Recipe, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'recipe_id' })
+	recipe!: Recipe;
+
+	@Index()
+	@Column({ type: 'uuid' })
+	recipeId!: string;
+}
