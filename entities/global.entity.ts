@@ -280,6 +280,9 @@ export class User extends CoreEntity {
 	@Column({ type: 'date', nullable: true })
 	subscriptionEnd!: string | null;
 
+	@Column({ type: 'date', nullable: true })
+	birthDate!: string | null;
+
 	@Column({ type: 'int', nullable: true })
 	caloriesTarget?: number | null;
 

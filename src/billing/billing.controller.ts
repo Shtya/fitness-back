@@ -142,4 +142,68 @@ export class BillingController {
 	getStats(@Query() query: any) {
 		return this.billingService.getStats(query);
 	}
+
+	/* =========================================================
+	 * Coach Client Management
+	 * ======================================================= */
+
+	@Get('clients')
+	getClients(@Query() query: any) {
+		return this.billingService.getClients(query);
+	}
+
+	@Get('clients/:id')
+	getClientById(@Param('id') id: string) {
+		return this.billingService.getClientById(id);
+	}
+
+	@Get('clients/:id/timeline')
+	getClientTimeline(@Param('id') id: string, @Query() query: any) {
+		return this.billingService.getClientTimeline(id, query);
+	}
+
+	@Get('clients/:id/progress')
+	getClientProgress(@Param('id') id: string) {
+		return this.billingService.getClientProgress(id);
+	}
+
+	@Get('clients/:id/checkins')
+	getClientCheckins(@Param('id') id: string) {
+		return this.billingService.getClientCheckins(id);
+	}
+
+	@Get('clients/:id/notes')
+	getClientNotes(@Param('id') id: string) {
+		return this.billingService.getClientNotes(id);
+	}
+
+	@Post('clients/:id/notes')
+	createClientNote(@Param('id') id: string, @Body() dto: any) {
+		return this.billingService.createClientNote(id, dto);
+	}
+
+	@Patch('clients/:id/notes/:noteId')
+	updateClientNote(@Param('id') id: string, @Param('noteId') noteId: string, @Body() dto: any) {
+		return this.billingService.updateClientNote(id, noteId, dto);
+	}
+
+	@Delete('clients/:id/notes/:noteId')
+	deleteClientNote(@Param('id') id: string, @Param('noteId') noteId: string) {
+		return this.billingService.deleteClientNote(id, noteId);
+	}
+
+	@Get('clients/:id/plans-history')
+	getClientPlansHistory(@Param('id') id: string) {
+		return this.billingService.getClientPlansHistory(id);
+	}
+
+	@Get('clients/:id/communications')
+	getClientCommunications(@Param('id') id: string) {
+		return this.billingService.getClientCommunications(id);
+	}
+
+	@Post('clients/:id/communications/send')
+	sendClientCommunications(@Param('id') id: string, @Body() dto: any) {
+		return this.billingService.sendClientCommunication(id, dto);
+	}
 }

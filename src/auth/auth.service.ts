@@ -638,7 +638,7 @@ export class AuthService {
 	}
 
 	async adminCreateUser(body: any, userId) {
-		const { name, email, role, phone, gender, membership, coachId, subscriptionStart, subscriptionEnd } = body || {};
+		const { name, email, role, phone, gender, membership, coachId, subscriptionStart, subscriptionEnd, birthDate } = body || {};
 		if (!name || !email) throw new BadRequestException('name and email are required');
 
 		const exists = await this.userRepo.findOne({ where: { email } });
@@ -662,6 +662,7 @@ export class AuthService {
 			status: UserStatus.ACTIVE, // Admin-created accounts start active
 			subscriptionStart: subscriptionStart ?? new Date().toISOString().slice(0, 10),
 			subscriptionEnd: subscriptionEnd ?? null,
+			birthDate: birthDate ?? null,
 			activeExercisePlanId: null,
 			defaultRestSeconds: 90,
 			lastLogin: null,
@@ -701,7 +702,7 @@ export class AuthService {
 	 * - Client is attached to the coach (coachId) and to the coach's admin (adminId)
 	 */
 	async coachCreateClient(body: any, actor: { id: string; role: UserRole }) {
-		const { name, email, phone, gender, membership, subscriptionStart, subscriptionEnd, password } = body || {};
+		const { name, email, phone, gender, membership, subscriptionStart, subscriptionEnd, birthDate, password } = body || {};
 
 		if (!actor || actor.role !== UserRole.COACH) {
 			throw new ForbiddenException('Only coaches can create clients via this endpoint');
@@ -734,6 +735,7 @@ export class AuthService {
 			status: UserStatus.PENDING, // Coach-created accounts start pending and require admin approval
 			subscriptionStart: subscriptionStart ?? today,
 			subscriptionEnd: subscriptionEnd ?? null,
+			birthDate: birthDate ?? null,
 			activeExercisePlanId: null,
 			defaultRestSeconds: 90,
 			lastLogin: null,
@@ -815,14 +817,13 @@ export class AuthService {
 
 	private async notifyAdminsSubscriptionAttempt(email: string) {
 		const notif = this.notifRepo.create({
-			type: NotificationType.SUBSCRIPTION_EXPIRED_LOGIN, // or FORM_SUBMISSION
+			type: NotificationType.SUBSCRIPTION_EXPIRED_LOGIN,
 			title: 'Expired subscription login attempt',
 			message: `User with email ${email} tried to log in but their subscription is expired.`,
 			audience: NotificationAudience.ADMIN,
 			isRead: false,
-			data: { email },
+			data: { email, event: 'subscription_expired_login' },
 		});
-
 		await this.notifRepo.save(notif);
 	}
 
@@ -1003,6 +1004,7 @@ export class AuthService {
 		if (dto.phone !== undefined) user.phone = dto.phone?.trim() || null;
 		if (dto.gender !== undefined) user.gender = dto.gender ?? null;
 		if (dto.membership !== undefined) user.membership = dto.membership ?? null;
+		if (dto.birthDate !== undefined) user.birthDate = dto.birthDate ?? null;
 		if (dto.defaultRestSeconds !== undefined) user.defaultRestSeconds = dto.defaultRestSeconds;
 
 		// ----- Password (optional) -----

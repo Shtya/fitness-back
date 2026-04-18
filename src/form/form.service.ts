@@ -215,7 +215,7 @@ export class FormService {
 
 	// ============ Submissions ============
 
-	async submitForm(formId: number, dto: SubmitFormDto, ipAddress: string): Promise<FormSubmission> {
+	async submitForm(formId: number, dto: SubmitFormDto, ipAddress: string, locale?: string): Promise<FormSubmission> {
 		const form = await this.formRepository.findOne({
 			where: { id: formId },
 			relations: ['fields'],
@@ -236,11 +236,10 @@ export class FormService {
 
 		// إشعار للإدارة
 		this.notificationService
-			.create({
-				type: NotificationType.FORM_SUBMISSION,
-				title: `New submission on "${form.title}"`,
-				message: `Email: ${dto.email} | Phone: ${dto.phone}`,
-				data: {
+			.createEvent({
+				event: 'form_submitted',
+				locale,
+				payload: {
 					formId: form.id,
 					formTitle: form.title,
 					submissionId: saved.id,
@@ -249,6 +248,7 @@ export class FormService {
 					ipAddress,
 				},
 				audience: NotificationAudience.ADMIN,
+				type: NotificationType.FORM_SUBMISSION,
 			})
 			.catch(() => { });
 
@@ -319,6 +319,7 @@ export class FormService {
 		ipAddress: string,
 		files: any[],
 		reportTo?: string,
+		locale?: string,
 	): Promise<FormSubmission> {
 		const form = await this.formRepository.findOne({
 			where: { id: formId },
@@ -395,11 +396,10 @@ export class FormService {
 
 		if (!existingByEmail) {
 			this.notificationService
-				.create({
-					type: NotificationType.FORM_SUBMISSION,
-					title: `New submission on "${form.title}"`,
-					message: `Email: ${dto.email} | Phone: ${dto.phone}`,
-					data: {
+				.createEvent({
+					event: 'form_submitted',
+					locale,
+					payload: {
 						formId: form.id,
 						formTitle: form.title,
 						submissionId: saved.id,
@@ -408,6 +408,7 @@ export class FormService {
 						ipAddress,
 					},
 					audience: NotificationAudience.ADMIN,
+					type: NotificationType.FORM_SUBMISSION,
 				})
 				.catch(() => { });
 		}

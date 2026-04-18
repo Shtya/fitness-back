@@ -18,6 +18,7 @@ import {
   NutritionStats as NutritionStatsEntity,
   DayOfWeek,
 } from '../../entities/meal_plans.entity';
+import { Recipe } from '../../entities/recipes.entity';
 
 import {
   User,
@@ -79,6 +80,7 @@ export class NutritionService {
     @InjectRepository(FoodSuggestion) private suggestionRepo: Repository<FoodSuggestion>,
     @InjectRepository(NutritionStatsEntity) private statsRepo: Repository<NutritionStatsEntity>,
     @InjectRepository(NotificationEntity) private notificationRepo: Repository<NotificationEntity>,
+    @InjectRepository(Recipe) private recipeRepo: Repository<Recipe>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -107,17 +109,54 @@ export class NutritionService {
       time: m?.time ? String(m.time) : null,
       items: (m?.items || []).map((it, ii) => {
         const alt = it?.alternative;
+        const alternativesArray = Array.isArray(it?.alternatives) ? it.alternatives : [];
+        const normalizedAlternatives = alternativesArray
+          .filter((a: any) => String(a?.name || '').trim())
+          .map((a: any) => ({
+            name: String(a.name || '').trim(),
+            quantity: a?.quantity === '' || a?.quantity == null ? null : Number(a.quantity),
+            unit:
+              a?.unit === 'mg'
+                ? 'mg'
+                : a?.unit === 'count' || a?.unit === 'pcs' || a?.unit === 'piece'
+                  ? 'count'
+                  : 'g',
+            calories: a?.calories === '' || a?.calories == null ? null : Number(a.calories),
+            type: a?.type === 'recipe' ? 'recipe' : 'food',
+            id: a?.sourceId ? String(a.sourceId) : a?.id ? String(a.id) : null,
+          }));
         const hasAlt = alt && String(alt?.name || '').trim();
+        const legacyAlt = hasAlt
+          ? {
+              name: String(alt.name).trim(),
+              quantity: alt.quantity !== '' && alt.quantity != null ? Number(alt.quantity) : null,
+              unit:
+                alt.unit === 'mg'
+                  ? 'mg'
+                  : alt.unit === 'count' || alt.unit === 'pcs' || alt.unit === 'piece'
+                    ? 'count'
+                    : 'g',
+              calories: Number(alt.calories ?? 0),
+            }
+          : normalizedAlternatives[0] || null;
         return {
           name: String(it?.name || '').trim(),
+          itemType: it?.type === 'recipe' ? 'recipe' : 'food',
+          sourceId: it?.sourceId ? String(it.sourceId) : it?.id ? String(it.id) : null,
           quantity: it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity),
-          unit: it?.unit === 'count' ? 'count' : 'g',
+          unit:
+            it?.unit === 'mg'
+              ? 'mg'
+              : it?.unit === 'count' || it?.unit === 'pcs' || it?.unit === 'piece'
+                ? 'count'
+                : 'g',
           calories: Number(it?.calories ?? 0),
           orderIndex: ii,
-          alternativeName: hasAlt ? String(alt.name).trim() : null,
-          alternativeQuantity: hasAlt && (alt.quantity !== '' && alt.quantity != null) ? Number(alt.quantity) : null,
-          alternativeUnit: hasAlt && alt.unit === 'count' ? 'count' : (hasAlt ? 'g' : null),
-          alternativeCalories: hasAlt ? Number(alt.calories ?? 0) : null,
+          alternativeName: legacyAlt?.name ?? null,
+          alternativeQuantity: legacyAlt?.quantity ?? null,
+          alternativeUnit: legacyAlt?.unit ?? null,
+          alternativeCalories: legacyAlt?.calories ?? null,
+          alternatives: normalizedAlternatives,
         };
       }),
       supplements: (m?.supplements || []).map((s, si) => ({
@@ -172,6 +211,56 @@ export class NutritionService {
       .getOne();
   }
 
+  private async hydratePlanRecipeItems(plan: MealPlan | null) {
+    if (!plan?.days?.length) return plan;
+
+    const recipeIds = new Set<string>();
+    for (const d of plan.days || []) {
+      for (const m of d.meals || []) {
+        for (const i of m.items || []) {
+          if ((i as any)?.itemType === 'recipe' && (i as any)?.sourceId) recipeIds.add(String((i as any).sourceId));
+        }
+      }
+    }
+
+    if (!recipeIds.size) return plan;
+
+    const recipes = await this.recipeRepo.find({
+      where: { id: In(Array.from(recipeIds)) },
+      relations: { ingredients: true, steps: true, tips: true },
+    });
+    const map = new Map(recipes.map(r => [r.id, r]));
+
+    for (const d of plan.days || []) {
+      for (const m of d.meals || []) {
+        for (const i of m.items || []) {
+          if ((i as any)?.itemType !== 'recipe' || !(i as any)?.sourceId) continue;
+          const recipe = map.get(String((i as any).sourceId));
+          if (!recipe) continue;
+          (i as any).recipe = {
+            id: recipe.id,
+            title: recipe.title,
+            imageUrl: recipe.imageUrl ?? null,
+            videoUrl: recipe.videoUrl ?? null,
+            calories: recipe.calories,
+            proteinG: Number(recipe.proteinG),
+            carbsG: Number(recipe.carbsG),
+            fatG: Number(recipe.fatG),
+            mealType: recipe.mealType ?? null,
+            satiety: recipe.satietyIndex
+              ? String(recipe.satietyIndex).replace(/\s+/g, '_').toUpperCase()
+              : 'MEDIUM',
+            ingredients: (recipe.ingredients || []).map(x => x.text),
+            directions: (recipe.steps || []).map(x => x.instruction),
+            tips: (recipe.tips || []).map(x => x.text),
+          };
+        }
+      }
+    }
+
+    return plan;
+  }
+
   /** ===================== MEAL PLANS ===================== */
 
   async createMealPlan(createDto: CreateMealPlanDto, user: any, lang?: Lang): Promise<MealPlan> {
@@ -221,14 +310,17 @@ export class NutritionService {
               itemRepo.create({
                 meal,
                 name: it.name,
+                itemType: it.itemType === 'recipe' ? 'recipe' : 'food',
+                sourceId: it.sourceId ?? null,
                 quantity: it.quantity ?? null,
-                unit: it.unit === 'count' ? 'count' : 'g',
+                unit: it.unit === 'mg' ? 'mg' : it.unit === 'count' ? 'count' : 'g',
                 calories: it.calories,
                 orderIndex: it.orderIndex,
                 alternativeName: it.alternativeName ?? null,
                 alternativeQuantity: it.alternativeQuantity ?? null,
                 alternativeUnit: it.alternativeUnit ?? null,
                 alternativeCalories: it.alternativeCalories ?? null,
+                alternatives: it.alternatives ?? [],
               }),
             );
             await itemRepo.save(items);
@@ -277,7 +369,8 @@ export class NutritionService {
 
       const full = await manager.getRepository(MealPlan).findOne({ where: { id: savedPlan.id } });
       if (!full) throw new NotFoundException(t(lang, 'plan_not_found'));
-      return this.fetchPlanDetailsOrdered(savedPlan.id);
+      const hydrated = await this.fetchPlanDetailsOrdered(savedPlan.id);
+      return this.hydratePlanRecipeItems(hydrated as any);
     });
   }
 
@@ -303,7 +396,21 @@ export class NutritionService {
       take: limit,
     });
 
-    return { records, total, page, limit };
+    const ids = records.map(r => r.id);
+    const usageRaw = ids.length
+      ? await this.userRepo
+          .createQueryBuilder('u')
+          .select('u."activeMealPlanId"', 'planId')
+          .addSelect('COUNT(*)', 'cnt')
+          .where('u."adminId" = :adminId', { adminId: user.id })
+          .andWhere('u."activeMealPlanId" IN (:...ids)', { ids })
+          .groupBy('u."activeMealPlanId"')
+          .getRawMany<{ planId: string; cnt: string }>()
+      : [];
+    const usageMap = new Map(usageRaw.map(r => [String(r.planId), Number(r.cnt || 0)]));
+    const mapped = records.map(r => ({ ...r, clientsUsingCount: usageMap.get(String(r.id)) ?? 0 }));
+
+    return { records: mapped, total, page, limit };
   }
 
   async findMealPlanByIdSecure(id: string, user: { id: string; role: UserRole }, lang?: Lang): Promise<MealPlan> {
@@ -314,7 +421,7 @@ export class NutritionService {
     // const canView = plan.adminId === null || plan.adminId === user.id || user.role === UserRole.SUPER_ADMIN;
     // if (!canView) throw new ForbiddenException(t(lang, 'forbidden_view'));
 
-    return plan;
+    return this.hydratePlanRecipeItems(plan as any);
   }
 
   async updateMealPlan(id: string, updateDto: UpdateMealPlanDto, user: any, lang?: Lang): Promise<MealPlan> {
@@ -350,7 +457,8 @@ export class NutritionService {
 
       // ✅ if no baseMeals in updateDto => keep structure (only metadata updated)
       if (!updateDto.baseMeals || !Array.isArray(updateDto.baseMeals) || updateDto.baseMeals.length === 0) {
-        return this.fetchPlanDetailsOrdered(id);
+        const hydrated = await this.fetchPlanDetailsOrdered(id);
+        return this.hydratePlanRecipeItems(hydrated as any);
       }
 
       // ensure days exist (in case old data missing)
@@ -388,22 +496,24 @@ export class NutritionService {
           );
 
           if (m.items?.length) {
-            await itemRepo.save(
-              m.items.map((it: any) =>
-                itemRepo.create({
-                  meal,
-                  name: it.name,
-                  quantity: it.quantity ?? null,
-                  unit: it.unit === 'count' ? 'count' : 'g',
-                  calories: it.calories,
-                  orderIndex: it.orderIndex,
-                  alternativeName: it.alternativeName ?? null,
-                  alternativeQuantity: it.alternativeQuantity ?? null,
-                  alternativeUnit: it.alternativeUnit ?? null,
-                  alternativeCalories: it.alternativeCalories ?? null,
-                }),
-              ),
+            const items = m.items.map((it: any) =>
+              itemRepo.create({
+                meal,
+                name: it.name,
+                itemType: it.itemType === 'recipe' ? 'recipe' : 'food',
+                sourceId: it.sourceId ?? null,
+                quantity: it.quantity ?? null,
+                unit: it.unit === 'mg' ? 'mg' : it.unit === 'count' ? 'count' : 'g',
+                calories: it.calories,
+                orderIndex: it.orderIndex,
+                alternativeName: it.alternativeName ?? null,
+                alternativeQuantity: it.alternativeQuantity ?? null,
+                alternativeUnit: it.alternativeUnit ?? null,
+                alternativeCalories: it.alternativeCalories ?? null,
+                alternatives: it.alternatives ?? [],
+              }),
             );
+            await itemRepo.save(items);
           }
 
           if (m.supplements?.length) {
@@ -440,7 +550,8 @@ export class NutritionService {
         }
       }
 
-      return this.fetchPlanDetailsOrdered(id);
+      const hydrated = await this.fetchPlanDetailsOrdered(id);
+      return this.hydratePlanRecipeItems(hydrated as any);
     });
   }
 
@@ -459,12 +570,41 @@ export class NutritionService {
     await this.userRepo.save(user);
   }
 
+  async getMealPlanAssignees(planId: string) {
+    const rows = await this.userRepo
+      .createQueryBuilder('u')
+      .select([
+        'u.id AS id',
+        'u.name AS name',
+        'u.email AS email',
+        'u.status AS status',
+        'u.subscriptionStart AS "subscriptionStart"',
+        'u.subscriptionEnd AS "subscriptionEnd"',
+      ])
+      .where('u."activeMealPlanId" = :planId', { planId })
+      .orderBy('u.created_at', 'DESC')
+      .getRawMany<{
+        id: string;
+        name: string;
+        email: string;
+        status: string;
+        subscriptionStart: string | null;
+        subscriptionEnd: string | null;
+      }>();
+
+    const now = new Date();
+    return rows.map(r => ({
+      ...r,
+      subscriptionActive: !r.subscriptionEnd || new Date(r.subscriptionEnd) >= now,
+    }));
+  }
+
   async getClientMealPlan(userId: string): Promise<MealPlan> {
     const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['activeMealPlan'] });
     if (!user?.activeMealPlan) throw new NotFoundException('No active meal plan found');
     const plan = await this.fetchPlanDetailsOrdered(user.activeMealPlan.id);
     if (!plan) throw new NotFoundException('No active meal plan found');
-    return plan;
+    return this.hydratePlanRecipeItems(plan as any);
   }
 
   /** ===================== MEAL LOGGING (kept, with date validation fix) ===================== */

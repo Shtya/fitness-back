@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   BillingInvoice,
   BillingPlan,
+  ClientCommunication,
+  ClientNote,
   PaymentTransaction,
   UserSubscription,
 } from '../../entities/billing.entity';
@@ -18,6 +20,8 @@ import { BillingService } from './billing.service';
       UserSubscription,
       BillingInvoice,
       PaymentTransaction,
+      ClientNote,
+      ClientCommunication,
       User,
     ]),
   ],

@@ -149,6 +149,12 @@ export class MealItem extends CoreEntity {
 	@Column({ type: 'varchar', length: 200 })
 	name!: string;
 
+	@Column({ name: 'item_type', type: 'varchar', length: 20, default: 'food' })
+	itemType!: 'food' | 'recipe';
+
+	@Column({ name: 'source_id', type: 'uuid', nullable: true })
+	sourceId!: string | null;
+
 	@Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
 	quantity!: number | null;
 
@@ -170,6 +176,16 @@ export class MealItem extends CoreEntity {
 
 	@Column({ name: 'alternative_calories', type: 'decimal', precision: 8, scale: 2, nullable: true })
 	alternativeCalories!: number | null;
+
+	@Column({ type: 'jsonb', nullable: true, default: () => "'[]'::jsonb" })
+	alternatives!: Array<{
+		name: string;
+		quantity: number | null;
+		unit: string | null;
+		calories: number | null;
+		type?: 'food' | 'recipe';
+		id?: string | null;
+	}> | null;
 
 	@ManyToOne(() => Meal, (meal) => meal.items, { onDelete: 'CASCADE' })
 	@JoinColumn({ name: 'meal_id' })

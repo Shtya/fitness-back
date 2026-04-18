@@ -62,6 +62,23 @@ export enum PaymentMethodType {
   OTHER = 'other',
 }
 
+export enum ClientNoteType {
+  GENERAL = 'general',
+  WARNING = 'warning',
+  NUTRITION = 'nutrition',
+  WORKOUT = 'workout',
+  FOLLOW_UP = 'follow_up',
+}
+
+export enum CommunicationType {
+  REMINDER = 'reminder',
+  WHATSAPP = 'whatsapp',
+  PLAN_OFFER = 'plan_offer',
+  RENEWAL = 'renewal',
+  FOLLOW_UP = 'follow_up',
+  OTHER = 'other',
+}
+
 @Entity('billing_plans')
 @Unique(['name'])
 export class BillingPlan extends CoreEntity {
@@ -308,6 +325,66 @@ export class PaymentTransaction extends CoreEntity {
 
   @Column({ type: 'text', nullable: true })
   notes?: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  metadata?: Record<string, any> | null;
+}
+
+@Entity('client_notes')
+@Index(['clientId', 'isPinned'])
+export class ClientNote extends CoreEntity {
+  @ManyToOne(() => User, { onDelete: 'CASCADE', eager: true })
+  @JoinColumn({ name: 'clientId' })
+  client!: User;
+
+  @Column({ type: 'uuid' })
+  clientId!: string;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true, eager: true })
+  @JoinColumn({ name: 'authorId' })
+  author!: User | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
+
+  @Column({ type: 'enum', enum: ClientNoteType, default: ClientNoteType.GENERAL })
+  type!: ClientNoteType;
+
+  @Column({ type: 'text' })
+  text!: string;
+
+  @Column({ type: 'boolean', default: false })
+  isPinned!: boolean;
+}
+
+@Entity('client_communications')
+@Index(['clientId', 'type'])
+export class ClientCommunication extends CoreEntity {
+  @ManyToOne(() => User, { onDelete: 'CASCADE', eager: true })
+  @JoinColumn({ name: 'clientId' })
+  client!: User;
+
+  @Column({ type: 'uuid' })
+  clientId!: string;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true, eager: true })
+  @JoinColumn({ name: 'coachId' })
+  coach!: User | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  coachId!: string | null;
+
+  @Column({ type: 'enum', enum: CommunicationType, default: CommunicationType.OTHER })
+  type!: CommunicationType;
+
+  @Column({ type: 'text', nullable: true })
+  template!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  message!: string | null;
+
+  @Column({ type: 'varchar', length: 16, default: 'sent' })
+  status!: string;
 
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, any> | null;

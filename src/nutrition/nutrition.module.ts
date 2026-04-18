@@ -20,6 +20,7 @@ import {
 } from '../../entities/meal_plans.entity';
 
 import { User, Notification as NotificationEntity } from 'entities/global.entity'; // ✅ خلي User/Notification من global
+import { Recipe } from 'entities/recipes.entity';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { User, Notification as NotificationEntity } from 'entities/global.entity
       NutritionStats,
       User,
       NotificationEntity,
+      Recipe,
     ]),
   ],
   controllers: [NutritionController],

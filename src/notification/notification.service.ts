@@ -92,6 +92,87 @@ export class NotificationService {
 		return saved;
 	}
 
+	private isAr(locale?: string) {
+		return String(locale || '').toLowerCase().startsWith('ar');
+	}
+
+	async createEvent(opts: {
+		event:
+			| 'form_submitted'
+			| 'weekly_report_submitted'
+			| 'weekly_report_updated'
+			| 'weekly_report_feedback'
+			| 'subscription_expired_login'
+			| 'birthday'
+			| 'subscription_ended';
+		locale?: string;
+		payload?: Record<string, any>;
+		audience?: NotificationAudience;
+		userId?: string | null;
+		type?: NotificationType;
+	}) {
+		const ar = this.isAr(opts.locale);
+		const p = opts.payload || {};
+		let title = 'Notification';
+		let message = '';
+
+		switch (opts.event) {
+			case 'form_submitted':
+				title = ar ? `إرسال جديد على "${p.formTitle || 'النموذج'}"` : `New submission on "${p.formTitle || 'form'}"`;
+				message = ar
+					? `البريد: ${p.email || '-'} | الهاتف: ${p.phone || '-'}`
+					: `Email: ${p.email || '-'} | Phone: ${p.phone || '-'}`;
+				break;
+			case 'weekly_report_submitted':
+				title = ar ? 'تم إرسال التقرير الأسبوعي' : 'New Weekly Report Submitted';
+				message = ar
+					? `${p.userName || 'عميل'} قام بإرسال التقرير الأسبوعي للأسبوع ${p.weekOf || ''}`
+					: `${p.userName || 'Client'} has submitted the weekly report for ${p.weekOf || ''}`;
+				break;
+			case 'weekly_report_updated':
+				title = ar ? 'تم تحديث التقرير الأسبوعي' : 'Weekly Report Updated';
+				message = ar
+					? `${p.userName || 'عميل'} قام بتحديث التقرير الأسبوعي للأسبوع ${p.weekOf || ''}`
+					: `${p.userName || 'Client'} updated the weekly report for ${p.weekOf || ''}`;
+				break;
+			case 'weekly_report_feedback':
+				title = ar ? 'تم إضافة ملاحظات من الكوتش' : 'Coach Feedback Received';
+				message = ar
+					? `تمت إضافة ملاحظات على تقريرك الأسبوعي (${p.weekOf || ''})`
+					: `Your coach has provided feedback on your weekly report for ${p.weekOf || ''}`;
+				break;
+			case 'subscription_expired_login':
+				title = ar ? 'محاولة دخول باشتراك منتهي' : 'Expired subscription login attempt';
+				message = ar
+					? `المستخدم ${p.email || ''} حاول تسجيل الدخول لكن الاشتراك منتهي.`
+					: `User with email ${p.email || ''} tried to log in but their subscription is expired.`;
+				break;
+			case 'birthday':
+				title = ar ? 'عيد ميلاد سعيد!' : 'Happy Birthday!';
+				message = ar
+					? `نتمنى لك يومًا رائعًا يا ${p.userName || ''}`
+					: `Wishing you an amazing day, ${p.userName || ''}`;
+				break;
+			case 'subscription_ended':
+				title = ar ? 'انتهى اشتراك العميل' : 'Client subscription ended';
+				message = ar
+					? `انتهى اشتراك ${p.userName || 'عميل'} اليوم.`
+					: `${p.userName || 'Client'} subscription ended today.`;
+				break;
+			default:
+				break;
+		}
+
+		return this.create({
+			type: opts.type ?? NotificationType.FORM_SUBMISSION,
+			title,
+			message,
+			data: { ...(opts.payload || {}), event: opts.event, locale: opts.locale || 'en' },
+			audience: opts.audience ?? NotificationAudience.ADMIN,
+			userId: opts.userId ?? null,
+		});
+	}
+
 	async listAdmin(page: number | string = 1, limit: number | string = 20, isRead?: boolean) {
 		const { page: p, take, skip } = normalizePagination(page, limit);
 

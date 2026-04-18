@@ -410,11 +410,33 @@ export class PlanService {
 
 		const [rows, total] = await qb.getManyAndCount();
 
+		// Count how many clients under this admin are currently using each plan
+		const planIds = rows.map(r => (r as any).id).filter(Boolean);
+		const countByPlanId = new Map<string, number>();
+		if (planIds.length) {
+			const raw = await this.userRepo
+				.createQueryBuilder('u')
+				.select('u."activeExercisePlanId"', 'planId')
+				.addSelect('COUNT(*)', 'cnt')
+				.where('u."adminId" = :adminId', { adminId: actor.id })
+				.andWhere('u."activeExercisePlanId" IN (:...planIds)', { planIds })
+				.groupBy('u."activeExercisePlanId"')
+				.getRawMany<{ planId: string; cnt: string }>();
+
+			for (const r of raw) {
+				if (!r?.planId) continue;
+				countByPlanId.set(String(r.planId), Number(r.cnt || 0));
+			}
+		}
+
 		const result = {
 			total_records: total,
 			current_page: page,
 			per_page: limit,
-			records: rows.map(plan => this.planToFrontendShape(plan)),
+			records: rows.map(plan => ({
+				...this.planToFrontendShape(plan),
+				clientsUsingCount: countByPlanId.get(String((plan as any).id)) ?? 0,
+			})),
 		};
 
 		// Store in Redis cache for 60 seconds
@@ -679,8 +701,42 @@ export class PlanService {
 
 	async listAssignees(planId: string) {
 		// no join-table: just return users pointing to this plan
-		const users = await this.userRepo.find({ where: { activeExercisePlanId: planId } });
-		return users;
+		// IMPORTANT: never return full user entity (contains sensitive fields like password)
+		const rows = await this.userRepo
+			.createQueryBuilder('u')
+			.select([
+				'u.id AS id',
+				'u.name AS name',
+				'u.email AS email',
+				'u.status AS status',
+				'u.subscriptionEnd AS "subscriptionEnd"',
+				'u.subscriptionStart AS "subscriptionStart"',
+			])
+			.where('u."activeExercisePlanId" = :planId', { planId })
+			.orderBy('u.created_at', 'DESC')
+			.getRawMany<{
+				id: string;
+				name: string;
+				email: string;
+				status: string;
+				subscriptionEnd: string | null;
+				subscriptionStart: string | null;
+			}>();
+
+		const now = new Date();
+		return rows.map(r => {
+			const end = r.subscriptionEnd ? new Date(r.subscriptionEnd) : null;
+			const subscriptionActive = !end || end >= now;
+			return {
+				id: r.id,
+				name: r.name,
+				email: r.email,
+				status: r.status,
+				subscriptionEnd: r.subscriptionEnd,
+				subscriptionStart: r.subscriptionStart,
+				subscriptionActive,
+			};
+		});
 	}
 
 	/* ---------- Cache Invalidation Methods ---------- */

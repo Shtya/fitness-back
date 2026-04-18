@@ -143,6 +143,7 @@ export class FormController {
 		@Query('report_to') reportTo?: string,
 	) {
 		const ipAddress = req.ip || req.connection?.remoteAddress || '';
+		const locale = String(req?.headers?.['x-locale'] || req?.headers?.['accept-language'] || 'en');
 
 		// body.answers comes as string in multipart
 		const answers = typeof body.answers === 'string' ? JSON.parse(body.answers) : (body.answers || {});
@@ -156,6 +157,6 @@ export class FormController {
 			throw new BadRequestException('Please review the form using the link again.');
 		}
 
-		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], reportTo);
+		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], reportTo, locale);
 	}
 }

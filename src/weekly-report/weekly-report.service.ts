@@ -16,7 +16,7 @@ export class WeeklyReportService {
     public readonly notificationService: NotificationService,
   ) {}
 
-  async createReport(userId: string, createDto: any) {
+  async createReport(userId: string, createDto: any, locale?: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
       relations: ['coach'],
@@ -52,11 +52,10 @@ export class WeeklyReportService {
       const updated = await this.weeklyReportRepo.save(merged);
 
       if (createDto.notifyCoach && user.coachId) {
-        await this.notificationService.create({
-          type: NotificationType.FORM_SUBMISSION,
-          title: 'Weekly Report Updated',
-          message: `${user.name} updated the weekly report for ${updated.weekOf}`,
-          data: {
+        await this.notificationService.createEvent({
+          event: 'weekly_report_updated',
+          locale,
+          payload: {
             reportId: updated.id,
             userId: user.id,
             userName: user.name,
@@ -65,6 +64,7 @@ export class WeeklyReportService {
           },
           audience: NotificationAudience.USER,
           userId: user.coachId,
+          type: NotificationType.FORM_SUBMISSION,
         });
       }
 
@@ -79,11 +79,10 @@ export class WeeklyReportService {
     const savedReport: any = await this.weeklyReportRepo.save(report);
 
     if (createDto.notifyCoach && user.coachId) {
-      await this.notificationService.create({
-        type: NotificationType.FORM_SUBMISSION,
-        title: 'New Weekly Report Submitted',
-        message: `${user.name} has submitted their weekly report for ${createDto.weekOf}`,
-        data: {
+      await this.notificationService.createEvent({
+        event: 'weekly_report_submitted',
+        locale,
+        payload: {
           reportId: savedReport.id,
           userId: user.id,
           userName: user.name,
@@ -92,6 +91,7 @@ export class WeeklyReportService {
         },
         audience: NotificationAudience.USER,
         userId: user.coachId,
+        type: NotificationType.FORM_SUBMISSION,
       });
     }
 
@@ -176,7 +176,7 @@ export class WeeklyReportService {
   }
 
   // ✅ تحديث الملاحظة بدون لعب في isRead (isRead للعميل فقط)
-  async updateFeedback(id: string, updateDto: { coachFeedback?: string }, coachId: string) {
+  async updateFeedback(id: string, updateDto: { coachFeedback?: string }, coachId: string, locale?: string) {
     const report = await this.weeklyReportRepo.findOne({
       where: { id },
       relations: ['user'],
@@ -203,17 +203,17 @@ export class WeeklyReportService {
     });
 
     if (updateDto.coachFeedback) {
-      await this.notificationService.create({
-        type: NotificationType.FORM_SUBMISSION,
-        title: 'Coach Feedback on Your Weekly Report',
-        message: `Your coach has provided feedback on your weekly report for ${report.weekOf}`,
-        data: {
+      await this.notificationService.createEvent({
+        event: 'weekly_report_feedback',
+        locale,
+        payload: {
           reportId: report.id,
           weekOf: report.weekOf,
           type: 'weekly_report_feedback',
         },
         audience: NotificationAudience.USER,
         userId: report.userId,
+        type: NotificationType.FORM_SUBMISSION,
       });
     }
 

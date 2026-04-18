@@ -10,13 +10,17 @@ import {
 	BillingInvoice,
 	BillingPlan,
 	BillingPlanStatus,
+	ClientCommunication,
+	ClientNote,
+	ClientNoteType,
+	CommunicationType,
 	InvoiceStatus,
 	PaymentStatus,
 	PaymentTransaction,
 	SubscriptionStatus,
 	UserSubscription,
 } from 'entities/billing.entity';
-import { User } from 'entities/global.entity';
+import { User, UserRole } from 'entities/global.entity';
 @Injectable()
 export class BillingService {
 	constructor(
@@ -31,6 +35,12 @@ export class BillingService {
 
 		@InjectRepository(PaymentTransaction)
 		private readonly paymentRepo: Repository<PaymentTransaction>,
+
+		@InjectRepository(ClientNote)
+		private readonly noteRepo: Repository<ClientNote>,
+
+		@InjectRepository(ClientCommunication)
+		private readonly commRepo: Repository<ClientCommunication>,
 
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
@@ -186,6 +196,20 @@ export class BillingService {
 
 	async updateSubscription(id: string, dto: any) {
 		const sub = await this.findSubscriptionById(id);
+		if (dto?.action) {
+			const action = String(dto.action).toLowerCase();
+			if (action === 'pause' || action === 'freeze') sub.status = SubscriptionStatus.PAST_DUE;
+			if (action === 'resume') sub.status = SubscriptionStatus.ACTIVE;
+			if (action === 'cancel') sub.status = SubscriptionStatus.CANCELED;
+			if (action === 'extend_days' && Number(dto.days || 0) > 0) {
+				const base = sub.endDate ? new Date(sub.endDate) : new Date();
+				base.setDate(base.getDate() + Number(dto.days));
+				sub.endDate = base.toISOString().slice(0, 10);
+			}
+			if (action === 'change_package' && dto.planId) {
+				sub.planId = dto.planId;
+			}
+		}
 		Object.assign(sub, dto);
 		const saved = await this.subscriptionRepo.save(sub);
 
@@ -430,6 +454,243 @@ export class BillingService {
 				totalPages: Math.ceil(total / limit),
 			},
 		};
+	}
+
+	async getClients(query: any) {
+		const { take, skip, page, limit } = this.paginate(query.page, query.limit);
+		const qb = this.userRepo.createQueryBuilder('u')
+			.leftJoin('u.coach', 'coach')
+			.select([
+				'u.id',
+				'u.name',
+				'u.email',
+				'u.phone',
+				'u.gender',
+				'u.membership',
+				'u.subscriptionStart',
+				'u.subscriptionEnd',
+				'u.status',
+				'u.created_at',
+				'u.coachId',
+				'coach.id',
+				'coach.name',
+			])
+			.where('u.role = :role', { role: UserRole.CLIENT })
+			.orderBy('u.created_at', 'DESC')
+			.take(take)
+			.skip(skip);
+
+		if (query.q) {
+			qb.andWhere(
+				new Brackets((sq) => {
+					sq.where('LOWER(u.name) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('LOWER(u.email) LIKE LOWER(:q)', { q: `%${query.q}%` })
+						.orWhere('u.phone LIKE :q', { q: `%${query.q}%` });
+				}),
+			);
+		}
+		if (query.coachId) qb.andWhere('u.coachId = :coachId', { coachId: query.coachId });
+
+		const [items, total] = await qb.getManyAndCount();
+		return {
+			items: await Promise.all(items.map(async (u) => {
+				const activeSub = await this.subscriptionRepo.findOne({
+					where: { userId: u.id, status: SubscriptionStatus.ACTIVE },
+					order: { created_at: 'DESC' },
+					relations: ['plan'],
+				});
+				const lastPayment = await this.paymentRepo.findOne({
+					where: { userId: u.id },
+					order: { created_at: 'DESC' },
+				});
+				return {
+					...u,
+					currentPackage: activeSub?.plan?.name ?? u.membership ?? null,
+					subscriptionStatus: activeSub?.status ?? (u.subscriptionEnd ? SubscriptionStatus.EXPIRED : SubscriptionStatus.PENDING),
+					renewalDate: activeSub?.endDate ?? u.subscriptionEnd ?? null,
+					lastActivity: lastPayment?.created_at ?? u.updated_at ?? u.created_at,
+				};
+			})),
+			meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+		};
+	}
+
+	async getClientById(id: string) {
+		const user = await this.userRepo.findOne({ where: { id }, relations: ['coach'] });
+		if (!user || user.role !== UserRole.CLIENT) throw new NotFoundException('Client not found');
+		const currentSubscription = await this.getCurrentSubscription(id);
+		const paymentsSummary = await this.paymentRepo
+			.createQueryBuilder('p')
+			.select('COALESCE(SUM(p.amount),0)', 'sum')
+			.where('p.userId = :id', { id })
+			.andWhere('p.status = :status', { status: PaymentStatus.SUCCEEDED })
+			.getRawOne();
+		return {
+			profile: user,
+			currentSubscription,
+			paymentsSummary: Number(paymentsSummary?.sum || 0),
+		};
+	}
+
+	async getClientTimeline(clientId: string, query: any = {}) {
+		const events: any[] = [];
+		const user = await this.userRepo.findOne({ where: { id: clientId } });
+		if (!user) throw new NotFoundException('Client not found');
+
+		events.push({
+			type: 'account_created',
+			title: 'Account created',
+			description: `${user.name} profile created`,
+			at: user.created_at,
+		});
+
+		const subs = await this.subscriptionRepo.find({ where: { userId: clientId }, relations: ['plan'], order: { created_at: 'DESC' } });
+		for (const s of subs) {
+			events.push({
+				type: 'subscription_changed',
+				title: `Subscription ${s.status}`,
+				description: `${s.plan?.name || 'Plan'} (${s.startDate || '-'} → ${s.endDate || '-'})`,
+				at: s.created_at,
+			});
+		}
+
+		const payments = await this.paymentRepo.find({ where: { userId: clientId }, order: { created_at: 'DESC' } });
+		for (const p of payments) {
+			events.push({
+				type: 'payment',
+				title: `Payment ${p.status}`,
+				description: `${p.amount} ${p.currency} via ${p.paymentMethod}`,
+				at: p.created_at,
+			});
+		}
+
+		const notes = await this.noteRepo.find({ where: { clientId }, order: { created_at: 'DESC' } });
+		for (const n of notes) {
+			events.push({
+				type: 'coach_note',
+				title: `Note (${n.type})`,
+				description: n.text,
+				at: n.created_at,
+			});
+		}
+
+		const comms = await this.commRepo.find({ where: { clientId }, order: { created_at: 'DESC' } });
+		for (const c of comms) {
+			events.push({
+				type: 'communication',
+				title: `Communication ${c.type}`,
+				description: c.message || c.template || '-',
+				at: c.created_at,
+			});
+		}
+
+		let filtered = events.sort((a, b) => +new Date(b.at) - +new Date(a.at));
+		if (query.type) filtered = filtered.filter((e) => e.type === query.type);
+		return filtered;
+	}
+
+	async getClientProgress(clientId: string) {
+		const monthlyPayments = await this.paymentRepo
+			.createQueryBuilder('p')
+			.select("to_char(p.created_at, 'YYYY-MM')", 'month')
+			.addSelect('COALESCE(SUM(p.amount),0)', 'total')
+			.addSelect('COUNT(*)', 'count')
+			.where('p.userId = :clientId', { clientId })
+			.groupBy("to_char(p.created_at, 'YYYY-MM')")
+			.orderBy('month', 'DESC')
+			.getRawMany();
+
+		const monthlySubscriptions = await this.subscriptionRepo
+			.createQueryBuilder('s')
+			.select("to_char(s.created_at, 'YYYY-MM')", 'month')
+			.addSelect('COUNT(*)', 'count')
+			.where('s.userId = :clientId', { clientId })
+			.groupBy("to_char(s.created_at, 'YYYY-MM')")
+			.orderBy('month', 'DESC')
+			.getRawMany();
+
+		// TODO: hook workout/nutrition adherence and body measurements when related APIs are finalized
+		return {
+			monthlyPayments: monthlyPayments.map((x) => ({ month: x.month, total: Number(x.total), count: Number(x.count) })),
+			monthlySubscriptions: monthlySubscriptions.map((x) => ({ month: x.month, count: Number(x.count) })),
+			monthlyCheckins: [],
+			monthlyAdherence: [],
+			monthlyMeasurements: [],
+		};
+	}
+
+	async getClientCheckins(clientId: string) {
+		// TODO: integrate with weekly-report module records for this client
+		return [];
+	}
+
+	async getClientNotes(clientId: string) {
+		return this.noteRepo.find({ where: { clientId }, order: { isPinned: 'DESC', created_at: 'DESC' } as any });
+	}
+
+	async createClientNote(clientId: string, dto: any) {
+		const client = await this.userRepo.findOne({ where: { id: clientId } });
+		if (!client) throw new NotFoundException('Client not found');
+		const note = this.noteRepo.create({
+			clientId,
+			authorId: dto.authorId ?? null,
+			type: dto.type ?? ClientNoteType.GENERAL,
+			text: dto.text,
+			isPinned: !!dto.isPinned,
+		});
+		return this.noteRepo.save(note);
+	}
+
+	async updateClientNote(clientId: string, noteId: string, dto: any) {
+		const note = await this.noteRepo.findOne({ where: { id: noteId, clientId } });
+		if (!note) throw new NotFoundException('Note not found');
+		Object.assign(note, dto);
+		return this.noteRepo.save(note);
+	}
+
+	async deleteClientNote(clientId: string, noteId: string) {
+		const note = await this.noteRepo.findOne({ where: { id: noteId, clientId } });
+		if (!note) throw new NotFoundException('Note not found');
+		await this.noteRepo.remove(note);
+		return { ok: true };
+	}
+
+	async getClientPlansHistory(clientId: string) {
+		const subscriptions = await this.subscriptionRepo.find({
+			where: { userId: clientId },
+			relations: ['plan'],
+			order: { created_at: 'DESC' },
+		});
+		return subscriptions.map((s) => ({
+			id: s.id,
+			planId: s.planId,
+			planName: s.plan?.name || null,
+			startDate: s.startDate,
+			endDate: s.endDate,
+			status: s.status,
+			replacedBy: null, // TODO: support explicit link when replace relation is available
+			notes: s.notes || null,
+		}));
+	}
+
+	async getClientCommunications(clientId: string) {
+		return this.commRepo.find({ where: { clientId }, order: { created_at: 'DESC' } });
+	}
+
+	async sendClientCommunication(clientId: string, dto: any) {
+		const client = await this.userRepo.findOne({ where: { id: clientId } });
+		if (!client) throw new NotFoundException('Client not found');
+		// TODO: integrate real whatsapp/push providers here
+		const log = this.commRepo.create({
+			clientId,
+			coachId: dto.coachId ?? null,
+			type: dto.type ?? CommunicationType.OTHER,
+			template: dto.template ?? null,
+			message: dto.message ?? null,
+			status: 'sent',
+			metadata: dto.metadata ?? null,
+		});
+		return this.commRepo.save(log);
 	}
 
 	async getStats(query: any) {

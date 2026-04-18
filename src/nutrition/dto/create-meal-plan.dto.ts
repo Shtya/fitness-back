@@ -7,11 +7,23 @@ export class AlternativeItemDto {
 	name!: string;
 
 	@IsOptional()
+	@IsIn(['food', 'recipe'])
+	type?: 'food' | 'recipe';
+
+	@IsOptional()
+	@IsString()
+	id?: string;
+
+	@IsOptional()
+	@IsString()
+	sourceId?: string;
+
+	@IsOptional()
 	@IsNumber()
 	quantity?: number;
 
 	@IsOptional()
-	@IsIn(['g', 'count'])
+	@IsIn(['g', 'count', 'mg', 'pcs', 'piece'])
 	unit?: string;
 
 	@IsNumber()
@@ -23,11 +35,23 @@ export class MealItemDto {
 	name!: string;
 
 	@IsOptional()
+	@IsIn(['food', 'recipe'])
+	type?: 'food' | 'recipe';
+
+	@IsOptional()
+	@IsString()
+	id?: string;
+
+	@IsOptional()
+	@IsString()
+	sourceId?: string;
+
+	@IsOptional()
 	@IsNumber()
 	quantity?: number;
 
 	@IsOptional()
-	@IsIn(['g', 'count'])
+	@IsIn(['g', 'mg', 'count', 'pcs', 'piece'])
 	unit?: string;
 
 	@IsNumber()
@@ -37,6 +61,12 @@ export class MealItemDto {
 	@ValidateNested()
 	@Type(() => AlternativeItemDto)
 	alternative?: AlternativeItemDto;
+
+	@IsOptional()
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => AlternativeItemDto)
+	alternatives?: AlternativeItemDto[];
 }
 
 export class SupplementDto {

@@ -52,6 +52,11 @@ export class NutritionController {
     return this.nutritionService.assignMealPlan(id, userId, req?.user, lang);
   }
 
+  @Get('meal-plans/:id/assignees')
+  getMealPlanAssignees(@Param('id') id: string) {
+    return this.nutritionService.getMealPlanAssignees(id);
+  }
+
   // @Get('meal-plans/:id/assignments')
   // getPlanAssignments(@Param('id') id: string, @Request() req, @Query('lang') lang?: 'ar' | 'en') {
   //   return this.nutritionService.getPlanAssignmentsSecure(id, req?.user, lang);

@@ -15,7 +15,8 @@ export class WeeklyReportController {
   @Post()
   @Roles(UserRole.CLIENT)
   async create(@Request() req, @Body() createDto: any) {
-    return this.weeklyReportService.createReport(req.user.id, createDto);
+    const locale = String(req?.headers?.['x-locale'] || req?.headers?.['accept-language'] || 'en');
+    return this.weeklyReportService.createReport(req.user.id, createDto, locale);
   }
 
   @Get()
@@ -88,7 +89,8 @@ export class WeeklyReportController {
   @Put(':id/feedback')
   @Roles(UserRole.COACH, UserRole.ADMIN)
   async updateFeedback(@Param('id') id: string, @Body() updateDto: { coachFeedback?: string }, @Request() req) {
-    return this.weeklyReportService.updateFeedback(id, updateDto, req.user.id);
+    const locale = String(req?.headers?.['x-locale'] || req?.headers?.['accept-language'] || 'en');
+    return this.weeklyReportService.updateFeedback(id, updateDto, req.user.id, locale);
   }
 
   @Put(':id/read')

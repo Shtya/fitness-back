@@ -13,7 +13,7 @@ export class MealLogItemDto {
 	qty?: number;
 
 	@IsOptional()
-	@IsIn(['g', 'count'])
+	@IsIn(['g', 'count' , 'mg'])
 	unit?: string;
 }
 
@@ -42,7 +42,7 @@ export class ExtraFoodDto {
 	fat?: number;
 
 		@IsOptional()
-	@IsIn(['g', 'count'])
+	@IsIn(['g', 'count', 'mg'])
 	unit?: string;
 }
 
