@@ -37,7 +37,7 @@ export class RemindersService {
 				this.logger.log(`   📌 Public key length: ${pub.length} chars (should be ~87)`);
 				this.logger.log(`   📌 Private key length: ${priv.length} chars (should be ~43)`);
 				this.logger.log(`   📌 Subject: ${sub}`);
-			} catch (vapidError) {
+			} catch (vapidError:any) {
 				this.logger.error(`❌ [RemindersService] Failed to set VAPID details:`, vapidError.message);
 				this.logger.error(`   📌 Public key: ${pub}`);
 				this.logger.error(`   📌 Private key length: ${priv.length}`);
@@ -99,107 +99,68 @@ export class RemindersService {
 
 
 
-	async processDueReminders(now: Date = new Date()) {
-		// Load reminders with user relations to get phone numbers
-		const active = await this.remindersRepo.find({
-			where: { isActive: true, isCompleted: false },
-			relations: ['user'], // This is important for WhatsApp integration
-		});
+async processDueReminders(now: Date = new Date()) {
+  const active = await this.remindersRepo.find({
+    where: { isActive: true, isCompleted: false },
+    relations: ['user'],
+  });
 
-		const pastWindowMs = 30_000; // 30 seconds in the past
-		const futureWindowMs = 60_000; // 1 minute in the future
-		let sentCount = 0;
-		let pushSentCount = 0;
-		let websocketSentCount = 0;
-		let expoSentCount = 0;
+  // Wider window: accept reminders from 55s ago up to 5s in future
+  // This covers cron jitter while preventing double-fires (next occurrence
+  // is always advanced past now+60s after firing)
+  const PAST_WINDOW_MS = 55_000;
+  const FUTURE_WINDOW_MS = 5_000;
 
-		for (const rem of active) {
-			try {
-				let next: Date | null = null;
+  let sentCount = 0;
 
-				if (rem.reminderTime && rem.reminderTime.getTime() > now.getTime() - pastWindowMs) {
-					next = rem.reminderTime;
-				} else {
-					next = this.computeNextOccurrence(rem, now);
-					if (next) {
-						rem.reminderTime = next;
-						await this.remindersRepo.save(rem);
-					}
-				}
+  for (const rem of active) {
+    try {
+      const next = rem.reminderTime ?? this.computeNextOccurrence(rem, now);
+      if (!next) continue;
 
-				if (!next) continue;
+      const diff = next.getTime() - now.getTime();
+      const isDue = diff >= -PAST_WINDOW_MS && diff <= FUTURE_WINDOW_MS;
 
-				const diff = next.getTime() - now.getTime();
+      if (!isDue) continue;
 
-				if (diff >= -pastWindowMs && diff <= futureWindowMs) {
-					const payload = {
-						title: rem.title,
-						body: rem.description ?? 'Reminder',
-						icon: '/icons/bell.svg',
-						url: '/dashboard/reminders',
-						data: {
-							reminderId: rem.id,
-							type: rem.type,
-						},
-						requireInteraction: true,
-						reminderId: rem.id,
-					};
+      // ── Send via Expo push (primary - works when app is closed) ──
+      try {
+        const user = rem.user ?? await this.userRepo.findOne({ where: { id: rem.userId } });
+        if (user?.expoPushTokens?.length) {
+          await this.expoPushService.sendToTokens(user.expoPushTokens, {
+            title: rem.title || 'Reminder',
+            body: rem.description ?? '🔔 You have a reminder',
+            data: { type: 'reminder', reminderId: rem.id },
+          });
+        }
+      } catch (expoErr) {
+        this.logger.error(`Expo push failed for reminder ${rem.id}:`, expoErr);
+      }
 
-					let sentViaWebSocket = false;
-					if (this.reminderGateway?.isUserConnected(rem.userId)) {
-						sentViaWebSocket = this.reminderGateway.sendReminderToUser(rem.userId, rem);
-						if (sentViaWebSocket) websocketSentCount++;
-					}
+      // ── Send via WebSocket (secondary - only works when app is open) ──
+      try {
+        if (this.reminderGateway?.isUserConnected(rem.userId)) {
+          this.reminderGateway.sendReminderToUser(rem.userId, rem);
+        }
+      } catch (wsErr) {
+        this.logger.error(`WebSocket send failed for reminder ${rem.id}:`, wsErr);
+      }
 
-					try {
-						const user = await this.userRepo.findOne({ where: { id: rem.userId } });
+      // ── Advance reminderTime to next occurrence so it doesn't re-fire ──
+      const nextAfter = this.computeNextOccurrence(rem, new Date(now.getTime() + 61_000));
+      rem.reminderTime = nextAfter ?? null;
+      await this.remindersRepo.save(rem);
 
-						if (user?.expoPushTokens?.length) {
-							await this.expoPushService.sendToTokens(user.expoPushTokens, {
-								title: rem.title || 'Reminder',
-								body: rem.description ?? '🔔 Reminder',
-								data: {
-									type: 'reminder',
-									reminderId: rem.id,
-								},
-							});
+      sentCount++;
+    } catch (err) {
+      this.logger.error(`Failed to process reminder ${rem.id}:`, err);
+    }
+  }
 
-							expoSentCount++;
-						}
-					} catch (expoError) {
-						this.logger.error(`Failed to send Expo push for reminder ${rem.id}:`, expoError);
-					}
-
-					try {
-						const pushResults = await this.sendPushToUser(rem.userId, payload);
-						if (pushResults?.length) {
-							const successCount = pushResults.filter((r: any) => r.ok).length;
-							if (successCount > 0) {
-								pushSentCount++;
-							}
-						}
-					} catch (pushError) {
-						this.logger.error(`Failed to send browser push for reminder ${rem.id}:`, pushError);
-					}
-
-					sentCount++;
-
-					const future = this.computeNextOccurrence(rem, new Date(next.getTime() + 60_000));
-					rem.reminderTime = future;
-					await this.remindersRepo.save(rem);
-				}
-			} catch (error) {
-				this.logger.error(`Failed to process reminder ${rem.id}:`, error);
-			}
-		}
-
-		if (sentCount > 0) {
-			this.logger.log(
-				`Sent ${sentCount} reminder(s) - WebSocket: ${websocketSentCount}, Expo: ${expoSentCount}, BrowserPush: ${pushSentCount}`,
-			);
-		}
-
-	}
+  if (sentCount > 0) {
+    this.logger.log(`✅ Processed ${sentCount} due reminder(s)`);
+  }
+}
 
 	private async getReminderOrThrow(userId: string, id: string) {
 		const rem = await this.remindersRepo.findOne({ where: { id, userId } });
@@ -307,8 +268,8 @@ export class RemindersService {
 		// monthly – على نفس يوم startDate أو نفس اليوم الحالي
 		if (mode === ScheduleMode.MONTHLY) {
 			const baseDay = startDateStr != null ? new Date(startDateStr + 'T00:00:00').getDate() : today.getDate();
-			let year = today.getFullYear();
-			let month = today.getMonth();
+			let year = now.getFullYear();
+let month = now.getMonth();
 
 			for (let i = 0; i < 24; i++) {
 				const d = new Date(year, month, baseDay);
@@ -774,7 +735,7 @@ export class RemindersService {
 			const saved = await this.subsRepo.save(found);
 			this.logger.log(`✅ [subscribePush] Subscription saved successfully, ID: ${saved.id}`);
 			return { ok: true, subscriptionId: saved.id };
-		} catch (saveError) {
+		} catch (saveError:any) {
 			this.logger.error(`❌ [subscribePush] Failed to save subscription:`, saveError.message);
 			throw new BadRequestException(`Failed to save subscription: ${saveError.message}`);
 		}

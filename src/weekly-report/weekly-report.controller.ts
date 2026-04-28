@@ -111,6 +111,19 @@ export class WeeklyReportController {
     return this.weeklyReportService.getUserReportStats(req.user.id);
   }
 
+  // Returns the report config that applies to this client (from their admin's config)
+  @Get('client/report-config')
+  @Roles(UserRole.CLIENT)
+  async getClientReportConfig(@Request() req) {
+    const user = await this.weeklyReportService.userRepo.findOne({
+      where: { id: req.user.id },
+      select: ['id', 'adminId', 'coachId'] as any,
+    });
+    const ownerId = (user as any)?.adminId || (user as any)?.coachId;
+    if (!ownerId) return null;
+    return this.weeklyReportService.getReportConfig(ownerId);
+  }
+
   @Get('coach/athletes-reports')
   @Roles(UserRole.COACH, UserRole.ADMIN)
   async getAthletesReports(@Request() req, @Query('page') page = '1', @Query('limit') limit = '10') {

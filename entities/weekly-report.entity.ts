@@ -92,4 +92,8 @@ export class WeeklyReport extends CoreEntity {
 
   @Column({ type: 'uuid', nullable: true })
   reviewedById: string | null;
+
+  // Answers for custom fields defined in the coach/admin's report config
+  @Column({ type: 'jsonb', nullable: true })
+  customAnswers: Record<string, any> | null;
 }

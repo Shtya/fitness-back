@@ -1,9 +1,10 @@
 // notification/notification.service.ts (updated)
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository } from 'typeorm';
 import { Notification, NotificationAudience, NotificationType, User, UserRole } from 'entities/global.entity';
 import { NotificationGateway } from './notification.gateway';
+import { ExpoPushService } from './expo-push.service';
 
 export function normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
 	const pageNum = Number(pageInput);
@@ -20,6 +21,8 @@ export function normalizePagination(pageInput?: number | string, limitInput?: nu
 
 @Injectable()
 export class NotificationService {
+	private readonly logger = new Logger(NotificationService.name);
+
 	constructor(
 		@InjectRepository(Notification)
 		private readonly repo: Repository<Notification>,
@@ -28,6 +31,7 @@ export class NotificationService {
 		private readonly userRepo: Repository<User>,
 
 		private readonly gateway: NotificationGateway,
+		private readonly expoPushService: ExpoPushService,
 	) { }
 
 	async registerExpoPushToken(userId: string, token: string) {
@@ -81,15 +85,28 @@ export class NotificationService {
 
 		const saved = await this.repo.save(notification);
 
-		// Push realtime event (non-blocking)
+		// Push realtime WebSocket event (non-blocking)
 		try {
 			this.gateway.broadcastNew(saved);
 		} catch (e) {
-			// Log error but don't fail the request
-			console.error('WebSocket notification error:', e);
+			this.logger.error('WebSocket notification error:', e);
+		}
+
+		// Send Expo push notification if recipient has registered tokens
+		if (opts.userId) {
+			this.sendExpoPushToUser(opts.userId, opts.title, opts.message || opts.title, opts.data || {}).catch(
+				e => this.logger.error('[ExpoPush] create() push failed', e),
+			);
 		}
 
 		return saved;
+	}
+
+	private async sendExpoPushToUser(userId: string, title: string, body: string, data: Record<string, any>) {
+		const user = await this.userRepo.findOne({ where: { id: userId }, select: ['id', 'expoPushTokens'] as any });
+		const tokens: string[] = (user as any)?.expoPushTokens ?? [];
+		if (!tokens.length) return;
+		await this.expoPushService.sendToTokens(tokens, { title, body, data });
 	}
 
 	private isAr(locale?: string) {
@@ -220,6 +237,7 @@ export class NotificationService {
 		};
 	}
 
+	// Fixed: always scope by userId for all roles
 	async listForUser(
 		user: User,
 		page?: number | string,
@@ -228,27 +246,18 @@ export class NotificationService {
 	) {
 		const { page: p, take, skip } = normalizePagination(page, limit);
 
-		const qb = this.repo
-			.createQueryBuilder('n')
-			.leftJoinAndSelect('n.user', 'user')
-			.orderBy('n.created_at', 'DESC')
-			.take(take)
-			.skip(skip);
+		const where: FindOptionsWhere<Notification> = {
+			user: { id: user.id } as any,
+		};
+		if (typeof isRead === 'boolean') where.isRead = isRead;
 
-		if (typeof isRead === 'boolean') {
-			qb.andWhere('n.isRead = :isRead', { isRead });
-		}
-
-		if (user.role === UserRole.CLIENT) {
-			qb.andWhere('user.id = :userId', { userId: user.id });
-		} else {
-			qb.andWhere('(n.audience = :adminAudience OR user.id = :userId)', {
-				adminAudience: NotificationAudience.ADMIN,
-				userId: user.id,
-			});
-		}
-
-		const [items, total] = await qb.getManyAndCount();
+		const [items, total] = await this.repo.findAndCount({
+			where,
+			relations: ['user'],
+			order: { created_at: 'DESC' },
+			take,
+			skip,
+		});
 
 		return {
 			items,
@@ -264,40 +273,22 @@ export class NotificationService {
 		return { id, isRead: true };
 	}
 
+	// Fixed: always scope by userId
 	async unreadCountForUser(user: User) {
-		const qb = this.repo
-			.createQueryBuilder('n')
-			.leftJoin('n.user', 'user')
-			.where('n.isRead = false');
-
-		if (user.role === UserRole.CLIENT) {
-			qb.andWhere('user.id = :userId', { userId: user.id });
-		} else {
-			qb.andWhere('(n.audience = :adminAudience OR user.id = :userId)', {
-				adminAudience: NotificationAudience.ADMIN,
-				userId: user.id,
-			});
-		}
-
-		const count = await qb.getCount();
+		const count = await this.repo.count({
+			where: { isRead: false, user: { id: user.id } as any },
+		});
 		return { count };
 	}
 
-	async markAllRead(userId?: string) {
-		if (userId) {
-			await this.repo
-				.createQueryBuilder()
-				.update(Notification)
-				.set({ isRead: true })
-				.where('user_id = :userId', { userId })
-				.execute();
-		} else {
-			await this.repo
-				.createQueryBuilder()
-				.update(Notification)
-				.set({ isRead: true })
-				.execute();
-		}
+	// Fixed: always require userId to avoid wiping all notifications system-wide
+	async markAllRead(userId: string) {
+		await this.repo
+			.createQueryBuilder()
+			.update(Notification)
+			.set({ isRead: true })
+			.where('user_id = :userId', { userId })
+			.execute();
 
 		return { ok: true };
 	}
@@ -310,7 +301,6 @@ export class NotificationService {
 		return { count };
 	}
 
-	// Specialized method for weekly report notifications
 	async createWeeklyReportNotification(user: User, weekOf: string, coachId: string) {
 		return this.create({
 			type: NotificationType.FORM_SUBMISSION,

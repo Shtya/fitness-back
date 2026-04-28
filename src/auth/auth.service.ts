@@ -4,7 +4,7 @@ import { Repository, Not, In, IsNull } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 
-import {  Notification, NotificationAudience, NotificationType, ExercisePlan, User, UserRole, UserStatus  } from 'entities/global.entity';
+import { Notification, NotificationAudience, NotificationType, ExercisePlan, User, UserRole, UserStatus } from 'entities/global.entity';
 import { RegisterDto, LoginDto, UpdateProfileDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
 import { ConfigService } from '@nestjs/config';
 import { MailService } from 'common/nodemailer';
@@ -419,7 +419,7 @@ export class AuthService {
 								name: d.name,
 								foods: (d.foods || [])
 									.sort((a, b) => a.orderIndex - b.orderIndex)
-									.map((f:any) => ({
+									.map((f: any) => ({
 										id: f.id,
 										name: f.name,
 										category: f.category,
@@ -1161,5 +1161,31 @@ export class AuthService {
 		});
 
 		return { items, total, page, totalPages: Math.ceil(total / limit) };
+	}
+
+
+
+
+
+	async savePushToken(userId: string, token: string) {
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+
+		const tokens: string[] = user.expoPushTokens || [];
+		if (!tokens.includes(token)) {
+			tokens.push(token);
+			user.expoPushTokens = tokens;
+			await this.userRepo.save(user);
+		}
+		return { message: 'Push token saved' };
+	}
+
+	async removePushToken(userId: string, token: string) {
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+
+		user.expoPushTokens = (user.expoPushTokens || []).filter(t => t !== token);
+		await this.userRepo.save(user);
+		return { message: 'Push token removed' };
 	}
 }

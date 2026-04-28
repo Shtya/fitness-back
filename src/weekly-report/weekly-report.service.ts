@@ -1,8 +1,9 @@
 // weekly-report/weekly-report.service.ts
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not, IsNull } from 'typeorm';
+import { Repository, Not, IsNull, In, ILike } from 'typeorm';
 import { WeeklyReport } from 'entities/weekly-report.entity';
+import { ReportConfig } from 'entities/report-config.entity';
 import { User, UserRole, NotificationType, NotificationAudience } from 'entities/global.entity';
 import { NotificationService } from '../notification/notification.service';
 
@@ -13,6 +14,8 @@ export class WeeklyReportService {
     public readonly weeklyReportRepo: Repository<WeeklyReport>,
     @InjectRepository(User)
     public readonly userRepo: Repository<User>,
+    @InjectRepository(ReportConfig)
+    public readonly reportConfigRepo: Repository<ReportConfig>,
     public readonly notificationService: NotificationService,
   ) {}
 
@@ -290,6 +293,135 @@ export class WeeklyReportService {
     });
 
     return { count };
+  }
+
+  /* ─── Report Config (per coach/admin) ─── */
+
+  async getReportConfig(coachId: string) {
+    const row = await this.reportConfigRepo.findOne({ where: { coachId } });
+    return row?.config ?? null;
+  }
+
+  async saveReportConfig(coachId: string, config: any) {
+    let row = await this.reportConfigRepo.findOne({ where: { coachId } });
+    if (row) {
+      row.config = config;
+      return (await this.reportConfigRepo.save(row)).config;
+    }
+    const created = await this.reportConfigRepo.save(
+      this.reportConfigRepo.create({ coachId, config }),
+    );
+    return created.config;
+  }
+
+  /* ─── Clients Report Status (paginated) ─── */
+
+  async getClientsReportStatus(
+    adminId: string,
+    role: UserRole,
+    page = 1,
+    limit = 20,
+    search = '',
+    statusFilter = '',
+  ) {
+    const { take, skip } = this.normalizePagination(page, limit);
+
+    // Config is always scoped to adminId — coaches share the admin's config
+    const baseWhere: any =
+      role === UserRole.ADMIN
+        ? { adminId, role: UserRole.CLIENT }
+        : { adminId, role: UserRole.CLIENT };
+
+    if (search?.trim()) {
+      baseWhere.name = ILike(`%${search.trim()}%`);
+    }
+
+    const [clients, total] = await this.userRepo.findAndCount({
+      where: baseWhere,
+      select: ['id', 'name', 'email', 'phone'] as any,
+      take,
+      skip,
+    });
+
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - 7);
+    weekStart.setHours(0, 0, 0, 0);
+
+    const lateStart = new Date();
+    lateStart.setDate(lateStart.getDate() - 14);
+    lateStart.setHours(0, 0, 0, 0);
+
+    let rows = await Promise.all(
+      clients.map(async client => {
+        const latest = await this.weeklyReportRepo.findOne({
+          where: { userId: client.id },
+          order: { created_at: 'DESC' },
+        });
+
+        let status: 'submitted' | 'pending' | 'late';
+        const lastReportAt = latest?.created_at ?? null;
+
+        if (!latest) {
+          status = 'late';
+        } else if (latest.created_at >= weekStart) {
+          status = 'submitted';
+        } else if (latest.created_at < lateStart) {
+          status = 'late';
+        } else {
+          status = 'pending';
+        }
+
+        return {
+          id: client.id,
+          name: (client as any).name,
+          email: (client as any).email,
+          phone: (client as any).phone,
+          status,
+          lastReportAt,
+        };
+      }),
+    );
+
+    // Apply status filter after computing statuses (since status is computed, not stored)
+    if (statusFilter && ['submitted', 'pending', 'late'].includes(statusFilter)) {
+      rows = rows.filter(r => r.status === statusFilter);
+    }
+
+    return {
+      items: rows,
+      total: statusFilter ? rows.length : total,
+      page,
+      limit: take,
+      hasMore: skip + take < (statusFilter ? rows.length : total),
+    };
+  }
+
+  /* ─── Send Reminder Notifications ─── */
+
+  async sendReminderToClients(clientIds: string[], locale: string) {
+    if (!clientIds?.length) return { sent: 0 };
+
+    const clients = await this.userRepo.findBy({ id: In(clientIds) });
+
+    const ar = String(locale || '').toLowerCase().startsWith('ar');
+    const title = ar ? 'تذكير بالتقرير الأسبوعي 🔔' : 'Weekly Report Reminder 🔔';
+    const message = ar
+      ? 'لم نستلم تقرير المتابعة الأسبوعي منك بعد. يرجى إكماله في أقرب وقت للحفاظ على متابعتك مع مدربك. 🏋️'
+      : "Your weekly report has not been submitted yet. Please complete it as soon as possible.";
+
+    await Promise.all(
+      clients.map(client =>
+        this.notificationService.create({
+          type: NotificationType.FORM_SUBMISSION,
+          title,
+          message,
+          audience: NotificationAudience.USER,
+          userId: client.id,
+        }),
+      ),
+    );
+
+    return { sent: clients.length };
   }
 
   private normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {

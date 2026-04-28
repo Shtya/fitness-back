@@ -69,8 +69,7 @@ export class NotificationController {
 
 	@Patch('read-all')
 	async markAllRead(@Request() req) {
-		const userId = req.user.role === UserRole.CLIENT ? req.user.id : undefined;
-		return this.svc.markAllRead(userId);
+		return this.svc.markAllRead(req.user.id);
 	}
 
 	@Patch(':id/read')

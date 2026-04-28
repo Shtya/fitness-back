@@ -246,4 +246,19 @@ export class AuthController {
 	async getCoachesForSelect() {
 		return this.authService.getCoachesForSelect();
 	}
+
+
+	@Post('push-token')
+@UseGuards(JwtAuthGuard)
+async savePushToken(@Req() req: any, @Body('token') token: string) {
+  if (!token) throw new BadRequestException('token is required');
+  return this.authService.savePushToken(req.user.id, token);
+}
+
+@Delete('push-token')
+@UseGuards(JwtAuthGuard)
+async removePushToken(@Req() req: any, @Body('token') token: string) {
+  if (!token) throw new BadRequestException('token is required');
+  return this.authService.removePushToken(req.user.id, token);
+}
 }
