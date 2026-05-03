@@ -116,6 +116,32 @@ export class FormController {
 		return this.formService.getFormById(+id); // public view allows any form
 	}
 
+	@Post('upload-files')
+	@UseInterceptors(
+		AnyFilesInterceptor({
+			storage: diskStorage({
+				destination: './uploads/forms',
+				filename: (req, file, cb) => {
+					const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+					const ext = extname(file.originalname || '');
+					cb(null, `upload-${unique}${ext}`);
+				},
+			}),
+			limits: {
+				fileSize: 25 * 1024 * 1024,
+				files: 10,
+			},
+		}),
+	)
+	async uploadFormFiles(@UploadedFiles() files: any[]) {
+		return {
+			files: (files || []).map(f => ({
+				url: `/uploads/forms/${f.filename}`,
+				originalname: f.originalname,
+			})),
+		};
+	}
+
 	@Post(':id/submit')
 	@UseInterceptors(
 		AnyFilesInterceptor({
