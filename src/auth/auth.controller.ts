@@ -149,6 +149,13 @@ export class AuthController {
 		return this.authService.setStatus(id, status);
 	}
 
+	@Put('admin/users/:id/workout-edit-toggle')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	toggleWorkoutEdit(@Param('id') id: string, @Body('canEditWorkout') canEditWorkout: boolean, @Req() req: any) {
+		return this.authService.toggleWorkoutEdit(id, canEditWorkout, req.user);
+	}
+
 	// Coach creates a client; account starts as PENDING and must be approved by admin
 	@Post('coach/users')
 	@UseGuards(JwtAuthGuard, RolesGuard)

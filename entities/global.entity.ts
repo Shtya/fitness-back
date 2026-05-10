@@ -374,6 +374,9 @@ export class User extends CoreEntity {
 
 	@Column('text', { array: true, default: '{}' })
 	expoPushTokens!: string[];
+
+	@Column({ type: 'boolean', default: false })
+	canEditWorkout!: boolean;
 }
 
 /* =========================================================

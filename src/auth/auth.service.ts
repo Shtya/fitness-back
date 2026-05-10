@@ -939,6 +939,17 @@ export class AuthService {
 		return this.serialize(user);
 	}
 
+	async toggleWorkoutEdit(userId: string, canEditWorkout: boolean, actor: { id: string; role: UserRole }) {
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+		if (actor.role === UserRole.ADMIN && user.adminId !== actor.id) {
+			throw new ForbiddenException('Not allowed');
+		}
+		user.canEditWorkout = !!canEditWorkout;
+		await this.userRepo.save(user);
+		return this.serialize(user);
+	}
+
 	async forgotPassword(dto: ForgotPasswordDto) {
 		const user = await this.userRepo.findOne({ where: { email: dto.email } });
 		if (!user) return { message: 'If the account exists, an OTP has been generated.' };
