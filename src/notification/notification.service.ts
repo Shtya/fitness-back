@@ -5,6 +5,7 @@ import { FindOptionsWhere, Repository } from 'typeorm';
 import { Notification, NotificationAudience, NotificationType, User, UserRole } from 'entities/global.entity';
 import { NotificationGateway } from './notification.gateway';
 import { ExpoPushService } from './expo-push.service';
+import { WebPushService } from './web-push.service';
 
 export function normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
 	const pageNum = Number(pageInput);
@@ -32,6 +33,7 @@ export class NotificationService {
 
 		private readonly gateway: NotificationGateway,
 		private readonly expoPushService: ExpoPushService,
+		private readonly webPushService: WebPushService,
 	) { }
 
 	async registerExpoPushToken(userId: string, token: string) {
@@ -97,6 +99,20 @@ export class NotificationService {
 			this.sendExpoPushToUser(opts.userId, opts.title, opts.message || opts.title, opts.data || {}).catch(
 				e => this.logger.error('[ExpoPush] create() push failed', e),
 			);
+			if (opts.type === NotificationType.WHATSAPP_MESSAGE) {
+				const data = opts.data || {};
+				this.webPushService
+					.sendToUser(opts.userId, {
+						title: opts.title,
+						body: opts.message || 'New WhatsApp message',
+						url: `/dashboard/whatsapp?accountId=${encodeURIComponent(
+							String(data.accountId || ''),
+						)}&conversationId=${encodeURIComponent(String(data.conversationId || ''))}`,
+						tag: `whatsapp-${data.conversationId || opts.userId}`,
+						data,
+					})
+					.catch(e => this.logger.error('[WebPush] WhatsApp push failed', e));
+			}
 		}
 
 		return saved;

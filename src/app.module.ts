@@ -29,6 +29,7 @@ import { LoggerMiddleware } from '../common/logger.middleware';
 import { TodoModule } from './todo/todo.module';
 import { RecipesModule } from './recipes/recipes.module';
 import { MoneyModule } from './money/money.module';
+import { WhatsAppModule } from './whatsapp/whatsapp.module';
  
 @Module({
 	imports: [
@@ -42,7 +43,18 @@ import { MoneyModule } from './money/money.module';
 			password: process.env.DATABASE_PASSWORD,
 			database: process.env.DATABASE_NAME,
 			entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-			synchronize: true,
+			// Never let TypeORM mutate a production schema implicitly.
+			// Production deployments must apply reviewed migrations instead.
+			synchronize:
+				process.env.NODE_ENV !== 'production' &&
+				process.env.DATABASE_SYNCHRONIZE !== 'false',
+			// Stay well under Supabase session-mode pool_size (often 15 shared).
+			poolSize: Math.min(Math.max(Number(process.env.DATABASE_POOL_SIZE) || 4, 2), 8),
+			extra: {
+				max: Math.min(Math.max(Number(process.env.DATABASE_POOL_SIZE) || 4, 2), 8),
+				idleTimeoutMillis: 10000,
+				connectionTimeoutMillis: 20000,
+			},
 		}),
 
 		AuthModule,
@@ -68,6 +80,7 @@ import { MoneyModule } from './money/money.module';
 		TodoModule,
 		RecipesModule,
 		MoneyModule,
+		WhatsAppModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

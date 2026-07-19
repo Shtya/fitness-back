@@ -5,6 +5,7 @@ import { join } from 'path';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 import { TimingInterceptor } from 'common/timing.interceptor';
+import { resolveCorsOrigins } from 'common/cors-origins';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -13,13 +14,22 @@ async function bootstrap() {
   app.useGlobalInterceptors(new TimingInterceptor());
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
 
-  // Static files (fix the path: no leading "/uploads")
+  // WhatsApp media is private and must only be served by guarded controllers.
+  // Keep this deny route before the generic public uploads mount for legacy files.
+  app.use('/uploads/whatsapp-media', (_req, res) => res.sendStatus(404));
+
+  // Public application assets only.
   app.useStaticAssets(join(__dirname, '..', '..', 'uploads'), {
     prefix: '/uploads/',
   });
 
   // CORS + global prefix + validation
-  app.enableCors({});
+  const allowedOrigins = resolveCorsOrigins();
+  app.enableCors({
+    origin: allowedOrigins,
+    credentials: true,
+  });
+  Logger.log(`CORS origins: ${allowedOrigins.join(', ')}`, 'Bootstrap');
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(
     new ValidationPipe({

@@ -8,10 +8,11 @@ import { Repository } from 'typeorm';
 import { User } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
 import { ChatPushService } from './chat-push.service';
+import { resolveCorsOrigins } from 'common/cors-origins';
 
 @WebSocketGateway({
 	cors: {
-		origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+		origin: resolveCorsOrigins(),
 		credentials: true,
 	},
 })
