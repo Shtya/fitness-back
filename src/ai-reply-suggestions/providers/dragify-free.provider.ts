@@ -6,8 +6,8 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { existsSync } from "fs";
 import puppeteer, { Browser, Page } from "puppeteer";
+import { resolveChromeExecutablePath } from "../../common/chrome-executable";
 import { AiReplyProvider, AiReplyProviderResult } from "./ai-reply-provider";
 
 const SELECTORS = {
@@ -75,37 +75,10 @@ export class DragifyFreeProvider implements AiReplyProvider {
   }
 
   private resolveExecutablePath() {
-    const configured =
+    return resolveChromeExecutablePath(
       this.config.get<string>("AI_REPLY_EXECUTABLE_PATH") ||
-      this.config.get<string>("CHROME_EXECUTABLE_PATH") ||
-      "";
-    if (configured && existsSync(configured)) return configured;
-
-    const candidates = [
-      process.env.PROGRAMFILES
-        ? `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`
-        : "",
-      process.env["PROGRAMFILES(X86)"]
-        ? `${process.env["PROGRAMFILES(X86)"]}\\Google\\Chrome\\Application\\chrome.exe`
-        : "",
-      process.env.LOCALAPPDATA
-        ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`
-        : "",
-      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    ].filter(Boolean);
-
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
-    }
-
-    try {
-      const bundled = puppeteer.executablePath();
-      if (bundled && existsSync(bundled)) return bundled;
-    } catch {
-      // Fall through to Puppeteer's default discovery.
-    }
-    return undefined;
+        this.config.get<string>("CHROME_EXECUTABLE_PATH"),
+    );
   }
 
   async generate(request: {

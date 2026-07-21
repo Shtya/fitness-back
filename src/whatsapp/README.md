@@ -6,6 +6,8 @@
 - A 32-byte Base64 key in `WHATSAPP_SESSION_ENCRYPTION_KEY`
 - `@wppconnect-team/wppconnect@2.2.3` and `qrcode@1.5.4`
 - Chrome/Chromium available to Puppeteer (`CHROME_EXECUTABLE_PATH` is optional)
+- Do **not** set `CHROME_EXECUTABLE_PATH` to a Windows path on Linux/VPS
+- Do **not** run WhatsApp/wppconnect on Vercel serverless (needs a persistent VPS/PM2 process)
 
 Install the provider packages after the npm registry certificate is trusted:
 

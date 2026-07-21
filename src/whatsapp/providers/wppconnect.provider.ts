@@ -1,5 +1,9 @@
 import { Logger } from '@nestjs/common';
 import {
+	isServerlessRuntime,
+	resolveChromeExecutablePath,
+} from '../../common/chrome-executable';
+import {
 	NormalizedWhatsAppMessage,
 	WhatsAppProvider,
 	WhatsAppProviderCapabilities,
@@ -188,12 +192,27 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async connect() {
+		if (isServerlessRuntime()) {
+			throw new Error(
+				'WhatsApp (wppconnect) cannot run on Vercel/serverless. Deploy the API on a persistent VPS/PM2 host with Chrome/Chromium installed, and leave CHROME_EXECUTABLE_PATH empty or set it to a path that exists on that server.',
+			);
+		}
+
 		let wppconnect: any;
 		try {
 			wppconnect = require('@wppconnect-team/wppconnect');
 		} catch {
 			throw new Error(
 				'@wppconnect-team/wppconnect is not installed. Install it before connecting an account.',
+			);
+		}
+
+		const executablePath = resolveChromeExecutablePath(
+			process.env.CHROME_EXECUTABLE_PATH,
+		);
+		if (process.env.CHROME_EXECUTABLE_PATH && !executablePath) {
+			this.logger.warn(
+				`CHROME_EXECUTABLE_PATH is set but not found on this host (${process.env.CHROME_EXECUTABLE_PATH}). Falling back to auto-discovery.`,
 			);
 		}
 
@@ -213,7 +232,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			updatesLog: false,
 			logQR: false,
 			puppeteerOptions: {
-				executablePath: process.env.CHROME_EXECUTABLE_PATH || undefined,
+				...(executablePath ? { executablePath } : {}),
 				args: ['--no-sandbox', '--disable-setuid-sandbox'],
 			},
 			catchQR: (base64Qr: string, _ascii: string, _attempt: number, rawCode: string) => {
