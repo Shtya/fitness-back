@@ -82,6 +82,28 @@ export class SendWhatsAppMessageDto {
 	clientMessageId?: string;
 }
 
+export class ReactWhatsAppMessageDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(16)
+	emoji?: string;
+}
+
+export class ForwardWhatsAppMessageDto {
+	@IsUUID()
+	targetConversationId: string;
+}
+
+export class ToggleWhatsAppMessageDto {
+	@IsBoolean()
+	enabled: boolean;
+}
+
+export class DeleteWhatsAppMessageDto {
+	@IsIn(['local', 'everyone'])
+	mode: 'local' | 'everyone';
+}
+
 export class AssignWhatsAppConversationDto {
 	@IsOptional()
 	@IsUUID()

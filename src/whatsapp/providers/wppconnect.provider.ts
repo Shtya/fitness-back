@@ -44,6 +44,18 @@ function detectFromMe(message: any): boolean {
 	return false;
 }
 
+export function isStatusMessage(message: any): boolean {
+	if (message?.isStatusV3) return true;
+	const ids = [
+		serializedId(message?.id),
+		serializedId(message?.id?.remote),
+		serializedId(message?.chatId),
+		serializedId(message?.from),
+		serializedId(message?.to),
+	].filter(Boolean);
+	return ids.some(value => String(value).includes('status@broadcast'));
+}
+
 function normalizeMessage(message: any): NormalizedWhatsAppMessage {
 	const fromMe = detectFromMe(message);
 	const providerMessageId =
@@ -73,8 +85,11 @@ function normalizeMessage(message: any): NormalizedWhatsAppMessage {
 		timestampReliable: Boolean(reliableTimestamp),
 		quotedProviderMessageId:
 			serializedId(message?.quotedMsg?.id) ||
+			serializedId(message?.quotedMsgId) ||
 			serializedId(message?.quotedMessageId) ||
 			null,
+		isForwarded: Boolean(message?.isForwarded || Number(message?.forwardingScore) > 0),
+		isStarred: Boolean(message?.star || message?.isStarred),
 		contactName: message?.notifyName || message?.sender?.pushname || null,
 		attachments: mediaTypes.has(type)
 			? [
@@ -129,6 +144,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 		statusFetch: true,
 		statusPublish: true,
 		statusView: true,
+		reactions: true,
+		messageActions: true,
 	};
 
 	private readonly logger = new Logger(WppConnectProvider.name);
@@ -137,6 +154,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 	private qr: string | null = null;
 	private state = 'disconnected';
 	private emitChain: Promise<void> = Promise.resolve();
+	private authReconcileTimer: ReturnType<typeof setInterval> | null = null;
+	private authReconcileStopTimer: ReturnType<typeof setTimeout> | null = null;
+	private statusChangeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
 		private readonly accountId: string,
@@ -157,6 +177,14 @@ export class WppConnectProvider implements WhatsAppProvider {
 					this.logger.error(`WhatsApp provider event failed: ${event.type}`, error),
 				);
 		}
+	}
+
+	private emitStatusChanged() {
+		if (this.statusChangeTimer) clearTimeout(this.statusChangeTimer);
+		this.statusChangeTimer = setTimeout(() => {
+			this.statusChangeTimer = null;
+			this.emit({ type: 'status_changed' });
+		}, 750);
 	}
 
 	async connect() {
@@ -207,6 +235,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		});
 
 		this.client.onMessage((message: any) => {
+			if (isStatusMessage(message)) {
+				this.emitStatusChanged();
+				return;
+			}
 			const normalized = normalizeMessage(message);
 			// Outbound echoes must never inflate unread / create fake inbound rows.
 			if (normalized.fromMe) return;
@@ -216,6 +248,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		});
 		if (typeof this.client.onAnyMessage === 'function') {
 			this.client.onAnyMessage((message: any) => {
+				if (isStatusMessage(message)) {
+					this.emitStatusChanged();
+					return;
+				}
 				const normalized = normalizeMessage(message);
 				// Capture phone-side outbound so the CRM stays in sync, without unread.
 				if (!normalized.fromMe || !normalized.providerMessageId || !normalized.chatId) {
@@ -233,6 +269,39 @@ export class WppConnectProvider implements WhatsAppProvider {
 				this.emit({ type: 'message_status', providerMessageId, status });
 			}
 		});
+		if (typeof this.client.onReactionMessage === 'function') {
+			this.client.onReactionMessage((reaction: any) => {
+				const messageId = serializedId(reaction?.msgId);
+				if (!messageId) return;
+				void this.getReactions(messageId)
+					.then(reactions =>
+						this.emit({
+							type: 'message_reactions',
+							providerMessageId: messageId,
+							reactions,
+						}),
+					)
+					.catch(error =>
+						this.logger.warn(
+							`Could not refresh reactions for ${messageId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						),
+					);
+			});
+		}
+		if (typeof this.client.onRevokedMessage === 'function') {
+			this.client.onRevokedMessage((revoked: any) => {
+				const messageId = serializedId(revoked?.refId);
+				if (messageId) {
+					this.emit({
+						type: 'message_deleted',
+						providerMessageId: messageId,
+						mode: 'everyone',
+					});
+				}
+			});
+		}
 		this.client.onStateChange((state: string) => {
 			const value = String(state);
 			if (['CONNECTED', 'MAIN', 'CONNECTED_PHONE'].includes(value)) {
@@ -272,9 +341,58 @@ export class WppConnectProvider implements WhatsAppProvider {
 					`waitForLogin ended: ${error?.message || error || 'unknown'}`,
 				);
 			});
+		this.startAuthReconciliation();
+	}
+
+	private stopAuthReconciliation() {
+		if (this.authReconcileTimer) {
+			clearInterval(this.authReconcileTimer);
+			this.authReconcileTimer = null;
+		}
+		if (this.authReconcileStopTimer) {
+			clearTimeout(this.authReconcileStopTimer);
+			this.authReconcileStopTimer = null;
+		}
+	}
+
+	/** Phone may already be linked while WA Web is still on the QR/sync screen. */
+	private startAuthReconciliation() {
+		this.stopAuthReconciliation();
+		const probe = async () => {
+			if (this.state === 'connected') {
+				this.stopAuthReconciliation();
+				return;
+			}
+			try {
+				const authenticated = await this.client?.isAuthenticated?.();
+				if (authenticated) {
+					await this.markConnected();
+					return;
+				}
+				const connected = await this.client?.isConnected?.();
+				if (connected) {
+					await this.markConnected();
+				}
+			} catch {
+				/* session still warming up */
+			}
+		};
+		void probe();
+		this.authReconcileTimer = setInterval(() => {
+			void probe();
+		}, 3000);
+		this.authReconcileStopTimer = setTimeout(() => this.stopAuthReconciliation(), 5 * 60 * 1000);
 	}
 
 	private async publishQr(base64Qr: string, rawCode?: string) {
+		// Ignore a spurious QR only while the provider is still genuinely authenticated.
+		if (this.state === 'connected') {
+			try {
+				if (await this.client?.isAuthenticated?.()) return;
+			} catch {
+				// Authentication is no longer valid, so expose the new QR below.
+			}
+		}
 		let value = String(base64Qr || '');
 		if (!value.startsWith('data:image') && value.length > 64) {
 			value = `data:image/png;base64,${value}`;
@@ -298,6 +416,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		if (this.state === 'connected') return;
 		this.state = 'connected';
 		this.qr = null;
+		this.stopAuthReconciliation();
 		let phoneNumber: string | undefined;
 		try {
 			const host = await this.client?.getHostDevice?.();
@@ -307,6 +426,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async disconnect() {
+		this.stopAuthReconciliation();
+		if (this.statusChangeTimer) {
+			clearTimeout(this.statusChangeTimer);
+			this.statusChangeTimer = null;
+		}
 		await this.client?.close?.();
 		this.client = null;
 		this.qr = null;
@@ -352,20 +476,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 
 		// Prefer a bounded listChats call — getAllChats can hang forever on large inboxes.
 		if (typeof this.client?.listChats === 'function') {
-			try {
-				const listed = await withTimeout(
-					this.client.listChats({ count, onlyUsers: false }),
-					25000,
-					'listChats',
-				);
-				if (Array.isArray(listed) && listed.length) return listed;
-			} catch (error) {
-				this.logger.warn(
-					`listChats failed/timeout for ${this.accountId}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
+			let lastError: unknown;
+			for (let attempt = 1; attempt <= 5; attempt += 1) {
+				try {
+					const listed = await withTimeout(
+						this.client.listChats({ count }),
+						25000,
+						'listChats',
+					);
+					if (Array.isArray(listed) && listed.length) return listed;
+					lastError = new Error('WhatsApp chat store is not ready yet');
+				} catch (error) {
+					lastError = error;
+				}
+				if (attempt < 5) {
+					await new Promise(resolve => setTimeout(resolve, 2000));
+				}
 			}
+			throw lastError instanceof Error
+				? lastError
+				: new Error('Could not read chats from WhatsApp');
 		}
 		if (typeof this.client?.getAllChats === 'function') {
 			try {
@@ -390,20 +520,28 @@ export class WppConnectProvider implements WhatsAppProvider {
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
 		if (this.client?.getMessages) {
-			messages = await this.client.getMessages(chatId, {
-				count,
-				id: options.before || options.after || undefined,
-				direction: options.before ? 'before' : options.after ? 'after' : undefined,
-			});
+			messages = await this.withTimeout(
+				this.client.getMessages(chatId, {
+					count,
+					id: options.before || options.after || undefined,
+					direction: options.before ? 'before' : options.after ? 'after' : undefined,
+				}),
+				30000,
+				`getMessages(${chatId})`,
+			);
 		} else {
-			messages = await this.client.getAllMessagesInChat(chatId, true, false);
+			messages = await this.withTimeout(
+				this.client.getAllMessagesInChat(chatId, true, false),
+				30000,
+				`getAllMessagesInChat(${chatId})`,
+			);
 			messages = messages.slice(-count);
 		}
 		return (messages || [])
 			.map(normalizeMessage)
 			.sort((a: any, b: any) => {
-				const aTime = new Date(a?.providerTimestamp || 0).getTime();
-				const bTime = new Date(b?.providerTimestamp || 0).getTime();
+				const aTime = new Date(a?.timestamp || 0).getTime();
+				const bTime = new Date(b?.timestamp || 0).getTime();
 				if (aTime !== bTime) return aTime - bTime;
 				return String(a?.providerMessageId || '').localeCompare(
 					String(b?.providerMessageId || ''),
@@ -427,6 +565,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 			);
 			return [];
 		});
+	}
+
+	async resolveContactIdentity(chatId: string) {
+		if (!chatId || typeof this.client?.getPnLidEntry !== 'function') return null;
+		try {
+			const entry = await this.client.getPnLidEntry(chatId);
+			const phoneWid = serializedId(entry?.phoneNumber);
+			const contact = entry?.contact || {};
+			return {
+				phoneNumber: phoneWid ? phoneWid.split('@')[0] || null : null,
+				name:
+					contact.name ||
+					contact.verifiedName ||
+					contact.pushname ||
+					contact.shortName ||
+					null,
+			};
+		} catch {
+			return null;
+		}
 	}
 
 	getGroups() {
@@ -493,6 +651,70 @@ export class WppConnectProvider implements WhatsAppProvider {
 			]);
 		} finally {
 			if (timer) clearTimeout(timer);
+		}
+	}
+
+	private async convertVoiceToOgg(filePath: string): Promise<string> {
+		const path = require('path');
+		const os = require('os');
+		const fs = require('fs');
+		const { spawn } = require('child_process');
+		const outputPath = path.join(
+			os.tmpdir(),
+			`whatsapp-voice-${this.accountId}-${Date.now()}-${Math.random()
+				.toString(36)
+				.slice(2)}.ogg`,
+		);
+		const executable = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const processHandle = spawn(
+					executable,
+					[
+						'-y',
+						'-i',
+						filePath,
+						'-vn',
+						'-ac',
+						'1',
+						'-ar',
+						'48000',
+						'-c:a',
+						'libopus',
+						'-b:a',
+						'32k',
+						'-application',
+						'voip',
+						'-f',
+						'ogg',
+						outputPath,
+					],
+					{ windowsHide: true },
+				);
+				let stderr = '';
+				const timer = setTimeout(() => {
+					processHandle.kill();
+					reject(new Error('Voice conversion timed out after 30000ms'));
+				}, 30000);
+				processHandle.stderr?.on('data', (chunk: Buffer) => {
+					stderr = `${stderr}${chunk.toString()}`.slice(-2000);
+				});
+				processHandle.once('error', (error: Error) => {
+					clearTimeout(timer);
+					reject(error);
+				});
+				processHandle.once('close', (code: number) => {
+					clearTimeout(timer);
+					if (code === 0) resolve();
+					else reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
+				});
+			});
+			const converted = await fs.promises.stat(outputPath);
+			if (!converted?.size) throw new Error('Converted voice file is empty');
+			return outputPath;
+		} catch (error) {
+			await fs.promises.rm(outputPath, { force: true }).catch(() => {});
+			throw error;
 		}
 	}
 
@@ -573,14 +795,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 		const sendToTarget = async (target: string) => {
 			if (options.isVoice) {
 				const fs = require('fs');
-				const buffer: Buffer = await fs.promises.readFile(filePath);
-				if (!buffer?.length) throw new Error('Voice file is empty');
 				const lower = filename.toLowerCase();
 				const isWebm =
 					lower.endsWith('.webm') || String(options.mimeType || '').includes('webm');
-				const mime =
-					options.mimeType ||
-					(lower.endsWith('.ogg')
+				let sendPath = filePath;
+				let sendFilename = filename;
+				let convertedPath: string | null = null;
+				if (isWebm) {
+					convertedPath = await this.convertVoiceToOgg(filePath);
+					sendPath = convertedPath;
+					sendFilename = filename.replace(/\.webm$/i, '.ogg');
+					if (sendFilename === filename) sendFilename = `${filename}.ogg`;
+				}
+				try {
+				const buffer: Buffer = await fs.promises.readFile(sendPath);
+				if (!buffer?.length) throw new Error('Voice file is empty');
+				const mimeWithParameters =
+					convertedPath
+						? 'audio/ogg'
+						: options.mimeType ||
+							(lower.endsWith('.ogg')
 						? 'audio/ogg; codecs=opus'
 						: lower.endsWith('.mp3')
 							? 'audio/mpeg'
@@ -589,19 +823,35 @@ export class WppConnectProvider implements WhatsAppProvider {
 								: isWebm
 									? 'audio/webm; codecs=opus'
 									: 'audio/ogg; codecs=opus');
+				// WPP validates data URLs against a strict MIME pattern. Codec
+				// parameters (especially the space in "; codecs=opus") make an
+				// otherwise valid recording fail with `invalid_data_url`.
+				const mime = String(mimeWithParameters).split(';')[0].trim() || 'audio/ogg';
 				const base64 = `data:${mime};base64,${buffer.toString('base64')}`;
-				const sendAudio = (isPtt: boolean) =>
-					this.client.sendFile(target, base64, {
+				const sendAudio = (isPtt: boolean) => {
+					if (typeof this.client.sendPttFromBase64 === 'function') {
+						return this.client.sendPttFromBase64(
+							target,
+							base64,
+							sendFilename,
+							options.caption || '',
+							options.quotedProviderMessageId,
+							undefined,
+							isPtt,
+						);
+					}
+					return this.client.sendFile(target, base64, {
 						type: 'audio',
 						isPtt,
-						filename,
+						filename: sendFilename,
 						caption: options.caption || '',
 						quotedMsg: options.quotedProviderMessageId,
 						waitForAck: true,
 					});
+				};
 				// Browser MediaRecorder usually produces webm/opus. WhatsApp Web often
 				// rejects that as PTT (cryptic puppeteer "t" errors) — send as audio first.
-				const attempts = isWebm ? [false, true] : [true, false];
+				const attempts = convertedPath ? [true, false] : isWebm ? [false, true] : [true, false];
 				let voiceError: unknown;
 				for (const isPtt of attempts) {
 					try {
@@ -621,8 +871,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 				}
 				try {
 					return await this.withTimeout(
-						this.client.sendFile(target, filePath, {
-							filename,
+						this.client.sendFile(target, sendPath, {
+							filename: sendFilename,
 							caption: options.caption || '',
 							quotedMsg: options.quotedProviderMessageId,
 							waitForAck: true,
@@ -640,6 +890,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 							? voiceError
 							: JSON.stringify(voiceError);
 				throw new Error(`Failed to send voice note: ${detail || 'unknown WhatsApp error'}`);
+				} finally {
+					if (convertedPath) {
+						await fs.promises.rm(convertedPath, { force: true }).catch(() => {});
+					}
+				}
 			}
 			return this.withTimeout(
 				this.client.sendFile(target, filePath, {
@@ -673,6 +928,129 @@ export class WppConnectProvider implements WhatsAppProvider {
 					? lastError
 					: JSON.stringify(lastError);
 		throw new Error(`Failed to send WhatsApp media: ${detail || 'unknown provider error'}`);
+	}
+
+	async sendReaction(providerMessageId: string, emoji: string | false) {
+		if (typeof this.client?.sendReactionToMessage !== 'function') {
+			throw new Error('Message reactions are not supported by this WhatsApp session');
+		}
+		return this.client.sendReactionToMessage(providerMessageId, emoji);
+	}
+
+	async getReactions(providerMessageId: string) {
+		if (typeof this.client?.getReactions !== 'function') return [];
+		const result = await this.client.getReactions(providerMessageId);
+		const senders = Array.isArray(result?.reactions)
+			? result.reactions.flatMap((group: any) =>
+					Array.isArray(group?.senders) ? group.senders : [],
+				)
+			: [];
+		const byMeRaw = result?.reactionByMe;
+		const byMeId = serializedId(byMeRaw?.id);
+		const filteredSenders = senders.filter(
+			(reaction: any) =>
+				(!byMeId || serializedId(reaction?.id) !== byMeId) &&
+				(!byMeRaw?.senderUserJid ||
+					reaction?.senderUserJid !== byMeRaw.senderUserJid),
+		);
+		const byMe = byMeRaw?.reactionText
+			? [{ ...result.reactionByMe, senderUserJid: 'me' }]
+			: [];
+		const unique = new Map<string, any>();
+		for (const reaction of [...filteredSenders, ...byMe]) {
+			const actorKey = String(reaction?.senderUserJid || 'unknown');
+			const emoji = String(reaction?.reactionText || '').trim();
+			if (!emoji) continue;
+			unique.set(actorKey, {
+				actorKey,
+				emoji,
+				timestamp: reaction?.timestamp
+					? new Date(Number(reaction.timestamp) * 1000)
+					: null,
+			});
+		}
+		return [...unique.values()];
+	}
+
+	async forwardMessage(chatId: string, providerMessageId: string) {
+		if (typeof this.client?.forwardMessagesV2 === 'function') {
+			return this.client.forwardMessagesV2(chatId, providerMessageId, {
+				displayCaptionText: true,
+			});
+		}
+		if (typeof this.client?.forwardMessage === 'function') {
+			return this.client.forwardMessage(chatId, providerMessageId);
+		}
+		throw new Error('Message forwarding is not supported by this WhatsApp session');
+	}
+
+	async deleteMessage(
+		chatId: string,
+		providerMessageId: string,
+		mode: 'local' | 'everyone',
+	) {
+		if (typeof this.client?.deleteMessage !== 'function') {
+			throw new Error('Message deletion is not supported by this WhatsApp session');
+		}
+		return this.client.deleteMessage(
+			chatId,
+			providerMessageId,
+			mode === 'local',
+			true,
+		);
+	}
+
+	async starMessage(providerMessageId: string, starred: boolean) {
+		if (typeof this.client?.starMessage !== 'function') {
+			throw new Error('Starring messages is not supported by this WhatsApp session');
+		}
+		return this.client.starMessage(providerMessageId, starred);
+	}
+
+	async pinMessage(providerMessageId: string, pinned: boolean) {
+		const page = this.client?.page;
+		if (!page?.evaluate) {
+			throw new Error('Pinning messages is not supported by this WhatsApp session');
+		}
+		return page.evaluate(
+			({ messageId, shouldPin }: { messageId: string; shouldPin: boolean }) => {
+				const wpp = (globalThis as any).WPP;
+				return wpp.chat.pinMsg(
+					messageId,
+					shouldPin,
+					wpp.whatsapp.PinExpiryDurationOption.SevenDays,
+				);
+			},
+			{ messageId: providerMessageId, shouldPin: pinned },
+		);
+	}
+
+	async getMessageInfo(providerMessageId: string) {
+		const message =
+			typeof this.client?.getMessageById === 'function'
+				? await this.client.getMessageById(providerMessageId)
+				: null;
+		const page = this.client?.page;
+		const acknowledgements = page?.evaluate
+			? await page
+					.evaluate((messageId: string) => {
+						const wpp = (globalThis as any).WPP;
+						return wpp.chat.getMessageACK(messageId);
+					}, providerMessageId)
+					.catch(() => null)
+			: null;
+		return {
+			message: message
+				? {
+						id: serializedId(message.id),
+						type: message.type,
+						timestamp: message.timestamp || message.t,
+						ack: message.ack,
+						fromMe: Boolean(message.fromMe || message.id?.fromMe),
+					}
+				: null,
+			acknowledgements,
+		};
 	}
 
 	async markChatRead(chatId: string) {
@@ -1093,237 +1471,367 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async getStatuses() {
-		const direct = await this.client.getAllStatuses?.();
-		if (Array.isArray(direct) && direct.length) return direct;
+		if (this.state !== 'connected' || !this.client?.page) {
+			return [];
+		}
+		const mainReady = await this.waitForWhatsAppMainReady(12_000);
+		if (!mainReady) {
+			this.logger.warn('Status fetch skipped: WhatsApp main is not ready yet');
+			return [];
+		}
+		const TIMEOUT_MS = 20_000;
 		try {
-			return await this.client.page.evaluate(async () => {
-				const browserWindow: any = window as any;
-				const output: any[] = [];
-				const seen = new Set<string>();
+			const items = await Promise.race([
+				this.collectStatusesFromPage(),
+				new Promise<any[]>(resolve => setTimeout(() => resolve([]), TIMEOUT_MS)),
+			]);
+			const list = Array.isArray(items) ? items : [];
+			if (list.length) {
+				this.logger.log(`Fetched ${list.length} WhatsApp status item(s)`);
+			} else {
+				this.logger.warn('WhatsApp status store returned no items');
+			}
+			return list;
+		} catch (error) {
+			this.logger.warn(`Status synchronization is unavailable: ${String(error)}`);
+			return [];
+		}
+	}
 
-				const identityKeys = (value: unknown): string[] => {
-					const text = String(value || '').trim();
-					if (!text) return [];
-					const keys = new Set<string>([text.toLowerCase()]);
-					const broadcastMatch = text.match(/status@broadcast_([^_]+)/i);
-					if (broadcastMatch?.[1]) keys.add(broadcastMatch[1].toLowerCase());
-					const hexMatch = text.match(/_([0-9A-Fa-f]{10,}|3A[0-9A-Fa-f]+)(?:_|$)/);
-					if (hexMatch?.[1]) keys.add(hexMatch[1].toLowerCase());
-					const bare = text.includes('_') ? text.split('_').pop() || '' : text;
-					if (/^[0-9A-Fa-f]{10,}$/i.test(bare) || /^3A[0-9A-Fa-f]+$/i.test(bare)) {
-						keys.add(bare.toLowerCase());
+	private async waitForWhatsAppMainReady(maxMs = 12_000) {
+		const page = this.client?.page;
+		if (!page) return false;
+		const started = Date.now();
+		while (Date.now() - started < maxMs) {
+			try {
+				const ready = await page.evaluate(() => {
+					const w = window as any;
+					return Boolean(w.WPP?.conn?.isMainReady?.());
+				});
+				if (ready) return true;
+			} catch {
+				/* page may still be loading */
+			}
+			await new Promise(resolve => setTimeout(resolve, 400));
+		}
+		return false;
+	}
+
+	private async collectStatusesFromPage() {
+		return this.client.page.evaluate(async () => {
+			const browserWindow: any = window as any;
+			const output: any[] = [];
+			const seen = new Set<string>();
+			const MAX_CONTACTS = 20;
+			const MAX_MSG_SCAN = 2500;
+
+			const identityKeys = (value: unknown): string[] => {
+				const text = String(value || '').trim();
+				if (!text) return [];
+				const keys = new Set<string>([text.toLowerCase()]);
+				const broadcastMatch = text.match(/status@broadcast_([^_]+)/i);
+				if (broadcastMatch?.[1]) keys.add(broadcastMatch[1].toLowerCase());
+				const hexMatch = text.match(/_([0-9A-Fa-f]{10,}|3A[0-9A-Fa-f]+)(?:_|$)/);
+				if (hexMatch?.[1]) keys.add(hexMatch[1].toLowerCase());
+				const bare = text.includes('_') ? text.split('_').pop() || '' : text;
+				if (/^[0-9A-Fa-f]{10,}$/i.test(bare) || /^3A[0-9A-Fa-f]+$/i.test(bare)) {
+					keys.add(bare.toLowerCase());
+				}
+				if (/^\d+$/.test(text)) keys.add(text);
+				return [...keys];
+			};
+
+			const looksLikeMedia = (value: unknown) => {
+				const text = String(value || '');
+				return (
+					text.startsWith('/9j/') ||
+					text.startsWith('data:') ||
+					text.startsWith('iVBOR') ||
+					text.startsWith('AAAA') ||
+					text.length > 400
+				);
+			};
+
+			const resolveId = (message: any): string => {
+				if (message?.id?._serialized) return String(message.id._serialized);
+				if (typeof message?.id === 'string' && message.id.includes('_')) {
+					return message.id;
+				}
+				if (
+					message?.id &&
+					typeof message.id === 'object' &&
+					message.id.remote != null &&
+					message.id.id != null
+				) {
+					const fromMe = message.id.fromMe ? 'true' : 'false';
+					const remote = message.id.remote;
+					const id = message.id.id;
+					const participant =
+						message.id.participant?._serialized ||
+						message.id.participant ||
+						message.author?._serialized ||
+						message.author ||
+						'';
+					return participant
+						? `${fromMe}_${remote}_${id}_${participant}`
+						: `${fromMe}_${remote}_${id}`;
+				}
+				if (message?.rowId != null) return String(message.rowId);
+				if (message?.id?.id != null) return String(message.id.id);
+				return typeof message?.id === 'string' ? message.id : '';
+			};
+
+			const resolveType = (message: any): string => {
+				const raw = String(message?.type || '').toLowerCase();
+				if (raw === 'chat') return 'text';
+				if (raw) return raw;
+				const mime = String(message?.mimetype || message?.mediaData?.mimetype || '');
+				if (mime.startsWith('video/')) return 'video';
+				if (mime.startsWith('image/') || message?.mediaData) return 'image';
+				if (message?.isStatusV3) return 'image';
+				return 'text';
+			};
+
+			const push = (message: any, sender: string, contactName?: string) => {
+				const id = resolveId(message);
+				if (!id) return;
+				const keys = identityKeys(id);
+				if (keys.some(key => seen.has(key))) return;
+				for (const key of keys) seen.add(key);
+				const rawCaption = message?.caption || message?.text || null;
+				const rawBody = message?.body || null;
+				const caption =
+					(rawCaption && !looksLikeMedia(rawCaption) ? rawCaption : null) ||
+					(rawBody && !looksLikeMedia(rawBody) ? rawBody : null);
+				output.push({
+					id,
+					from: sender,
+					sender,
+					contactName: contactName || null,
+					type: resolveType(message),
+					caption,
+					body: caption,
+					timestamp: message?.t || message?.timestamp || null,
+					fromMe: Boolean(message?.id?.fromMe || message?.fromMe),
+					isOwn: Boolean(message?.id?.fromMe || message?.fromMe),
+				});
+			};
+
+			const readMessages = (status: any): any[] => {
+				try {
+					if (typeof status?.getAllMsgs === 'function') {
+						return status.getAllMsgs() || [];
 					}
-					if (/^\d+$/.test(text)) keys.add(text);
-					return [...keys];
-				};
-
-				const looksLikeMedia = (value: unknown) => {
-					const text = String(value || '');
-					return (
-						text.startsWith('/9j/') ||
-						text.startsWith('data:') ||
-						text.startsWith('iVBOR') ||
-						text.startsWith('AAAA') ||
-						text.length > 400
-					);
-				};
-
-				const resolveId = (message: any): string => {
-					if (message?.id?._serialized) return String(message.id._serialized);
-					if (typeof message?.id === 'string' && message.id.includes('_')) {
-						return message.id;
+					if (status?.msgs?.getModelsArray) {
+						return status.msgs.getModelsArray() || [];
 					}
-					if (
-						message?.id &&
-						typeof message.id === 'object' &&
-						message.id.remote != null &&
-						message.id.id != null
-					) {
-						const fromMe = message.id.fromMe ? 'true' : 'false';
-						const remote = message.id.remote;
-						const id = message.id.id;
-						const participant =
-							message.id.participant?._serialized ||
-							message.id.participant ||
-							message.author?._serialized ||
-							message.author ||
-							'';
-						return participant
-							? `${fromMe}_${remote}_${id}_${participant}`
-							: `${fromMe}_${remote}_${id}`;
-					}
-					if (message?.rowId != null) return String(message.rowId);
-					if (message?.id?.id != null) return String(message.id.id);
-					return typeof message?.id === 'string' ? message.id : '';
-				};
+					if (Array.isArray(status?.msgs?.models)) return status.msgs.models;
+					if (Array.isArray(status?.msgs)) return status.msgs;
+				} catch {
+					/* ignore */
+				}
+				return [];
+			};
 
-				const resolveType = (message: any): string => {
-					const raw = String(message?.type || '').toLowerCase();
-					if (raw === 'chat') return 'text';
-					if (raw) return raw;
-					const mime = String(message?.mimetype || message?.mediaData?.mimetype || '');
-					if (mime.startsWith('video/')) return 'video';
-					if (mime.startsWith('image/') || message?.mediaData) return 'image';
-					if (message?.isStatusV3) return 'image';
-					return 'text';
-				};
+			const resolveSender = (status: any) =>
+				String(
+					status?.id?._serialized ||
+						(typeof status?.id?.toString === 'function'
+							? status.id.toString()
+							: status?.id) ||
+						'',
+				);
 
-				const push = (message: any, sender: string, contactName?: string) => {
-					const id = resolveId(message);
-					if (!id) return;
-					const keys = identityKeys(id);
-					if (keys.some(key => seen.has(key))) return;
-					for (const key of keys) seen.add(key);
-					const rawCaption = message?.caption || message?.text || null;
-					const rawBody = message?.body || null;
-					const caption =
-						(rawCaption && !looksLikeMedia(rawCaption) ? rawCaption : null) ||
-						(rawBody && !looksLikeMedia(rawBody) ? rawBody : null);
-					output.push({
-						id,
-						from: sender,
-						sender,
-						contactName: contactName || null,
-						type: resolveType(message),
-						caption,
-						body: caption,
-						timestamp: message?.t || message?.timestamp || null,
-						fromMe: Boolean(message?.id?.fromMe || message?.fromMe),
-						isOwn: Boolean(message?.id?.fromMe || message?.fromMe),
-					});
-				};
-
-				const store = browserWindow.WPP?.whatsapp?.StatusV3Store;
-				if (store) {
-					for (let round = 0; round < 3; round += 1) {
-						try {
-							if (typeof store.sync === 'function') await store.sync();
-							if (typeof store.loadMore === 'function') await store.loadMore();
-						} catch {
-							/* ignore */
-						}
-						await new Promise(resolve => setTimeout(resolve, 600));
-					}
-
-					const models =
-						(typeof store.getUnexpired === 'function' && store.getUnexpired(true)) ||
-						(typeof store.getModelsArray === 'function' && store.getModelsArray()) ||
-						store.models ||
-						[];
-
-					for (const status of models) {
-						const sender = String(
-							status?.id?._serialized ||
-								(typeof status?.id?.toString === 'function'
-									? status.id.toString()
-									: status?.id) ||
-								'',
-						);
-						if (!sender || sender === 'status@broadcast') continue;
-
-						let previousCount = -1;
-						for (let round = 0; round < 4; round += 1) {
+			const waitForStatusStore = async () => {
+				const started = Date.now();
+				let syncRequested = false;
+				while (Date.now() - started < 10_000) {
+					const store = browserWindow.WPP?.whatsapp?.StatusV3Store;
+					if (store) {
+						if (!syncRequested) {
+							syncRequested = true;
 							try {
-								if (typeof status.loadMore === 'function') await status.loadMore(50);
-								if (typeof status.loadStatusMsgs === 'function') {
-									await status.loadStatusMsgs();
-								}
-							} catch {
-								/* ignore */
+								if (typeof store.sync === 'function') {
+								await store.sync();
 							}
-							let count = 0;
-							try {
-								if (typeof status.getAllMsgs === 'function') {
-									count = (status.getAllMsgs() || []).length;
-								} else if (status.msgs?.getModelsArray) {
-									count = (status.msgs.getModelsArray() || []).length;
-								} else {
-									count = Number(status.msgsLength || status.totalCount || 0);
-								}
 							} catch {
-								count = 0;
+								/* store may already be synchronizing */
 							}
-							if (count === previousCount) break;
-							previousCount = count;
-							await new Promise(resolve => setTimeout(resolve, 300));
 						}
-
-						let messages: any[] = [];
+						if (typeof store.hasSynced === 'function' && store.hasSynced()) {
+							return store;
+						}
+						let unexpired = null;
 						try {
-							if (typeof status.getAllMsgs === 'function') {
-								messages = status.getAllMsgs() || [];
-							} else if (status.msgs?.getModelsArray) {
-								messages = status.msgs.getModelsArray() || [];
-							} else if (Array.isArray(status.msgs?.models)) {
-								messages = status.msgs.models;
-							} else if (Array.isArray(status.msgs)) {
-								messages = status.msgs;
-							}
+							unexpired =
+								typeof store.getUnexpired === 'function'
+									? store.getUnexpired(true)
+									: null;
 						} catch {
-							messages = [];
+							/* API shape differs between WhatsApp Web versions */
 						}
-						const contactName =
-							status?.contact?.name || status?.contact?.pushname || null;
-						if (messages.length === 0 && status.lastStatus) {
-							push(status.lastStatus, sender, contactName);
-						}
-						for (const message of messages) {
-							push(message, sender, contactName);
+						if (Array.isArray(unexpired) && unexpired.length > 0) {
+							return store;
 						}
 					}
-
 					try {
-						const mine =
-							(typeof store.getMyStatus === 'function' && store.getMyStatus()) ||
-							(browserWindow.WPP?.status?.getMyStatus &&
-								(await browserWindow.WPP.status.getMyStatus()));
-						if (mine) {
-							try {
-								if (typeof mine.loadMore === 'function') await mine.loadMore(50);
-								if (typeof mine.loadStatusMsgs === 'function') {
-									await mine.loadStatusMsgs();
-								}
-							} catch {
-								/* ignore */
-							}
-							const myId = String(
-								mine.id?._serialized ||
-									(typeof mine.id?.toString === 'function'
-										? mine.id.toString()
-										: '') ||
-									'',
-							);
-							if (myId) {
-								let msgs: any[] = [];
-								if (typeof mine.getAllMsgs === 'function') {
-									msgs = mine.getAllMsgs() || [];
-								}
-								for (const msg of msgs) {
-									push(
-										{
-											...msg,
-											fromMe: true,
-											id: msg.id || { _serialized: msg.id, fromMe: true },
-										},
-										myId,
-										'You',
-									);
-								}
-							}
+						if (browserWindow.WPP?.conn?.isMainReady?.()) {
+							const lateStore = browserWindow.WPP?.whatsapp?.StatusV3Store;
+							if (lateStore) return lateStore;
 						}
 					} catch {
 						/* ignore */
 					}
+					await new Promise(resolve => setTimeout(resolve, 350));
+				}
+				return browserWindow.WPP?.whatsapp?.StatusV3Store || null;
+			};
+
+			const store = await waitForStatusStore();
+			if (store) {
+				try {
+					if (typeof store.sync === 'function') await store.sync();
+					if (typeof store.loadMore === 'function') await store.loadMore();
+				} catch {
+					/* ignore */
+				}
+				await new Promise(resolve => setTimeout(resolve, 600));
+
+				const modelMap = new Map<string, any>();
+				const addModel = (model: any) => {
+					const sender = resolveSender(model);
+					if (!model) return;
+					const key =
+						sender && sender !== 'status@broadcast'
+							? sender
+							: `status-model-${modelMap.size}`;
+					if (!modelMap.has(key)) modelMap.set(key, model);
+				};
+				const safeRead = (reader: () => any) => {
+					try {
+						return reader();
+					} catch {
+						return null;
+					}
+				};
+				const pools = [
+					safeRead(() => store.getUnexpired?.(true)),
+					safeRead(() => store.getUnexpired?.()),
+					safeRead(() => store.getModelsArray?.()),
+					store.models,
+					store._models,
+				];
+				for (const pool of pools) {
+					const models = Array.isArray(pool)
+						? pool
+						: pool instanceof Map
+							? [...pool.values()]
+							: [];
+					for (const model of models) addModel(model);
 				}
 
-				// Always merge MsgStore broadcast statuses as a safety net.
+				let processed = 0;
+				for (const status of modelMap.values()) {
+					if (processed >= MAX_CONTACTS) break;
+					processed += 1;
+					const sender = resolveSender(status);
+					let messages = readMessages(status);
+					if (messages.length === 0) {
+						try {
+							await Promise.race([
+								(async () => {
+									if (typeof status.loadStatusMsgs === 'function') {
+										await status.loadStatusMsgs();
+									} else if (typeof status.loadMore === 'function') {
+										await status.loadMore(12);
+									}
+								})(),
+								new Promise((_, reject) =>
+									setTimeout(() => reject(new Error('status load timeout')), 400),
+								),
+							]);
+							messages = readMessages(status);
+						} catch {
+							messages = readMessages(status);
+						}
+					}
+					const contactName =
+						status?.contact?.name || status?.contact?.pushname || null;
+					if (messages.length === 0 && status.lastStatus) {
+						const lastSender = String(
+							status.lastStatus?.author?._serialized ||
+								status.lastStatus?.author ||
+								status.lastStatus?.id?.participant?._serialized ||
+								status.lastStatus?.id?.participant ||
+								sender,
+						);
+						push(status.lastStatus, lastSender, contactName);
+					}
+					for (const message of messages) {
+						const messageSender = String(
+							message?.author?._serialized ||
+								message?.author ||
+								message?.id?.participant?._serialized ||
+								message?.id?.participant ||
+								message?.from?._serialized ||
+								message?.from ||
+								sender,
+						);
+						if (messageSender && messageSender !== 'status@broadcast') {
+							push(message, messageSender, contactName);
+						}
+					}
+				}
+
+				try {
+					const mine =
+						(typeof store.getMyStatus === 'function' && store.getMyStatus()) ||
+						(browserWindow.WPP?.status?.getMyStatus &&
+							(await browserWindow.WPP.status.getMyStatus()));
+					if (mine) {
+						let myMessages = readMessages(mine);
+						if (myMessages.length === 0) {
+							try {
+								if (typeof mine.loadStatusMsgs === 'function') {
+									await mine.loadStatusMsgs();
+								} else if (typeof mine.loadMore === 'function') {
+									await mine.loadMore(12);
+								}
+								myMessages = readMessages(mine);
+							} catch {
+								myMessages = readMessages(mine);
+							}
+						}
+						const myId = resolveSender(mine);
+						if (myId) {
+							for (const msg of myMessages) {
+								push(
+									{
+										...msg,
+										fromMe: true,
+										id: msg.id || { _serialized: msg.id, fromMe: true },
+									},
+									myId,
+									'You',
+								);
+							}
+						}
+					}
+				} catch {
+					/* ignore */
+				}
+			}
+
+			if (output.length === 0) {
 				const msgStore = browserWindow.WPP?.whatsapp?.MsgStore;
 				const msgs =
 					(typeof msgStore?.getModelsArray === 'function' &&
 						msgStore.getModelsArray()) ||
 					msgStore?.models ||
 					[];
-				for (const msg of msgs) {
+				const start = Math.max(0, msgs.length - MAX_MSG_SCAN);
+				for (let index = msgs.length - 1; index >= start; index -= 1) {
+					const msg = msgs[index];
 					const isStatus =
 						msg?.isStatusV3 ||
 						msg?.id?.remote === 'status@broadcast' ||
@@ -1340,15 +1848,64 @@ export class WppConnectProvider implements WhatsAppProvider {
 					if (!contactId || contactId === 'status@broadcast') continue;
 					push(msg, contactId, msg?.notifyName || null);
 				}
+			}
 
-				return output;
-			});
-		} catch (error) {
-			this.logger.warn(`Status synchronization is unavailable: ${String(error)}`);
-			throw error instanceof Error
-				? error
-				: new Error('Status synchronization is unavailable');
+			return output;
+		});
+	}
+
+	private normalizeProviderStatus(item: any) {
+		if (!item || typeof item !== 'object') return null;
+		const id = String(
+			item?.id?._serialized ||
+				(typeof item?.id === 'string' || typeof item?.id === 'number' ? item.id : '') ||
+				item?.messageId ||
+				'',
+		).trim();
+		if (!id) return null;
+		const senderWaId = String(
+			item?.author?._serialized ||
+				item?.from?._serialized ||
+				item?.sender ||
+				item?.author ||
+				item?.from ||
+				'',
+		).trim();
+		const rawCaption = item?.caption || item?.text || null;
+		const rawBody = item?.body || null;
+		const looksLikeMedia = (value: unknown) => {
+			const text = String(value || '');
+			return (
+				text.startsWith('/9j/') ||
+				text.startsWith('data:') ||
+				text.startsWith('iVBOR') ||
+				text.startsWith('AAAA') ||
+				text.length > 400
+			);
+		};
+		const caption =
+			(rawCaption && !looksLikeMedia(rawCaption) ? rawCaption : null) ||
+			(rawBody && !looksLikeMedia(rawBody) ? rawBody : null);
+		const rawType = String(item?.type || '').toLowerCase();
+		let type = rawType === 'chat' ? 'text' : rawType;
+		if (!type) {
+			const mime = String(item?.mimetype || item?.mediaData?.mimetype || '');
+			if (mime.startsWith('video/')) type = 'video';
+			else if (mime.startsWith('image/') || item?.mediaData) type = 'image';
+			else type = item?.isStatusV3 ? 'image' : 'text';
 		}
+		return {
+			id,
+			from: senderWaId || undefined,
+			sender: senderWaId || undefined,
+			contactName: item?.contactName || item?.notifyName || item?.sender?.pushname || null,
+			type,
+			caption,
+			body: caption,
+			timestamp: item?.timestamp ?? item?.t ?? null,
+			fromMe: Boolean(item?.id?.fromMe || item?.fromMe),
+			isOwn: Boolean(item?.id?.fromMe || item?.fromMe || item?.isOwn),
+		};
 	}
 
 	publishStatus(content: string, options: { type: string; caption?: string }) {

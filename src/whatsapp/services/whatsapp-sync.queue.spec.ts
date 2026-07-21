@@ -36,6 +36,7 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			gateway as any,
 			audit as any,
 			{} as any,
+			{} as any,
 		);
 		return { service, gateway, conversationRepo, access, providers, audit };
 	}

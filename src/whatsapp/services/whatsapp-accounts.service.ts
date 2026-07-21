@@ -1,11 +1,19 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { promises as fs } from 'fs';
+import * as path from 'path';
 import { In, Repository } from 'typeorm';
 import { User, UserRole } from '../../../entities/global.entity';
 import {
 	WhatsAppAccount,
 	WhatsAppAccountAccess,
+	WhatsAppAuditLog,
 	WhatsAppAccountStatus,
+	WhatsAppConnectionLog,
+	WhatsAppContact,
+	WhatsAppConversation,
+	WhatsAppGroup,
+	WhatsAppStatus,
 } from '../entities/whatsapp.entity';
 import {
 	getWhatsAppPrivacySettings,
@@ -14,6 +22,26 @@ import {
 } from '../utils/whatsapp-privacy';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
+import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
+
+const whatsappMediaRoot = () =>
+	path.resolve(
+		process.env.WHATSAPP_MEDIA_ROOT ||
+			path.join(process.cwd(), 'storage', 'whatsapp-media'),
+	);
+
+async function removeAccountMedia(accountId: string) {
+	const root = whatsappMediaRoot();
+	await Promise.all([
+		fs.rm(path.join(root, accountId), { recursive: true, force: true }),
+		fs.rm(path.join(root, 'outgoing', accountId), { recursive: true, force: true }),
+		fs.rm(path.join(root, 'statuses', accountId), { recursive: true, force: true }),
+		fs.rm(path.join(process.cwd(), 'uploads', 'whatsapp-media', accountId), {
+			recursive: true,
+			force: true,
+		}),
+	]);
+}
 
 @Injectable()
 export class WhatsAppAccountsService {
@@ -26,6 +54,7 @@ export class WhatsAppAccountsService {
 		private readonly userRepo: Repository<User>,
 		private readonly accessService: WhatsAppAccessService,
 		private readonly audit: WhatsAppAuditService,
+		private readonly providers: WhatsAppProviderManagerService,
 	) {}
 
 	async list(user: User) {
@@ -107,10 +136,12 @@ export class WhatsAppAccountsService {
 
 	async remove(user: User, accountId: string) {
 		const account = await this.accessService.assertAccountPermission(user, accountId, 'canManage');
-		if (account.status !== WhatsAppAccountStatus.DISCONNECTED) {
-			throw new NotFoundException('Disconnect the WhatsApp account before deleting it');
-		}
-		await this.accountRepo.softDelete(accountId);
+		await this.providers.destroySession(accountId, account.providerName);
+		await removeAccountMedia(accountId);
+		await this.accountRepo.manager.transaction(async manager => {
+			await manager.delete(WhatsAppAuditLog, { accountId });
+			await manager.delete(WhatsAppAccount, { id: accountId });
+		});
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId,
@@ -119,6 +150,47 @@ export class WhatsAppAccountsService {
 			targetId: accountId,
 		});
 		return { ok: true };
+	}
+
+	async resetData(user: User, accountId: string) {
+		const account = await this.accessService.assertAccountPermission(user, accountId, 'canManage');
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected') {
+			throw new BadRequestException(
+				'WhatsApp is not ready. Wait for the phone connection before resetting data.',
+			);
+		}
+		try {
+			const chats = await provider.getChats(100);
+			if (!Array.isArray(chats) || chats.length === 0) {
+				throw new Error('WhatsApp returned no chats');
+			}
+		} catch {
+			throw new BadRequestException(
+				'WhatsApp chat data is not ready yet. Nothing was deleted; wait and try again.',
+			);
+		}
+		await removeAccountMedia(accountId);
+		await this.accountRepo.manager.transaction(async manager => {
+			// Preserve the account, provider session and staff access; purge synchronized data only.
+			await manager.delete(WhatsAppAuditLog, { accountId });
+			await manager.delete(WhatsAppConversation, { accountId });
+			await manager.delete(WhatsAppContact, { accountId });
+			await manager.delete(WhatsAppGroup, { accountId });
+			await manager.delete(WhatsAppStatus, { accountId });
+			await manager.delete(WhatsAppConnectionLog, { accountId });
+			await manager.update(WhatsAppAccount, accountId, {
+				lastError: null,
+			});
+		});
+		await this.audit.write({
+			actorUserId: user.id,
+			accountId,
+			action: 'whatsapp.account.data_reset',
+			targetType: 'WhatsAppAccount',
+			targetId: accountId,
+		});
+		return { ok: true, status: account.status };
 	}
 
 	async getAccess(user: User, accountId: string) {

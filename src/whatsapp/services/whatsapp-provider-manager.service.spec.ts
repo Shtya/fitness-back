@@ -5,6 +5,9 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 	function createService() {
 		const accountRepo = {
 			update: jest.fn().mockResolvedValue(undefined),
+			findOneBy: jest.fn().mockResolvedValue({
+				status: WhatsAppAccountStatus.DISCONNECTED,
+			}),
 		};
 		const logRepo = {
 			create: jest.fn(value => value),
@@ -23,16 +26,19 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		const notifications = {
 			create: jest.fn(),
 		};
+		const sessions = {
+			clear: jest.fn().mockResolvedValue(true),
+		};
 		const service = new WhatsAppProviderManagerService(
 			accountRepo as any,
 			logRepo as any,
 			accessRepo as any,
 			messageRepo as any,
-			{} as any,
+			sessions as any,
 			gateway as any,
 			notifications as any,
 		);
-		return { service, accountRepo, logRepo, gateway };
+		return { service, accountRepo, logRepo, gateway, sessions };
 	}
 
 	it('never broadcasts message content to the account room', async () => {
@@ -63,6 +69,43 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			status: WhatsAppAccountStatus.QR_PENDING,
 		});
 		expect(gateway.emitAccountEvent).not.toHaveBeenCalled();
+	});
+
+	it('ignores stale QR events while the account is already connected', async () => {
+		const { service, gateway, accountRepo } = createService();
+		accountRepo.findOneBy.mockResolvedValue({
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
+		(service as any).providers.set('account-1', {
+			getState: jest.fn().mockReturnValue('connected'),
+		});
+
+		await (service as any).handleEvent('account-1', {
+			type: 'qr',
+			qr: 'data:image/png;base64,secret-pairing-code',
+		});
+
+		expect(accountRepo.update).not.toHaveBeenCalled();
+		expect(gateway.emitAccountEvent).not.toHaveBeenCalled();
+	});
+
+	it('accepts QR events when the in-memory provider is actually waiting for pairing', async () => {
+		const { service, accountRepo } = createService();
+		accountRepo.findOneBy.mockResolvedValue({
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
+		(service as any).providers.set('account-1', {
+			getState: jest.fn().mockReturnValue('qr_pending'),
+		});
+
+		await (service as any).handleEvent('account-1', {
+			type: 'qr',
+			qr: 'data:image/png;base64,new-pairing-code',
+		});
+
+		expect(accountRepo.update).toHaveBeenCalledWith('account-1', {
+			status: WhatsAppAccountStatus.QR_PENDING,
+		});
 	});
 
 	it('broadcasts only sanitized connection state', async () => {
@@ -111,5 +154,19 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			'account-1',
 			expect.objectContaining({ status: WhatsAppAccountStatus.DISCONNECTED }),
 		);
+	});
+
+	it('clears the saved session even when provider logout fails', async () => {
+		const { service, sessions } = createService();
+		const provider = {
+			logout: jest.fn().mockRejectedValue(new Error('provider unavailable')),
+		};
+		(service as any).providers.set('account-1', provider);
+
+		await expect(service.destroySession('account-1', 'wppconnect')).resolves.toEqual({
+			ok: true,
+		});
+		expect(sessions.clear).toHaveBeenCalledWith('account-1', 'wppconnect');
+		expect((service as any).providers.has('account-1')).toBe(false);
 	});
 });

@@ -2,6 +2,7 @@ import {
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
+	Logger,
 	NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -65,6 +66,8 @@ function normalizeStatusType(value: unknown) {
 @Injectable()
 
 export class WhatsAppStatusService {
+	private readonly logger = new Logger(WhatsAppStatusService.name);
+
 	constructor(
 		@InjectRepository(WhatsAppStatus)
 		private readonly repo: Repository<WhatsAppStatus>,
@@ -81,6 +84,37 @@ export class WhatsAppStatusService {
 			throw new BadRequestException('WhatsApp account is not connected');
 		}
 		return provider;
+	}
+
+	private async ensureStatusProvider(accountId: string, timeoutMs = 60000) {
+		let provider = this.providers.getProvider(accountId);
+		let state = provider?.getState() || 'disconnected';
+		if (state === 'connected') {
+			return { provider, state, ready: true as const };
+		}
+		try {
+			provider = await this.providers.connect(accountId);
+			state = provider.getState();
+		} catch {
+			return { provider: provider || null, state, ready: false as const };
+		}
+		if (state !== 'connected') {
+			const ready = await this.providers.waitUntilConnected(accountId, timeoutMs);
+			provider = this.providers.getProvider(accountId);
+			state = provider?.getState() || state;
+			if (!ready || state !== 'connected') {
+				return { provider: provider || null, state, ready: false as const };
+			}
+		}
+		return { provider: provider!, state: 'connected' as const, ready: true as const };
+	}
+
+	private statusRefreshHint(state: string) {
+		if (state === 'connected') return null;
+		if (['connecting', 'qr_pending'].includes(state)) {
+			return 'whatsapp_session_not_ready';
+		}
+		return 'whatsapp_not_connected';
 	}
 
 	private async upsertProviderStatuses(
@@ -172,7 +206,8 @@ export class WhatsAppStatusService {
 		}
 		// Drop statuses that WhatsApp no longer returns (deleted / expired),
 		// and collapse any leftover duplicate identity rows.
-		if (Array.isArray(statuses)) {
+		// Never wipe the DB when the provider returned nothing — that usually means sync is not ready yet.
+		if (Array.isArray(statuses) && refreshedIds.length > 0) {
 			const refreshedKeys = new Set<string>();
 			for (const id of refreshedIds) {
 				for (const key of statusIdentityKeys(id)) refreshedKeys.add(key);
@@ -217,16 +252,50 @@ export class WhatsAppStatusService {
 
 	async list(user: User, accountId: string, refresh = false) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
-		const provider = this.providers.getProvider(accountId);
 		const contactNames = new Map<string, string>();
-		if (refresh && provider?.capabilities.statusFetch) {
-			try {
-				const statuses = await provider.getStatuses();
-				if (Array.isArray(statuses)) {
-					await this.upsertProviderStatuses(accountId, statuses, contactNames);
+		let provider = this.providers.getProvider(accountId);
+		let providerState = provider?.getState() || this.providers.getProviderState(accountId);
+		let sessionReady = providerState === 'connected';
+		let refreshHint: string | null = null;
+
+		if (refresh) {
+			const readiness = await this.ensureStatusProvider(accountId);
+			provider = readiness.provider;
+			providerState = readiness.state;
+			sessionReady = readiness.ready;
+			if (sessionReady && provider?.capabilities.statusFetch) {
+				try {
+					const statuses = await Promise.race([
+						provider.getStatuses(),
+						new Promise<any[]>((_, reject) => {
+							setTimeout(
+								() => reject(new Error('Story sync timed out')),
+								35_000,
+							);
+						}),
+					]);
+					if (Array.isArray(statuses) && statuses.length > 0) {
+						await this.upsertProviderStatuses(accountId, statuses, contactNames);
+						refreshHint = null;
+					} else {
+						refreshHint = 'whatsapp_stories_empty';
+						this.logger.warn(
+							`Status refresh returned no items for account ${accountId} (provider state: ${providerState})`,
+						);
+					}
+				} catch (error) {
+					refreshHint =
+						error instanceof Error && error.message.includes('timed out')
+							? 'whatsapp_stories_sync_failed'
+							: 'whatsapp_stories_sync_failed';
+					this.logger.warn(
+						`Status refresh failed for ${accountId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
 				}
-			} catch {
-				// Keep the local snapshot when WhatsApp sync fails mid-refresh.
+			} else {
+				refreshHint = this.statusRefreshHint(providerState);
 			}
 		}
 		const items = await this.repo
@@ -260,7 +329,10 @@ export class WhatsAppStatusService {
 			}
 		}
 		return {
-			supported: provider?.capabilities.statusFetch ?? false,
+			supported: provider?.capabilities.statusFetch ?? true,
+			sessionReady,
+			providerState,
+			hint: refreshHint,
 			items: dedupedItems.map(item => ({
 				...item,
 				contactName: item.senderWaId

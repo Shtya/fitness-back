@@ -5,6 +5,7 @@ import { User, UserRole } from '../../../entities/global.entity';
 import {
 	WhatsAppAccount,
 	WhatsAppAccountAccess,
+	WhatsAppConversation,
 } from '../entities/whatsapp.entity';
 
 export type WhatsAppAccountPermission =
@@ -23,6 +24,8 @@ export class WhatsAppAccessService {
 		private readonly accessRepo: Repository<WhatsAppAccountAccess>,
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
+		@InjectRepository(WhatsAppConversation)
+		private readonly conversationRepo: Repository<WhatsAppConversation>,
 	) {}
 
 	private isSuperAdmin(user?: User | null) {
@@ -66,7 +69,9 @@ export class WhatsAppAccessService {
 
 	async getAccountAccess(user: User, accountId: string) {
 		if (!user?.id) throw new ForbiddenException('WhatsApp user is not authenticated');
-		const account = await this.accountRepo.findOne({ where: { id: accountId } });
+		const account = await this.accountRepo.findOne({
+			where: { id: accountId },
+		});
 		if (!account) throw new NotFoundException('WhatsApp account not found');
 		if (this.isSuperAdmin(user) || account.ownerAdminId === user.id) {
 			return this.fullAccess(account);
@@ -74,7 +79,9 @@ export class WhatsAppAccessService {
 		if (!this.isEligibleStaff(user)) {
 			throw new ForbiddenException('WhatsApp account access denied');
 		}
-		const access = await this.accessRepo.findOne({ where: { accountId, userId: user.id } });
+		const access = await this.accessRepo.findOne({
+			where: { accountId, userId: user.id },
+		});
 		if (!access?.canView) throw new ForbiddenException('WhatsApp account access denied');
 		return { account, ...access };
 	}
@@ -120,6 +127,20 @@ export class WhatsAppAccessService {
 		return account;
 	}
 
+	async assertConversationVisible(user: User, conversationId: string) {
+		const conversation = await this.conversationRepo.findOne({
+			where: { id: conversationId },
+			relations: ['contact', 'group', 'group.participants', 'assignedUser'],
+		});
+		if (!conversation) throw new NotFoundException('WhatsApp conversation not found');
+		const accountAccess = await this.getAccountAccess(user, conversation.accountId);
+		const canSeeAll = this.canSeeAllConversations(user, accountAccess);
+		if (!accountAccess.canView || (!canSeeAll && conversation.assignedUserId !== user.id)) {
+			throw new ForbiddenException('WhatsApp conversation access denied');
+		}
+		return { conversation, accountAccess, canSeeAll };
+	}
+
 	async notificationRecipientIds(accountId: string, assignedUserId?: string | null) {
 		if (assignedUserId) return [assignedUserId];
 		const [account, rows] = await Promise.all([
@@ -132,8 +153,8 @@ export class WhatsAppAccessService {
 			...new Set([
 				account.ownerAdminId,
 				...rows
-					.filter(row => row.canManage || row.canAssign)
-					.map(row => row.userId)
+					.filter((row) => row.canManage || row.canAssign)
+					.map((row) => row.userId)
 					.filter(Boolean),
 			]),
 		];
@@ -152,7 +173,7 @@ export class WhatsAppAccessService {
 		}>,
 	) {
 		const account = await this.assertAccountPermission(actor, accountId, 'canManage');
-		const normalizedItems = items.filter(item => item.userId !== account.ownerAdminId);
+		const normalizedItems = items.filter((item) => item.userId !== account.ownerAdminId);
 		normalizedItems.push({
 			userId: account.ownerAdminId,
 			canView: true,
@@ -161,17 +182,19 @@ export class WhatsAppAccessService {
 			canAssign: true,
 			canTransfer: true,
 		});
-		const userIds = [...new Set(normalizedItems.map(item => item.userId))];
+		const userIds = [...new Set(normalizedItems.map((item) => item.userId))];
 		const allowedRoles = [UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN];
 		const users = userIds.length
-			? await this.userRepo.find({ where: { id: In(userIds), role: In(allowedRoles) } })
+			? await this.userRepo.find({
+					where: { id: In(userIds), role: In(allowedRoles) },
+				})
 			: [];
 		if (users.length !== userIds.length) {
 			throw new NotFoundException('One or more eligible staff users do not exist');
 		}
 		if (actor.role !== UserRole.SUPER_ADMIN) {
 			const outOfScope = users.filter(
-				candidate =>
+				(candidate) =>
 					candidate.id !== actor.id &&
 					candidate.adminId !== actor.id &&
 					candidate.coachId !== actor.id &&
@@ -184,21 +207,17 @@ export class WhatsAppAccessService {
 			}
 		}
 
-		await this.accessRepo.manager.transaction(async manager => {
+		await this.accessRepo.manager.transaction(async (manager) => {
 			await manager.delete(WhatsAppAccountAccess, { accountId });
 			if (normalizedItems.length) {
 				await manager.save(
 					WhatsAppAccountAccess,
-					normalizedItems.map(item =>
+					normalizedItems.map((item) =>
 						manager.create(WhatsAppAccountAccess, {
 							accountId,
 							...item,
 							canView:
-								item.canView ||
-								item.canUse ||
-								item.canManage ||
-								item.canAssign ||
-								item.canTransfer,
+								item.canView || item.canUse || item.canManage || item.canAssign || item.canTransfer,
 						}),
 					),
 				);

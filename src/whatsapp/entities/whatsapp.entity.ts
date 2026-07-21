@@ -323,6 +323,32 @@ export class WhatsAppConversationAssignment extends CoreEntity {
 	note: string | null;
 }
 
+@Entity('whatsapp_conversation_preferences')
+@Unique('uq_whatsapp_conversation_preference', ['conversationId', 'userId'])
+export class WhatsAppConversationPreference extends CoreEntity {
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ name: 'is_favorite', type: 'boolean', default: false })
+	isFavorite: boolean;
+
+	@Column({ name: 'is_pinned', type: 'boolean', default: false })
+	isPinned: boolean;
+}
+
 @Entity('whatsapp_messages')
 @Unique('uq_whatsapp_message_account_provider', ['accountId', 'providerMessageId'])
 @Index('idx_whatsapp_messages_conversation_timestamp', ['conversationId', 'providerTimestamp'])
@@ -387,6 +413,24 @@ export class WhatsAppMessage extends CoreEntity {
 	@Column({ name: 'quoted_provider_message_id', type: 'varchar', length: 300, nullable: true })
 	quotedProviderMessageId: string | null;
 
+	@Column({ name: 'is_starred', type: 'boolean', default: false })
+	isStarred: boolean;
+
+	@Column({ name: 'is_forwarded', type: 'boolean', default: false })
+	isForwarded: boolean;
+
+	@Column({ name: 'is_pinned', type: 'boolean', default: false })
+	isPinned: boolean;
+
+	@Column({ name: 'pinned_until', type: 'timestamptz', nullable: true })
+	pinnedUntil: Date | null;
+
+	@Column({ name: 'deleted_mode', type: 'varchar', length: 20, default: 'none' })
+	deletedMode: 'none' | 'local' | 'everyone';
+
+	@Column({ name: 'provider_deleted_at', type: 'timestamptz', nullable: true })
+	providerDeletedAt: Date | null;
+
 	@Column({ name: 'provider_timestamp', type: 'timestamptz' })
 	providerTimestamp: Date;
 
@@ -395,6 +439,30 @@ export class WhatsAppMessage extends CoreEntity {
 
 	@OneToMany(() => WhatsAppMessageAttachment, attachment => attachment.message)
 	attachments: WhatsAppMessageAttachment[];
+
+	@OneToMany(() => WhatsAppMessageReaction, reaction => reaction.message)
+	reactions: WhatsAppMessageReaction[];
+}
+
+@Entity('whatsapp_message_reactions')
+@Unique('uq_whatsapp_message_reaction_actor', ['messageId', 'actorKey'])
+export class WhatsAppMessageReaction extends CoreEntity {
+	@Index()
+	@Column({ name: 'message_id', type: 'uuid' })
+	messageId: string;
+
+	@ManyToOne(() => WhatsAppMessage, message => message.reactions, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'message_id' })
+	message: WhatsAppMessage;
+
+	@Column({ name: 'actor_key', type: 'varchar', length: 200 })
+	actorKey: string;
+
+	@Column({ type: 'varchar', length: 32 })
+	emoji: string;
+
+	@Column({ name: 'reacted_at', type: 'timestamptz', nullable: true })
+	reactedAt: Date | null;
 }
 
 @Entity('whatsapp_message_attachments')

@@ -102,6 +102,7 @@ describe('WhatsApp conversations API (isolated HTTP integration)', () => {
 			'account-1',
 			2,
 			75,
+			'',
 		);
 	});
 });

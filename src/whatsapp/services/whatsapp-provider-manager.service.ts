@@ -84,10 +84,13 @@ export class WhatsAppProviderManagerService
 
 	private async connectExclusive(accountId: string) {
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
-		await this.accountRepo.update(accountId, {
-			status: WhatsAppAccountStatus.CONNECTING,
-			lastError: null,
-		});
+		// Keep CONNECTED in the DB while we restore the in-memory browser session.
+		if (account.status !== WhatsAppAccountStatus.CONNECTED) {
+			await this.accountRepo.update(accountId, {
+				status: WhatsAppAccountStatus.CONNECTING,
+				lastError: null,
+			});
+		}
 		const provider = this.createProvider(account);
 		provider.onEvent(event => this.handleEvent(accountId, event));
 		this.providers.set(accountId, provider);
@@ -121,6 +124,15 @@ export class WhatsAppProviderManagerService
 	private async handleEvent(accountId: string, event: WhatsAppProviderEvent) {
 		if (event.type === 'connection') {
 			const status = event.status as WhatsAppAccountStatus;
+			const provider = this.providers.get(accountId);
+			if (
+				[WhatsAppAccountStatus.QR_PENDING, WhatsAppAccountStatus.CONNECTING].includes(
+					status,
+				) &&
+				provider?.getState() === 'connected'
+			) {
+				return;
+			}
 			await this.accountRepo.update(accountId, {
 				status,
 				phoneNumber: event.phoneNumber || undefined,
@@ -153,6 +165,10 @@ export class WhatsAppProviderManagerService
 			}
 		}
 		if (event.type === 'qr') {
+			const provider = this.providers.get(accountId);
+			if (provider?.getState() === 'connected') {
+				return;
+			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'qr_updated');
 		}
@@ -208,8 +224,45 @@ export class WhatsAppProviderManagerService
 		return { ok: true };
 	}
 
+	async destroySession(accountId: string, providerName = 'wppconnect') {
+		const provider = this.providers.get(accountId);
+		try {
+			if (provider) await provider.logout();
+		} catch (error) {
+			this.logger.warn(
+				`WhatsApp provider logout failed while clearing ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			try {
+				if (provider) await provider.disconnect();
+			} catch {
+				// The provider is being discarded and its persisted token is cleared below.
+			}
+		} finally {
+			this.providers.delete(accountId);
+			this.connecting.delete(accountId);
+			await this.sessions.clear(accountId, providerName);
+		}
+		return { ok: true };
+	}
+
 	getQr(accountId: string) {
 		return this.providers.get(accountId)?.getQr() || null;
+	}
+
+	getProviderState(accountId: string) {
+		return this.providers.get(accountId)?.getState() || 'disconnected';
+	}
+
+	async waitUntilConnected(accountId: string, timeoutMs = 60000) {
+		const started = Date.now();
+		while (Date.now() - started < timeoutMs) {
+			const provider = this.providers.get(accountId);
+			if (provider?.getState() === 'connected') return true;
+			await new Promise(resolve => setTimeout(resolve, 1500));
+		}
+		return this.providers.get(accountId)?.getState() === 'connected';
 	}
 
 	private async log(

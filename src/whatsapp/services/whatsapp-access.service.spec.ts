@@ -15,14 +15,17 @@ describe('WhatsAppAccessService', () => {
 			find: jest.fn().mockResolvedValue([]),
 		};
 		const userRepo = { find: jest.fn() };
+		const conversationRepo = { findOne: jest.fn() };
 		return {
 			service: new WhatsAppAccessService(
 				accountRepo as any,
 				accessRepo as any,
 				userRepo as any,
+				conversationRepo as any,
 			),
 			accountRepo,
 			accessRepo,
+			conversationRepo,
 		};
 	}
 
@@ -72,19 +75,42 @@ describe('WhatsAppAccessService', () => {
 			canUse: true,
 		});
 		await expect(
-			service.getAccountAccess(
-				{ id: 'client-1', role: UserRole.CLIENT } as any,
-				'account-1',
-			),
+			service.getAccountAccess({ id: 'client-1', role: UserRole.CLIENT } as any, 'account-1'),
 		).rejects.toBeInstanceOf(ForbiddenException);
 	});
 
 	it('returns no WhatsApp accounts for ineligible client roles', async () => {
 		const { service, accountRepo, accessRepo } = createService();
 		await expect(
-			service.listAccessibleAccounts({ id: 'client-1', role: UserRole.CLIENT } as any),
+			service.listAccessibleAccounts({
+				id: 'client-1',
+				role: UserRole.CLIENT,
+			} as any),
 		).resolves.toEqual([]);
 		expect(accountRepo.find).not.toHaveBeenCalled();
 		expect(accessRepo.find).not.toHaveBeenCalled();
+	});
+
+	it('enforces assignment visibility for scoped staff', async () => {
+		const { service, conversationRepo } = createService({
+			accountId: 'account-1',
+			userId: 'coach-1',
+			canView: true,
+			canUse: true,
+			canManage: false,
+			canAssign: false,
+		});
+		conversationRepo.findOne.mockResolvedValue({
+			id: 'conversation-1',
+			accountId: 'account-1',
+			assignedUserId: 'another-coach',
+		});
+
+		await expect(
+			service.assertConversationVisible(
+				{ id: 'coach-1', role: UserRole.COACH } as any,
+				'conversation-1',
+			),
+		).rejects.toBeInstanceOf(ForbiddenException);
 	});
 });

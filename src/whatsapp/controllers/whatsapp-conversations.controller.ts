@@ -2,9 +2,11 @@ import {
 	BadRequestException,
 	Body,
 	Controller,
+	Delete,
 	Get,
 	Param,
 	Post,
+	Put,
 	Query,
 	Req,
 	Res,
@@ -21,7 +23,14 @@ import * as path from 'path';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
-import { SendWhatsAppMessageDto, CreateWhatsAppConversationNoteDto } from '../dto/whatsapp.dto';
+import {
+	CreateWhatsAppConversationNoteDto,
+	DeleteWhatsAppMessageDto,
+	ForwardWhatsAppMessageDto,
+	ReactWhatsAppMessageDto,
+	SendWhatsAppMessageDto,
+	ToggleWhatsAppMessageDto,
+} from '../dto/whatsapp.dto';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 
@@ -64,8 +73,45 @@ export class WhatsAppConversationsController {
 		@Param('accountId') accountId: string,
 		@Query('page') page = '1',
 		@Query('limit') limit = '50',
+		@Query('search') search = '',
+		@Query('filter') filter = 'all',
+		@Query('assignedUserId') assignedUserId = '',
 	) {
-		return this.sync.listConversations(req.user, accountId, Number(page), Number(limit));
+		return this.sync.listConversations(
+			req.user,
+			accountId,
+			Number(page),
+			Number(limit),
+			search,
+			filter,
+			assignedUserId,
+		);
+	}
+
+	@Put('conversations/:conversationId/favorite')
+	setFavorite(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: { isFavorite?: boolean },
+	) {
+		return this.sync.setConversationFavorite(
+			req.user,
+			conversationId,
+			Boolean(body.isFavorite),
+		);
+	}
+
+	@Put('conversations/:conversationId/pin')
+	setPinned(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: { isPinned?: boolean },
+	) {
+		return this.sync.setConversationPinned(
+			req.user,
+			conversationId,
+			Boolean(body.isPinned),
+		);
 	}
 
 	@Post('accounts/:accountId/sync/contacts')
@@ -110,6 +156,75 @@ export class WhatsAppConversationsController {
 		@Query('limit') limit = '30',
 	) {
 		return this.sync.listMessages(req.user, conversationId, before, Number(limit));
+	}
+
+	@Put('conversations/:conversationId/messages/:messageId/reaction')
+	reactToMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: ReactWhatsAppMessageDto,
+	) {
+		return this.sync.reactToMessage(
+			req.user,
+			conversationId,
+			messageId,
+			body.emoji,
+		);
+	}
+
+	@Post('conversations/:conversationId/messages/:messageId/forward')
+	forwardMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: ForwardWhatsAppMessageDto,
+	) {
+		return this.sync.forwardMessage(
+			req.user,
+			conversationId,
+			messageId,
+			body.targetConversationId,
+		);
+	}
+
+	@Put('conversations/:conversationId/messages/:messageId/star')
+	starMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: ToggleWhatsAppMessageDto,
+	) {
+		return this.sync.starMessage(req.user, conversationId, messageId, body.enabled);
+	}
+
+	@Put('conversations/:conversationId/messages/:messageId/pin')
+	pinMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: ToggleWhatsAppMessageDto,
+	) {
+		return this.sync.pinMessage(req.user, conversationId, messageId, body.enabled);
+	}
+
+	@Delete('conversations/:conversationId/messages/:messageId')
+	deleteMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: DeleteWhatsAppMessageDto,
+	) {
+		return this.sync.deleteMessage(req.user, conversationId, messageId, body.mode);
+	}
+
+	@Get('conversations/:conversationId/messages/:messageId/info')
+	messageInfo(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+	) {
+		return this.sync.getMessageInfo(req.user, conversationId, messageId);
 	}
 
 	@Post('conversations/:conversationId/sync/latest')
@@ -234,6 +349,28 @@ export class WhatsAppConversationsController {
 			mimeType: file.mimetype,
 			size: file.size,
 		};
+	}
+
+	@Delete('accounts/:accountId/media')
+	async deletePendingUpload(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: { fileId?: string },
+	) {
+		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
+		if (!body.fileId) throw new BadRequestException('Media fileId is required');
+		const userRoot = path.resolve(
+			mediaRoot(),
+			'outgoing',
+			String(accountId),
+			String(req.user?.id || 'invalid'),
+		);
+		const filePath = path.resolve(mediaRoot(), body.fileId);
+		if (filePath !== userRoot && !filePath.startsWith(`${userRoot}${path.sep}`)) {
+			throw new BadRequestException('Invalid media fileId');
+		}
+		await fs.promises.rm(filePath, { force: true });
+		return { deleted: true };
 	}
 
 	@Post('attachments/:attachmentId/download')

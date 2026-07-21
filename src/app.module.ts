@@ -30,7 +30,10 @@ import { TodoModule } from './todo/todo.module';
 import { RecipesModule } from './recipes/recipes.module';
 import { MoneyModule } from './money/money.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
- 
+import { TranscriptionModule } from './transcription/transcription.module';
+import { WhatsAppDemoModule } from './whatsapp-demo/whatsapp-demo.module';
+import { AiReplySuggestionsModule } from './ai-reply-suggestions/ai-reply-suggestions.module';
+
 @Module({
 	imports: [
 		ConfigModule.forRoot(),
@@ -81,6 +84,9 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module';
 		RecipesModule,
 		MoneyModule,
 		WhatsAppModule,
+		WhatsAppDemoModule,
+		TranscriptionModule,
+		AiReplySuggestionsModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

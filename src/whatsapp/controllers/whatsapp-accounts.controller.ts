@@ -48,6 +48,12 @@ export class WhatsAppAccountsController {
 		return this.accounts.remove(req.user, accountId);
 	}
 
+	@Post(':accountId/reset-data')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	resetData(@Req() req: any, @Param('accountId') accountId: string) {
+		return this.accounts.resetData(req.user, accountId);
+	}
+
 	@Get(':accountId/access')
 	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	getAccess(@Req() req: any, @Param('accountId') accountId: string) {
