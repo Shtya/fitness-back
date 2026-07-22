@@ -13,14 +13,13 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
-import { resolveCorsOrigins } from 'common/cors-origins';
 import { WhatsAppConversation } from '../entities/whatsapp.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 
 @WebSocketGateway({
 	namespace: '/whatsapp',
 	cors: {
-		origin: resolveCorsOrigins(),
+		origin: true,
 		credentials: true,
 	},
 })

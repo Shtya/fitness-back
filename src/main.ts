@@ -5,10 +5,6 @@ import { join } from 'path';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 import { TimingInterceptor } from 'common/timing.interceptor';
-import {
-  createCorsOriginDelegate,
-  resolveCorsOrigins,
-} from 'common/cors-origins';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -26,29 +22,11 @@ async function bootstrap() {
     prefix: '/uploads/',
   });
 
-  // CORS + global prefix + validation
-  // Must allow Authorization preflight from the Vercel frontend (so7bafit.com)
-  // to the API host (api.so7bafit.com). Do not use origin:"*" with credentials.
-  const allowedOrigins = resolveCorsOrigins();
+  // Allow any browser origin (reflect request Origin; works with credentials).
   app.enableCors({
-    origin: createCorsOriginDelegate(allowedOrigins),
+    origin: true,
     credentials: true,
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Authorization',
-      'Content-Type',
-      'Accept',
-      'Origin',
-      'X-Requested-With',
-      'X-Lang',
-      'X-Request-Id',
-    ],
-    exposedHeaders: ['Content-Disposition'],
-    optionsSuccessStatus: 204,
-    preflightContinue: false,
-    maxAge: 86400,
   });
-  Logger.log(`CORS origins: ${allowedOrigins.join(', ')}`, 'Bootstrap');
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(
     new ValidationPipe({
@@ -67,6 +45,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-
-
-
