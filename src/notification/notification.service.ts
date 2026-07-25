@@ -5,6 +5,8 @@ import { FindOptionsWhere, Repository } from 'typeorm';
 import { Notification, NotificationAudience, NotificationType, User, UserRole } from 'entities/global.entity';
 import { NotificationGateway } from './notification.gateway';
 import { ExpoPushService } from './expo-push.service';
+import { BadgeService } from './badge.service';
+import { NOTIFICATION_CHANNELS } from './notification-channels';
 import { WebPushService } from './web-push.service';
 
 export function normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
@@ -33,6 +35,7 @@ export class NotificationService {
 
 		private readonly gateway: NotificationGateway,
 		private readonly expoPushService: ExpoPushService,
+		private readonly badgeService: BadgeService,
 		private readonly webPushService: WebPushService,
 	) { }
 
@@ -122,7 +125,13 @@ export class NotificationService {
 		const user = await this.userRepo.findOne({ where: { id: userId }, select: ['id', 'expoPushTokens'] as any });
 		const tokens: string[] = (user as any)?.expoPushTokens ?? [];
 		if (!tokens.length) return;
-		await this.expoPushService.sendToTokens(tokens, { title, body, data });
+		await this.expoPushService.sendToTokens(tokens, {
+			title,
+			body,
+			data,
+			badge: await this.badgeService.getTotalBadge(userId),
+			channelId: NOTIFICATION_CHANNELS.DEFAULT,
+		});
 	}
 
 	private isAr(locale?: string) {

@@ -1,19 +1,20 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Notification, User } from 'entities/global.entity';
+import { ChatMessage, ChatParticipant, Notification, User } from 'entities/global.entity';
 import { NotificationService } from './notification.service';
 import { NotificationController } from './notification.controller';
 import { NotificationGateway } from './notification.gateway';
 import { ExpoPushService } from './expo-push.service';
+import { BadgeService } from './badge.service';
 import { NotificationScheduler } from './notification.scheduler';
 import { JwtService } from '@nestjs/jwt';
 import { PushSubscription } from '../../entities/alert.entity';
 import { WebPushService } from './web-push.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Notification, User, PushSubscription])],
-  providers: [NotificationService, NotificationGateway, ExpoPushService, WebPushService, NotificationScheduler, JwtService],
+  imports: [TypeOrmModule.forFeature([Notification, User, PushSubscription, ChatMessage, ChatParticipant])],
+  providers: [NotificationService, NotificationGateway, ExpoPushService, BadgeService, WebPushService, NotificationScheduler, JwtService],
   controllers: [NotificationController],
-  exports: [NotificationService, ExpoPushService, WebPushService],
+  exports: [NotificationService, ExpoPushService, BadgeService, WebPushService],
 })
 export class NotificationModule {}

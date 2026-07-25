@@ -23,6 +23,8 @@ import {
 import { User, UserRole } from '../../entities/global.entity';
 import { isUUID } from 'class-validator';
 import { ExpoPushService } from '../notification/expo-push.service';
+import { BadgeService } from '../notification/badge.service';
+import { NOTIFICATION_CHANNELS } from '../notification/notification-channels';
 
 
 const DEFAULT_TYPES = [
@@ -95,6 +97,7 @@ export class CalendarService {
 		@InjectRepository(CommitmentTimer) private readonly commitmentRepo: Repository<CommitmentTimer>,
 		@InjectRepository(User) private readonly userRepo: Repository<User>,
 		private readonly expoPushService: ExpoPushService,
+		private readonly badgeService: BadgeService,
 	) { }
 
 	private toDateKey(d: Date) {
@@ -174,6 +177,8 @@ export class CalendarService {
 						startDate: item.startDate,
 						startTime: item.startTime,
 					},
+					channelId: NOTIFICATION_CHANNELS.CALENDAR,
+					badge: await this.badgeService.getTotalBadge(item.userId),
 				});
 			} catch (error) {
 				console.error(`Failed to send calendar notification for item ${item.id}`, error);

@@ -36,6 +36,14 @@ function brandingUploadDir() {
   return dir;
 }
 
+/** Avoid Express.Multer.File — breaks with @types/express v5 when Multer types aren't merged. */
+type BrandingUploadFile = {
+  filename: string;
+  originalname: string;
+  mimetype: string;
+  size: number;
+};
+
 @Controller()
 export class TenantController {
   constructor(private readonly tenants: TenantService) {}
@@ -104,7 +112,7 @@ export class TenantController {
   )
   async uploadAsset(
     @Req() req: any,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file: BrandingUploadFile,
     @Body('assetType') assetType: string,
   ) {
     if (!file) throw new Error('File required');

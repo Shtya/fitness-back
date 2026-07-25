@@ -8,6 +8,7 @@ import { Repository } from 'typeorm';
 import { User } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
 import { ChatPushService } from './chat-push.service';
+import { BadgeService } from '../notification/badge.service';
 
 @WebSocketGateway({
 	cors: {
@@ -26,6 +27,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	  constructor(
     private jwtService: JwtService,
     private chatPushService: ChatPushService,
+    private badgeService: BadgeService,
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(ChatConversation) private conversationRepo: Repository<ChatConversation>,
     @InjectRepository(ChatMessage) private messageRepo: Repository<ChatMessage>,
@@ -230,6 +232,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // Always attempt push for reliability when app is backgrounded but socket still "online".
         // Clients suppress chat banners while AppState === active.
         if (settings?.notificationsEnabled !== false && tokens.length) {
+          // The receiver's JS is not running when the app is killed, so the icon
+          // badge can only come from the payload — send the absolute total.
+          const badge = settings?.badge === false ? 0 : await this.badgeService.getTotalBadge(participant.user.id);
+
           await this.chatPushService.sendPushNotifications(tokens, {
             title: user.name || user.email || 'New message',
             body: this.buildPushBody(savedMessage as any, settings),
@@ -241,6 +247,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
               showPreview: settings?.showPreview ?? true,
             },
             sound: settings?.sound === false ? null : 'default',
+            badge,
           });
         }
       }

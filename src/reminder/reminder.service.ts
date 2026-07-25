@@ -6,6 +6,8 @@ import * as webpush from 'web-push';
 import { Reminder, UserReminderSettings, PushSubscription, NotificationLog, ReminderSchedule, ScheduleMode, ReminderType, Priority, IntervalUnit } from 'entities/alert.entity';
 import { User } from '../../entities/global.entity';
 import { ExpoPushService } from '../notification/expo-push.service';
+import { BadgeService } from '../notification/badge.service';
+import { NOTIFICATION_CHANNELS } from '../notification/notification-channels';
 
 @Injectable()
 export class RemindersService {
@@ -24,6 +26,7 @@ export class RemindersService {
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
 		private readonly expoPushService: ExpoPushService,
+		private readonly badgeService: BadgeService,
 
 
 	) {
@@ -131,6 +134,8 @@ async processDueReminders(now: Date = new Date()) {
             title: rem.title || 'Reminder',
             body: rem.description ?? '🔔 You have a reminder',
             data: { type: 'reminder', reminderId: rem.id },
+            channelId: NOTIFICATION_CHANNELS.REMINDERS,
+            badge: await this.badgeService.getTotalBadge(rem.userId),
           });
         }
       } catch (expoErr) {
