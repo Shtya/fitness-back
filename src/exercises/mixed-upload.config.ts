@@ -58,7 +58,7 @@ export const profilePhotoUploadOptions = {
     },
     filename: (req, file, cb) => {
       // Include user ID and side in filename for better organization
-      const userId = req.user?.id || 'unknown';
+      const userId = (req as any).user?.id || 'unknown';
       const side = file.fieldname || 'unknown';
       const ext = extname(file.originalname);
       const rand = Array(8)

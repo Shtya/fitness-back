@@ -226,7 +226,14 @@ export class AiReplySuggestionsService {
         "Conversation has no usable local message context",
       );
     }
-    const provider = this.providers.get(settings.provider);
+    const provider =
+      this.providers.tryGet(settings.provider) ||
+      this.providers.tryGet("ai-free");
+    if (!provider) {
+      throw new BadRequestException(
+        "Configured AI reply provider is not available",
+      );
+    }
     const result = await provider.generate({
       prompt: buildAiReplyPrompt(settings, context.messages),
       model: settings.model,
@@ -236,7 +243,7 @@ export class AiReplySuggestionsService {
         result.text,
         settings.suggestionCount,
       ),
-      provider: settings.provider,
+      provider: provider.name,
       requestedModel: settings.model,
       actualModel: result.actualModel ?? null,
       activePromptId: settings.activePromptId,
@@ -264,7 +271,7 @@ export class AiReplySuggestionsService {
     const testSettings: EffectiveAiReplySettings = {
       accountId: "test",
       enabled: true,
-      provider: "dragify-free",
+      provider: "ai-free",
       model,
       systemPrompt:
         "You are a helpful WhatsApp support assistant. Suggest replies only.",
@@ -280,7 +287,7 @@ export class AiReplySuggestionsService {
       updatedBy: null,
     };
     const startedAt = Date.now();
-    const provider = this.providers.get("dragify-free");
+    const provider = this.providers.get("ai-free");
     const result = await provider.generate({
       prompt: buildAiReplyPrompt(testSettings, messages),
       model,
@@ -288,7 +295,7 @@ export class AiReplySuggestionsService {
     return {
       ok: true,
       suggestions: parseAiReplySuggestions(result.text, suggestionCount),
-      provider: "dragify-free",
+      provider: "ai-free",
       requestedModel: model,
       actualModel: result.actualModel ?? null,
       elapsedMs: Date.now() - startedAt,
@@ -314,7 +321,7 @@ export class AiReplySuggestionsService {
     return {
         accountId,
         enabled: false,
-        provider: "dragify-free",
+        provider: "ai-free",
         model: "auto",
         systemPrompt: null,
         promptPresets: [],

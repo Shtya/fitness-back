@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/global.entity';
 import { NotificationModule } from '../notification/notification.module';
+import { RedisModule } from '../redis/redis.module';
 import { WhatsAppAccountsController } from './controllers/whatsapp-accounts.controller';
 import { WhatsAppAssignmentsController } from './controllers/whatsapp-assignments.controller';
 import { WhatsAppConnectionController } from './controllers/whatsapp-connection.controller';
@@ -66,6 +67,7 @@ export const WHATSAPP_ENTITIES = [
 			}),
 		}),
 		NotificationModule,
+		RedisModule,
 	],
 	controllers: [
 		WhatsAppAccountsController,

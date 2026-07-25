@@ -1,6 +1,12 @@
 export type WhatsAppProviderEvent =
 	| { type: 'qr'; qr: string }
-	| { type: 'connection'; status: string; phoneNumber?: string }
+	| { type: 'pairing_code'; code: string }
+	| {
+			type: 'connection';
+			status: string;
+			phoneNumber?: string;
+			error?: string;
+	  }
 	| { type: 'message'; message: NormalizedWhatsAppMessage }
 	| { type: 'message_status'; providerMessageId: string; status: string }
 	| {
@@ -61,10 +67,11 @@ export interface WhatsAppProviderCapabilities {
 export interface WhatsAppProvider {
 	readonly name: string;
 	readonly capabilities: WhatsAppProviderCapabilities;
-	connect(): Promise<void>;
+	connect(phoneNumber?: string): Promise<void>;
 	disconnect(): Promise<void>;
 	logout(): Promise<void>;
 	getQr(): string | null;
+	getPairingCode(): string | null;
 	getState(): string;
 	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>): void;
 	getChats(limit?: number): Promise<any[]>;

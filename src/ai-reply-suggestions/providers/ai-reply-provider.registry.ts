@@ -24,4 +24,8 @@ export class AiReplyProviderRegistry {
     }
     return provider;
   }
+
+  tryGet(name: string): AiReplyProvider | null {
+    return this.providers.get(name) || null;
+  }
 }

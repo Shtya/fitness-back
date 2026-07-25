@@ -5,12 +5,14 @@ import {
 	OnApplicationShutdown,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { In, Repository } from 'typeorm';
 import {
 	NotificationAudience,
 	NotificationType,
 } from '../../../entities/global.entity';
 import { NotificationService } from '../../notification/notification.service';
+import { RedisService } from '../../redis/redis.service';
 import {
 	WhatsAppAccount,
 	WhatsAppAccountAccess,
@@ -31,9 +33,17 @@ export class WhatsAppProviderManagerService
 	private readonly logger = new Logger(WhatsAppProviderManagerService.name);
 	private readonly providers = new Map<string, WhatsAppProvider>();
 	private readonly connecting = new Map<string, Promise<WhatsAppProvider>>();
+	private readonly connectStartedAt = new Map<string, number>();
 	private readonly listeners = new Set<
 		(accountId: string, event: WhatsAppProviderEvent) => void | Promise<void>
 	>();
+
+	// Distributed lock so at most one backend process/instance ever holds a live
+	// Puppeteer/WhatsApp session for a given account — running more than one
+	// simultaneously looks like multi-device abuse to WhatsApp and risks a ban.
+	private readonly instanceId = randomUUID();
+	private readonly lockTtlSeconds = 45;
+	private readonly lockRenewTimers = new Map<string, NodeJS.Timeout>();
 
 	constructor(
 		@InjectRepository(WhatsAppAccount)
@@ -47,7 +57,81 @@ export class WhatsAppProviderManagerService
 		private readonly sessions: WhatsAppSessionService,
 		private readonly gateway: WhatsAppGateway,
 		private readonly notifications: NotificationService,
+		private readonly redis: RedisService,
 	) {}
+
+	private lockKey(accountId: string) {
+		return `whatsapp:conn-lock:${accountId}`;
+	}
+
+	private async acquireLock(accountId: string): Promise<boolean> {
+		try {
+			const client = this.redis.getClient();
+			const key = this.lockKey(accountId);
+			const result = await client.set(key, this.instanceId, {
+				NX: true,
+				EX: this.lockTtlSeconds,
+			});
+			if (result === 'OK') return true;
+			// Already ours (e.g. reconnecting before the renewal tick caught up)?
+			const current = await client.get(key);
+			return current === this.instanceId;
+		} catch (error) {
+			// Redis being unreachable must not block WhatsApp entirely on a
+			// single-instance deployment — fail open, but log loudly.
+			this.logger.error(
+				`Could not acquire WhatsApp connection lock for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return true;
+		}
+	}
+
+	private async releaseLock(accountId: string) {
+		try {
+			const client = this.redis.getClient();
+			const key = this.lockKey(accountId);
+			const current = await client.get(key);
+			if (current === this.instanceId) {
+				await client.del(key);
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Could not release WhatsApp connection lock for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	private startLockRenewal(accountId: string) {
+		this.stopLockRenewal(accountId);
+		const timer = setInterval(async () => {
+			try {
+				const client = this.redis.getClient();
+				const key = this.lockKey(accountId);
+				const current = await client.get(key);
+				if (current === this.instanceId) {
+					await client.expire(key, this.lockTtlSeconds);
+				}
+			} catch (error) {
+				this.logger.warn(
+					`Could not renew WhatsApp connection lock for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}, Math.floor((this.lockTtlSeconds * 1000) / 3));
+		timer.unref?.();
+		this.lockRenewTimers.set(accountId, timer);
+	}
+
+	private stopLockRenewal(accountId: string) {
+		const timer = this.lockRenewTimers.get(accountId);
+		if (timer) clearInterval(timer);
+		this.lockRenewTimers.delete(accountId);
+	}
 
 	onProviderEvent(
 		listener: (accountId: string, event: WhatsAppProviderEvent) => void | Promise<void>,
@@ -60,7 +144,7 @@ export class WhatsAppProviderManagerService
 		return this.providers.get(accountId) || null;
 	}
 
-	async connect(accountId: string) {
+	async connect(accountId: string, phoneNumber?: string) {
 		const pending = this.connecting.get(accountId);
 		if (pending) return pending;
 
@@ -68,12 +152,30 @@ export class WhatsAppProviderManagerService
 		if (active?.getState() === 'connected') {
 			return active;
 		}
-		// Reuse an in-flight browser session instead of starting a second Chromium.
-		if (active && ['connecting', 'qr_pending'].includes(active.getState())) {
+
+		const stuckMs = Math.min(
+			Math.max(Number(process.env.WHATSAPP_CONNECT_STUCK_MS) || 90_000, 15_000),
+			10 * 60 * 1000,
+		);
+		const startedAt = this.connectStartedAt.get(accountId) || 0;
+		const isInFlight = active && ['connecting', 'qr_pending'].includes(active.getState());
+		const isStuck = isInFlight && Date.now() - startedAt > stuckMs;
+		const isBroken = active && active.getState() === 'error';
+
+		// Reuse an in-flight browser session instead of starting a second Chromium,
+		// unless the caller is switching modes, the session is stuck, or it failed.
+		if (isInFlight && !phoneNumber && !isStuck) {
 			return active;
 		}
+		if (active && (phoneNumber || isStuck || isBroken || isInFlight)) {
+			this.providers.delete(accountId);
+			this.connectStartedAt.delete(accountId);
+			await active.disconnect().catch(() => undefined);
+			this.stopLockRenewal(accountId);
+			await this.releaseLock(accountId).catch(() => undefined);
+		}
 
-		const promise = this.connectExclusive(accountId);
+		const promise = this.connectExclusive(accountId, phoneNumber);
 		this.connecting.set(accountId, promise);
 		try {
 			return await promise;
@@ -82,7 +184,13 @@ export class WhatsAppProviderManagerService
 		}
 	}
 
-	private async connectExclusive(accountId: string) {
+	private async connectExclusive(accountId: string, phoneNumber?: string) {
+		const locked = await this.acquireLock(accountId);
+		if (!locked) {
+			throw new Error(
+				'This WhatsApp account is already being managed by another server instance. Try again shortly.',
+			);
+		}
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
 		// Keep CONNECTED in the DB while we restore the in-memory browser session.
 		if (account.status !== WhatsAppAccountStatus.CONNECTED) {
@@ -94,12 +202,17 @@ export class WhatsAppProviderManagerService
 		const provider = this.createProvider(account);
 		provider.onEvent(event => this.handleEvent(accountId, event));
 		this.providers.set(accountId, provider);
+		this.connectStartedAt.set(accountId, Date.now());
 		try {
-			await provider.connect();
+			await provider.connect(phoneNumber);
+			this.startLockRenewal(accountId);
 			await this.log(accountId, 'connect_started', 'WhatsApp provider started');
 			return provider;
 		} catch (error) {
 			this.providers.delete(accountId);
+			this.connectStartedAt.delete(accountId);
+			this.stopLockRenewal(accountId);
+			await this.releaseLock(accountId);
 			const message = error instanceof Error ? error.message : String(error);
 			await this.accountRepo.update(accountId, {
 				status: WhatsAppAccountStatus.ERROR,
@@ -137,9 +250,30 @@ export class WhatsAppProviderManagerService
 				status,
 				phoneNumber: event.phoneNumber || undefined,
 				lastConnectedAt: status === WhatsAppAccountStatus.CONNECTED ? new Date() : undefined,
-				lastError: null,
+				lastError:
+					status === WhatsAppAccountStatus.ERROR
+						? event.error || 'WhatsApp connection failed'
+						: null,
 			});
-			await this.log(accountId, 'connection_state_changed', null, { status });
+			if (
+				[
+					WhatsAppAccountStatus.CONNECTED,
+					WhatsAppAccountStatus.DISCONNECTED,
+					WhatsAppAccountStatus.ERROR,
+				].includes(status)
+			) {
+				this.connectStartedAt.delete(accountId);
+			}
+			if (status === WhatsAppAccountStatus.ERROR) {
+				// Provider already closed itself; do not call disconnect() or it
+				// would emit "disconnected" and overwrite the error status.
+				this.providers.delete(accountId);
+				this.stopLockRenewal(accountId);
+				await this.releaseLock(accountId).catch(() => undefined);
+			}
+			await this.log(accountId, 'connection_state_changed', event.error || null, {
+				status,
+			});
 			if (
 				[
 					WhatsAppAccountStatus.CONNECTED,
@@ -171,6 +305,14 @@ export class WhatsAppProviderManagerService
 			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'qr_updated');
+		}
+		if (event.type === 'pairing_code') {
+			const provider = this.providers.get(accountId);
+			if (provider?.getState() === 'connected') {
+				return;
+			}
+			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
+			await this.log(accountId, 'pairing_code_updated');
 		}
 		if (event.type === 'message_status') {
 			const rank: Record<string, number> = {
@@ -216,9 +358,13 @@ export class WhatsAppProviderManagerService
 			const account = await this.accountRepo.findOneByOrFail({ id: accountId });
 			await this.sessions.clear(accountId, account.providerName);
 		}
+		this.connectStartedAt.delete(accountId);
+		this.stopLockRenewal(accountId);
+		await this.releaseLock(accountId);
 		await this.accountRepo.update(accountId, {
 			status: WhatsAppAccountStatus.DISCONNECTED,
 			phoneNumber: logout ? null : undefined,
+			lastError: null,
 		});
 		await this.log(accountId, logout ? 'logged_out' : 'disconnected');
 		return { ok: true };
@@ -242,6 +388,8 @@ export class WhatsAppProviderManagerService
 		} finally {
 			this.providers.delete(accountId);
 			this.connecting.delete(accountId);
+			this.stopLockRenewal(accountId);
+			await this.releaseLock(accountId);
 			await this.sessions.clear(accountId, providerName);
 		}
 		return { ok: true };
@@ -249,6 +397,10 @@ export class WhatsAppProviderManagerService
 
 	getQr(accountId: string) {
 		return this.providers.get(accountId)?.getQr() || null;
+	}
+
+	getPairingCode(accountId: string) {
+		return this.providers.get(accountId)?.getPairingCode() || null;
 	}
 
 	getProviderState(accountId: string) {
@@ -296,6 +448,12 @@ export class WhatsAppProviderManagerService
 	async onApplicationShutdown() {
 		await Promise.allSettled(
 			[...this.providers.values()].map(provider => provider.disconnect()),
+		);
+		for (const accountId of this.lockRenewTimers.keys()) {
+			this.stopLockRenewal(accountId);
+		}
+		await Promise.allSettled(
+			[...this.providers.keys()].map(accountId => this.releaseLock(accountId)),
 		);
 		this.providers.clear();
 	}

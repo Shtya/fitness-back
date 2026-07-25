@@ -9,7 +9,7 @@ describe("AI reply suggestion prompt handling", () => {
   const settings = {
     accountId: "account-1",
     enabled: true,
-    provider: "dragify-free" as const,
+    provider: "ai-free" as const,
     model: "auto",
     systemPrompt: "Use the shop policy",
     promptPresets: [
@@ -61,7 +61,7 @@ describe("AiReplySuggestionsService permissions and side effects", () => {
     const settingsRepo = {
       findOne: jest.fn().mockResolvedValue({
         enabled: true,
-        provider: "dragify-free",
+        provider: "ai-free",
         model: "auto",
         suggestionCount: 2,
         contextMessageLimit: 20,
@@ -83,12 +83,16 @@ describe("AiReplySuggestionsService permissions and side effects", () => {
       }),
     };
     const provider = {
+      name: "ai-free",
       generate: jest.fn().mockResolvedValue({
         text: '{"suggestions":["Reply one","Reply two"]}',
         actualModel: null,
       }),
     };
-    const providers = { get: jest.fn().mockReturnValue(provider) };
+    const providers = {
+      get: jest.fn().mockReturnValue(provider),
+      tryGet: jest.fn().mockReturnValue(provider),
+    };
     const config = { get: jest.fn() };
     return {
       service: new AiReplySuggestionsService(
@@ -117,7 +121,7 @@ describe("AiReplySuggestionsService permissions and side effects", () => {
       service.generate({ id: "user-1" } as any, "conversation-1"),
     ).resolves.toMatchObject({
       suggestions: ["Reply one", "Reply two"],
-      provider: "dragify-free",
+      provider: "ai-free",
       requestedModel: "auto",
       actualModel: null,
       contextThroughMessageId: "message-1",

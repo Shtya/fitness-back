@@ -156,6 +156,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 	private client: any;
 	private listeners: Array<(event: WhatsAppProviderEvent) => void | Promise<void>> = [];
 	private qr: string | null = null;
+	private pairingCode: string | null = null;
 	private state = 'disconnected';
 	private emitChain: Promise<void> = Promise.resolve();
 	private authReconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -191,7 +192,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}, 750);
 	}
 
-	async connect() {
+	async connect(phoneNumber?: string) {
 		if (isServerlessRuntime()) {
 			throw new Error(
 				'WhatsApp (wppconnect) cannot run on Vercel/serverless. Deploy the API on a persistent VPS/PM2 host with Chrome/Chromium installed, and leave CHROME_EXECUTABLE_PATH empty or set it to a path that exists on that server.',
@@ -216,6 +217,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 			);
 		}
 
+		// A phone number here makes wppconnect skip QR generation entirely and
+		// request an 8-character pairing code instead (WPP.conn.genLinkDeviceCodeForPhoneNumber).
+		const normalizedPhone = phoneNumber ? String(phoneNumber).replace(/[^\d]/g, '') : '';
+		this.qr = null;
+		this.pairingCode = null;
+
 		this.state = 'connecting';
 		this.emit({ type: 'connection', status: this.state });
 		// waitForLogin:false → create() returns once Chromium/WA-JS are up so HTTP
@@ -231,12 +238,18 @@ export class WppConnectProvider implements WhatsAppProvider {
 			disableWelcome: true,
 			updatesLog: false,
 			logQR: false,
+			...(normalizedPhone ? { phoneNumber: normalizedPhone } : {}),
 			puppeteerOptions: {
 				...(executablePath ? { executablePath } : {}),
-				args: ['--no-sandbox', '--disable-setuid-sandbox'],
+				// --disable-dev-shm-usage: Docker limits /dev/shm to 64MB by default, which
+				// crashes Chromium's renderer under normal load; force it to use /tmp instead.
+				args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
 			},
 			catchQR: (base64Qr: string, _ascii: string, _attempt: number, rawCode: string) => {
 				this.publishQr(base64Qr, rawCode);
+			},
+			catchLinkCode: (code: string) => {
+				this.publishLinkCode(code);
 			},
 			statusFind: (status: string) => {
 				const connected = [
@@ -377,6 +390,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 	/** Phone may already be linked while WA Web is still on the QR/sync screen. */
 	private startAuthReconciliation() {
 		this.stopAuthReconciliation();
+		const timeoutMs = Math.min(
+			Math.max(
+				Number(process.env.WHATSAPP_AUTH_RECONCILE_TIMEOUT_MS) || 5 * 60 * 1000,
+				30_000,
+			),
+			15 * 60 * 1000,
+		);
 		const probe = async () => {
 			if (this.state === 'connected') {
 				this.stopAuthReconciliation();
@@ -400,7 +420,44 @@ export class WppConnectProvider implements WhatsAppProvider {
 		this.authReconcileTimer = setInterval(() => {
 			void probe();
 		}, 3000);
-		this.authReconcileStopTimer = setTimeout(() => this.stopAuthReconciliation(), 5 * 60 * 1000);
+		this.authReconcileStopTimer = setTimeout(() => {
+			void this.failIfStillConnecting(
+				`WhatsApp connection timed out after ${Math.round(timeoutMs / 1000)}s. Restart the connection.`,
+			);
+		}, timeoutMs);
+	}
+
+	/**
+	 * Avoid leaving accounts stuck forever on connecting/qr_pending when the
+	 * browser session never reaches an authenticated state.
+	 */
+	private async failIfStillConnecting(reason: string) {
+		this.stopAuthReconciliation();
+		if (
+			this.state === 'connected' ||
+			this.state === 'disconnected' ||
+			this.state === 'error'
+		) {
+			return;
+		}
+		const previous = this.state;
+		this.logger.warn(
+			`WhatsApp auth reconciliation failed for ${this.accountId} (was ${previous}): ${reason}`,
+		);
+		try {
+			await this.client?.close?.();
+		} catch {
+			/* ignore close errors during timeout cleanup */
+		}
+		this.client = null;
+		this.qr = null;
+		this.pairingCode = null;
+		this.state = 'error';
+		this.emit({
+			type: 'connection',
+			status: this.state,
+			error: reason,
+		});
 	}
 
 	private async publishQr(base64Qr: string, rawCode?: string) {
@@ -431,10 +488,27 @@ export class WppConnectProvider implements WhatsAppProvider {
 		this.emit({ type: 'connection', status: this.state });
 	}
 
+	private async publishLinkCode(code: string) {
+		if (this.state === 'connected') {
+			try {
+				if (await this.client?.isAuthenticated?.()) return;
+			} catch {
+				// Authentication is no longer valid, so expose the new code below.
+			}
+		}
+		const value = String(code || '').trim();
+		if (!value || value === this.pairingCode) return;
+		this.pairingCode = value;
+		this.state = 'qr_pending';
+		this.emit({ type: 'pairing_code', code: value });
+		this.emit({ type: 'connection', status: this.state });
+	}
+
 	private async markConnected() {
 		if (this.state === 'connected') return;
 		this.state = 'connected';
 		this.qr = null;
+		this.pairingCode = null;
 		this.stopAuthReconciliation();
 		let phoneNumber: string | undefined;
 		try {
@@ -453,6 +527,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		await this.client?.close?.();
 		this.client = null;
 		this.qr = null;
+		this.pairingCode = null;
 		this.state = 'disconnected';
 		this.emit({ type: 'connection', status: this.state });
 	}
@@ -468,6 +543,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 
 	getQr() {
 		return this.qr;
+	}
+
+	getPairingCode() {
+		return this.pairingCode;
 	}
 
 	getState() {

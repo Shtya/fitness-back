@@ -11,7 +11,13 @@ import {
 import { User } from "../../../entities/global.entity";
 import { WhatsAppAccount } from "../../whatsapp/entities/whatsapp.entity";
 
-export const AI_REPLY_PROVIDERS = ["dragify-free"] as const;
+export const AI_REPLY_PROVIDERS = [
+  "ai-free",
+  "llm7-free",
+  "pollinations-free",
+  "browser-chatgpt",
+  "dragify-free",
+] as const;
 export const AI_REPLY_LANGUAGES = ["auto", "ar", "en"] as const;
 export const AI_REPLY_TONES = [
   "professional",
@@ -44,7 +50,7 @@ export class WhatsAppAiSettings {
   @Column({ type: "boolean", default: false })
   enabled: boolean;
 
-  @Column({ type: "varchar", length: 40, default: "dragify-free" })
+  @Column({ type: "varchar", length: 40, default: "ai-free" })
   provider: AiReplyProviderName;
 
   @Column({ type: "varchar", length: 80, default: "auto" })

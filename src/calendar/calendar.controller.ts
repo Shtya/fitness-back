@@ -12,6 +12,7 @@ import {
 	Req,
 	UseGuards,
 } from '@nestjs/common';
+import { IsBoolean, IsOptional, IsString, IsUUID } from 'class-validator';
 import { CalendarService } from './calendar.service';
 import {
 	CreateCalendarItemDto,
@@ -33,9 +34,19 @@ class UpdateSoundDto {
 
 // Frontend PATCH /calendar/completions expects this payload shape:
 class PatchCompletionDto {
+	@IsString()
+	@IsOptional()
 	key?: string;
+
+	@IsBoolean()
 	completed: boolean;
+
+	@IsUUID()
+	@IsOptional()
 	itemId?: string;
+
+	@IsString()
+	@IsOptional()
 	date?: string;
 }
 
@@ -123,7 +134,7 @@ export class CalendarController {
 
 	// ✅ MISSING: frontend uses PATCH /calendar/completions
 	@Patch('completions')
-	patchCompletion(@Req() req: any, @Body() dto: any) {
+	patchCompletion(@Req() req: any, @Body() dto: PatchCompletionDto) {
 		return this.service.patchCompletion(req.user, dto);
 	}
 

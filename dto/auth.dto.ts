@@ -16,6 +16,16 @@ export class LoginDto {
   @IsString()
   @MinLength(6)
   password!: string;
+
+  /** Optional tenant discovery token from /auth/discover-tenant* */
+  @IsOptional()
+  @IsString()
+  discoveryToken?: string;
+
+  /** Optional explicit tenant id (must match user's tenant unless super_admin) */
+  @IsOptional()
+  @IsString()
+  tenantId?: string;
 }
 
 export class RefreshDto {

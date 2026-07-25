@@ -526,11 +526,16 @@ export class CalendarService {
 		const key = dto.key ?? (dto.itemId && dto.date ? `${dto.itemId}_${dto.date}` : undefined);
 		if (!key) throw new BadRequestException('Provide key OR (itemId and date)');
 
-		const [itemId, date] = dto.itemId && dto.date ? [dto.itemId, dto.date] : key.split('_');
-		if (!itemId || !date) throw new BadRequestException('Invalid completion key');
-
 		const adminId = this.getTenantAdminId(user);
 		this.assertTenant(adminId);
+
+		const [itemId, date] = dto.itemId && dto.date
+			? [dto.itemId, dto.date]
+			: (() => {
+					const idx = key.lastIndexOf('_');
+					return idx > 0 ? [key.slice(0, idx), key.slice(idx + 1)] : [undefined, undefined];
+				})();
+		if (!itemId || !date) throw new BadRequestException('Invalid key format');
 
 		const item = await this.itemRepo.findOne({ where: { id: itemId, adminId, userId: user.id } });
 		if (!item) throw new NotFoundException('Item not found');

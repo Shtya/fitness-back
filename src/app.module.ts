@@ -33,6 +33,8 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { TranscriptionModule } from './transcription/transcription.module';
 import { WhatsAppDemoModule } from './whatsapp-demo/whatsapp-demo.module';
 import { AiReplySuggestionsModule } from './ai-reply-suggestions/ai-reply-suggestions.module';
+import { AiFreeModule } from './ai-free/ai-free.module';
+import { TenantModule } from './tenant/tenant.module';
 
 @Module({
 	imports: [
@@ -61,6 +63,7 @@ import { AiReplySuggestionsModule } from './ai-reply-suggestions/ai-reply-sugges
 		}),
 
 		AuthModule,
+		TenantModule,
 		AssetModule,
 		PlansModule,
 		PrsModule,
@@ -87,6 +90,7 @@ import { AiReplySuggestionsModule } from './ai-reply-suggestions/ai-reply-sugges
 		WhatsAppDemoModule,
 		TranscriptionModule,
 		AiReplySuggestionsModule,
+		AiFreeModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

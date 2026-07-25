@@ -1,5 +1,6 @@
 import {
 	BadRequestException,
+	Body,
 	Controller,
 	Get,
 	Param,
@@ -12,6 +13,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
+import { ConnectWhatsAppAccountDto } from '../dto/whatsapp.dto';
 import { WhatsAppConnectionLog } from '../entities/whatsapp.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppAuditService } from '../services/whatsapp-audit.service';
@@ -29,18 +31,28 @@ export class WhatsAppConnectionController {
 	) {}
 
 	@Post('connect')
-	async connect(@Req() req: any, @Param('accountId') accountId: string) {
+	async connect(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: ConnectWhatsAppAccountDto,
+	) {
 		await this.access.assertAccountPermission(req.user, accountId, 'canManage');
 		try {
-			const provider = await this.providers.connect(accountId);
+			const provider = await this.providers.connect(accountId, body?.phoneNumber);
 			await this.audit.write({
 				actorUserId: req.user.id,
 				accountId,
 				action: 'whatsapp.account.connect_requested',
 				targetType: 'WhatsAppAccount',
 				targetId: accountId,
+				metadata: body?.phoneNumber ? { mode: 'pairing_code' } : { mode: 'qr' },
 			});
-			return { ok: true, status: provider.getState(), qr: provider.getQr() };
+			return {
+				ok: true,
+				status: provider.getState(),
+				qr: provider.getQr(),
+				pairingCode: provider.getPairingCode(),
+			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new BadRequestException(message);
@@ -56,6 +68,7 @@ export class WhatsAppConnectionController {
 		);
 		return {
 			qr: this.providers.getQr(accountId),
+			pairingCode: this.providers.getPairingCode(accountId),
 			status: account.status,
 		};
 	}

@@ -254,6 +254,11 @@ export class User extends CoreEntity {
 	@Column({ type: 'uuid', nullable: true })
 	adminId?: string | null;
 
+	/** Formal multi-tenant org id (backfilled from adminId tree). */
+	@Index()
+	@Column({ type: 'uuid', nullable: true })
+	tenantId?: string | null;
+
 	@OneToMany(() => User, u => u.coach)
 	athletes?: User[];
 

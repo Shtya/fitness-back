@@ -5,6 +5,7 @@ import {
 	IsOptional,
 	IsString,
 	IsUUID,
+	Matches,
 	MaxLength,
 	MinLength,
 	ValidateNested,
@@ -20,6 +21,16 @@ export class CreateWhatsAppAccountDto {
 	@IsOptional()
 	@IsIn(['wppconnect'])
 	providerName?: string;
+}
+
+export class ConnectWhatsAppAccountDto {
+	/** Full international number (digits, optional leading +). Omit to fall back to QR. */
+	@IsOptional()
+	@IsString()
+	@Matches(/^\+?[1-9]\d{6,14}$/, {
+		message: 'phoneNumber must be a valid international number, e.g. +201234567890',
+	})
+	phoneNumber?: string;
 }
 
 export class WhatsAppAccountAccessItemDto {

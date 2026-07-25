@@ -8,6 +8,11 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			findOneBy: jest.fn().mockResolvedValue({
 				status: WhatsAppAccountStatus.DISCONNECTED,
 			}),
+			findOneByOrFail: jest.fn().mockResolvedValue({
+				id: 'account-1',
+				status: WhatsAppAccountStatus.DISCONNECTED,
+				providerName: 'wppconnect',
+			}),
 		};
 		const logRepo = {
 			create: jest.fn(value => value),
@@ -29,6 +34,15 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		const sessions = {
 			clear: jest.fn().mockResolvedValue(true),
 		};
+		const redisClient = {
+			set: jest.fn().mockResolvedValue('OK'),
+			get: jest.fn().mockResolvedValue(null),
+			del: jest.fn().mockResolvedValue(1),
+			expire: jest.fn().mockResolvedValue(true),
+		};
+		const redis = {
+			getClient: jest.fn().mockReturnValue(redisClient),
+		};
 		const service = new WhatsAppProviderManagerService(
 			accountRepo as any,
 			logRepo as any,
@@ -37,8 +51,9 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			sessions as any,
 			gateway as any,
 			notifications as any,
+			redis as any,
 		);
-		return { service, accountRepo, logRepo, gateway, sessions };
+		return { service, accountRepo, logRepo, gateway, sessions, redis, redisClient };
 	}
 
 	it('never broadcasts message content to the account room', async () => {
@@ -137,6 +152,62 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 
 		await expect(service.connect('account-1')).resolves.toBe(provider);
 		expect(accountRepo.update).not.toHaveBeenCalled();
+	});
+
+	it('stores lastError and drops a timed-out connecting provider', async () => {
+		const { service, accountRepo } = createService();
+		const provider = {
+			getState: jest.fn().mockReturnValue('error'),
+			disconnect: jest.fn().mockResolvedValue(undefined),
+		};
+		(service as any).providers.set('account-1', provider);
+		(service as any).connectStartedAt.set('account-1', Date.now() - 1000);
+
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.ERROR,
+			error: 'WhatsApp connection timed out',
+		});
+
+		expect(accountRepo.update).toHaveBeenCalledWith(
+			'account-1',
+			expect.objectContaining({
+				status: WhatsAppAccountStatus.ERROR,
+				lastError: 'WhatsApp connection timed out',
+			}),
+		);
+		expect((service as any).providers.has('account-1')).toBe(false);
+		expect((service as any).connectStartedAt.has('account-1')).toBe(false);
+	});
+
+	it('restarts a stuck connecting provider instead of reusing it forever', async () => {
+		const { service, accountRepo, redisClient } = createService();
+		accountRepo.findOneByOrFail.mockResolvedValue({
+			id: 'account-1',
+			status: WhatsAppAccountStatus.CONNECTING,
+			providerName: 'wppconnect',
+		});
+		const stale = {
+			getState: jest.fn().mockReturnValue('connecting'),
+			disconnect: jest.fn().mockResolvedValue(undefined),
+			onEvent: jest.fn(),
+			connect: jest.fn().mockResolvedValue(undefined),
+		};
+		(service as any).providers.set('account-1', stale);
+		(service as any).connectStartedAt.set('account-1', Date.now() - 120_000);
+		const fresh = {
+			getState: jest.fn().mockReturnValue('connecting'),
+			onEvent: jest.fn(),
+			connect: jest.fn().mockResolvedValue(undefined),
+		};
+		jest
+			.spyOn(service as any, 'createProvider')
+			.mockReturnValue(fresh);
+
+		await expect(service.connect('account-1')).resolves.toBe(fresh);
+		expect(stale.disconnect).toHaveBeenCalledTimes(1);
+		expect(fresh.connect).toHaveBeenCalledTimes(1);
+		expect(redisClient.set).toHaveBeenCalled();
 	});
 
 	it('disconnects the provider and removes it from the active map', async () => {

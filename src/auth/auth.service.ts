@@ -242,16 +242,25 @@ export class AuthService {
 		};
 	}
 
-	private signAccess(id: string) {
-		return this.jwt.sign({ id }, { secret: this.cfg.get<string>('JWT_SECRET')!, expiresIn: this.cfg.get<string>('JWT_EXPIRE') || '1d' });
+	private signAccess(id: string, tenantId?: string | null) {
+		const payload: Record<string, string> = { id };
+		if (tenantId) payload.tenantId = tenantId;
+		return this.jwt.sign(payload, { secret: this.cfg.get<string>('JWT_SECRET')!, expiresIn: this.cfg.get<string>('JWT_EXPIRE') || '1d' });
 	}
-	private signRefresh(id: string) {
-		return this.jwt.sign({ id }, { secret: this.cfg.get<string>('JWT_REFRESH') || this.cfg.get<string>('JWT_SECRET')!, expiresIn: this.cfg.get<string>('JWT_REFRESH_EXPIRE') || '7d' });
+	private signRefresh(id: string, tenantId?: string | null) {
+		const payload: Record<string, string> = { id };
+		if (tenantId) payload.tenantId = tenantId;
+		return this.jwt.sign(payload, {
+			secret: this.cfg.get<string>('JWT_REFRESH') || this.cfg.get<string>('JWT_SECRET')!,
+			expiresIn: this.cfg.get<string>('JWT_REFRESH_EXPIRE') || '7d',
+		});
 	}
 	// inside AuthService
 	private serialize(u: User, tokens?: { accessToken: string; refreshToken: string }) {
+		const { password, resetPasswordToken, resetPasswordExpires, ...safe } = u as any;
 		return {
-			...u,
+			...safe,
+			tenantId: u.tenantId || null,
 			...(tokens ?? {}),
 		};
 	}
@@ -836,6 +845,25 @@ export class AuthService {
 			throw new UnauthorizedException(user.status === UserStatus.PENDING ? 'Your account is pending approval.' : 'Your account is suspended.');
 		}
 
+		// Tenant binding: discovery token or explicit tenantId must match user's tenant
+		if (dto.discoveryToken) {
+			try {
+				const payload: any = this.jwt.verify(dto.discoveryToken, { secret: this.cfg.get<string>('JWT_SECRET')! });
+				if (payload?.typ !== 'tenant_discovery' || !payload?.tenantId) {
+					throw new UnauthorizedException('Invalid organization session');
+				}
+				if (user.role !== UserRole.SUPER_ADMIN && user.tenantId && user.tenantId !== payload.tenantId) {
+					throw new ForbiddenException('User does not belong to this organization');
+				}
+			} catch (e) {
+				if (e instanceof ForbiddenException || e instanceof UnauthorizedException) throw e;
+				throw new UnauthorizedException('Organization session expired. Please select your organization again.');
+			}
+		}
+		if (dto.tenantId && user.role !== UserRole.SUPER_ADMIN && user.tenantId && user.tenantId !== dto.tenantId) {
+			throw new ForbiddenException('User does not belong to this organization');
+		}
+
 		const today = new Date().toISOString().slice(0, 10);
 		if (user.subscriptionStart && today < user.subscriptionStart) {
 			throw new UnauthorizedException('Your subscription has not started yet.');
@@ -853,8 +881,8 @@ export class AuthService {
 		user.lastLogin = new Date();
 		await this.userRepo.save(user);
 
-		const accessToken = this.signAccess(user.id);
-		const refreshToken = this.signRefresh(user.id);
+		const accessToken = this.signAccess(user.id, user.tenantId);
+		const refreshToken = this.signRefresh(user.id, user.tenantId);
 		return { accessToken, refreshToken, user: this.serialize(user) };
 	}
 
@@ -871,8 +899,8 @@ export class AuthService {
 		if (!user) throw new UnauthorizedException('User not found');
 		if (user.status !== UserStatus.ACTIVE) throw new UnauthorizedException('Account is not active');
 
-		const newAccess = this.signAccess(user.id);
-		const newRefresh = this.signRefresh(user.id);
+		const newAccess = this.signAccess(user.id, user.tenantId);
+		const newRefresh = this.signRefresh(user.id, user.tenantId);
 		return { message: 'Tokens refreshed', accessToken: newAccess, refreshToken: newRefresh };
 	}
 

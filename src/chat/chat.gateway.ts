@@ -20,7 +20,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	@WebSocketServer()
 	server: Server;
 
-	private connectedUsers = new Map<string, string>();
+	/** userId → set of socket ids (supports multiple tabs / mobile + web) */
+	private connectedUsers = new Map<string, Set<string>>();
 
 	  constructor(
     private jwtService: JwtService,
@@ -36,6 +37,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (message.messageType === 'text') return message.content || 'New message';
     if (message.messageType === 'image') return 'Photo';
+    if (message.messageType === 'video') return 'Video';
     if (message.messageType === 'file') return 'File';
     if (message.messageType === 'voice') return 'Voice message';
 
@@ -61,7 +63,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				return;
 			}
 
-			this.connectedUsers.set(user.id, client.id);
+			const sockets = this.connectedUsers.get(user.id) ?? new Set<string>();
+			sockets.add(client.id);
+			this.connectedUsers.set(user.id, sockets);
+			client.data.userId = user.id;
 			client.join(`user_${user.id}`);
 
 			// Join all user's conversations
@@ -83,12 +88,34 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	}
 
 	handleDisconnect(client: Socket) {
-		for (const [userId, socketId] of this.connectedUsers.entries()) {
-			if (socketId === client.id) {
+		const userId = client.data?.userId as string | undefined;
+		if (userId && this.connectedUsers.has(userId)) {
+			const sockets = this.connectedUsers.get(userId)!;
+			sockets.delete(client.id);
+			if (!sockets.size) {
 				this.connectedUsers.delete(userId);
 				this.server.emit('user_online', { userId, online: false });
+			}
+			return;
+		}
+
+		for (const [uid, socketIds] of this.connectedUsers.entries()) {
+			if (socketIds.has(client.id)) {
+				socketIds.delete(client.id);
+				if (!socketIds.size) {
+					this.connectedUsers.delete(uid);
+					this.server.emit('user_online', { userId: uid, online: false });
+				}
 				break;
 			}
+		}
+	}
+
+	private emitToUserSockets(userId: string, event: string, payload: unknown) {
+		const socketIds = this.connectedUsers.get(userId);
+		if (!socketIds?.size) return;
+		for (const socketId of socketIds) {
+			this.server.to(socketId).emit(event, payload);
 		}
 	}
 
@@ -181,43 +208,41 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				relations: ['user'],
 			});
 
-			      // Emit conversation update to all participants + send push to offline users
+			      // Emit conversation update to all participants + Expo push for receivers
       for (const participant of participants) {
-        const userSocketId = this.connectedUsers.get(participant.user.id);
-
         const updatedConvo = await this.getConversationWithUnreadCount(
           payload.conversationId,
           participant.user.id,
         );
 
-        if (userSocketId) {
-          this.server.to(userSocketId).emit('conversation_updated', updatedConvo);
+        this.emitToUserSockets(participant.user.id, 'conversation_updated', updatedConvo);
+
+        if (participant.user.id === user.id) continue;
+
+        const receiver = await this.userRepo.findOne({
+          where: { id: participant.user.id },
+          select: ['id', 'name', 'email', 'expoPushTokens', 'chatSettings'],
+        });
+
+        const tokens = receiver?.expoPushTokens || [];
+        const settings: any = receiver?.chatSettings || {};
+
+        // Always attempt push for reliability when app is backgrounded but socket still "online".
+        // Clients suppress chat banners while AppState === active.
+        if (settings?.notificationsEnabled !== false && tokens.length) {
+          await this.chatPushService.sendPushNotifications(tokens, {
+            title: user.name || user.email || 'New message',
+            body: this.buildPushBody(savedMessage as any, settings),
+            data: {
+              conversationId: payload.conversationId,
+              senderId: user.id,
+              messageId: savedMessage.id,
+              type: 'chat_message',
+              showPreview: settings?.showPreview ?? true,
+            },
+            sound: settings?.sound === false ? null : 'default',
+          });
         }
-
-        if (participant.user.id !== user.id) {
-  const receiver = await this.userRepo.findOne({
-    where: { id: participant.user.id },
-    select: ['id', 'name', 'email', 'expoPushTokens', 'chatSettings'],
-  });
-
-  const tokens = receiver?.expoPushTokens || [];
-  const settings: any = receiver?.chatSettings || {};
-
-  if (settings?.notificationsEnabled !== false && tokens.length) {
-    await this.chatPushService.sendPushNotifications(tokens, {
-      title: user.name || user.email || 'New message',
-      body: this.buildPushBody(savedMessage as any, settings),
-      data: {
-        conversationId: payload.conversationId,
-        senderId: user.id,
-        messageId: savedMessage.id,
-        type: 'chat_message',
-        showPreview: settings?.showPreview ?? true,
-      },
-      sound: settings?.sound === false ? null : 'default',
-    });
-  }
-}
       }
 		} catch (error) {
 			console.error('Error sending message:', error);
