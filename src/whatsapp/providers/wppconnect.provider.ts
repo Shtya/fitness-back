@@ -461,13 +461,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	private async publishQr(base64Qr: string, rawCode?: string) {
-		// Ignore a spurious QR only while the provider is still genuinely authenticated.
-		if (this.state === 'connected') {
-			try {
-				if (await this.client?.isAuthenticated?.()) return;
-			} catch {
-				// Authentication is no longer valid, so expose the new QR below.
+		// During session restore WPP may emit a QR before auth settles. If the
+		// client is already authenticated, promote to connected — never qr_pending.
+		try {
+			if (await this.client?.isAuthenticated?.()) {
+				await this.markConnected();
+				return;
 			}
+		} catch {
+			// Not authenticated — expose the new QR below.
 		}
 		let value = String(base64Qr || '');
 		if (!value.startsWith('data:image') && value.length > 64) {
@@ -489,12 +491,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	private async publishLinkCode(code: string) {
-		if (this.state === 'connected') {
-			try {
-				if (await this.client?.isAuthenticated?.()) return;
-			} catch {
-				// Authentication is no longer valid, so expose the new code below.
+		try {
+			if (await this.client?.isAuthenticated?.()) {
+				await this.markConnected();
+				return;
 			}
+		} catch {
+			// Not authenticated — expose the new code below.
 		}
 		const value = String(code || '').trim();
 		if (!value || value === this.pairingCode) return;
@@ -572,9 +575,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 			}
 		};
 
+		let lastError: unknown = new Error(
+			'Could not load chats from WhatsApp — chat list was empty after retries. The session may still be syncing; try again shortly.',
+		);
+
 		// Prefer a bounded listChats call — getAllChats can hang forever on large inboxes.
 		if (typeof this.client?.listChats === 'function') {
-			let lastError: unknown;
 			for (let attempt = 1; attempt <= 5; attempt += 1) {
 				try {
 					const listed = await withTimeout(
@@ -588,27 +594,39 @@ export class WppConnectProvider implements WhatsAppProvider {
 					lastError = error;
 				}
 				if (attempt < 5) {
-					await new Promise(resolve => setTimeout(resolve, 2000));
+					await new Promise((resolve) => setTimeout(resolve, 2000));
 				}
 			}
-			throw lastError instanceof Error
-				? lastError
-				: new Error('Could not read chats from WhatsApp');
 		}
+
 		if (typeof this.client?.getAllChats === 'function') {
-			try {
-				const chats =
-					(await withTimeout(this.client.getAllChats(), 20000, 'getAllChats')) || [];
-				return (Array.isArray(chats) ? chats : []).slice(0, count);
-			} catch (error) {
-				this.logger.warn(
-					`getAllChats failed/timeout for ${this.accountId}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
+			for (let attempt = 1; attempt <= 3; attempt += 1) {
+				try {
+					const chats =
+						(await withTimeout(this.client.getAllChats(), 20000, 'getAllChats')) || [];
+					if (Array.isArray(chats) && chats.length) {
+						return chats.slice(0, count);
+					}
+					lastError = new Error('WhatsApp chat store is not ready yet');
+				} catch (error) {
+					lastError = error;
+					this.logger.warn(
+						`getAllChats failed/timeout for ${this.accountId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				if (attempt < 3) {
+					await new Promise((resolve) => setTimeout(resolve, 1500));
+				}
 			}
 		}
-		return [];
+
+		throw lastError instanceof Error
+			? lastError
+			: new Error(
+					'Could not load chats from WhatsApp — chat list was empty after retries. The session may still be syncing; try again shortly.',
+				);
 	}
 
 	async getMessages(

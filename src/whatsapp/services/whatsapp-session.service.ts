@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as crypto from 'crypto';
@@ -6,6 +6,7 @@ import { WhatsAppProviderSession } from '../entities/whatsapp.entity';
 
 @Injectable()
 export class WhatsAppSessionService {
+	private readonly logger = new Logger(WhatsAppSessionService.name);
 	private readonly algorithm = 'aes-256-gcm';
 
 	constructor(
@@ -70,8 +71,19 @@ export class WhatsAppSessionService {
 	createWppTokenStore(accountId: string) {
 		return {
 			getToken: (_sessionName: string) => this.load(accountId, 'wppconnect'),
-			setToken: (_sessionName: string, tokenData: any) =>
-				tokenData ? this.save(accountId, 'wppconnect', tokenData) : Promise.resolve(false),
+			setToken: async (_sessionName: string, tokenData: any) => {
+				if (!tokenData) return false;
+				try {
+					return await this.save(accountId, 'wppconnect', tokenData);
+				} catch (error) {
+					this.logger.warn(
+						`Failed to save WPP token for ${accountId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+					return false;
+				}
+			},
 			removeToken: (_sessionName: string) => this.clear(accountId, 'wppconnect'),
 			listTokens: async () => {
 				const token = await this.load(accountId, 'wppconnect');

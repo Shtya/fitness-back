@@ -220,6 +220,20 @@ describe('WppConnectProvider message normalization', () => {
 		expect(provider.getQr()).toBe('data:image/png;base64,new-qr');
 	});
 
+	it('marks connected instead of qr_pending when authenticated during restore', async () => {
+		const provider = new WppConnectProvider('account-test', {});
+		(provider as any).state = 'connecting';
+		(provider as any).client = {
+			isAuthenticated: jest.fn().mockResolvedValue(true),
+			getHostDevice: jest.fn().mockResolvedValue({ wid: { user: '201000000000' } }),
+		};
+
+		await (provider as any).publishQr('data:image/png;base64,spurious-qr');
+
+		expect(provider.getState()).toBe('connected');
+		expect(provider.getQr()).toBeNull();
+	});
+
 	it('resolves LID chats to their saved contact name and phone number', async () => {
 		const provider = new WppConnectProvider('account-test', {});
 		(provider as any).client = {

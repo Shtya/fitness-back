@@ -42,6 +42,8 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		};
 		const redis = {
 			getClient: jest.fn().mockReturnValue(redisClient),
+			isReady: jest.fn().mockReturnValue(true),
+			isAvailable: jest.fn().mockResolvedValue(true),
 		};
 		const service = new WhatsAppProviderManagerService(
 			accountRepo as any,
@@ -239,5 +241,29 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		});
 		expect(sessions.clear).toHaveBeenCalledWith('account-1', 'wppconnect');
 		expect((service as any).providers.has('account-1')).toBe(false);
+	});
+
+	it('skips Redis lock commands when Redis is unavailable', async () => {
+		const { service, redis, redisClient, accountRepo } = createService();
+		redis.isAvailable.mockResolvedValue(false);
+		accountRepo.findOneByOrFail.mockResolvedValue({
+			id: 'account-1',
+			status: WhatsAppAccountStatus.DISCONNECTED,
+			providerName: 'wppconnect',
+		});
+		const fresh = {
+			getState: jest.fn().mockReturnValue('connecting'),
+			onEvent: jest.fn(),
+			connect: jest.fn().mockResolvedValue(undefined),
+			disconnect: jest.fn().mockResolvedValue(undefined),
+		};
+		jest.spyOn(service as any, 'createProvider').mockReturnValue(fresh);
+
+		await expect(service.connect('account-1')).resolves.toBe(fresh);
+		expect(redisClient.set).not.toHaveBeenCalled();
+		expect(redis.getClient).not.toHaveBeenCalled();
+
+		await expect(service.disconnect('account-1', false)).resolves.toEqual({ ok: true });
+		expect(redisClient.del).not.toHaveBeenCalled();
 	});
 });

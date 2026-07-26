@@ -902,9 +902,27 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	async syncChats(user: User, accountId: string, limit = 100) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const provider = this.requireProvider(accountId);
-		return this.syncChatsInternal(accountId, provider, limit, {
-			syncGroupParticipants: false,
+		this.gateway.emitAccountEvent(accountId, 'sync_started', {
+			accountId,
+			progress: 10,
+			stage: 'manual',
 		});
+		try {
+			const result = await this.syncChatsInternal(accountId, provider, limit, {
+				syncGroupParticipants: false,
+			});
+			this.gateway.emitAccountEvent(accountId, 'sync_completed', {
+				...result,
+				progress: 100,
+				stage: 'manual',
+			});
+			return result;
+		} catch (error) {
+			this.gateway.emitAccountEvent(accountId, 'sync_failed', {
+				message: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 	}
 
 	private async syncChatsInternal(
@@ -1524,13 +1542,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// take tens of seconds on a remote database.
 		const historyWriteConcurrency = 4;
 		for (let index = 0; index < messages.length; index += historyWriteConcurrency) {
-			await Promise.all(
-				messages.slice(index, index + historyWriteConcurrency).map((item) =>
+			const batch = messages.slice(index, index + historyWriteConcurrency);
+			const results = await Promise.allSettled(
+				batch.map((item) =>
 					this.persistMessage(conversation.accountId, item, null, false, {
 						emitEvents: false,
 					}),
 				),
 			);
+			results.forEach((result, offset) => {
+				if (result.status !== 'rejected') return;
+				const item = batch[offset];
+				this.logger.warn(
+					`Failed to persist history message ${item?.providerMessageId || '?'} in conversation ${conversationId}: ${
+						result.reason instanceof Error ? result.reason.message : String(result.reason)
+					}`,
+				);
+			});
 		}
 		const newestReliableTimestamp = messages.reduce<Date | null>((latest, item) => {
 			if (item.timestampReliable === false) return latest;

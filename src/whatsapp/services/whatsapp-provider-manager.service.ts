@@ -44,6 +44,7 @@ export class WhatsAppProviderManagerService
 	private readonly instanceId = randomUUID();
 	private readonly lockTtlSeconds = 45;
 	private readonly lockRenewTimers = new Map<string, NodeJS.Timeout>();
+	private redisUnavailableWarned = false;
 
 	constructor(
 		@InjectRepository(WhatsAppAccount)
@@ -64,7 +65,19 @@ export class WhatsAppProviderManagerService
 		return `whatsapp:conn-lock:${accountId}`;
 	}
 
+	private warnRedisUnavailableOnce() {
+		if (this.redisUnavailableWarned) return;
+		this.redisUnavailableWarned = true;
+		this.logger.warn(
+			'Redis unavailable — WhatsApp connection locks disabled; allowing connect/disconnect without distributed locks',
+		);
+	}
+
 	private async acquireLock(accountId: string): Promise<boolean> {
+		if (!(await this.redis.isAvailable())) {
+			this.warnRedisUnavailableOnce();
+			return true;
+		}
 		try {
 			const client = this.redis.getClient();
 			const key = this.lockKey(accountId);
@@ -89,6 +102,10 @@ export class WhatsAppProviderManagerService
 	}
 
 	private async releaseLock(accountId: string) {
+		if (!(await this.redis.isAvailable())) {
+			this.warnRedisUnavailableOnce();
+			return;
+		}
 		try {
 			const client = this.redis.getClient();
 			const key = this.lockKey(accountId);
@@ -105,9 +122,30 @@ export class WhatsAppProviderManagerService
 		}
 	}
 
+	/** Always delete the lock — used for user-initiated disconnect/reconnect recovery. */
+	private async forceReleaseLock(accountId: string) {
+		if (!(await this.redis.isAvailable())) {
+			this.warnRedisUnavailableOnce();
+			return;
+		}
+		try {
+			await this.redis.getClient().del(this.lockKey(accountId));
+		} catch (error) {
+			this.logger.warn(
+				`Could not force-release WhatsApp connection lock for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
 	private startLockRenewal(accountId: string) {
 		this.stopLockRenewal(accountId);
 		const timer = setInterval(async () => {
+			if (!(await this.redis.isAvailable())) {
+				this.warnRedisUnavailableOnce();
+				return;
+			}
 			try {
 				const client = this.redis.getClient();
 				const key = this.lockKey(accountId);
@@ -185,7 +223,18 @@ export class WhatsAppProviderManagerService
 	}
 
 	private async connectExclusive(accountId: string, phoneNumber?: string) {
-		const locked = await this.acquireLock(accountId);
+		let locked = await this.acquireLock(accountId);
+		if (!locked) {
+			// Stale/foreign locks are common after overlapping local backends or a
+			// shared Redis with another environment. User-initiated connect should
+			// reclaim ownership instead of staying blocked forever.
+			this.logger.warn(
+				`Reclaiming WhatsApp connection lock for ${accountId} from another instance`,
+			);
+			this.stopLockRenewal(accountId);
+			await this.forceReleaseLock(accountId);
+			locked = await this.acquireLock(accountId);
+		}
 		if (!locked) {
 			throw new Error(
 				'This WhatsApp account is already being managed by another server instance. Try again shortly.',
@@ -303,12 +352,20 @@ export class WhatsAppProviderManagerService
 			if (provider?.getState() === 'connected') {
 				return;
 			}
+			const account = await this.accountRepo.findOne({ where: { id: accountId } });
+			if (account?.status === WhatsAppAccountStatus.CONNECTED) {
+				return;
+			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'qr_updated');
 		}
 		if (event.type === 'pairing_code') {
 			const provider = this.providers.get(accountId);
 			if (provider?.getState() === 'connected') {
+				return;
+			}
+			const account = await this.accountRepo.findOne({ where: { id: accountId } });
+			if (account?.status === WhatsAppAccountStatus.CONNECTED) {
 				return;
 			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
@@ -360,7 +417,9 @@ export class WhatsAppProviderManagerService
 		}
 		this.connectStartedAt.delete(accountId);
 		this.stopLockRenewal(accountId);
-		await this.releaseLock(accountId);
+		// User-initiated disconnect must clear foreign/stale locks too, otherwise
+		// a later connect keeps failing with "another server instance".
+		await this.forceReleaseLock(accountId);
 		await this.accountRepo.update(accountId, {
 			status: WhatsAppAccountStatus.DISCONNECTED,
 			phoneNumber: logout ? null : undefined,
@@ -389,7 +448,7 @@ export class WhatsAppProviderManagerService
 			this.providers.delete(accountId);
 			this.connecting.delete(accountId);
 			this.stopLockRenewal(accountId);
-			await this.releaseLock(accountId);
+			await this.forceReleaseLock(accountId);
 			await this.sessions.clear(accountId, providerName);
 		}
 		return { ok: true };
