@@ -494,9 +494,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					message: 'Inbox sync timed out. Click Sync to retry.',
 				});
 			}
-		}, 90000);
+		}, 120000);
 		const run = (attempt: number) => {
-			void this.bootstrapAccount(accountId)
+			void this.waitForInboxReady(accountId, 90000)
+				.then(ready => {
+					if (!ready) {
+						throw new Error(
+							'WhatsApp chat store is not ready yet — the session may still be syncing on your phone.',
+						);
+					}
+					return this.bootstrapAccount(accountId);
+				})
 				.then((result) => {
 					clearTimeout(unlockTimer);
 					this.bootstrapping.delete(accountId);
@@ -506,24 +514,47 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					});
 				})
 				.catch((error) => {
-					if (attempt < 2) {
+					const message = error instanceof Error ? error.message : String(error);
+					const retryable =
+						/not ready|not connected|listChats|syncing/i.test(message) ||
+						message.includes('timed out');
+					if (retryable && attempt < 3) {
 						this.gateway.emitAccountEvent(accountId, 'sync_progress', {
 							accountId,
 							progress: 20,
 							stage: 'retry',
 							attempt,
 						});
-						setTimeout(() => run(attempt + 1), 2500 * attempt);
+						setTimeout(() => run(attempt + 1), 4000 * attempt);
 						return;
 					}
 					clearTimeout(unlockTimer);
 					this.bootstrapping.delete(accountId);
 					this.gateway.emitAccountEvent(accountId, 'sync_failed', {
-						message: error instanceof Error ? error.message : String(error),
+						message,
 					});
 				});
 		};
 		setTimeout(() => run(1), 2000);
+	}
+
+	private async waitForInboxReady(accountId: string, timeoutMs = 90000) {
+		const started = Date.now();
+		while (Date.now() - started < timeoutMs) {
+			const provider = this.providers.getProvider(accountId);
+			if (!provider || provider.getState() !== 'connected') return false;
+			try {
+				const chats = await provider.getChats(1);
+				if (Array.isArray(chats)) return true;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (!/not ready|not connected|listChats|null/i.test(message)) {
+					throw error;
+				}
+			}
+			await new Promise(resolve => setTimeout(resolve, 2000));
+		}
+		return false;
 	}
 
 	async bootstrapAccount(accountId: string, limit = 40) {
@@ -941,6 +972,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		}
 		let chats: any[];
+		let fetchPulse = 0;
+		const fetchHeartbeat =
+			emitProgress &&
+			setInterval(() => {
+				fetchPulse += 1;
+				this.gateway.emitAccountEvent(accountId, 'sync_progress', {
+					accountId,
+					progress: Math.min(45, 30 + fetchPulse * 3),
+					stage: 'fetching_chats',
+				});
+			}, 8000);
 		try {
 			chats = await provider.getChats(Math.min(limit, 100));
 		} catch (error) {
@@ -950,6 +992,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					? 'WhatsApp is waiting for the linked session. Open the account connection status and try again.'
 					: message || 'Could not load chats from WhatsApp',
 			);
+		} finally {
+			if (fetchHeartbeat) clearInterval(fetchHeartbeat);
 		}
 		if (emitProgress) {
 			this.gateway.emitAccountEvent(accountId, 'sync_progress', {

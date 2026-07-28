@@ -557,6 +557,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async getChats(limit = 50) {
+		if (this.state !== 'connected') {
+			throw new Error('WhatsApp chat store is not ready yet');
+		}
 		const count = Math.min(Math.max(Number(limit) || 50, 1), 200);
 		const withTimeout = async <T>(promise: Promise<T>, ms: number, label: string) => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
@@ -580,45 +583,51 @@ export class WppConnectProvider implements WhatsAppProvider {
 		);
 
 		// Prefer a bounded listChats call — getAllChats can hang forever on large inboxes.
-		if (typeof this.client?.listChats === 'function') {
-			for (let attempt = 1; attempt <= 5; attempt += 1) {
-				try {
-					const listed = await withTimeout(
-						this.client.listChats({ count }),
-						25000,
-						'listChats',
-					);
-					if (Array.isArray(listed) && listed.length) return listed;
-					lastError = new Error('WhatsApp chat store is not ready yet');
-				} catch (error) {
-					lastError = error;
-				}
-				if (attempt < 5) {
-					await new Promise((resolve) => setTimeout(resolve, 2000));
-				}
+		for (let attempt = 1; attempt <= 5; attempt += 1) {
+			const client = this.client;
+			if (!client || this.state !== 'connected') {
+				throw new Error('WhatsApp chat store is not ready yet');
+			}
+			if (typeof client.listChats !== 'function') break;
+			try {
+				const listed = await withTimeout(
+					client.listChats({ count }),
+					25000,
+					'listChats',
+				);
+				if (Array.isArray(listed) && listed.length) return listed;
+				lastError = new Error('WhatsApp chat store is not ready yet');
+			} catch (error) {
+				lastError = error;
+			}
+			if (attempt < 5) {
+				await new Promise((resolve) => setTimeout(resolve, 2000));
 			}
 		}
 
-		if (typeof this.client?.getAllChats === 'function') {
-			for (let attempt = 1; attempt <= 3; attempt += 1) {
-				try {
-					const chats =
-						(await withTimeout(this.client.getAllChats(), 20000, 'getAllChats')) || [];
-					if (Array.isArray(chats) && chats.length) {
-						return chats.slice(0, count);
-					}
-					lastError = new Error('WhatsApp chat store is not ready yet');
-				} catch (error) {
-					lastError = error;
-					this.logger.warn(
-						`getAllChats failed/timeout for ${this.accountId}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			const client = this.client;
+			if (!client || this.state !== 'connected') {
+				throw new Error('WhatsApp chat store is not ready yet');
+			}
+			if (typeof client.getAllChats !== 'function') break;
+			try {
+				const chats =
+					(await withTimeout(client.getAllChats(), 20000, 'getAllChats')) || [];
+				if (Array.isArray(chats) && chats.length) {
+					return chats.slice(0, count);
 				}
-				if (attempt < 3) {
-					await new Promise((resolve) => setTimeout(resolve, 1500));
-				}
+				lastError = new Error('WhatsApp chat store is not ready yet');
+			} catch (error) {
+				lastError = error;
+				this.logger.warn(
+					`getAllChats failed/timeout for ${this.accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+			if (attempt < 3) {
+				await new Promise((resolve) => setTimeout(resolve, 1500));
 			}
 		}
 

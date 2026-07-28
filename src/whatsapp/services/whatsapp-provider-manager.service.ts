@@ -254,6 +254,15 @@ export class WhatsAppProviderManagerService
 		this.connectStartedAt.set(accountId, Date.now());
 		try {
 			await provider.connect(phoneNumber);
+			if (
+				!phoneNumber &&
+				typeof provider.getQr === 'function' &&
+				provider.getState?.() !== 'connected' &&
+				!provider.getQr() &&
+				!(typeof provider.getPairingCode === 'function' && provider.getPairingCode())
+			) {
+				await this.waitForLinkMaterial(accountId, 20_000);
+			}
 			this.startLockRenewal(accountId);
 			await this.log(accountId, 'connect_started', 'WhatsApp provider started');
 			return provider;
@@ -474,6 +483,22 @@ export class WhatsAppProviderManagerService
 			await new Promise(resolve => setTimeout(resolve, 1500));
 		}
 		return this.providers.get(accountId)?.getState() === 'connected';
+	}
+
+	/** Give catchQR / catchLinkCode time to populate before /connect responds. */
+	private async waitForLinkMaterial(accountId: string, timeoutMs = 20000) {
+		const started = Date.now();
+		while (Date.now() - started < timeoutMs) {
+			const provider = this.providers.get(accountId);
+			if (!provider) return;
+			const state = provider.getState?.() || 'disconnected';
+			if (state === 'connected' || state === 'error') return;
+			const qr = typeof provider.getQr === 'function' ? provider.getQr() : null;
+			const code =
+				typeof provider.getPairingCode === 'function' ? provider.getPairingCode() : null;
+			if (qr || code) return;
+			await new Promise(resolve => setTimeout(resolve, 400));
+		}
 	}
 
 	private async log(
