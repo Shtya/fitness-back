@@ -35,6 +35,9 @@ import { WhatsAppDemoModule } from './whatsapp-demo/whatsapp-demo.module';
 import { AiReplySuggestionsModule } from './ai-reply-suggestions/ai-reply-suggestions.module';
 import { AiFreeModule } from './ai-free/ai-free.module';
 import { TenantModule } from './tenant/tenant.module';
+import { PhoneIntelligenceModule } from './phone-intelligence/phone-intelligence.module';
+import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
+import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 
 @Module({
 	imports: [
@@ -91,6 +94,9 @@ import { TenantModule } from './tenant/tenant.module';
 		TranscriptionModule,
 		AiReplySuggestionsModule,
 		AiFreeModule,
+		PhoneIntelligenceModule,
+		FitnessLeadsModule,
+		MetaWhatsAppModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

@@ -7,15 +7,18 @@ import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
 import { TimingInterceptor } from 'common/timing.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // rawBody required for Meta webhook X-Hub-Signature-256 verification
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
 
   // Interceptors / filters
   app.useGlobalInterceptors(new TimingInterceptor());
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
 
-  // WhatsApp media is private and must only be served by guarded controllers.
-  // Keep this deny route before the generic public uploads mount for legacy files.
+  // WhatsApp / Meta media is private and must only be served by guarded controllers.
   app.use('/uploads/whatsapp-media', (_req, res) => res.sendStatus(404));
+  app.use('/uploads/meta-whatsapp-media', (_req, res) => res.sendStatus(404));
 
   // Public application assets only.
   app.useStaticAssets(join(__dirname, '..', '..', 'uploads'), {
