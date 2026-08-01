@@ -23,6 +23,7 @@ import { MetaWhatsAppBulkService } from './services/meta-whatsapp-bulk.service';
 import { MetaWhatsAppMediaService } from './services/meta-whatsapp-media.service';
 import { MetaWhatsAppUsageBillingService } from './services/meta-whatsapp-usage-billing.service';
 import { MetaWhatsAppQuickRepliesService } from './services/meta-whatsapp-quick-replies.service';
+import { MetaWhatsAppTranslateService } from './services/meta-whatsapp-translate.service';
 
 @Module({
 	imports: [
@@ -50,6 +51,7 @@ import { MetaWhatsAppQuickRepliesService } from './services/meta-whatsapp-quick-
 		MetaWhatsAppMediaService,
 		MetaWhatsAppUsageBillingService,
 		MetaWhatsAppQuickRepliesService,
+		MetaWhatsAppTranslateService,
 	],
 	exports: [
 		MetaWhatsAppConfigService,

@@ -373,3 +373,15 @@ export class UpdateMetaQuickReplyDto {
 	@Max(9999)
 	sortOrder?: number;
 }
+
+export class TranslateMetaTextDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(4500)
+	text: string;
+
+	/** Optional override; otherwise Arabic↔English is auto-detected. */
+	@IsOptional()
+	@IsString()
+	targetLang?: 'ar' | 'en';
+}

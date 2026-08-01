@@ -35,6 +35,7 @@ import {
 	CloneMetaTemplatesDto,
 	CreateMetaQuickReplyDto,
 	UpdateMetaQuickReplyDto,
+	TranslateMetaTextDto,
 } from '../dto/meta-whatsapp.dto';
 import { MetaWhatsAppConfigService } from '../services/meta-whatsapp-config.service';
 import { MetaWhatsAppConversationsService } from '../services/meta-whatsapp-conversations.service';
@@ -45,6 +46,7 @@ import { MetaWhatsAppMediaService } from '../services/meta-whatsapp-media.servic
 import { MetaWhatsAppCloudApiService } from '../services/meta-whatsapp-cloud-api.service';
 import { MetaWhatsAppUsageBillingService } from '../services/meta-whatsapp-usage-billing.service';
 import { MetaWhatsAppQuickRepliesService } from '../services/meta-whatsapp-quick-replies.service';
+import { MetaWhatsAppTranslateService } from '../services/meta-whatsapp-translate.service';
 
 @Controller('meta-whatsapp')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -59,6 +61,7 @@ export class MetaWhatsAppController {
 		private readonly cloudApi: MetaWhatsAppCloudApiService,
 		private readonly usageBilling: MetaWhatsAppUsageBillingService,
 		private readonly quickReplies: MetaWhatsAppQuickRepliesService,
+		private readonly translateService: MetaWhatsAppTranslateService,
 	) {}
 
 	@Get('status')
@@ -358,5 +361,13 @@ export class MetaWhatsAppController {
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	deleteQuickReply(@Param('id') id: string) {
 		return this.quickReplies.remove(id);
+	}
+
+	@Post('translate')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	translateText(@Body() dto: TranslateMetaTextDto) {
+		const target =
+			dto.targetLang === 'ar' || dto.targetLang === 'en' ? dto.targetLang : undefined;
+		return this.translateService.translate(dto.text, target);
 	}
 }
