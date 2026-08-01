@@ -341,3 +341,35 @@ export class OpenMetaPhoneDto {
 	@MaxLength(120)
 	displayName?: string;
 }
+
+export class CreateMetaQuickReplyDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	title: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(4000)
+	body: string;
+}
+
+export class UpdateMetaQuickReplyDto {
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	title?: string;
+
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(4000)
+	body?: string;
+
+	@IsOptional()
+	@IsInt()
+	@Min(0)
+	@Max(9999)
+	sortOrder?: number;
+}

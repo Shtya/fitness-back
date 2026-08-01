@@ -33,6 +33,8 @@ import {
 	CheckMetaBulkPhonesDto,
 	CreateFromMetaLibraryDto,
 	CloneMetaTemplatesDto,
+	CreateMetaQuickReplyDto,
+	UpdateMetaQuickReplyDto,
 } from '../dto/meta-whatsapp.dto';
 import { MetaWhatsAppConfigService } from '../services/meta-whatsapp-config.service';
 import { MetaWhatsAppConversationsService } from '../services/meta-whatsapp-conversations.service';
@@ -42,6 +44,7 @@ import { MetaWhatsAppActivityService } from '../services/meta-whatsapp-activity.
 import { MetaWhatsAppMediaService } from '../services/meta-whatsapp-media.service';
 import { MetaWhatsAppCloudApiService } from '../services/meta-whatsapp-cloud-api.service';
 import { MetaWhatsAppUsageBillingService } from '../services/meta-whatsapp-usage-billing.service';
+import { MetaWhatsAppQuickRepliesService } from '../services/meta-whatsapp-quick-replies.service';
 
 @Controller('meta-whatsapp')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -55,6 +58,7 @@ export class MetaWhatsAppController {
 		private readonly media: MetaWhatsAppMediaService,
 		private readonly cloudApi: MetaWhatsAppCloudApiService,
 		private readonly usageBilling: MetaWhatsAppUsageBillingService,
+		private readonly quickReplies: MetaWhatsAppQuickRepliesService,
 	) {}
 
 	@Get('status')
@@ -330,5 +334,29 @@ export class MetaWhatsAppController {
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	cancelBulk(@Req() req: any, @Param('id') id: string) {
 		return this.bulk.cancel(req.user?.id, id);
+	}
+
+	@Get('quick-replies')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	listQuickReplies(@Req() req: any) {
+		return this.quickReplies.list(req.user?.id);
+	}
+
+	@Post('quick-replies')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	createQuickReply(@Req() req: any, @Body() dto: CreateMetaQuickReplyDto) {
+		return this.quickReplies.create(req.user?.id, dto);
+	}
+
+	@Put('quick-replies/:id')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	updateQuickReply(@Param('id') id: string, @Body() dto: UpdateMetaQuickReplyDto) {
+		return this.quickReplies.update(id, dto);
+	}
+
+	@Delete('quick-replies/:id')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	deleteQuickReply(@Param('id') id: string) {
+		return this.quickReplies.remove(id);
 	}
 }

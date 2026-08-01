@@ -347,3 +347,31 @@ export class MetaWhatsAppActivityLog {
 	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
 	createdAt: Date;
 }
+
+@Entity('meta_whatsapp_quick_replies')
+@Index('idx_meta_wa_quick_replies_sort', ['sortOrder'])
+export class MetaWhatsAppQuickReply {
+	@PrimaryGeneratedColumn('uuid')
+	id: string;
+
+	@Column({ type: 'varchar', length: 120 })
+	title: string;
+
+	@Column({ type: 'text' })
+	body: string;
+
+	@Column({ name: 'sort_order', type: 'int', default: 0 })
+	sortOrder: number;
+
+	@Column({ name: 'is_default', type: 'boolean', default: false })
+	isDefault: boolean;
+
+	@Column({ name: 'created_by', type: 'uuid', nullable: true })
+	createdBy: string | null;
+
+	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+	createdAt: Date;
+
+	@UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
+	updatedAt: Date;
+}

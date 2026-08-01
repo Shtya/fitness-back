@@ -8,6 +8,7 @@ import {
 	MetaWhatsAppConfig,
 	MetaWhatsAppConversation,
 	MetaWhatsAppMessage,
+	MetaWhatsAppQuickReply,
 } from './entities/meta-whatsapp.entity';
 import { MetaWhatsAppController } from './controllers/meta-whatsapp.controller';
 import { MetaWhatsAppWebhookController } from './controllers/meta-whatsapp-webhook.controller';
@@ -21,6 +22,7 @@ import { MetaWhatsAppWebhookService } from './services/meta-whatsapp-webhook.ser
 import { MetaWhatsAppBulkService } from './services/meta-whatsapp-bulk.service';
 import { MetaWhatsAppMediaService } from './services/meta-whatsapp-media.service';
 import { MetaWhatsAppUsageBillingService } from './services/meta-whatsapp-usage-billing.service';
+import { MetaWhatsAppQuickRepliesService } from './services/meta-whatsapp-quick-replies.service';
 
 @Module({
 	imports: [
@@ -31,6 +33,7 @@ import { MetaWhatsAppUsageBillingService } from './services/meta-whatsapp-usage-
 			MetaWhatsAppBulkJob,
 			MetaWhatsAppBulkItem,
 			MetaWhatsAppActivityLog,
+			MetaWhatsAppQuickReply,
 			FitnessLead,
 		]),
 	],
@@ -46,12 +49,14 @@ import { MetaWhatsAppUsageBillingService } from './services/meta-whatsapp-usage-
 		MetaWhatsAppBulkService,
 		MetaWhatsAppMediaService,
 		MetaWhatsAppUsageBillingService,
+		MetaWhatsAppQuickRepliesService,
 	],
 	exports: [
 		MetaWhatsAppConfigService,
 		MetaWhatsAppConversationsService,
 		MetaWhatsAppMessagingService,
 		MetaWhatsAppBulkService,
+		MetaWhatsAppQuickRepliesService,
 	],
 })
 export class MetaWhatsAppModule {}

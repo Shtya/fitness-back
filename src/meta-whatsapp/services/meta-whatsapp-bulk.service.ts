@@ -171,19 +171,36 @@ export class MetaWhatsAppBulkService {
 	async getJob(jobId: string) {
 		const job = await this.jobRepo.findOne({ where: { id: jobId } });
 		if (!job) throw new NotFoundException('Bulk job not found');
-		// Auto-resume if the in-memory worker died while jobs are still pending
+
+		// Resume worker only if job is active and no in-memory pace (worker died)
+		const hasPace = this.paceByJob.has(jobId);
 		if (
 			!this.running &&
+			!hasPace &&
 			(job.status === MetaWaBulkJobStatus.QUEUED ||
 				job.status === MetaWaBulkJobStatus.RUNNING)
 		) {
 			void this.processQueue();
 		}
+
 		const items = await this.itemRepo.find({
 			where: { jobId },
-			order: { createdAt: 'ASC' },
+			order: { updatedAt: 'DESC' },
 			take: 2000,
 		});
+
+		const counts = {
+			queued: 0,
+			sending: 0,
+			sent: 0,
+			failed: 0,
+			skipped: 0,
+		};
+		for (const it of items) {
+			const s = String(it.status || '');
+			if (s in counts) counts[s as keyof typeof counts] += 1;
+		}
+
 		const sorted = [...items].sort((a, b) => {
 			const rank = (s: string, err?: string | null) => {
 				if (s === MetaWaBulkItemStatus.SENDING) return 0;
@@ -202,9 +219,28 @@ export class MetaWhatsAppBulkService {
 			if (d !== 0) return d;
 			return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
 		});
+
 		return {
 			...this.serializeJob(job),
-			items: sorted,
+			// Prefer item-derived counters for the live UI
+			sentCount: counts.sent,
+			failedCount: counts.failed,
+			skippedCount: counts.skipped,
+			items: sorted.map(it => ({
+				id: it.id,
+				jobId: it.jobId,
+				leadId: it.leadId,
+				waId: it.waId,
+				displayName: it.displayName,
+				status: it.status,
+				messageId: it.messageId,
+				wamid: it.wamid,
+				errorMessage: it.errorMessage,
+				attemptCount: it.attemptCount,
+				createdAt: it.createdAt,
+				updatedAt: it.updatedAt,
+			})),
+			itemCounts: counts,
 			workerRunning: this.running,
 		};
 	}
@@ -252,11 +288,17 @@ export class MetaWhatsAppBulkService {
 				if (!job || job.status === MetaWaBulkJobStatus.CANCELLED) break;
 
 				try {
-					// Recover items stuck in "sending" after a crash / hot-reload
-					await this.itemRepo.update(
-						{ jobId: job.id, status: MetaWaBulkItemStatus.SENDING },
-						{ status: MetaWaBulkItemStatus.QUEUED },
-					);
+					// Only recover items stuck in "sending" for > 2 minutes (avoid wiping live sends)
+					await this.itemRepo
+						.createQueryBuilder()
+						.update(MetaWhatsAppBulkItem)
+						.set({ status: MetaWaBulkItemStatus.QUEUED })
+						.where('job_id = :jobId', { jobId: job.id })
+						.andWhere('status = :status', { status: MetaWaBulkItemStatus.SENDING })
+						.andWhere('updated_at < :stale', {
+							stale: new Date(Date.now() - 2 * 60 * 1000),
+						})
+						.execute();
 
 					job.status = MetaWaBulkJobStatus.RUNNING;
 					job.startedAt = job.startedAt || new Date();
@@ -300,9 +342,9 @@ export class MetaWhatsAppBulkService {
 						if (already.has(item.waId)) {
 							item.status = MetaWaBulkItemStatus.SKIPPED;
 							item.errorMessage = ALREADY_SENT_REASON;
-							fresh.skippedCount += 1;
 							await this.itemRepo.save(item);
-							await this.jobRepo.save(fresh);
+							await this.jobRepo.increment({ id: fresh.id }, 'skippedCount', 1);
+							fresh.skippedCount = Number(fresh.skippedCount || 0) + 1;
 							continue;
 						}
 
@@ -335,7 +377,9 @@ export class MetaWhatsAppBulkService {
 							item.messageId = message.id;
 							item.wamid = message.wamid;
 							item.errorMessage = null;
-							fresh.sentCount += 1;
+							await this.itemRepo.save(item);
+							await this.jobRepo.increment({ id: fresh.id }, 'sentCount', 1);
+							fresh.sentCount = Number(fresh.sentCount || 0) + 1;
 						} catch (error) {
 							const errMsg =
 								error instanceof Error ? error.message : 'Send failed';
@@ -343,6 +387,7 @@ export class MetaWhatsAppBulkService {
 								item.status = MetaWaBulkItemStatus.QUEUED;
 								item.errorMessage = `Retry ${item.attemptCount}: ${errMsg}`;
 								this.logger.warn(`Bulk item ${item.id} will retry: ${errMsg}`);
+								await this.itemRepo.save(item);
 								const waitMs = delayMs * 2;
 								const waitStartedAt = Date.now();
 								this.paceByJob.set(job.id, {
@@ -358,13 +403,23 @@ export class MetaWhatsAppBulkService {
 							} else {
 								item.status = MetaWaBulkItemStatus.FAILED;
 								item.errorMessage = errMsg;
-								fresh.failedCount += 1;
+								await this.itemRepo.save(item);
+								await this.jobRepo.increment({ id: fresh.id }, 'failedCount', 1);
+								fresh.failedCount = Number(fresh.failedCount || 0) + 1;
 								this.logger.warn(`Bulk item ${item.id} failed: ${errMsg}`);
 							}
 						}
 
-						await this.itemRepo.save(item);
-						await this.jobRepo.save(fresh);
+						if (!alreadyWaited) {
+							// Ensure latest counters are visible to pollers
+							const latest = await this.jobRepo.findOne({ where: { id: job.id } });
+							if (latest) {
+								fresh.sentCount = latest.sentCount;
+								fresh.failedCount = latest.failedCount;
+								fresh.skippedCount = latest.skippedCount;
+								fresh.status = latest.status;
+							}
+						}
 
 						const cancelled = await this.jobRepo.findOne({ where: { id: job.id } });
 						if (!cancelled || cancelled.status === MetaWaBulkJobStatus.CANCELLED) {
