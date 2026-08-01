@@ -224,22 +224,56 @@ Rules:
 	}
 
 	async getJob(jobId: string, userId?: string) {
-		const cached = await this.redis.get<any>(`fitness-leads:job:${jobId}`);
-		if (cached) {
-			if (userId && cached.userId && cached.userId !== userId) throw new NotFoundException('Job not found');
-			return cached;
-		}
 		const job = await this.jobRepo.findOne({ where: { id: jobId } });
 		if (!job) throw new NotFoundException('Job not found');
 		if (userId && job.userId && job.userId !== userId) throw new NotFoundException('Job not found');
+
+		// Job process died / hung during enrich — recover so UI does not spin forever.
+		if (
+			job.status === FitnessLeadsJobStatus.RUNNING &&
+			this.isJobStale(job)
+		) {
+			const savedCount = await this.leadRepo.count({ where: { jobId } });
+			if (savedCount > 0) {
+				this.logger.warn(`Auto-finalizing stale job ${jobId} with ${savedCount} leads`);
+				return this.finalizeJob(jobId, userId);
+			}
+			job.status = FitnessLeadsJobStatus.FAILED;
+			job.errorMessage =
+				job.errorMessage ||
+				'Job stalled during enrichment (no new progress). Try again with Enrich websites off, or lower max places.';
+			job.finishedAt = new Date();
+			await this.jobRepo.save(job);
+			await this.redis.del(`fitness-leads:job:${jobId}`).catch(() => null);
+		}
+
+		const cached = await this.redis.get<any>(`fitness-leads:job:${jobId}`);
+		if (
+			cached &&
+			cached.status === job.status &&
+			cached.progressPercent === job.progressPercent &&
+			cached.leadsCount === job.leadsCount
+		) {
+			if (userId && cached.userId && cached.userId !== userId) {
+				throw new NotFoundException('Job not found');
+			}
+			return cached;
+		}
 		const leads = await this.leadRepo.find({
 			where: { jobId },
 			order: { createdAt: 'DESC' },
-			take: 300,
+			take: 2000,
 		});
 		const payload = this.toClient(job, leads);
 		await this.redis.set(`fitness-leads:job:${jobId}`, payload, 60 * 60 * 6);
 		return payload;
+	}
+
+	private isJobStale(job: FitnessLeadsJob) {
+		const updated = job.updatedAt ? new Date(job.updatedAt).getTime() : 0;
+		if (!updated) return false;
+		// Enrich often pauses >30s on bad sites; treat >3 min with no DB update as stuck.
+		return Date.now() - updated > 180_000;
 	}
 
 	async listLeads(userId: string, jobId?: string) {
@@ -260,11 +294,10 @@ Rules:
 		const jobs = await this.jobRepo.find({
 			where,
 			order: { createdAt: 'DESC' },
-			take: 40,
+			take: 80,
 		});
-		return {
-			total: jobs.length,
-			items: jobs.map(job => ({
+		const items = jobs
+			.map(job => ({
 				jobId: job.id,
 				status: job.status,
 				countryKey: job.countryKey,
@@ -272,11 +305,83 @@ Rules:
 				categories: job.categories || [],
 				leadsCount: job.leadsCount || 0,
 				progressPercent: job.progressPercent || 0,
+				isFavorite: Boolean(job.isFavorite),
 				errorMessage: job.errorMessage,
 				createdAt: job.createdAt,
 				finishedAt: job.finishedAt,
-			})),
+			}))
+			.sort((a, b) => {
+				if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+				return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+			});
+		return {
+			total: items.length,
+			items,
 		};
+	}
+
+	async setJobFavorite(jobId: string, userId: string | undefined, isFavorite: boolean) {
+		const job = await this.jobRepo.findOne({ where: { id: jobId } });
+		if (!job) throw new NotFoundException('Job not found');
+		if (userId && job.userId && job.userId !== userId) {
+			throw new NotFoundException('Job not found');
+		}
+		job.isFavorite = Boolean(isFavorite);
+		await this.jobRepo.save(job);
+		await this.redis.del(`fitness-leads:job:${jobId}`).catch(() => null);
+		return { jobId: job.id, isFavorite: job.isFavorite };
+	}
+
+	async deleteJob(jobId: string, userId?: string) {
+		const job = await this.jobRepo.findOne({ where: { id: jobId } });
+		if (!job) throw new NotFoundException('Job not found');
+		if (userId && job.userId && job.userId !== userId) {
+			throw new NotFoundException('Job not found');
+		}
+		await this.leadRepo.delete({ jobId });
+		await this.jobRepo.delete({ id: jobId });
+		await this.redis.del(`fitness-leads:job:${jobId}`).catch(() => null);
+		return { ok: true, jobId };
+	}
+
+	/** Mark a failed/interrupted job as done when leads were already saved. */
+	async finalizeJob(jobId: string, userId?: string) {
+		const job = await this.jobRepo.findOne({ where: { id: jobId } });
+		if (!job) throw new NotFoundException('Job not found');
+		if (userId && job.userId && job.userId !== userId) {
+			throw new NotFoundException('Job not found');
+		}
+		const savedCount = await this.leadRepo.count({ where: { jobId } });
+		if (!savedCount) {
+			throw new BadRequestException('No leads to finalize for this job');
+		}
+		const savedLeads = await this.leadRepo.find({
+			where: { jobId },
+			order: { createdAt: 'ASC' },
+			take: 2000,
+		});
+		job.status = FitnessLeadsJobStatus.DONE;
+		job.progressPercent = 100;
+		job.currentStep = 'done';
+		job.finishedAt = new Date();
+		job.leadsCount = savedCount;
+		if (!job.errorMessage) {
+			job.errorMessage = 'Finalized with partial results after an interruption.';
+		}
+		job.steps = (job.steps || []).map((s: any) => {
+			if (['enrich_websites', 'save'].includes(s.id) && s.status !== 'done' && s.status !== 'skipped') {
+				return {
+					...s,
+					status: 'done',
+					message: s.id === 'save' ? 'Saved partial' : `${savedCount} leads (finalized)`,
+					finishedAt: new Date().toISOString(),
+				};
+			}
+			return s;
+		});
+		await this.jobRepo.save(job);
+		await this.cacheJob(job, savedLeads);
+		return this.toClient(job, savedLeads);
 	}
 
 	private async runJob(jobId: string, apiKey: string) {
@@ -332,96 +437,49 @@ Rules:
 
 			await this.setStep(job, 'enrich_websites', job.enrichWebsites ? 'running' : 'skipped');
 			const leads: FitnessLead[] = [];
+			let enrichFailures = 0;
 			for (let i = 0; i < places.length; i++) {
-				const place = places[i];
-				const phone =
-					place.internationalPhoneNumber || place.nationalPhoneNumber || '';
-				let enrichment = {
-					emails: [] as string[],
-					sourceUrl: null as string | null,
-					social: {
-						instagram: '',
-						linkedin: '',
-						facebook: '',
-						twitter: '',
-						tiktok: '',
-						youtube: '',
-						whatsapp: '',
-					},
-					verification: null as string | null,
-					emailSource: null as string | null,
-				};
-				const websiteUri = place.websiteUri || '';
-				if (job.enrichWebsites && websiteUri) {
-					enrichment = await this.websiteEnrich.enrichFromWebsite(websiteUri, phone);
-				}
-				const osmSocial = place._osmSocial || {};
-				enrichment.social = {
-					instagram: enrichment.social.instagram || osmSocial.instagram || '',
-					linkedin: enrichment.social.linkedin || osmSocial.linkedin || '',
-					facebook: enrichment.social.facebook || osmSocial.facebook || '',
-					twitter: enrichment.social.twitter || osmSocial.twitter || '',
-					tiktok: enrichment.social.tiktok || '',
-					youtube: enrichment.social.youtube || osmSocial.youtube || '',
-					whatsapp: enrichment.social.whatsapp || osmSocial.whatsapp || '',
-				};
-				if (!enrichment.social.whatsapp && phone) {
-					enrichment.social.whatsapp = extractWhatsAppFromPhone(phone);
-				}
-
-				const bestEmail = getBestEmail(enrichment.emails);
-				const city = extractCityFromAddress(
-					place.formattedAddress || '',
-					knownCities,
-					job.cities[0] || '',
-				);
-				const neighborhood = extractNeighborhood(place, city);
-				const address = String(
-					place.formattedAddress || place.shortFormattedAddress || '',
-				).trim();
-				const notes = [
-					enrichment.emailSource ? `Email source: ${enrichment.emailSource}` : null,
-					neighborhood ? `Area: ${neighborhood}` : null,
-					place._source ? `Found via: ${place._source}` : null,
-				]
-					.filter(Boolean)
-					.join(' | ');
-
-				const lead = this.leadRepo.create({
-					jobId: job.id,
-					userId: job.userId,
-					businessName: place.displayName?.text || 'Unknown',
-					businessType: classifyBusinessType(place.displayName?.text),
-					email: bestEmail,
-					country: country.name,
-					city,
-					neighborhood: neighborhood || null,
-					address: address || null,
-					website: websiteUri || null,
-					sourceUrl: enrichment.sourceUrl || place.googleMapsUri || null,
-					linkedinUrl: enrichment.social.linkedin || null,
-					instagramUrl: enrichment.social.instagram || null,
-					facebookUrl: enrichment.social.facebook || null,
-					twitterUrl: enrichment.social.twitter || null,
-					tiktokUrl: enrichment.social.tiktok || null,
-					youtubeUrl: enrichment.social.youtube || null,
-					whatsappUrl: enrichment.social.whatsapp || null,
-					emailType: bestEmail ? classifyEmailType(bestEmail) : null,
-					verificationStatus: bestEmail
-						? enrichment.verification ||
-							getVerificationStatus(bestEmail, Boolean(enrichment.sourceUrl))
-						: 'No Email Found',
-					notes: notes || null,
-					phone: phone || null,
-					foundVia: place._source || null,
+				const latest = await this.jobRepo.findOne({
+					where: { id: jobId },
+					select: ['id', 'status'] as any,
 				});
-				leads.push(await this.leadRepo.save(lead));
+				if (!latest || latest.status !== FitnessLeadsJobStatus.RUNNING) {
+					this.logger.warn(`Job ${jobId} stopped externally — ending enrich worker`);
+					return;
+				}
+				const place = places[i];
+				try {
+					const lead = await this.buildLeadFromPlace(job, place, country, knownCities);
+					leads.push(await this.leadRepo.save(lead));
+				} catch (placeErr: any) {
+					enrichFailures += 1;
+					this.logger.warn(
+						`Lead enrich skipped for "${place?.displayName?.text || 'unknown'}": ${
+							placeErr?.message || placeErr
+						}`,
+					);
+					try {
+						// Still keep the place as a basic lead (no website enrich).
+						const fallback = await this.buildLeadFromPlace(job, place, country, knownCities, {
+							skipWebsiteEnrich: true,
+						});
+						leads.push(await this.leadRepo.save(fallback));
+					} catch (fallbackErr: any) {
+						this.logger.warn(
+							`Could not save fallback lead: ${fallbackErr?.message || fallbackErr}`,
+						);
+					}
+				}
 
 				const pct = 50 + Math.round(((i + 1) / Math.max(places.length, 1)) * 40);
 				job.leadsCount = leads.length;
 				await this.saveJob(job, pct, 'enrich_websites', leads);
 			}
-			await this.setStep(job, 'enrich_websites', 'done', `${leads.length} enriched`);
+			const enrichMsg =
+				enrichFailures > 0
+					? `${leads.length} leads (${enrichFailures} enrich issues skipped)`
+					: `${leads.length} enriched`;
+			await this.setStep(job, 'enrich_websites', 'done', enrichMsg);
 			await this.saveJob(job, 95, 'save', leads);
 
 			await this.setStep(job, 'save', 'running');
@@ -430,15 +488,155 @@ Rules:
 			job.currentStep = 'done';
 			job.finishedAt = new Date();
 			job.leadsCount = leads.length;
+			job.errorMessage =
+				enrichFailures > 0
+					? `Completed with ${enrichFailures} website enrich skip(s). Leads were still saved.`
+					: null;
 			await this.setStep(job, 'save', 'done', 'Saved');
 			await this.saveJob(job, 100, 'done', leads);
 		} catch (error: any) {
+			this.logger.error(`Fitness leads job ${jobId} failed: ${error?.message || error}`);
+			// If we already saved leads, finish as DONE so the UI can use them.
+			const savedCount = await this.leadRepo.count({ where: { jobId } });
+			if (savedCount > 0) {
+				const savedLeads = await this.leadRepo.find({
+					where: { jobId },
+					order: { createdAt: 'ASC' },
+					take: 2000,
+				});
+				job.status = FitnessLeadsJobStatus.DONE;
+				job.progressPercent = 100;
+				job.currentStep = 'done';
+				job.finishedAt = new Date();
+				job.leadsCount = savedCount;
+				job.errorMessage = `Completed with partial results after error: ${
+					error?.message || 'Job interrupted'
+				}`;
+				job.steps = (job.steps || []).map((s: any) => {
+					if (s.id === 'enrich_websites' && s.status === 'running') {
+						return {
+							...s,
+							status: 'done',
+							message: `${savedCount} leads (partial)`,
+							finishedAt: new Date().toISOString(),
+						};
+					}
+					if (s.id === 'save' && s.status !== 'done') {
+						return {
+							...s,
+							status: 'done',
+							message: 'Saved partial',
+							finishedAt: new Date().toISOString(),
+						};
+					}
+					return s;
+				});
+				await this.jobRepo.save(job);
+				await this.cacheJob(job, savedLeads);
+				return;
+			}
 			job.status = FitnessLeadsJobStatus.FAILED;
 			job.errorMessage = error?.message || 'Job failed';
 			job.finishedAt = new Date();
 			await this.jobRepo.save(job);
 			await this.cacheJob(job);
 		}
+	}
+
+	private async buildLeadFromPlace(
+		job: FitnessLeadsJob,
+		place: any,
+		country: { name: string },
+		knownCities: string[],
+		opts?: { skipWebsiteEnrich?: boolean },
+	) {
+		const phone = place.internationalPhoneNumber || place.nationalPhoneNumber || '';
+		let enrichment = {
+			emails: [] as string[],
+			sourceUrl: null as string | null,
+			social: {
+				instagram: '',
+				linkedin: '',
+				facebook: '',
+				twitter: '',
+				tiktok: '',
+				youtube: '',
+				whatsapp: '',
+			},
+			verification: null as string | null,
+			emailSource: null as string | null,
+		};
+		const websiteUri = place.websiteUri || '';
+		if (!opts?.skipWebsiteEnrich && job.enrichWebsites && websiteUri) {
+			try {
+				enrichment = await this.websiteEnrich.enrichFromWebsite(websiteUri, phone);
+			} catch (err: any) {
+				this.logger.warn(
+					`Website enrich failed for ${websiteUri}: ${err?.message || err}`,
+				);
+			}
+		}
+		const osmSocial = place._osmSocial || {};
+		enrichment.social = {
+			instagram: enrichment.social.instagram || osmSocial.instagram || '',
+			linkedin: enrichment.social.linkedin || osmSocial.linkedin || '',
+			facebook: enrichment.social.facebook || osmSocial.facebook || '',
+			twitter: enrichment.social.twitter || osmSocial.twitter || '',
+			tiktok: enrichment.social.tiktok || '',
+			youtube: enrichment.social.youtube || osmSocial.youtube || '',
+			whatsapp: enrichment.social.whatsapp || osmSocial.whatsapp || '',
+		};
+		if (!enrichment.social.whatsapp && phone) {
+			enrichment.social.whatsapp = extractWhatsAppFromPhone(phone);
+		}
+
+		const bestEmail = getBestEmail(enrichment.emails);
+		const city = extractCityFromAddress(
+			place.formattedAddress || '',
+			knownCities,
+			job.cities[0] || '',
+		);
+		const neighborhood = extractNeighborhood(place, city);
+		const address = String(
+			place.formattedAddress || place.shortFormattedAddress || '',
+		).trim();
+		const notes = [
+			enrichment.emailSource ? `Email source: ${enrichment.emailSource}` : null,
+			neighborhood ? `Area: ${neighborhood}` : null,
+			place._source ? `Found via: ${place._source}` : null,
+			opts?.skipWebsiteEnrich ? 'Enrich skipped (site error)' : null,
+		]
+			.filter(Boolean)
+			.join(' | ');
+
+		return this.leadRepo.create({
+			jobId: job.id,
+			userId: job.userId,
+			businessName: place.displayName?.text || 'Unknown',
+			businessType: classifyBusinessType(place.displayName?.text),
+			email: bestEmail,
+			country: country.name,
+			city,
+			neighborhood: neighborhood || null,
+			address: address || null,
+			website: websiteUri || null,
+			sourceUrl: enrichment.sourceUrl || place.googleMapsUri || null,
+			linkedinUrl: enrichment.social.linkedin || null,
+			instagramUrl: enrichment.social.instagram || null,
+			facebookUrl: enrichment.social.facebook || null,
+			twitterUrl: enrichment.social.twitter || null,
+			tiktokUrl: enrichment.social.tiktok || null,
+			youtubeUrl: enrichment.social.youtube || null,
+			whatsappUrl: enrichment.social.whatsapp || null,
+			emailType: bestEmail ? classifyEmailType(bestEmail) : null,
+			verificationStatus: bestEmail
+				? enrichment.verification ||
+					getVerificationStatus(bestEmail, Boolean(enrichment.sourceUrl))
+				: 'No Email Found',
+			notes: notes || null,
+			phone: phone || null,
+			foundVia: place._source || null,
+		});
 	}
 
 	private async setStep(job: FitnessLeadsJob, id: string, status: string, message?: string) {

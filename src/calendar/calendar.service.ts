@@ -1,7 +1,7 @@
 // src/modules/calendar/calendar.service.ts
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import {
 	CalendarCompletion,
 	CalendarEventType,
@@ -25,6 +25,11 @@ import { isUUID } from 'class-validator';
 import { ExpoPushService } from '../notification/expo-push.service';
 import { BadgeService } from '../notification/badge.service';
 import { NOTIFICATION_CHANNELS } from '../notification/notification-channels';
+
+/** Calendar due times match the rest of the product (reminders / PRS). */
+const CALENDAR_TZ = 'Africa/Cairo';
+/** Dedupe window so a delayed cron minute still fires once. */
+const NOTIFY_DEDUPE_MS = 90_000;
 
 
 const DEFAULT_TYPES = [
@@ -100,89 +105,177 @@ export class CalendarService {
 		private readonly badgeService: BadgeService,
 	) { }
 
-	private toDateKey(d: Date) {
-		const y = d.getFullYear();
-		const m = String(d.getMonth() + 1).padStart(2, '0');
-		const day = String(d.getDate()).padStart(2, '0');
-		return `${y}-${m}-${day}`;
+	private readonly logger = new Logger(CalendarService.name);
+	/** itemId_date_HH:MM → last sent ms (in-process dedupe; mirrors reminder window). */
+	private readonly recentlyNotified = new Map<string, number>();
+
+	private normalizeTime(raw?: string | null): string | null {
+		if (!raw) return null;
+		const m = String(raw).trim().match(/^(\d{1,2}):(\d{2})/);
+		if (!m) return null;
+		const h = Number(m[1]);
+		const min = Number(m[2]);
+		if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null;
+		return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 	}
 
-	private toTimeKey(d: Date) {
-		const h = String(d.getHours()).padStart(2, '0');
-		const m = String(d.getMinutes()).padStart(2, '0');
-		return `${h}:${m}`;
+	/** Calendar clock in Africa/Cairo — not the host machine TZ (often UTC on servers). */
+	private partsInCairo(d: Date) {
+		const parts = Object.fromEntries(
+			new Intl.DateTimeFormat('en-CA', {
+				timeZone: CALENDAR_TZ,
+				year: 'numeric',
+				month: '2-digit',
+				day: '2-digit',
+				hour: '2-digit',
+				minute: '2-digit',
+				hour12: false,
+			})
+				.formatToParts(d)
+				.filter((p) => p.type !== 'literal')
+				.map((p) => [p.type, p.value]),
+		) as Record<string, string>;
+
+		let hour = parts.hour ?? '00';
+		if (hour === '24') hour = '00';
+		const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
+		const timeKey = `${hour.padStart(2, '0')}:${(parts.minute ?? '00').padStart(2, '0')}`;
+		return { dateKey, timeKey };
 	}
 
-	private isSameOrAfter(a: string, b: string) {
-		return a >= b;
+	private daysBetween(a: string, b: string) {
+		const [ay, am, ad] = a.split('-').map(Number);
+		const [by, bm, bd] = b.split('-').map(Number);
+		const A = Date.UTC(ay, am - 1, ad);
+		const B = Date.UTC(by, bm - 1, bd);
+		return Math.round((B - A) / 86_400_000);
 	}
 
-	private isCalendarItemDueToday(item: CalendarItem, now: Date) {
-		const today = this.toDateKey(now);
-		const nowTime = this.toTimeKey(now);
+	private weekdayMon0(dateKey: string) {
+		const [y, m, d] = dateKey.split('-').map(Number);
+		const js = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
+		return js === 0 ? 6 : js - 1; // Mon=0 .. Sun=6
+	}
 
-		if (!item.startTime) return false;
-		if (item.startTime !== nowTime) return false;
-		if (!item.startDate) return false;
-		if (!this.isSameOrAfter(today, item.startDate)) return false;
+	/** Same occurrence rules as the mobile calendar grid. */
+	private occursOnDate(item: CalendarItem, dateKey: string) {
+		const start = String(item.startDate || '').slice(0, 10);
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
+		if (dateKey < start) return false;
 
-		switch (item.recurrence) {
+		const interval = Math.max(1, Number(item.recurrenceInterval) || 1);
+		const diff = this.daysBetween(start, dateKey);
+		const recurrence = item.recurrence || CalendarRecurrence.NONE;
+
+		switch (recurrence) {
 			case CalendarRecurrence.NONE:
-				return item.startDate === today;
-
+				return dateKey === start;
 			case CalendarRecurrence.DAILY:
-				return true;
-
+			case CalendarRecurrence.EVERY_X_DAYS:
+				return diff % interval === 0;
 			case CalendarRecurrence.WEEKLY:
-				return new Date(item.startDate).getDay() === now.getDay();
-
+				return diff % (7 * interval) === 0;
 			case CalendarRecurrence.MONTHLY:
-				return new Date(item.startDate).getDate() === now.getDate();
-
+				return Number(dateKey.slice(8, 10)) === Number(start.slice(8, 10));
 			case CalendarRecurrence.CUSTOM: {
-				const jsDay = now.getDay(); // 0..6
-				const mappedDay = jsDay === 0 ? 6 : jsDay - 1; // لو عندك نظام مختلف عدّله
-				return Array.isArray(item.recurrenceDays) && item.recurrenceDays.includes(mappedDay);
+				const mapped = this.weekdayMon0(dateKey);
+				return Array.isArray(item.recurrenceDays) && item.recurrenceDays.includes(mapped);
 			}
-
 			default:
 				return false;
 		}
 	}
 
+	private wasRecentlyNotified(key: string) {
+		const at = this.recentlyNotified.get(key);
+		if (!at) return false;
+		if (Date.now() - at > NOTIFY_DEDUPE_MS) {
+			this.recentlyNotified.delete(key);
+			return false;
+		}
+		return true;
+	}
 
+	private markNotified(key: string) {
+		const now = Date.now();
+		this.recentlyNotified.set(key, now);
+		for (const [k, at] of this.recentlyNotified) {
+			if (now - at > NOTIFY_DEDUPE_MS) this.recentlyNotified.delete(k);
+		}
+	}
+
+	/**
+	 * Due when Cairo clock hits the item's HH:MM on an occurrence day.
+	 * Also accepts the previous Cairo minute so a late cron tick still delivers once.
+	 */
+	private resolveDueFire(item: CalendarItem, now: Date): { dateKey: string; timeKey: string } | null {
+		const itemTime = this.normalizeTime(item.startTime);
+		if (!itemTime || !item.startDate) return null;
+
+		const candidates = [now, new Date(now.getTime() - 60_000)].map((d) => this.partsInCairo(d));
+		for (const { dateKey, timeKey } of candidates) {
+			if (timeKey !== itemTime) continue;
+			if (!this.occursOnDate(item, dateKey)) continue;
+			return { dateKey, timeKey };
+		}
+		return null;
+	}
 
 	async checkAndSendCalendarNotifications(now: Date = new Date()) {
-		const adminItems = await this.itemRepo.find({
-			where: {},
+		const items = await this.itemRepo.find({
+			where: { startTime: Not(IsNull()) },
 		});
 
-		for (const item of adminItems) {
+		let sent = 0;
+		for (const item of items) {
 			try {
 				if (!item.userId) continue;
-				if (!this.isCalendarItemDueToday(item, now)) continue;
 
-				const user = await this.userRepo.findOne({
-					where: { id: item.userId },
+				const due = this.resolveDueFire(item, now);
+				if (!due) continue;
+
+				const dedupeKey = `${item.id}_${due.dateKey}_${due.timeKey}`;
+				if (this.wasRecentlyNotified(dedupeKey)) continue;
+
+				const done = await this.completionRepo.findOne({
+					where: {
+						itemId: item.id,
+						date: due.dateKey,
+						userId: item.userId,
+						completed: true,
+					},
 				});
+				if (done) continue;
 
+				const user = await this.userRepo.findOne({ where: { id: item.userId } });
 				if (!user?.expoPushTokens?.length) continue;
 
-				await this.expoPushService.sendToTokens(user.expoPushTokens, {
+				const pushResult = await this.expoPushService.sendToTokens(user.expoPushTokens, {
 					title: item.title,
 					body: item.typeKey ? `📅 ${item.typeKey}` : '📅 Calendar reminder',
 					data: {
 						type: 'calendar_item',
 						itemId: item.id,
-						startDate: item.startDate,
-						startTime: item.startTime,
+						startDate: due.dateKey,
+						startTime: due.timeKey,
 					},
 					channelId: NOTIFICATION_CHANNELS.CALENDAR,
 					badge: await this.badgeService.getTotalBadge(item.userId),
 				});
+				if (pushResult.deadTokens?.length) {
+					const next = user.expoPushTokens.filter((t) => !pushResult.deadTokens.includes(t));
+					await this.userRepo.update(user.id, { expoPushTokens: next });
+				}
+
+				this.markNotified(dedupeKey);
+				sent += 1;
 			} catch (error) {
-				console.error(`Failed to send calendar notification for item ${item.id}`, error);
+				this.logger.error(`Failed to send calendar notification for item ${item.id}`, error as any);
 			}
+		}
+
+		if (sent > 0) {
+			this.logger.log(`Calendar push: sent ${sent} notification(s)`);
 		}
 	}
 	async getState(user: any) {
@@ -405,14 +498,13 @@ export class CalendarService {
 			typeId,
 			typeKey,
 			startDate: dto.startDate,
-			startTime: dto.startTime ?? null,
+			startTime: this.normalizeTime(dto.startTime) ?? null,
 			recurrence: dto.recurrence ?? CalendarRecurrence.NONE,
 			recurrenceInterval: dto.recurrenceInterval ?? 1,
 			recurrenceDays: dto.recurrenceDays ?? [],
 			userId: user.id,
 			adminId,
 		});
-
 		return this.itemRepo.save(item);
 	}
 
@@ -447,7 +539,8 @@ export class CalendarService {
 			typeId: nextTypeId,
 			typeKey: nextTypeKey,
 			startDate: dto.startDate ?? item.startDate,
-			startTime: dto.startTime !== undefined ? dto.startTime : item.startTime,
+			startTime:
+				dto.startTime !== undefined ? this.normalizeTime(dto.startTime) : item.startTime,
 			recurrence: dto.recurrence ?? item.recurrence,
 			recurrenceInterval: dto.recurrenceInterval ?? item.recurrenceInterval,
 			recurrenceDays: dto.recurrenceDays ?? item.recurrenceDays,

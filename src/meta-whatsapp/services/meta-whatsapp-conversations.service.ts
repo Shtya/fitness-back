@@ -111,7 +111,23 @@ export class MetaWhatsAppConversationsService {
 	}
 
 	serializeMessage(m: MetaWhatsAppMessage) {
-		const hasMedia = Boolean(m.mediaId || m.mediaUrl);
+		let mediaId = m.mediaId;
+		let mediaMimeType = m.mediaMimeType;
+		const raw = m.rawPayload;
+		if (!mediaId && raw && typeof raw === 'object') {
+			const bucket =
+				raw.sticker ||
+				raw.image ||
+				raw.video ||
+				raw.audio ||
+				raw.document ||
+				null;
+			if (bucket?.id) {
+				mediaId = String(bucket.id);
+				mediaMimeType = bucket.mime_type || mediaMimeType;
+			}
+		}
+		const hasMedia = Boolean(mediaId || m.mediaUrl);
 		return {
 			id: m.id,
 			conversationId: m.conversationId,
@@ -125,8 +141,8 @@ export class MetaWhatsAppConversationsService {
 			status: m.status,
 			errorCode: m.errorCode,
 			errorMessage: m.errorMessage,
-			mediaId: m.mediaId,
-			mediaMimeType: m.mediaMimeType,
+			mediaId: mediaId || null,
+			mediaMimeType: mediaMimeType || null,
 			mediaFileName: m.mediaFileName,
 			mediaUrl: hasMedia ? `/meta-whatsapp/messages/${m.id}/media` : null,
 			hasMedia,

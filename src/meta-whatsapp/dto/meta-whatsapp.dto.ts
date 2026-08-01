@@ -2,6 +2,7 @@ import {
 	IsArray,
 	IsBoolean,
 	IsInt,
+	IsObject,
 	IsOptional,
 	IsString,
 	IsUUID,
@@ -158,6 +159,112 @@ export class CreateMetaTemplateDto {
 	exampleHeaderParams?: string[];
 }
 
+export class EditMetaTemplateDto {
+	@IsOptional()
+	@IsString()
+	@MinLength(3)
+	category?: string;
+
+	@IsString()
+	@MinLength(1)
+	bodyText: string;
+
+	@IsOptional()
+	@IsString()
+	headerFormat?: string;
+
+	@IsOptional()
+	@IsString()
+	headerText?: string;
+
+	@IsOptional()
+	@IsString()
+	headerHandle?: string;
+
+	@IsOptional()
+	@IsObject()
+	existingHeaderComponent?: Record<string, any>;
+
+	@IsOptional()
+	@IsString()
+	footerText?: string;
+
+	@IsOptional()
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => CreateMetaTemplateButtonDto)
+	buttons?: CreateMetaTemplateButtonDto[];
+
+	@IsOptional()
+	@IsArray()
+	@IsString({ each: true })
+	exampleBodyParams?: string[];
+
+	@IsOptional()
+	@IsArray()
+	@IsString({ each: true })
+	exampleHeaderParams?: string[];
+}
+
+export class CloneMetaTemplatesDto {
+	/** Source template names on Meta (default: so7ba_fitness_outreach_ar/en). */
+	@IsOptional()
+	@IsArray()
+	@IsString({ each: true })
+	names?: string[];
+
+	/** Target category (default UTILITY). */
+	@IsOptional()
+	@IsString()
+	category?: string;
+
+	/** Appended to source name when nameMap has no entry (default _util). */
+	@IsOptional()
+	@IsString()
+	nameSuffix?: string;
+
+	/** Optional explicit new-name map: { sourceName: newName }. */
+	@IsOptional()
+	@IsObject()
+	nameMap?: Record<string, string>;
+}
+
+export class CreateFromMetaLibraryDto {
+	@IsString()
+	@MinLength(3)
+	@MaxLength(512)
+	name: string;
+
+	@IsString()
+	@MinLength(2)
+	language: string;
+
+	@IsString()
+	@MinLength(1)
+	libraryTemplateName: string;
+
+	@IsOptional()
+	@IsString()
+	category?: string;
+
+	@IsOptional()
+	@IsArray()
+	libraryTemplateButtonInputs?: any[];
+
+	/** Raw library buttons — used to auto-build button inputs when not provided */
+	@IsOptional()
+	@IsArray()
+	buttons?: any[];
+
+	@IsOptional()
+	@IsString()
+	buttonUrl?: string;
+
+	@IsOptional()
+	@IsString()
+	buttonPhone?: string;
+}
+
 export class MetaBulkLeadRefDto {
 	@IsOptional()
 	@IsUUID()
@@ -172,11 +279,23 @@ export class MetaBulkLeadRefDto {
 	displayName?: string;
 }
 
+export class CheckMetaBulkPhonesDto {
+	@IsArray()
+	@IsString({ each: true })
+	phones: string[];
+}
+
 export class StartMetaBulkDto {
+	/** Load all phones from a Lead Scout job sheet (preferred for full-sheet sends). */
+	@IsOptional()
+	@IsUUID()
+	jobId?: string;
+
+	@IsOptional()
 	@IsArray()
 	@ValidateNested({ each: true })
 	@Type(() => MetaBulkLeadRefDto)
-	recipients: MetaBulkLeadRefDto[];
+	recipients?: MetaBulkLeadRefDto[];
 
 	@IsString()
 	@MinLength(1)
@@ -186,9 +305,18 @@ export class StartMetaBulkDto {
 	@IsString()
 	language?: string;
 
+	/** Static Meta components (used when no per-lead variable map). */
 	@IsOptional()
 	@IsArray()
 	components?: any[];
+
+	/**
+	 * Map template placeholders to FitnessLead fields.
+	 * Example: { "BODY:1": "businessName", "BODY:2": "city", "BUTTON:0:1": "website" }
+	 */
+	@IsOptional()
+	@IsObject()
+	variableMap?: Record<string, string>;
 
 	@IsOptional()
 	@IsInt()

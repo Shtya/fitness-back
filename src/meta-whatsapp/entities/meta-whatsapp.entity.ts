@@ -194,6 +194,34 @@ export class MetaWhatsAppMessage {
 	@Column({ name: 'raw_payload', type: 'jsonb', nullable: true })
 	rawPayload: any | null;
 
+	@Column({ name: 'pricing_category', type: 'varchar', length: 32, nullable: true })
+	pricingCategory: string | null;
+
+	@Column({ name: 'pricing_type', type: 'varchar', length: 32, nullable: true })
+	pricingType: string | null;
+
+	@Column({ name: 'pricing_model', type: 'varchar', length: 64, nullable: true })
+	pricingModel: string | null;
+
+	@Column({ type: 'boolean', nullable: true })
+	billable: boolean | null;
+
+	@Column({ name: 'recipient_country', type: 'varchar', length: 8, nullable: true })
+	recipientCountry: string | null;
+
+	@Column({
+		name: 'estimated_cost_usd',
+		type: 'numeric',
+		precision: 12,
+		scale: 6,
+		nullable: true,
+		transformer: {
+			to: (v: number | null) => v,
+			from: (v: string | number | null) => (v == null ? null : Number(v)),
+		},
+	})
+	estimatedCostUsd: number | null;
+
 	@Column({ name: 'sent_by', type: 'uuid', nullable: true })
 	sentBy: string | null;
 

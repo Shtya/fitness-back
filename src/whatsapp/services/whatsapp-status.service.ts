@@ -414,11 +414,28 @@ export class WhatsAppStatusService {
 		await provider.viewStatus(statusProviderId, senderWaId);
 		return { ok: true };
 	}
+	private async findStatusRow(accountId: string, statusIdValue: string) {
+		const id = String(statusIdValue || '').trim();
+		if (!id) return null;
+		const byPk = await this.repo.findOne({ where: { id, accountId } });
+		if (byPk) return byPk;
+		const byProvider = await this.repo.findOne({
+			where: { providerStatusId: id, accountId },
+		});
+		if (byProvider) return byProvider;
+		const keys = new Set(statusIdentityKeys(id));
+		if (!keys.size) return null;
+		const rows = await this.repo.find({ where: { accountId } });
+		return (
+			rows.find(row =>
+				statusIdentityKeys(row.providerStatusId).some(key => keys.has(key)),
+			) || null
+		);
+	}
+
 	async resolveContent(user: User, accountId: string, statusIdValue: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
-		const status = await this.repo.findOne({
-			where: { id: statusIdValue, accountId },
-		});
+		const status = await this.findStatusRow(accountId, statusIdValue);
 		if (!status) throw new NotFoundException('WhatsApp status not found');
 		if (normalizeStatusType(status.type) === 'text') {
 			throw new BadRequestException('Text status does not have media content');
@@ -466,16 +483,10 @@ export class WhatsAppStatusService {
 					: await provider.downloadMedia(status.providerStatusId);
 		} catch (error: any) {
 			const detail = String(error?.message || error || '');
-			const missing =
-				/not found|could not be downloaded|unavailable|thumbnail only/i.test(detail);
-			if (missing) {
-				// Deleted/expired stories still linger in DB until refresh; drop them here.
-				if (status.mediaPath) {
-					const cached = path.resolve(process.cwd(), status.mediaPath);
-					await fs.unlink(cached).catch(() => undefined);
-				}
-				await this.repo.delete(status.id);
-			}
+			// Do NOT delete the DB row here. Thumbnail prefetch and transient WhatsApp
+			// store misses ("Status message not found…") would wipe stories that still
+			// appear in the list, causing "WhatsApp status not found" on open.
+			// Expired/deleted stories are cleaned up by status refresh instead.
 			throw new BadRequestException(
 				detail && detail !== 'Object'
 					? detail

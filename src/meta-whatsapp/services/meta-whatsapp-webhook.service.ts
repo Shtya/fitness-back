@@ -126,6 +126,37 @@ export class MetaWhatsAppWebhookService {
 				message.errorMessage = status.errors[0].title || status.errors[0].message || null;
 				message.status = MetaWaMessageStatus.FAILED;
 			}
+
+			const pricing = status.pricing || status.conversation?.origin || null;
+			if (status.pricing) {
+				const category = String(
+					status.pricing.category || status.pricing.pricing_category || '',
+				)
+					.toUpperCase()
+					.trim();
+				const pricingType = String(status.pricing.type || status.pricing.pricing_type || '')
+					.toUpperCase()
+					.trim();
+				const pricingModel = String(
+					status.pricing.pricing_model || status.pricing.model || '',
+				)
+					.toUpperCase()
+					.trim();
+				if (category) message.pricingCategory = category;
+				if (pricingType) message.pricingType = pricingType;
+				if (pricingModel) message.pricingModel = pricingModel;
+				if (typeof status.pricing.billable === 'boolean') {
+					message.billable = status.pricing.billable;
+				} else if (pricingType) {
+					message.billable = pricingType === 'REGULAR';
+				}
+			} else if (pricing && typeof pricing === 'object') {
+				const category = String(pricing.type || pricing.category || '')
+					.toUpperCase()
+					.trim();
+				if (category) message.pricingCategory = category;
+			}
+
 			message.rawPayload = { ...(message.rawPayload || {}), status };
 			await this.messageRepo.save(message);
 			count += 1;
@@ -231,21 +262,42 @@ export class MetaWhatsAppWebhookService {
 			const body = msg.text?.body || '';
 			return { type, body, preview: body, mediaId: null, mimeType: null, fileName: null };
 		}
+		if (type === 'video') {
+			return {
+				type,
+				body: msg.video?.caption || '',
+				preview: msg.video?.caption || 'Video',
+				mediaId: msg.video?.id || null,
+				mimeType: msg.video?.mime_type || null,
+				fileName: null,
+			};
+		}
+		if (type === 'sticker') {
+			return {
+				type: 'sticker',
+				body: '',
+				preview: 'Sticker',
+				mediaId: msg.sticker?.id || null,
+				mimeType: msg.sticker?.mime_type || 'image/webp',
+				fileName: null,
+			};
+		}
 		if (type === 'image') {
 			return {
 				type,
-				body: msg.image?.caption || '[image]',
-				preview: msg.image?.caption || '[image]',
+				body: msg.image?.caption || '',
+				preview: msg.image?.caption || 'Photo',
 				mediaId: msg.image?.id || null,
 				mimeType: msg.image?.mime_type || null,
 				fileName: null,
 			};
 		}
 		if (type === 'audio' || type === 'voice') {
+			const isVoice = type === 'voice' || Boolean(msg.audio?.voice);
 			return {
-				type: type === 'voice' ? 'voice' : 'audio',
-				body: '[audio]',
-				preview: '[audio]',
+				type: isVoice ? 'voice' : 'audio',
+				body: '',
+				preview: isVoice ? 'Voice message' : 'Audio',
 				mediaId: msg.audio?.id || null,
 				mimeType: msg.audio?.mime_type || null,
 				fileName: null,
@@ -262,31 +314,64 @@ export class MetaWhatsAppWebhookService {
 				fileName: name,
 			};
 		}
-		if (type === 'video') {
+		if (type === 'reaction') {
+			const emoji = msg.reaction?.emoji || '👍';
 			return {
-				type,
-				body: msg.video?.caption || '[video]',
-				preview: msg.video?.caption || '[video]',
-				mediaId: msg.video?.id || null,
-				mimeType: msg.video?.mime_type || null,
+				type: 'reaction',
+				body: emoji,
+				preview: `Reacted ${emoji}`,
+				mediaId: null,
+				mimeType: null,
+				fileName: null,
+			};
+		}
+		if (type === 'location') {
+			const name = msg.location?.name || msg.location?.address || 'Location';
+			return {
+				type: 'location',
+				body: name,
+				preview: name,
+				mediaId: null,
+				mimeType: null,
+				fileName: null,
+			};
+		}
+		if (type === 'contacts') {
+			const name = msg.contacts?.[0]?.name?.formatted_name || 'Contact';
+			return {
+				type: 'contacts',
+				body: name,
+				preview: name,
+				mediaId: null,
+				mimeType: null,
+				fileName: null,
+			};
+		}
+		if (type === 'unsupported' || type === 'system') {
+			return {
+				type: 'unsupported',
+				body: '',
+				preview: 'Unsupported message',
+				mediaId: null,
+				mimeType: null,
 				fileName: null,
 			};
 		}
 		if (type === 'button') {
-			const body = msg.button?.text || msg.button?.payload || '[button]';
+			const body = msg.button?.text || msg.button?.payload || 'Button reply';
 			return { type, body, preview: body, mediaId: null, mimeType: null, fileName: null };
 		}
 		if (type === 'interactive') {
 			const body =
 				msg.interactive?.button_reply?.title ||
 				msg.interactive?.list_reply?.title ||
-				'[interactive]';
+				'Interactive reply';
 			return { type, body, preview: body, mediaId: null, mimeType: null, fileName: null };
 		}
 		return {
 			type,
-			body: `[${type}]`,
-			preview: `[${type}]`,
+			body: '',
+			preview: type ? String(type) : 'Message',
 			mediaId: null,
 			mimeType: null,
 			fileName: null,

@@ -130,13 +130,17 @@ async processDueReminders(now: Date = new Date()) {
       try {
         const user = rem.user ?? await this.userRepo.findOne({ where: { id: rem.userId } });
         if (user?.expoPushTokens?.length) {
-          await this.expoPushService.sendToTokens(user.expoPushTokens, {
+          const pushResult = await this.expoPushService.sendToTokens(user.expoPushTokens, {
             title: rem.title || 'Reminder',
             body: rem.description ?? '🔔 You have a reminder',
             data: { type: 'reminder', reminderId: rem.id },
             channelId: NOTIFICATION_CHANNELS.REMINDERS,
             badge: await this.badgeService.getTotalBadge(rem.userId),
           });
+          if (pushResult.deadTokens?.length) {
+            const next = user.expoPushTokens.filter((t) => !pushResult.deadTokens.includes(t));
+            await this.userRepo.update(user.id, { expoPushTokens: next });
+          }
         }
       } catch (expoErr) {
         this.logger.error(`Expo push failed for reminder ${rem.id}:`, expoErr);

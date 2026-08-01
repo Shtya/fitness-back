@@ -25,6 +25,55 @@ import { MetaWhatsAppConversationsService } from './meta-whatsapp-conversations.
 import { MetaWhatsAppActivityService } from './meta-whatsapp-activity.service';
 import { MetaWhatsAppMediaService } from './meta-whatsapp-media.service';
 
+const URL_BUTTON_PARAM_SAFE = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+$/;
+
+/** Meta #132018 — dynamic URL button params must keep the final URL valid. */
+export function assertValidTemplateUrlButtonParams(
+	templateComponents: any[] | null | undefined,
+	sendComponents?: any[] | null,
+) {
+	const send = Array.isArray(sendComponents) ? sendComponents : [];
+	const buttonSends = send.filter(
+		(c) =>
+			String(c?.type || '').toLowerCase() === 'button' &&
+			String(c?.sub_type || '').toLowerCase() === 'url',
+	);
+	if (!buttonSends.length) return;
+
+	const tplButtons =
+		(Array.isArray(templateComponents)
+			? templateComponents.find((c) => String(c?.type || '').toUpperCase() === 'BUTTONS')
+					?.buttons
+			: null) || [];
+
+	for (const btnSend of buttonSends) {
+		const idx = Number(btnSend.index ?? 0);
+		const param = String(btnSend?.parameters?.[0]?.text || '').trim();
+		if (!param) {
+			throw new BadRequestException('URL button parameter is required');
+		}
+		if (/\s/.test(param) || /[^\x00-\x7F]/.test(param) || !URL_BUTTON_PARAM_SAFE.test(param)) {
+			throw new BadRequestException(
+				'URL button parameter is invalid. Use only Latin letters, numbers, and URL-safe characters (e.g. demo or user/123) — no spaces or Arabic text. (Meta #132018)',
+			);
+		}
+		const urlTemplate = String(tplButtons[idx]?.url || '');
+		if (urlTemplate.includes('{{')) {
+			const filled = urlTemplate.replace(/\{\{\s*[\w]+\s*\}\}/g, () => param);
+			try {
+				const u = new URL(filled);
+				if (!/^https?:$/i.test(u.protocol)) {
+					throw new Error('bad protocol');
+				}
+			} catch {
+				throw new BadRequestException(
+					`URL button parameter generates an invalid URL. Check Button ${idx + 1} value. (Meta #132018)`,
+				);
+			}
+		}
+	}
+}
+
 /** Build readable template text from Meta template definition + send parameters. */
 export function renderFilledTemplateText(
 	templateComponents: any[] | null | undefined,
@@ -64,6 +113,62 @@ export function renderFilledTemplateText(
 	const bodyParams = sendBody?.parameters || [];
 	if (bodyParams.length) return bodyParams.map((p: any) => p?.text).filter(Boolean).join(' ');
 	return null;
+}
+
+/** Resolve template CTA / quick-reply buttons with dynamic URL params filled. */
+export function resolveTemplateButtons(
+	templateComponents: any[] | null | undefined,
+	sendComponents?: any[] | null,
+): Array<{ type: string; text: string; url?: string; phone_number?: string }> {
+	const comps = Array.isArray(templateComponents) ? templateComponents : [];
+	const buttonBlock = comps.find((c) => String(c?.type || '').toUpperCase() === 'BUTTONS');
+	const buttons = Array.isArray(buttonBlock?.buttons) ? buttonBlock.buttons : [];
+	if (!buttons.length) return [];
+
+	const send = Array.isArray(sendComponents) ? sendComponents : [];
+	const urlSends = send.filter(
+		(c) =>
+			String(c?.type || '').toLowerCase() === 'button' &&
+			String(c?.sub_type || '').toLowerCase() === 'url',
+	);
+
+	return buttons.map((btn: any, index: number) => {
+		const type = String(btn?.type || 'QUICK_REPLY').toUpperCase();
+		const text = String(btn?.text || '').trim();
+		let url = String(btn?.url || '').trim();
+		const phone_number = String(btn?.phone_number || '').trim();
+
+		if (type === 'URL' && url.includes('{{')) {
+			const sendBtn =
+				urlSends.find((s) => Number(s.index ?? -1) === index) ||
+				urlSends.find((s) => Number(s.index ?? 0) === index) ||
+				urlSends[0];
+			const param = String(sendBtn?.parameters?.[0]?.text || '').trim();
+			if (param) {
+				url = url.replace(/\{\{\s*[\w]+\s*\}\}/g, () => param);
+			}
+		}
+
+		return {
+			type,
+			text,
+			...(url ? { url } : {}),
+			...(phone_number ? { phone_number } : {}),
+		};
+	});
+}
+
+/** Normalize stored templateComponents (legacy array or v2 object). */
+export function unwrapTemplateSendComponents(stored: any): any[] {
+	if (Array.isArray(stored)) return stored;
+	if (stored && Array.isArray(stored.send)) return stored.send;
+	if (stored && Array.isArray(stored.parameters)) return stored.parameters;
+	return [];
+}
+
+export function unwrapStoredTemplateButtons(stored: any) {
+	if (stored && Array.isArray(stored.buttons)) return stored.buttons;
+	return [];
 }
 
 @Injectable()
@@ -130,21 +235,25 @@ export class MetaWhatsAppMessagingService {
 		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
 
 		let previewBody = '';
+		let templateDef: any = null;
 		try {
 			const templates = await this.configService.listTemplates();
-			const def = templates.find(
-				(t: any) =>
-					t.name === templateName &&
-					String(t.language || '') === language,
-			) || templates.find((t: any) => t.name === templateName);
-			previewBody = renderFilledTemplateText(def?.components, dto.components) || '';
+			templateDef =
+				templates.find(
+					(t: any) =>
+						t.name === templateName &&
+						String(t.language || '') === language,
+				) || templates.find((t: any) => t.name === templateName);
+			previewBody = renderFilledTemplateText(templateDef?.components, dto.components) || '';
 		} catch {
 			previewBody = '';
 		}
+		assertValidTemplateUrlButtonParams(templateDef?.components, dto.components);
 		if (!previewBody) {
 			previewBody = renderFilledTemplateText(null, dto.components) || templateName;
 		}
 
+		const resolvedButtons = resolveTemplateButtons(templateDef?.components, dto.components);
 		const message = this.messageRepo.create({
 			conversationId: conversation.id,
 			direction: MetaWaMessageDirection.OUTBOUND,
@@ -152,7 +261,11 @@ export class MetaWhatsAppMessagingService {
 			body: previewBody,
 			templateName,
 			templateLanguage: language,
-			templateComponents: dto.components || null,
+			templateComponents: {
+				v: 2,
+				send: dto.components || [],
+				buttons: resolvedButtons,
+			},
 			status: MetaWaMessageStatus.QUEUED,
 			sentBy: userId || null,
 			leadId: lead?.id || conversation.leadId,
@@ -198,7 +311,22 @@ export class MetaWhatsAppMessagingService {
 		},
 	) {
 		if (!input.buffer?.length) throw new BadRequestException('File is required');
-		const mimeType = input.mimeType || 'application/octet-stream';
+		let mimeType = input.mimeType || 'application/octet-stream';
+		let fileName = input.fileName;
+		let buffer = input.buffer;
+
+		if (input.asVoice || mimeType.startsWith('audio/')) {
+			const prepared = await this.media.ensureMetaAudioBuffer(
+				buffer,
+				mimeType,
+				fileName,
+				Boolean(input.asVoice),
+			);
+			buffer = prepared.buffer;
+			mimeType = prepared.mimeType;
+			fileName = prepared.fileName;
+		}
+
 		const messageType = input.asVoice
 			? 'voice'
 			: this.media.guessMessageType(mimeType);
@@ -211,36 +339,44 @@ export class MetaWhatsAppMessagingService {
 			conversationId: conversation.id,
 			direction: MetaWaMessageDirection.OUTBOUND,
 			messageType,
-			body: input.caption || `[${messageType}]`,
+			body: input.caption || null,
 			status: MetaWaMessageStatus.QUEUED,
 			sentBy: userId || null,
 			leadId: lead?.id || conversation.leadId,
 			mediaMimeType: mimeType,
-			mediaFileName: input.fileName,
+			mediaFileName: fileName,
 		});
 		await this.messageRepo.save(message);
 
 		try {
 			const saved = await this.media.saveLocalFile(
 				message.id,
-				input.buffer,
+				buffer,
 				mimeType,
-				input.fileName,
+				fileName,
 			);
 			message.mediaUrl = saved.relativePath;
 
 			const uploaded = await this.cloudApi.uploadMedia(
 				runtime.secrets.accessToken,
 				runtime.config.phoneNumberId!,
-				input.buffer,
+				buffer,
 				mimeType,
-				input.fileName,
+				fileName,
 			);
 			message.mediaId = uploaded.mediaId;
 
 			let sent;
 			if (messageType === 'image') {
 				sent = await this.cloudApi.sendImageById(
+					runtime.secrets.accessToken,
+					runtime.config.phoneNumberId!,
+					conversation.waId,
+					uploaded.mediaId,
+					input.caption,
+				);
+			} else if (messageType === 'video') {
+				sent = await this.cloudApi.sendVideoById(
 					runtime.secrets.accessToken,
 					runtime.config.phoneNumberId!,
 					conversation.waId,
@@ -271,7 +407,14 @@ export class MetaWhatsAppMessagingService {
 			await this.messageRepo.save(message);
 			await this.conversations.touchConversation(
 				conversation,
-				input.caption || `[${messageType}]`,
+				input.caption ||
+					(messageType === 'image'
+						? 'Photo'
+						: messageType === 'video'
+							? 'Video'
+							: messageType === 'voice' || messageType === 'audio'
+								? 'Voice message'
+								: fileName || 'Document'),
 			);
 			await this.activity.log('message.sent.media', userId, {
 				conversationId: conversation.id,

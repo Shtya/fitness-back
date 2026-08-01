@@ -79,6 +79,9 @@ export class FitnessLeadsJob {
 	@Column({ name: 'leads_count', type: 'int', default: 0 })
 	leadsCount: number;
 
+	@Column({ name: 'is_favorite', type: 'boolean', default: false })
+	isFavorite: boolean;
+
 	@Column({ name: 'error_message', type: 'text', nullable: true })
 	errorMessage: string | null;
 

@@ -82,6 +82,28 @@ export class FitnessLeadsController {
 		return this.service.getJob(jobId, req.user?.id);
 	}
 
+	@Put('jobs/:jobId/favorite')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	setFavorite(
+		@Req() req: any,
+		@Param('jobId') jobId: string,
+		@Body() body: { isFavorite?: boolean },
+	) {
+		return this.service.setJobFavorite(jobId, req.user?.id, Boolean(body?.isFavorite));
+	}
+
+	@Delete('jobs/:jobId')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	deleteJob(@Req() req: any, @Param('jobId') jobId: string) {
+		return this.service.deleteJob(jobId, req.user?.id);
+	}
+
+	@Post('jobs/:jobId/finalize')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	finalizeJob(@Req() req: any, @Param('jobId') jobId: string) {
+		return this.service.finalizeJob(jobId, req.user?.id);
+	}
+
 	@Get('leads')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	listLeads(@Req() req: any, @Query('jobId') jobId?: string) {

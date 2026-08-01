@@ -36,7 +36,7 @@ export class StartFitnessLeadsJobDto {
 	@Type(() => Number)
 	@IsInt()
 	@Min(5)
-	@Max(120)
+	@Max(1000)
 	maxPlaces?: number;
 }
 

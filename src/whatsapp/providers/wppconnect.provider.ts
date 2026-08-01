@@ -1198,22 +1198,89 @@ export class WppConnectProvider implements WhatsAppProvider {
 
 	/**
 	 * Download status/story media at full quality.
-	 * Status IDs often need `false_status@broadcast_<id>_<participant@c.us>`.
+	 * Status IDs often need `false_status@broadcast_<id>_<participant@c.us|@lid>`.
 	 * Never return message.body — that is only a tiny WhatsApp thumbnail.
 	 */
 	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {
 		const statusId = String(providerStatusId || '');
 		if (!statusId) throw new Error('downloadStatus: status id is required');
-		const sender = senderWaId ? String(senderWaId) : '';
+		const participantFromId =
+			statusId.match(/status@broadcast_[^_]+_(.+)$/i)?.[1]?.trim() || '';
+		const senderSeed = String(senderWaId || participantFromId || '').trim();
+		const senderCandidates = senderSeed
+			? await this.resolveSendableChatIds(senderSeed)
+			: [];
+		if (participantFromId && !senderCandidates.includes(participantFromId)) {
+			senderCandidates.unshift(participantFromId);
+		}
 
 		try {
 			const dataUri = await this.client.page.evaluate(
-				async (targetId: string, targetSender: string) => {
+				async (targetId: string, targetSenders: string[]) => {
 					const browserWindow: any = window as any;
 					const WPP = browserWindow.WPP;
 					if (!WPP) throw new Error('WhatsApp WPP is not ready');
 
 					const MIN_FULL_BYTES = 3_000;
+					const senders = Array.isArray(targetSenders)
+						? targetSenders.filter(Boolean).map(String)
+						: [];
+
+					const bare = (value: string) =>
+						String(value || '')
+							.trim()
+							.toLowerCase()
+							.replace(/@.*/, '');
+
+					const identityTokens = (value: unknown): string[] => {
+						const text = String(value || '').trim().toLowerCase();
+						if (!text) return [];
+						const tokens = new Set<string>([text, bare(text)]);
+						try {
+							const contact =
+								WPP?.whatsapp?.ContactStore?.get?.(text) ||
+								WPP?.contact?.get?.(text);
+							const extras = [
+								contact?.id?._serialized,
+								contact?.id,
+								contact?.phoneNumber?._serialized,
+								contact?.phoneNumber,
+								contact?.lid?._serialized,
+								contact?.lid,
+							];
+							for (const extra of extras) {
+								const serialized = String(
+									extra?._serialized || extra || '',
+								).trim();
+								if (!serialized) continue;
+								tokens.add(serialized.toLowerCase());
+								tokens.add(bare(serialized));
+							}
+						} catch {
+							/* contact lookup optional */
+						}
+						return [...tokens].filter(Boolean);
+					};
+
+					const senderAliasSet = new Set<string>();
+					for (const sender of senders) {
+						for (const token of identityTokens(sender)) senderAliasSet.add(token);
+					}
+					const participantFromTarget =
+						targetId.match(/status@broadcast_[^_]+_(.+)$/i)?.[1] || '';
+					for (const token of identityTokens(participantFromTarget)) {
+						senderAliasSet.add(token);
+					}
+
+					const sameIdentity = (left: unknown, right?: unknown) => {
+						const leftTokens = identityTokens(left);
+						if (!leftTokens.length) return false;
+						if (right != null && String(right)) {
+							const rightTokens = new Set(identityTokens(right));
+							return leftTokens.some(token => rightTokens.has(token));
+						}
+						return leftTokens.some(token => senderAliasSet.has(token));
+					};
 
 					const participantOf = (msg: any, fallback = '') =>
 						String(
@@ -1241,12 +1308,31 @@ export class WppConnectProvider implements WhatsAppProvider {
 						const text = String(value || '');
 						const statusMatch = text.match(/status@broadcast_([^_]+)/i);
 						if (statusMatch?.[1]) return statusMatch[1];
-						const hexMatch = text.match(/_([0-9A-Fa-f]{10,}|3A[0-9A-Fa-f]+)(?:_|$)/);
+						const hexMatch = text.match(
+							/_([0-9A-Fa-f]{10,}|3A[0-9A-Fa-f]+)(?:_|$)/,
+						);
 						if (hexMatch?.[1]) return hexMatch[1];
 						return text;
 					};
 
 					const targetKey = extractKey(targetId);
+
+					const alternateStatusIds = (): string[] => {
+						const ids = new Set<string>([targetId]);
+						if (!targetKey) return [...ids];
+						const participants = [
+							...senders,
+							participantFromTarget,
+							...[...senderAliasSet].filter(token => token.includes('@')),
+						].filter(Boolean);
+						for (const participant of participants) {
+							ids.add(`false_status@broadcast_${targetKey}_${participant}`);
+							ids.add(`true_status@broadcast_${targetKey}_${participant}`);
+						}
+						ids.add(`false_status@broadcast_${targetKey}`);
+						ids.add(`true_status@broadcast_${targetKey}`);
+						return [...ids];
+					};
 
 					const idCandidates = (msg: any): string[] => {
 						const values = [
@@ -1254,7 +1340,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 							typeof msg?.id === 'string' ? msg.id : null,
 							msg?.rowId != null ? String(msg.rowId) : null,
 							msg?.id?.id != null ? String(msg.id.id) : null,
-							buildFullId(msg, targetSender),
+							buildFullId(msg, senders[0] || ''),
 						];
 						return [...new Set(values.filter(Boolean).map(String))];
 					};
@@ -1262,17 +1348,17 @@ export class WppConnectProvider implements WhatsAppProvider {
 					const matches = (msg: any) => {
 						const candidates = idCandidates(msg);
 						if (candidates.includes(targetId)) return true;
-						if (targetKey && candidates.some(c => c.includes(targetKey))) return true;
+						if (targetKey && candidates.some(c => c.includes(targetKey))) {
+							return true;
+						}
 						if (msg?.id?.id && String(msg.id.id) === targetKey) return true;
-						if (targetSender) {
+						if (senderAliasSet.size) {
 							const participant = participantOf(msg);
-							const senderMatch =
-								participant === targetSender ||
-								participant.includes(targetSender) ||
-								targetSender.includes(participant) ||
-								participant.replace(/@.*/, '') ===
-									targetSender.replace(/@.*/, '');
-							if (senderMatch && targetKey && String(msg?.id?.id || '') === targetKey) {
+							if (
+								sameIdentity(participant) &&
+								targetKey &&
+								String(msg?.id?.id || '') === targetKey
+							) {
 								return true;
 							}
 						}
@@ -1294,7 +1380,6 @@ export class WppConnectProvider implements WhatsAppProvider {
 							if (blob.startsWith('data:')) return blob;
 							return `data:${mimeHint || 'application/octet-stream'};base64,${blob}`;
 						}
-						// OpaqueData / WhatsApp wrappers
 						try {
 							if (typeof blob.forceToBlob === 'function') {
 								blob = blob.forceToBlob();
@@ -1310,7 +1395,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 						return await new Promise<string>((resolve, reject) => {
 							const reader = new FileReader();
 							reader.onloadend = () => resolve(String(reader.result || ''));
-							reader.onerror = () => reject(new Error('Failed to read media blob'));
+							reader.onerror = () =>
+								reject(new Error('Failed to read media blob'));
 							reader.readAsDataURL(blob);
 						});
 					};
@@ -1332,7 +1418,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 						try {
 							const LruMediaStore = WPP?.whatsapp?.LruMediaStore;
 							if (filehash && typeof LruMediaStore?.get === 'function') {
-								const cached = await LruMediaStore.get(filehash).catch(() => null);
+								const cached = await LruMediaStore.get(filehash).catch(
+									() => null,
+								);
 								if (cached) {
 									const buffer =
 										cached instanceof ArrayBuffer
@@ -1379,7 +1467,6 @@ export class WppConnectProvider implements WhatsAppProvider {
 					const forceDownloadMsg = async (msg: any) => {
 						const mimeHint = msg?.mimetype || msg?.mediaData?.mimetype || msg?.type;
 
-						// Mirror wa-js downloadMedia: force expensive user-initiated download.
 						try {
 							if (typeof msg.downloadMedia === 'function') {
 								await msg.downloadMedia({
@@ -1399,12 +1486,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 						}
 
 						const fullIds = [
-							buildFullId(msg, targetSender),
+							buildFullId(msg, senders[0] || ''),
 							msg?.id?._serialized,
-							targetSender && targetKey
-								? `false_status@broadcast_${targetKey}_${targetSender}`
-								: null,
-							targetId,
+							...alternateStatusIds(),
 						].filter(Boolean);
 
 						for (const id of fullIds) {
@@ -1448,9 +1532,6 @@ export class WppConnectProvider implements WhatsAppProvider {
 						return null;
 					};
 
-					let found: any = null;
-					const store = WPP?.whatsapp?.StatusV3Store;
-
 					const collectMsgs = (status: any) => {
 						const messages =
 							(typeof status.getAllMsgs === 'function' && status.getAllMsgs()) ||
@@ -1463,7 +1544,65 @@ export class WppConnectProvider implements WhatsAppProvider {
 						];
 					};
 
-					if (store) {
+					const contactIdOf = (status: any) =>
+						String(
+							status?.id?._serialized ||
+								(typeof status?.id?.toString === 'function'
+									? status.id.toString()
+									: status?.id) ||
+								'',
+						);
+
+					const ensureStatusMsgs = async (status: any) => {
+						try {
+							await Promise.race([
+								(async () => {
+									if (typeof status.loadMore === 'function') {
+										await status.loadMore(50);
+									}
+									if (typeof status.loadStatusMsgs === 'function') {
+										await status.loadStatusMsgs();
+									}
+								})(),
+								new Promise(resolve => setTimeout(resolve, 2500)),
+							]);
+						} catch {
+							/* ignore */
+						}
+					};
+
+					let found: any = null;
+
+					// Direct id lookup first (works even when StatusV3 contact is keyed
+					// differently for @lid vs @c.us).
+					for (const candidateId of alternateStatusIds()) {
+						try {
+							if (typeof WPP?.chat?.getMessageById === 'function') {
+								const msg = await WPP.chat.getMessageById(candidateId);
+								if (msg && (matches(msg) || candidateId === targetId)) {
+									found = Array.isArray(msg) ? msg[0] : msg;
+									if (found) break;
+								}
+							}
+						} catch {
+							/* continue */
+						}
+						try {
+							const msgStore = WPP?.whatsapp?.MsgStore;
+							const msg =
+								(typeof msgStore?.get === 'function' && msgStore.get(candidateId)) ||
+								null;
+							if (msg) {
+								found = msg;
+								break;
+							}
+						} catch {
+							/* continue */
+						}
+					}
+
+					const store = WPP?.whatsapp?.StatusV3Store;
+					if (!found && store) {
 						try {
 							if (typeof store.sync === 'function') await store.sync();
 							if (typeof store.loadMore === 'function') await store.loadMore();
@@ -1471,56 +1610,74 @@ export class WppConnectProvider implements WhatsAppProvider {
 							/* ignore */
 						}
 
-						const models =
-							(typeof store.getUnexpired === 'function' && store.getUnexpired(true)) ||
-							(typeof store.getModelsArray === 'function' && store.getModelsArray()) ||
-							store.models ||
-							[];
-
-						// Prefer the sender's status collection when we know it.
-						const ordered = [...models].sort((a, b) => {
-							const aId = String(a?.id?._serialized || a?.id || '');
-							const bId = String(b?.id?._serialized || b?.id || '');
-							if (targetSender && aId === targetSender) return -1;
-							if (targetSender && bId === targetSender) return 1;
-							return 0;
-						});
-
-						for (const status of ordered) {
-							const contactId = String(
-								status?.id?._serialized ||
-									(typeof status?.id?.toString === 'function'
-										? status.id.toString()
-										: status?.id) ||
-									'',
-							);
-							if (targetSender && contactId) {
-								const sameContact =
-									contactId === targetSender ||
-									contactId.replace(/@.*/, '') ===
-										targetSender.replace(/@.*/, '') ||
-									contactId.includes(targetSender.replace(/@.*/, '')) ||
-									targetSender.includes(contactId.replace(/@.*/, ''));
-								if (!sameContact) continue;
+						const modelPools = [
+							typeof store.getUnexpired === 'function'
+								? store.getUnexpired(true)
+								: null,
+							typeof store.getModelsArray === 'function'
+								? store.getModelsArray()
+								: null,
+							store.models,
+							store._models,
+						];
+						const modelMap = new Map<string, any>();
+						for (const pool of modelPools) {
+							const models = Array.isArray(pool)
+								? pool
+								: pool instanceof Map
+									? [...pool.values()]
+									: [];
+							for (const model of models) {
+								const id = contactIdOf(model) || `anon-${modelMap.size}`;
+								if (!modelMap.has(id)) modelMap.set(id, model);
 							}
+						}
+
+						for (const sender of senders) {
 							try {
-								if (typeof status.loadMore === 'function') await status.loadMore(50);
-								if (typeof status.loadStatusMsgs === 'function') {
-									await status.loadStatusMsgs();
+								const byApi =
+									(typeof WPP?.status?.get === 'function' &&
+										WPP.status.get(sender)) ||
+									(typeof store.get === 'function' && store.get(sender)) ||
+									null;
+								if (byApi) {
+									const id = contactIdOf(byApi) || sender;
+									modelMap.set(id, byApi);
 								}
 							} catch {
-								/* ignore */
+								/* continue */
 							}
-							found = collectMsgs(status).find(matches) || null;
+						}
+
+						const models = [...modelMap.values()];
+						const preferred = models.filter(status =>
+							sameIdentity(contactIdOf(status)),
+						);
+						const ordered = [
+							...preferred,
+							...models.filter(status => !sameIdentity(contactIdOf(status))),
+						];
+
+						// Pass 1: preferred sender contacts. Pass 2: every contact by msg key.
+						for (const restrictToSender of [true, false]) {
 							if (found) break;
+							const scanList = restrictToSender ? preferred : ordered;
+							for (const status of scanList) {
+								await ensureStatusMsgs(status);
+								found = collectMsgs(status).find(matches) || null;
+								if (found) break;
+							}
 						}
 
 						if (!found) {
 							try {
 								const mine =
-									(typeof store.getMyStatus === 'function' && store.getMyStatus()) ||
-									(WPP?.status?.getMyStatus && (await WPP.status.getMyStatus()));
+									(typeof store.getMyStatus === 'function' &&
+										store.getMyStatus()) ||
+									(WPP?.status?.getMyStatus &&
+										(await WPP.status.getMyStatus()));
 								if (mine) {
+									await ensureStatusMsgs(mine);
 									found = collectMsgs(mine).find(matches) || null;
 								}
 							} catch {
@@ -1548,7 +1705,19 @@ export class WppConnectProvider implements WhatsAppProvider {
 						}
 					}
 
+					// Last resort: try downloading by known ids without a Msg model.
 					if (!found) {
+						for (const candidateId of alternateStatusIds()) {
+							try {
+								const media = await WPP.chat.downloadMedia(candidateId);
+								if (isAcceptable(media, 'image')) {
+									const uri = await toDataUri(media, 'image/jpeg');
+									if (uri) return uri;
+								}
+							} catch {
+								/* continue */
+							}
+						}
 						throw new Error(
 							`Status message not found in WhatsApp store for id ${targetId}`,
 						);
@@ -1575,7 +1744,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 					return uri;
 				},
 				statusId,
-				sender,
+				senderCandidates,
 			);
 
 			return dataUri;

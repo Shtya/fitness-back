@@ -69,6 +69,23 @@ export class NotificationService {
 		return { ok: true };
 	}
 
+	/** Drop Expo tokens that tickets marked DeviceNotRegistered / InvalidCredentials. */
+	async pruneDeadExpoPushTokens(userId: string, deadTokens: string[]) {
+		if (!userId || !deadTokens?.length) return { removed: 0 };
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) return { removed: 0 };
+
+		const dead = new Set(deadTokens.filter(Boolean));
+		const before = user.expoPushTokens ?? [];
+		const next = before.filter(t => !dead.has(t));
+		if (next.length === before.length) return { removed: 0 };
+
+		user.expoPushTokens = next;
+		await this.userRepo.save(user);
+		this.logger.warn(`[ExpoPush] Pruned ${before.length - next.length} dead token(s) for user ${userId}`);
+		return { removed: before.length - next.length };
+	}
+
 
 	async create(opts: {
 		type: NotificationType;
@@ -125,13 +142,16 @@ export class NotificationService {
 		const user = await this.userRepo.findOne({ where: { id: userId }, select: ['id', 'expoPushTokens'] as any });
 		const tokens: string[] = (user as any)?.expoPushTokens ?? [];
 		if (!tokens.length) return;
-		await this.expoPushService.sendToTokens(tokens, {
+		const result = await this.expoPushService.sendToTokens(tokens, {
 			title,
 			body,
 			data,
 			badge: await this.badgeService.getTotalBadge(userId),
 			channelId: NOTIFICATION_CHANNELS.DEFAULT,
 		});
+		if (result.deadTokens?.length) {
+			await this.pruneDeadExpoPushTokens(userId, result.deadTokens);
+		}
 	}
 
 	private isAr(locale?: string) {

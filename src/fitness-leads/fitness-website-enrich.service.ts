@@ -10,6 +10,21 @@ import {
 	getBestEmail,
 } from './fitness-leads.utils';
 
+const EMPTY_SOCIAL = {
+	instagram: '',
+	linkedin: '',
+	facebook: '',
+	twitter: '',
+	tiktok: '',
+	youtube: '',
+	whatsapp: '',
+};
+
+/** Hard ceiling so one bad site cannot stall the whole job. */
+const ENRICH_BUDGET_MS = 8_000;
+const PAGE_TIMEOUT_MS = 4_000;
+const MAX_PAGES = 2;
+
 @Injectable()
 export class FitnessWebsiteEnrichService {
 	private readonly logger = new Logger(FitnessWebsiteEnrichService.name);
@@ -17,28 +32,43 @@ export class FitnessWebsiteEnrichService {
 	constructor(private readonly emailProviders: FitnessEmailProvidersService) {}
 
 	async enrichFromWebsite(websiteUrl: string, phone?: string | null) {
-		const emptySocial = {
-			instagram: '',
-			linkedin: '',
-			facebook: '',
-			twitter: '',
-			tiktok: '',
-			youtube: '',
-			whatsapp: '',
-		};
 		const empty = {
 			emails: [] as string[],
 			sourceUrl: null as string | null,
-			social: { ...emptySocial },
+			social: { ...EMPTY_SOCIAL },
 			verification: null as string | null,
 			emailSource: null as string | null,
 		};
 
-		if (!websiteUrl || !this.isScrapable(websiteUrl)) return empty;
+		try {
+			if (!websiteUrl || !this.isScrapable(websiteUrl)) return empty;
 
+			return await this.withTimeout(
+				this.enrichFromWebsiteInner(websiteUrl, phone, empty),
+				ENRICH_BUDGET_MS,
+				empty,
+				`enrich ${websiteUrl}`,
+			);
+		} catch (error: any) {
+			this.logger.warn(`enrichFromWebsite failed for ${websiteUrl}: ${error?.message || error}`);
+			return empty;
+		}
+	}
+
+	private async enrichFromWebsiteInner(
+		websiteUrl: string,
+		phone: string | null | undefined,
+		empty: {
+			emails: string[];
+			sourceUrl: string | null;
+			social: typeof EMPTY_SOCIAL;
+			verification: string | null;
+			emailSource: string | null;
+		},
+	) {
 		let allEmails: string[] = [];
 		let sourceUrl: string | null = null;
-		let social = { ...emptySocial };
+		let social = { ...EMPTY_SOCIAL };
 
 		const pages = await this.discoverPages(websiteUrl);
 		for (const pageUrl of pages) {
@@ -58,6 +88,8 @@ export class FitnessWebsiteEnrichService {
 					youtube: social.youtube || pageSocial.youtube,
 					whatsapp: social.whatsapp || pageSocial.whatsapp,
 				};
+				// Homepage already gave us emails — skip extra contact pages.
+				if (allEmails.length) break;
 			} catch (error: any) {
 				this.logger.warn(`Fetch ${pageUrl} failed: ${error?.message || error}`);
 			}
@@ -67,16 +99,21 @@ export class FitnessWebsiteEnrichService {
 		let emailSource: string | null = sourceUrl ? 'Website' : null;
 		let verification: string | null = null;
 
+		// Only hit paid/slow providers when the site yielded nothing.
 		if (!allEmails.length) {
-			const fromProviders = await this.emailProviders.findEmailsFromProviders(websiteUrl);
-			allEmails = fromProviders.emails;
-			emailSource = fromProviders.source;
-			if (fromProviders.linkedin && !social.linkedin) social.linkedin = fromProviders.linkedin;
-		}
-
-		const best = getBestEmail(allEmails);
-		if (best && emailSource === 'Hunter.io') {
-			verification = await this.emailProviders.hunterVerifyEmail(best);
+			try {
+				const fromProviders = await this.withTimeout(
+					this.emailProviders.findEmailsFromProviders(websiteUrl),
+					5_000,
+					{ emails: [] as string[], verification: null, source: null, linkedin: '' },
+					`providers ${websiteUrl}`,
+				);
+				allEmails = fromProviders.emails || [];
+				emailSource = fromProviders.source;
+				if (fromProviders.linkedin && !social.linkedin) social.linkedin = fromProviders.linkedin;
+			} catch (error: any) {
+				this.logger.warn(`Email providers failed for ${websiteUrl}: ${error?.message || error}`);
+			}
 		}
 
 		if (!social.whatsapp && phone) social.whatsapp = extractWhatsAppFromPhone(phone);
@@ -88,6 +125,28 @@ export class FitnessWebsiteEnrichService {
 			verification,
 			emailSource,
 		};
+	}
+
+	private async withTimeout<T>(
+		promise: Promise<T>,
+		ms: number,
+		fallback: T,
+		label: string,
+	): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise<T>(resolve => {
+					timer = setTimeout(() => {
+						this.logger.warn(`Timeout ${ms}ms: ${label}`);
+						resolve(fallback);
+					}, ms);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	private isScrapable(websiteUrl: string) {
@@ -102,33 +161,43 @@ export class FitnessWebsiteEnrichService {
 	}
 
 	private async discoverPages(websiteUrl: string) {
-		const pages = new Set<string>([websiteUrl]);
+		const pages: string[] = [];
 		try {
-			const origin = new URL(
-				websiteUrl.startsWith('http') ? websiteUrl : `https://${websiteUrl}`,
-			).origin;
-			for (const p of FITNESS_CONTACT_PATHS.slice(0, 5)) {
-				pages.add(`${origin}/${p}`);
-			}
+			const normalized = websiteUrl.startsWith('http') ? websiteUrl : `https://${websiteUrl}`;
+			pages.push(normalized);
+			const origin = new URL(normalized).origin;
+			// Prefer one contact page only (was up to 5 — too slow).
+			const contact = FITNESS_CONTACT_PATHS.find(Boolean);
+			if (contact) pages.push(`${origin}/${contact}`);
 		} catch {
-			/* ignore */
+			if (websiteUrl) pages.push(websiteUrl);
 		}
-		return [...pages].slice(0, 6);
+		return [...new Set(pages)].slice(0, MAX_PAGES);
 	}
 
 	private async fetchHtml(url: string) {
-		const { data, status } = await axios.get(url, {
-			timeout: 10000,
-			maxRedirects: 3,
-			responseType: 'text',
-			headers: {
-				'User-Agent':
-					'Mozilla/5.0 (compatible; So7baFitFitnessLeads/1.0; +https://so7bafit.local)',
-				Accept: 'text/html,application/xhtml+xml',
-			},
-			validateStatus: s => s >= 200 && s < 400,
-		});
-		if (status >= 400 || typeof data !== 'string') return null;
-		return data.slice(0, 350_000);
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), PAGE_TIMEOUT_MS);
+		try {
+			const { data, status } = await axios.get(url, {
+				timeout: PAGE_TIMEOUT_MS,
+				signal: controller.signal,
+				maxRedirects: 2,
+				maxContentLength: 400_000,
+				responseType: 'text',
+				headers: {
+					'User-Agent':
+						'Mozilla/5.0 (compatible; So7baFitFitnessLeads/1.0; +https://so7bafit.local)',
+					Accept: 'text/html,application/xhtml+xml',
+				},
+				validateStatus: s => s >= 200 && s < 400,
+			});
+			if (status >= 400 || typeof data !== 'string') return null;
+			return data.slice(0, 200_000);
+		} catch {
+			return null;
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 }

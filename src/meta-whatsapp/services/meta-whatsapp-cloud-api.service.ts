@@ -5,6 +5,8 @@ import {
 	ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import FormData = require('form-data');
+import axios from 'axios';
 
 export type MetaGraphError = {
 	message?: string;
@@ -38,24 +40,94 @@ export class MetaWhatsAppCloudApiService {
 		phoneNumberId: string;
 		wabaId?: string | null;
 	}) {
-		const phone = await this.request<{
+		let phone: {
 			id?: string;
 			display_phone_number?: string;
 			verified_name?: string;
 			quality_rating?: string;
-		}>(
-			'GET',
-			`/${input.phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating`,
-			input.accessToken,
-		);
-
-		let wabaOk: { id?: string; name?: string } | null = null;
-		if (input.wabaId) {
-			wabaOk = await this.request(
+			whatsapp_business_account?: { id?: string; name?: string };
+		};
+		try {
+			phone = await this.request(
 				'GET',
-				`/${input.wabaId}?fields=id,name`,
+				`/${input.phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating,whatsapp_business_account{id,name}`,
 				input.accessToken,
 			);
+		} catch (err: any) {
+			throw new BadRequestException(
+				this.explainWhatsAppAccessError(this.errText(err), {
+					phoneNumberId: input.phoneNumberId,
+					wabaId: input.wabaId,
+					stage: 'phone',
+				}),
+			);
+		}
+
+		const resolvedFromPhone = phone.whatsapp_business_account?.id || null;
+		let configuredWaba = String(input.wabaId || '').trim() || null;
+
+		// Common mistake: Phone Number ID pasted into WABA ID field
+		if (configuredWaba && configuredWaba === String(input.phoneNumberId).trim()) {
+			configuredWaba = null;
+		}
+
+		let wabaOk: { id?: string; name?: string } | null = null;
+		const wabaToCheck = configuredWaba || resolvedFromPhone;
+		if (wabaToCheck) {
+			try {
+				wabaOk = await this.request(
+					'GET',
+					`/${wabaToCheck}?fields=id,name`,
+					input.accessToken,
+				);
+			} catch (err) {
+				if (resolvedFromPhone && configuredWaba && configuredWaba !== resolvedFromPhone) {
+					try {
+						wabaOk = await this.request(
+							'GET',
+							`/${resolvedFromPhone}?fields=id,name`,
+							input.accessToken,
+						);
+					} catch (err2: any) {
+						throw new BadRequestException(
+							this.explainWhatsAppAccessError(this.errText(err2), {
+								phoneNumberId: input.phoneNumberId,
+								wabaId: resolvedFromPhone,
+								stage: 'waba',
+							}),
+						);
+					}
+				} else {
+					throw new BadRequestException(
+						this.explainWhatsAppAccessError(this.errText(err), {
+							phoneNumberId: input.phoneNumberId,
+							wabaId: wabaToCheck,
+							stage: 'waba',
+						}),
+					);
+				}
+			}
+		}
+
+		const finalWabaId = wabaOk?.id || resolvedFromPhone || configuredWaba || null;
+
+		// Prove the token can list templates on this WABA (catches missing whatsapp_business_management)
+		if (finalWabaId) {
+			try {
+				await this.request(
+					'GET',
+					`/${finalWabaId}/message_templates?limit=1&fields=id,name`,
+					input.accessToken,
+				);
+			} catch (err: any) {
+				throw new BadRequestException(
+					this.explainWhatsAppAccessError(this.errText(err), {
+						phoneNumberId: input.phoneNumberId,
+						wabaId: finalWabaId,
+						stage: 'templates',
+					}),
+				);
+			}
 		}
 
 		return {
@@ -63,9 +135,90 @@ export class MetaWhatsAppCloudApiService {
 			displayPhoneNumber: phone.display_phone_number || null,
 			verifiedName: phone.verified_name || null,
 			qualityRating: phone.quality_rating || null,
-			wabaId: wabaOk?.id || input.wabaId || null,
-			wabaName: wabaOk?.name || null,
+			wabaId: finalWabaId,
+			wabaName: wabaOk?.name || phone.whatsapp_business_account?.name || null,
+			wabaAutoResolved:
+				Boolean(resolvedFromPhone) &&
+				(!input.wabaId ||
+					String(input.wabaId).trim() !== finalWabaId ||
+					String(input.wabaId).trim() === String(input.phoneNumberId).trim()),
 		};
+	}
+
+	errText(err: unknown) {
+		const response =
+			typeof (err as any)?.getResponse === 'function' ? (err as any).getResponse() : null;
+		const raw =
+			typeof response === 'string'
+				? response
+				: response?.message || (err as any)?.message || '';
+		return Array.isArray(raw) ? raw.join(', ') : String(raw);
+	}
+
+	explainWhatsAppAccessError(
+		metaMessage: string,
+		ctx: { phoneNumberId?: string | null; wabaId?: string | null; stage?: string },
+	) {
+		const phone = ctx.phoneNumberId || '—';
+		const waba = ctx.wabaId || '—';
+		const base = metaMessage || 'Meta Graph access failed';
+
+		// Don't wrap clear API validation / parameter errors as "token assignment" issues
+		if (
+			/#100\b/i.test(base) ||
+			/invalid parameter/i.test(base) ||
+			/hsm_id requires name/i.test(base) ||
+			/button input/i.test(base) ||
+			/library buttons/i.test(base) ||
+			/does not exist/i.test(base) ||
+			/already exists/i.test(base) ||
+			/\(#\d+\)/.test(base)
+		) {
+			return base;
+		}
+
+		return (
+			`${base} ` +
+			`Your Phone Number ID (${phone}) and WABA ID (${waba}) look like Meta dashboard values, ` +
+			`but this Access Token cannot use them. Fix the token: ` +
+			`1) Meta Business Suite → Business Settings → System Users → generate a permanent token for THIS app, ` +
+			`2) assign the WhatsApp Business Account "So7bahfit" (${waba}) to that system user with full control, ` +
+			`3) include permissions whatsapp_business_management + whatsapp_business_messaging (+ business_management). ` +
+			`Then paste the new token, Save, and Verify connection.`
+		);
+	}
+
+	/**
+	 * Ensure we have a real WhatsApp Business Account ID (not Phone Number ID).
+	 * Resolves from the phone number when missing/wrong.
+	 */
+	async resolveWabaId(input: {
+		accessToken: string;
+		phoneNumberId: string;
+		wabaId?: string | null;
+	}): Promise<{ wabaId: string; autoResolved: boolean }> {
+		const phoneId = String(input.phoneNumberId || '').trim();
+		let wabaId = String(input.wabaId || '').trim();
+		if (wabaId && wabaId === phoneId) wabaId = '';
+
+		if (wabaId) {
+			return { wabaId, autoResolved: false };
+		}
+
+		const phone = await this.request<{
+			whatsapp_business_account?: { id?: string };
+		}>(
+			'GET',
+			`/${phoneId}?fields=whatsapp_business_account{id}`,
+			input.accessToken,
+		);
+		const resolved = String(phone.whatsapp_business_account?.id || '').trim();
+		if (!resolved) {
+			throw new BadRequestException(
+				'Could not resolve WABA ID from Phone Number ID. In Meta Developer → WhatsApp → API Setup, copy the WhatsApp Business Account ID (not Phone Number ID) into WABA ID.',
+			);
+		}
+		return { wabaId: resolved, autoResolved: true };
 	}
 
 	async listMessageTemplates(accessToken: string, wabaId: string) {
@@ -83,6 +236,160 @@ export class MetaWhatsAppCloudApiService {
 			id: t.id,
 			qualityScore: t.quality_score || null,
 		}));
+	}
+
+	/**
+	 * Meta Template Library — pre-written UTILITY/AUTHENTICATION templates.
+	 * GET /message_template_library
+	 */
+	async listTemplateLibrary(
+		accessToken: string,
+		options?: { search?: string; language?: string; limit?: number },
+	) {
+		const params = new URLSearchParams();
+		params.set('limit', String(Math.min(Math.max(options?.limit || 40, 1), 100)));
+		if (options?.search?.trim()) params.set('search', options.search.trim());
+		if (options?.language?.trim()) params.set('language', options.language.trim());
+		const data = await this.request<{ data?: any[]; paging?: any }>(
+			'GET',
+			`/message_template_library?${params.toString()}`,
+			accessToken,
+		);
+		return (data.data || []).map(t => ({
+			libraryTemplateName: t.name,
+			name: t.name,
+			language: t.language,
+			category: t.category || 'UTILITY',
+			topic: t.topic || null,
+			usecase: t.usecase || null,
+			industry: t.industry || [],
+			body: t.body || t.body_text || '',
+			bodyParams: t.body_params || t.body_param_types || [],
+			header: t.header || t.header_text || null,
+			footer: t.footer || t.footer_text || null,
+			buttons: t.buttons || [],
+			raw: t,
+		}));
+	}
+
+	async createMessageTemplateFromLibrary(
+		accessToken: string,
+		wabaId: string,
+		input: {
+			name: string;
+			language: string;
+			category?: string;
+			libraryTemplateName: string;
+			libraryTemplateButtonInputs?: any[];
+			buttons?: any[];
+			buttonUrl?: string;
+			buttonPhone?: string;
+		},
+	) {
+		const payload: Record<string, any> = {
+			name: String(input.name || '').trim(),
+			language: String(input.language || 'en_US').trim(),
+			category: String(input.category || 'UTILITY').toUpperCase(),
+			library_template_name: String(input.libraryTemplateName || '').trim(),
+		};
+
+		const buttonInputs =
+			input.libraryTemplateButtonInputs?.length
+				? input.libraryTemplateButtonInputs
+				: this.buildLibraryTemplateButtonInputs(input.buttons || [], {
+						url: input.buttonUrl,
+						phone: input.buttonPhone,
+				  });
+
+		if (buttonInputs.length) {
+			payload.library_template_button_inputs = buttonInputs;
+		}
+
+		this.logger.debug(
+			`Creating Meta library template ${payload.name} from ${payload.library_template_name}` +
+				(buttonInputs.length ? ` with ${buttonInputs.length} button input(s)` : ''),
+		);
+		return this.request<any>('POST', `/${wabaId}/message_templates`, accessToken, payload);
+	}
+
+	/**
+	 * Meta requires library_template_button_inputs for library buttons that take
+	 * business-specific values (URL / PHONE_NUMBER / OTP). Count must match.
+	 */
+	buildLibraryTemplateButtonInputs(
+		buttons: any[],
+		defaults?: { url?: string; phone?: string },
+	): any[] {
+		const list = Array.isArray(buttons) ? buttons : [];
+		const site = String(defaults?.url || process.env.PUBLIC_WEB_URL || 'https://so7bafit.com')
+			.trim()
+			.replace(/\/$/, '');
+		const httpsSite = /^https:\/\//i.test(site) ? site : `https://${site.replace(/^https?:\/\//i, '')}`;
+		let phone = String(defaults?.phone || '').replace(/[^\d+]/g, '');
+		if (phone && !phone.startsWith('+')) phone = `+${phone}`;
+		if (!phone) phone = '+201000000000';
+
+		const inputs: any[] = [];
+		for (const btn of list) {
+			const type = String(btn?.type || btn?.button_type || '').toUpperCase();
+			if (type === 'URL' || type === 'VISIT_WEBSITE') {
+				const fromBtn = String(btn?.url || btn?.example || '').trim();
+				const base =
+					fromBtn && /^https:\/\//i.test(fromBtn)
+						? fromBtn.replace(/\{\{.*?\}\}/g, '{{1}}')
+						: `${httpsSite}/{{1}}`;
+				const withVar = /\{\{/.test(base) ? base : `${base.replace(/\/$/, '')}/{{1}}`;
+				inputs.push({
+					type: 'URL',
+					url: {
+						base_url: withVar,
+						url_suffix_example: withVar.replace(/\{\{\s*\d+\s*\}\}/g, 'demo'),
+					},
+				});
+			} else if (
+				type === 'PHONE_NUMBER' ||
+				type === 'CALL' ||
+				type === 'CALL_PHONE_NUMBER' ||
+				type === 'VOICE_CALL'
+			) {
+				const fromBtn = String(btn?.phone_number || btn?.phone || '').replace(/[^\d+]/g, '');
+				const value = fromBtn
+					? fromBtn.startsWith('+')
+						? fromBtn
+						: `+${fromBtn}`
+					: phone;
+				inputs.push({ type: 'PHONE_NUMBER', phone_number: value });
+			} else if (type === 'OTP') {
+				inputs.push({
+					type: 'OTP',
+					otp_type: String(btn?.otp_type || 'COPY_CODE').toUpperCase(),
+					zero_tap_terms_accepted: true,
+				});
+			}
+			// QUICK_REPLY / CATALOG / FLOW / etc. typically need no button inputs
+		}
+		return inputs;
+	}
+
+	async deleteMessageTemplate(
+		accessToken: string,
+		wabaId: string,
+		input: { name?: string; hsmId?: string },
+	) {
+		const name = String(input.name || '').trim();
+		const hsmId = String(input.hsmId || '').trim();
+		// Meta: deleting by hsm_id ALSO requires name — name alone deletes all languages for that template
+		if (!name) {
+			throw new BadRequestException('Template name is required to delete');
+		}
+		const params = new URLSearchParams();
+		params.set('name', name);
+		if (hsmId) params.set('hsm_id', hsmId);
+		return this.request<{ success?: boolean }>(
+			'DELETE',
+			`/${wabaId}/message_templates?${params.toString()}`,
+			accessToken,
+		);
 	}
 
 	async uploadTemplateHeaderHandle(
@@ -141,6 +448,7 @@ export class MetaWhatsAppCloudApiService {
 			headerFormat?: string;
 			headerText?: string;
 			headerHandle?: string;
+			existingHeaderComponent?: Record<string, any>;
 			footerText?: string;
 			buttons?: Array<{
 				type: string;
@@ -152,6 +460,66 @@ export class MetaWhatsAppCloudApiService {
 			exampleHeaderParams?: string[];
 		},
 	) {
+		const components = this.buildMessageTemplateComponents(input);
+		const payload = {
+			name: input.name,
+			language: input.language,
+			category: String(input.category || 'UTILITY').toUpperCase(),
+			allow_category_change: true,
+			parameter_format: 'positional',
+			components,
+		};
+		this.logger.debug(`Creating Meta template ${input.name}: ${JSON.stringify(payload)}`);
+		return this.request<any>('POST', `/${wabaId}/message_templates`, accessToken, payload);
+	}
+
+	async editMessageTemplate(
+		accessToken: string,
+		templateId: string,
+		input: {
+			category?: string;
+			bodyText: string;
+			headerFormat?: string;
+			headerText?: string;
+			headerHandle?: string;
+			existingHeaderComponent?: Record<string, any>;
+			footerText?: string;
+			buttons?: Array<{
+				type: string;
+				text: string;
+				url?: string;
+				phone_number?: string;
+			}>;
+			exampleBodyParams?: string[];
+			exampleHeaderParams?: string[];
+		},
+	) {
+		const id = String(templateId || '').trim();
+		if (!id) throw new BadRequestException('Template id is required to edit');
+		const components = this.buildMessageTemplateComponents(input);
+		// Meta forbids changing category on APPROVED templates (#100).
+		// Edits only update components — never send category / allow_category_change.
+		const payload = { components };
+		this.logger.debug(`Editing Meta template ${id}: ${JSON.stringify(payload)}`);
+		return this.request<any>('POST', `/${id}`, accessToken, payload);
+	}
+
+	buildMessageTemplateComponents(input: {
+		bodyText: string;
+		headerFormat?: string;
+		headerText?: string;
+		headerHandle?: string;
+		existingHeaderComponent?: Record<string, any>;
+		footerText?: string;
+		buttons?: Array<{
+			type: string;
+			text: string;
+			url?: string;
+			phone_number?: string;
+		}>;
+		exampleBodyParams?: string[];
+		exampleHeaderParams?: string[];
+	}) {
 		const components: Record<string, any>[] = [];
 		const headerFormat = String(input.headerFormat || 'NONE').toUpperCase();
 		const bodyText = this.normalizeTemplateText(input.bodyText);
@@ -180,23 +548,24 @@ export class MetaWhatsAppCloudApiService {
 			if (headerVars.length) {
 				const headerExamples = input.exampleHeaderParams?.filter(Boolean) || [];
 				header.example = {
-					header_text: [
-						headerExamples[0] || 'Sample',
-					],
+					header_text: [headerExamples[0] || 'Sample'],
 				};
 			}
 			components.push(header);
 		} else if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat)) {
-			if (!input.headerHandle?.trim()) {
+			if (input.headerHandle?.trim()) {
+				components.push({
+					type: 'HEADER',
+					format: headerFormat,
+					example: { header_handle: [input.headerHandle.trim()] },
+				});
+			} else if (input.existingHeaderComponent) {
+				components.push(input.existingHeaderComponent);
+			} else {
 				throw new BadRequestException(
 					`Sample ${headerFormat.toLowerCase()} is required for ${headerFormat} header`,
 				);
 			}
-			components.push({
-				type: 'HEADER',
-				format: headerFormat,
-				example: { header_handle: [input.headerHandle.trim()] },
-			});
 		}
 
 		const body: Record<string, any> = { type: 'BODY', text: bodyText };
@@ -229,12 +598,8 @@ export class MetaWhatsAppCloudApiService {
 			}
 			const urlCount = buttons.filter(b => b.type === 'URL').length;
 			const phoneCount = buttons.filter(b => b.type === 'PHONE_NUMBER').length;
-			const qrCount = buttons.filter(b => b.type === 'QUICK_REPLY').length;
 			if (urlCount > 2) throw new BadRequestException('Maximum 2 URL buttons');
 			if (phoneCount > 1) throw new BadRequestException('Maximum 1 phone button');
-			if (qrCount && (urlCount || phoneCount) && buttons.length > 3) {
-				// Meta allows mixing but keeps a practical cap; leave as soft guide
-			}
 			components.push({
 				type: 'BUTTONS',
 				buttons: buttons.map(b => {
@@ -266,17 +631,7 @@ export class MetaWhatsAppCloudApiService {
 			});
 		}
 
-		const payload = {
-			name: input.name,
-			language: input.language,
-			category: String(input.category || 'UTILITY').toUpperCase(),
-			allow_category_change: true,
-			parameter_format: 'positional',
-			components,
-		};
-
-		this.logger.debug(`Creating Meta template ${input.name}: ${JSON.stringify(payload)}`);
-		return this.request<any>('POST', `/${wabaId}/message_templates`, accessToken, payload);
+		return components;
 	}
 
 	private normalizeTemplateText(text: string) {
@@ -375,6 +730,21 @@ export class MetaWhatsAppCloudApiService {
 		});
 	}
 
+	async sendVideoById(
+		accessToken: string,
+		phoneNumberId: string,
+		to: string,
+		mediaId: string,
+		caption?: string,
+	) {
+		return this.sendMessage(accessToken, phoneNumberId, {
+			messaging_product: 'whatsapp',
+			to,
+			type: 'video',
+			video: { id: mediaId, ...(caption ? { caption } : {}) },
+		});
+	}
+
 	async sendDocumentById(
 		accessToken: string,
 		phoneNumberId: string,
@@ -402,8 +772,6 @@ export class MetaWhatsAppCloudApiService {
 		mimeType: string,
 		fileName: string,
 	) {
-		const FormData = (await import('form-data')).default;
-		const axios = (await import('axios')).default;
 		const form = new FormData();
 		form.append('messaging_product', 'whatsapp');
 		form.append('type', mimeType);
@@ -523,8 +891,59 @@ export class MetaWhatsAppCloudApiService {
 		};
 	}
 
+	/**
+	 * Messaging analytics on WABA:
+	 * fields=analytics.start(...).end(...).granularity(DAY)
+	 */
+	async getMessagingAnalytics(
+		accessToken: string,
+		wabaId: string,
+		startUnix: number,
+		endUnix: number,
+		granularity: 'HALF_HOUR' | 'DAY' | 'MONTH' = 'DAY',
+	) {
+		const fields = `analytics.start(${startUnix}).end(${endUnix}).granularity(${granularity})`;
+		return this.request<any>('GET', `/${wabaId}?fields=${fields}`, accessToken);
+	}
+
+	/**
+	 * Per-message pricing analytics (July 2025+ model):
+	 * fields=pricing_analytics.start(...).end(...).granularity(DAILY).dimensions(...)
+	 */
+	async getPricingAnalytics(
+		accessToken: string,
+		wabaId: string,
+		startUnix: number,
+		endUnix: number,
+		granularity: 'HALF_HOUR' | 'DAILY' | 'MONTHLY' = 'DAILY',
+	) {
+		const fields =
+			`pricing_analytics.start(${startUnix}).end(${endUnix})` +
+			`.granularity(${granularity})` +
+			`.dimensions(PRICING_CATEGORY,PRICING_TYPE,COUNTRY)` +
+			`.metric_types(COST,VOLUME)`;
+		return this.request<any>('GET', `/${wabaId}?fields=${fields}`, accessToken);
+	}
+
+	/**
+	 * Template analytics (sent/delivered/read/cost) — requires analytics enablement on WABA.
+	 */
+	async getTemplateAnalytics(
+		accessToken: string,
+		wabaId: string,
+		startUnix: number,
+		endUnix: number,
+		templateIds?: string[],
+	) {
+		let fields = `template_analytics.start(${startUnix}).end(${endUnix}).granularity(DAILY)`;
+		if (templateIds?.length) {
+			fields += `.template_ids([${templateIds.slice(0, 10).join(',')}])`;
+		}
+		return this.request<any>('GET', `/${wabaId}?fields=${fields}`, accessToken);
+	}
+
 	private async request<T>(
-		method: 'GET' | 'POST',
+		method: 'GET' | 'POST' | 'DELETE',
 		path: string,
 		accessToken: string,
 		body?: Record<string, any>,
@@ -555,14 +974,26 @@ export class MetaWhatsAppCloudApiService {
 				err?.error_user_msg ||
 				err?.error_user_title ||
 				'';
+			const codePrefix =
+				err?.code != null ? `(#${err.code}) ` : '';
 			const message =
 				err?.message ||
 				`Meta Graph API error (${res.status})`;
-			const fullMessage = details ? `${message} — ${details}` : message;
-			const withHint =
-				!details && /invalid parameter/i.test(message)
-					? `${fullMessage} — Check variables (use {{1}}, {{2}} not {{name}}), https:// URL buttons, no variables in footer, and TEXT header max one {{1}}.`
-					: fullMessage;
+			const coded = message.startsWith('(#') ? message : `${codePrefix}${message}`;
+			const fullMessage = details ? `${coded} — ${details}` : coded;
+			let withHint = fullMessage;
+			if (/131058/.test(String(err?.code)) || /hello world templates can only be sent/i.test(fullMessage)) {
+				withHint = `${fullMessage} — hello_world only works from Meta Public Test Numbers. Use your own APPROVED template on a live phone number, or send from the Meta test number in API Setup.`;
+			} else if (/132018/.test(String(err?.code)) || /URL parameter generates an invalid URL/i.test(fullMessage)) {
+				withHint = `${fullMessage} — URL button variables must be Latin/URL-safe only (e.g. demo or user/123). Do not put Arabic text, spaces, or a full URL in that field.`;
+			} else if (
+				/cannot update an approved template category/i.test(fullMessage) ||
+				(/100/.test(String(err?.code)) && /template category/i.test(fullMessage))
+			) {
+				withHint = `${fullMessage} — Category cannot be changed after Meta approves a template. Edit body/header/buttons only, or create a new template with a different category.`;
+			} else if (!details && /invalid parameter/i.test(message)) {
+				withHint = `${fullMessage} — Check variables (use {{1}}, {{2}} not {{name}}), https:// URL buttons, no variables in footer, and TEXT header max one {{1}}.`;
+			}
 			this.logger.warn(
 				`Meta Graph ${method} ${path}: ${withHint}` +
 					(err?.code != null ? ` (code=${err.code}` : '') +

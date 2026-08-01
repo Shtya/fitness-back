@@ -236,7 +236,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           // badge can only come from the payload — send the absolute total.
           const badge = settings?.badge === false ? 0 : await this.badgeService.getTotalBadge(participant.user.id);
 
-          await this.chatPushService.sendPushNotifications(tokens, {
+          const deadTokens = await this.chatPushService.sendPushNotifications(tokens, {
             title: user.name || user.email || 'New message',
             body: this.buildPushBody(savedMessage as any, settings),
             data: {
@@ -249,6 +249,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
             sound: settings?.sound === false ? null : 'default',
             badge,
           });
+
+          if (deadTokens?.length) {
+            const next = (receiver.expoPushTokens || []).filter((t) => !deadTokens.includes(t));
+            if (next.length !== (receiver.expoPushTokens || []).length) {
+              await this.userRepo.update(receiver.id, { expoPushTokens: next });
+            }
+          }
         }
       }
 		} catch (error) {

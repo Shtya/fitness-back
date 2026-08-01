@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { existsSync, mkdirSync, promises as fs } from 'fs';
 import * as path from 'path';
@@ -68,6 +68,17 @@ export class MetaWhatsAppMediaService {
 			}
 		}
 
+		if (!message.mediaId && message.rawPayload && typeof message.rawPayload === 'object') {
+			const raw = message.rawPayload;
+			const bucket =
+				raw.sticker || raw.image || raw.video || raw.audio || raw.document || null;
+			if (bucket?.id) {
+				message.mediaId = String(bucket.id);
+				if (bucket.mime_type) message.mediaMimeType = String(bucket.mime_type);
+				await this.messageRepo.save(message);
+			}
+		}
+
 		if (!message.mediaId) throw new NotFoundException('Message has no media');
 
 		const runtime = await this.configService.requireRuntime({ requireEnabled: false });
@@ -119,5 +130,116 @@ export class MetaWhatsAppMediaService {
 			return mimeType.includes('ogg') ? 'voice' : 'audio';
 		}
 		return 'document';
+	}
+
+	/** Meta Cloud API voice notes need OGG/Opus; browsers usually record WebM. */
+	async ensureMetaAudioBuffer(
+		buffer: Buffer,
+		mimeType: string,
+		fileName: string,
+		asVoice = false,
+	): Promise<{ buffer: Buffer; mimeType: string; fileName: string }> {
+		const mime = String(mimeType || '').toLowerCase().split(';')[0].trim();
+		if (!mime.startsWith('audio/')) {
+			return { buffer, mimeType, fileName };
+		}
+		if (mime === 'audio/ogg' || mime === 'audio/opus') {
+			return {
+				buffer,
+				mimeType: 'audio/ogg',
+				fileName: fileName.replace(/\.[^.]+$/, '') + '.ogg',
+			};
+		}
+
+		const shouldConvert = asVoice || mime.includes('webm');
+		if (!shouldConvert) {
+			return { buffer, mimeType: mime, fileName };
+		}
+
+		try {
+			return await this.convertAudioBufferToOgg(buffer, fileName);
+		} catch (error) {
+			throw new BadRequestException(
+				`Voice conversion failed (install ffmpeg or set FFMPEG_PATH): ${
+					error instanceof Error ? error.message : error
+				}`,
+			);
+		}
+	}
+
+	private async convertAudioBufferToOgg(buffer: Buffer, fileName: string) {
+		const os = await import('os');
+		const { spawn } = await import('child_process');
+		const tmpRoot = os.tmpdir();
+		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const inputPath = path.join(tmpRoot, `meta-voice-in-${stamp}${path.extname(fileName) || '.webm'}`);
+		const outputPath = path.join(tmpRoot, `meta-voice-out-${stamp}.ogg`);
+
+		let executable = process.env.FFMPEG_PATH?.trim() || '';
+		if (!executable) {
+			try {
+				// eslint-disable-next-line @typescript-eslint/no-var-requires
+				executable = require('ffmpeg-static') || '';
+			} catch {
+				executable = 'ffmpeg';
+			}
+		}
+		if (!executable) executable = 'ffmpeg';
+
+		await fs.writeFile(inputPath, buffer);
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const processHandle = spawn(
+					executable,
+					[
+						'-y',
+						'-i',
+						inputPath,
+						'-vn',
+						'-ac',
+						'1',
+						'-ar',
+						'48000',
+						'-c:a',
+						'libopus',
+						'-b:a',
+						'32k',
+						'-application',
+						'voip',
+						'-f',
+						'ogg',
+						outputPath,
+					],
+					{ windowsHide: true },
+				);
+				let stderr = '';
+				const timer = setTimeout(() => {
+					processHandle.kill();
+					reject(new Error('Voice conversion timed out'));
+				}, 30000);
+				processHandle.stderr?.on('data', (chunk: Buffer) => {
+					stderr = `${stderr}${chunk.toString()}`.slice(-2000);
+				});
+				processHandle.once('error', (error: Error) => {
+					clearTimeout(timer);
+					reject(error);
+				});
+				processHandle.once('close', (code: number) => {
+					clearTimeout(timer);
+					if (code === 0) resolve();
+					else reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
+				});
+			});
+			const out = await fs.readFile(outputPath);
+			if (!out.length) throw new Error('Converted voice file is empty');
+			return {
+				buffer: out,
+				mimeType: 'audio/ogg',
+				fileName: `${path.parse(fileName).name || 'voice'}.ogg`,
+			};
+		} finally {
+			await fs.rm(inputPath, { force: true }).catch(() => {});
+			await fs.rm(outputPath, { force: true }).catch(() => {});
+		}
 	}
 }

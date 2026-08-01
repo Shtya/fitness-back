@@ -2,6 +2,7 @@ import {
 	BadRequestException,
 	Body,
 	Controller,
+	Delete,
 	Get,
 	Param,
 	Post,
@@ -24,10 +25,14 @@ import {
 	OpenLeadConversationDto,
 	OpenMetaPhoneDto,
 	CreateMetaTemplateDto,
+	EditMetaTemplateDto,
 	SaveMetaWhatsAppConfigDto,
 	SendMetaTemplateDto,
 	SendMetaTextDto,
 	StartMetaBulkDto,
+	CheckMetaBulkPhonesDto,
+	CreateFromMetaLibraryDto,
+	CloneMetaTemplatesDto,
 } from '../dto/meta-whatsapp.dto';
 import { MetaWhatsAppConfigService } from '../services/meta-whatsapp-config.service';
 import { MetaWhatsAppConversationsService } from '../services/meta-whatsapp-conversations.service';
@@ -36,6 +41,7 @@ import { MetaWhatsAppBulkService } from '../services/meta-whatsapp-bulk.service'
 import { MetaWhatsAppActivityService } from '../services/meta-whatsapp-activity.service';
 import { MetaWhatsAppMediaService } from '../services/meta-whatsapp-media.service';
 import { MetaWhatsAppCloudApiService } from '../services/meta-whatsapp-cloud-api.service';
+import { MetaWhatsAppUsageBillingService } from '../services/meta-whatsapp-usage-billing.service';
 
 @Controller('meta-whatsapp')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -48,12 +54,19 @@ export class MetaWhatsAppController {
 		private readonly activity: MetaWhatsAppActivityService,
 		private readonly media: MetaWhatsAppMediaService,
 		private readonly cloudApi: MetaWhatsAppCloudApiService,
+		private readonly usageBilling: MetaWhatsAppUsageBillingService,
 	) {}
 
 	@Get('status')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	status() {
 		return this.config.getPublicStatus();
+	}
+
+	@Get('usage-billing')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	getUsageBilling(@Req() req: any) {
+		return this.usageBilling.getDashboard(req.user?.id);
 	}
 
 	@Put('config')
@@ -80,6 +93,40 @@ export class MetaWhatsAppController {
 		return this.config.listTemplates();
 	}
 
+	@Get('templates/seed')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	listSeedTemplates() {
+		return this.config.listSeedTemplates();
+	}
+
+	@Post('templates/seed')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	submitSeedTemplates(@Req() req: any, @Body() body: { keys?: string[] }) {
+		return this.config.submitSeedTemplates(req.user?.id, body?.keys);
+	}
+
+	@Post('templates/clone')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	cloneTemplates(@Req() req: any, @Body() dto: CloneMetaTemplatesDto) {
+		return this.config.cloneTemplatesAsCategory(req.user?.id, dto);
+	}
+
+	@Get('templates/library')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	listTemplateLibrary(
+		@Req() req: any,
+		@Query('search') search?: string,
+		@Query('language') language?: string,
+	) {
+		return this.config.listTemplateLibrary(req.user?.id, { search, language });
+	}
+
+	@Post('templates/from-library')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	createFromLibrary(@Req() req: any, @Body() dto: CreateFromMetaLibraryDto) {
+		return this.config.createFromLibrary(req.user?.id, dto);
+	}
+
 	@Post('templates/upload-header')
 	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	@UseInterceptors(
@@ -97,6 +144,30 @@ export class MetaWhatsAppController {
 	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	createTemplate(@Req() req: any, @Body() dto: CreateMetaTemplateDto) {
 		return this.config.createTemplate(req.user?.id, dto);
+	}
+
+	@Put('templates/:templateId')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	updateTemplate(
+		@Req() req: any,
+		@Param('templateId') templateId: string,
+		@Body() dto: EditMetaTemplateDto,
+	) {
+		return this.config.updateTemplate(req.user?.id, templateId, dto);
+	}
+
+	@Delete('templates')
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	deleteTemplate(
+		@Req() req: any,
+		@Query('name') name?: string,
+		@Query('hsmId') hsmId?: string,
+		@Body() body?: { name?: string; hsmId?: string },
+	) {
+		return this.config.deleteTemplate(req.user?.id, {
+			name: name || body?.name,
+			hsmId: hsmId || body?.hsmId,
+		});
 	}
 
 	@Get('activity')
@@ -237,6 +308,12 @@ export class MetaWhatsAppController {
 		return this.bulk.start(req.user?.id, dto);
 	}
 
+	@Post('bulk/check-phones')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	checkBulkPhones(@Body() dto: CheckMetaBulkPhonesDto) {
+		return this.bulk.checkPhones(dto);
+	}
+
 	@Get('bulk')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	listBulk(@Query('limit') limit?: string) {
@@ -250,7 +327,7 @@ export class MetaWhatsAppController {
 	}
 
 	@Post('bulk/:id/cancel')
-	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	cancelBulk(@Req() req: any, @Param('id') id: string) {
 		return this.bulk.cancel(req.user?.id, id);
 	}

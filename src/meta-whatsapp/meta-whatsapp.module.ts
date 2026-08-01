@@ -20,6 +20,7 @@ import { MetaWhatsAppMessagingService } from './services/meta-whatsapp-messaging
 import { MetaWhatsAppWebhookService } from './services/meta-whatsapp-webhook.service';
 import { MetaWhatsAppBulkService } from './services/meta-whatsapp-bulk.service';
 import { MetaWhatsAppMediaService } from './services/meta-whatsapp-media.service';
+import { MetaWhatsAppUsageBillingService } from './services/meta-whatsapp-usage-billing.service';
 
 @Module({
 	imports: [
@@ -44,6 +45,7 @@ import { MetaWhatsAppMediaService } from './services/meta-whatsapp-media.service
 		MetaWhatsAppWebhookService,
 		MetaWhatsAppBulkService,
 		MetaWhatsAppMediaService,
+		MetaWhatsAppUsageBillingService,
 	],
 	exports: [
 		MetaWhatsAppConfigService,
