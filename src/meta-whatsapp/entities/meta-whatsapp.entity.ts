@@ -132,6 +132,9 @@ export class MetaWhatsAppConversation {
 	@Column({ name: 'unread_count', type: 'int', default: 0 })
 	unreadCount: number;
 
+	@Column({ name: 'is_favorite', type: 'boolean', default: false })
+	isFavorite: boolean;
+
 	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
 	createdAt: Date;
 

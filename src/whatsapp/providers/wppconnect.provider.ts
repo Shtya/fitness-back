@@ -260,8 +260,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 					'inChat',
 				];
 				if (connected.includes(String(status))) this.markConnected();
-				if (['phoneNotConnected', 'browserClose', 'serverClose', 'autocloseCalled'].includes(String(status))) {
+				if (
+					['phoneNotConnected', 'browserClose', 'serverClose', 'autocloseCalled'].includes(
+						String(status),
+					)
+				) {
 					this.logger.warn(`WhatsApp statusFind: ${status}`);
+					void this.markSessionBroken(
+						`WhatsApp Web closed (${status}). Reconnect the account from the dashboard.`,
+					);
 				}
 			},
 		});
@@ -521,6 +528,50 @@ export class WppConnectProvider implements WhatsAppProvider {
 		this.emit({ type: 'connection', status: this.state, phoneNumber });
 	}
 
+	/** Chromium/WA Web page died while Nest still thought the session was connected. */
+	static isSessionDeadError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error || '');
+		return /detached Frame|Target closed|Session closed|Protocol error|Execution context was destroyed|Navigating frame was detached|page has been closed|Browser has been closed|Connection closed/i.test(
+			message,
+		);
+	}
+
+	private async markSessionBroken(reason: string) {
+		this.stopAuthReconciliation();
+		if (this.statusChangeTimer) {
+			clearTimeout(this.statusChangeTimer);
+			this.statusChangeTimer = null;
+		}
+		const previous = this.state;
+		this.logger.error(
+			`WhatsApp browser session broken for ${this.accountId} (was ${previous}): ${reason}`,
+		);
+		try {
+			await this.client?.close?.();
+		} catch {
+			/* ignore close errors on a dead page */
+		}
+		this.client = null;
+		this.qr = null;
+		this.pairingCode = null;
+		this.state = 'error';
+		this.emit({
+			type: 'connection',
+			status: this.state,
+			error: reason,
+		});
+	}
+
+	private async rethrowIfSessionDead(label: string, error: unknown): Promise<never> {
+		if (WppConnectProvider.isSessionDeadError(error)) {
+			const friendly =
+				'WhatsApp Web session died on the server (browser page closed). Reconnect the account, then try again.';
+			await this.markSessionBroken(`${friendly} [${label}]`);
+			throw new Error(friendly);
+		}
+		throw error instanceof Error ? error : new Error(String(error));
+	}
+
 	async disconnect() {
 		this.stopAuthReconciliation();
 		if (this.statusChangeTimer) {
@@ -599,6 +650,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 				lastError = new Error('WhatsApp chat store is not ready yet');
 			} catch (error) {
 				lastError = error;
+				if (WppConnectProvider.isSessionDeadError(error)) {
+					await this.rethrowIfSessionDead('listChats', error);
+				}
 			}
 			if (attempt < 5) {
 				await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -625,6 +679,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
+				if (WppConnectProvider.isSessionDeadError(error)) {
+					await this.rethrowIfSessionDead('getAllChats', error);
+				}
 			}
 			if (attempt < 3) {
 				await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -642,25 +699,34 @@ export class WppConnectProvider implements WhatsAppProvider {
 		chatId: string,
 		options: { limit?: number; before?: string; after?: string } = {},
 	) {
+		if (this.state !== 'connected' || !this.client) {
+			throw new Error(
+				'WhatsApp account is not connected. Reconnect the account, then try again.',
+			);
+		}
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
-		if (this.client?.getMessages) {
-			messages = await this.withTimeout(
-				this.client.getMessages(chatId, {
-					count,
-					id: options.before || options.after || undefined,
-					direction: options.before ? 'before' : options.after ? 'after' : undefined,
-				}),
-				30000,
-				`getMessages(${chatId})`,
-			);
-		} else {
-			messages = await this.withTimeout(
-				this.client.getAllMessagesInChat(chatId, true, false),
-				30000,
-				`getAllMessagesInChat(${chatId})`,
-			);
-			messages = messages.slice(-count);
+		try {
+			if (this.client?.getMessages) {
+				messages = await this.withTimeout(
+					this.client.getMessages(chatId, {
+						count,
+						id: options.before || options.after || undefined,
+						direction: options.before ? 'before' : options.after ? 'after' : undefined,
+					}),
+					30000,
+					`getMessages(${chatId})`,
+				);
+			} else {
+				messages = await this.withTimeout(
+					this.client.getAllMessagesInChat(chatId, true, false),
+					30000,
+					`getAllMessagesInChat(${chatId})`,
+				);
+				messages = messages.slice(-count);
+			}
+		} catch (error) {
+			await this.rethrowIfSessionDead(`getMessages(${chatId})`, error);
 		}
 		return (messages || [])
 			.map(normalizeMessage)

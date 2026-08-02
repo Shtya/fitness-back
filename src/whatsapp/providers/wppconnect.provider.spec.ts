@@ -3,6 +3,7 @@ import { isStatusMessage, WppConnectProvider } from './wppconnect.provider';
 describe('WppConnectProvider message normalization', () => {
 	function providerWithMessages(messages: any[]) {
 		const provider = new WppConnectProvider('account-test', {});
+		(provider as any).state = 'connected';
 		(provider as any).client = {
 			getMessages: jest.fn().mockResolvedValue(messages),
 		};
@@ -200,11 +201,26 @@ describe('WppConnectProvider message normalization', () => {
 			.fn()
 			.mockResolvedValue([{ id: { _serialized: '201000000000@c.us' } }]);
 		const getAllChats = jest.fn();
+		(provider as any).state = 'connected';
 		(provider as any).client = { listChats, getAllChats };
 
 		await expect(provider.getChats(50)).resolves.toHaveLength(1);
 		expect(listChats).toHaveBeenCalledWith({ count: 50 });
 		expect(getAllChats).not.toHaveBeenCalled();
+	});
+
+	it('marks the session broken on detached Frame errors', async () => {
+		const provider = new WppConnectProvider('account-test', {});
+		(provider as any).state = 'connected';
+		(provider as any).client = {
+			getMessages: jest
+				.fn()
+				.mockRejectedValue(new Error("Attempted to use detached Frame 'ABC'")),
+			close: jest.fn().mockResolvedValue(undefined),
+		};
+
+		await expect(provider.getMessages('chat@c.us')).rejects.toThrow(/session died/i);
+		expect(provider.getState()).toBe('error');
 	});
 
 	it('accepts a new QR when the previously connected session is no longer authenticated', async () => {

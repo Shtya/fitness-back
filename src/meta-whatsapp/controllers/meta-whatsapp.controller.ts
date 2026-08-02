@@ -24,6 +24,7 @@ import { UserRole } from '../../../entities/global.entity';
 import {
 	OpenLeadConversationDto,
 	OpenMetaPhoneDto,
+	SetMetaConversationFavoriteDto,
 	CreateMetaTemplateDto,
 	EditMetaTemplateDto,
 	SaveMetaWhatsAppConfigDto,
@@ -185,8 +186,18 @@ export class MetaWhatsAppController {
 
 	@Get('conversations')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	listConversations(@Query('q') q?: string, @Query('limit') limit?: string) {
-		return this.conversations.list(q, limit ? Number(limit) : 50);
+	listConversations(
+		@Query('q') q?: string,
+		@Query('limit') limit?: string,
+		@Query('filter') filter?: string,
+	) {
+		return this.conversations.list(q, limit ? Number(limit) : 50, filter);
+	}
+
+	@Get('conversations/counts')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	conversationFilterCounts() {
+		return this.conversations.filterCounts();
 	}
 
 	@Post('conversations/open-phone')
@@ -243,6 +254,15 @@ export class MetaWhatsAppController {
 			metaHistoryNote:
 				'Meta Cloud API cannot import WhatsApp history from before the webhook. Synced from this system database.',
 		};
+	}
+
+	@Put('conversations/:id/favorite')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	setConversationFavorite(
+		@Param('id') id: string,
+		@Body() dto: SetMetaConversationFavoriteDto,
+	) {
+		return this.conversations.setFavorite(id, dto.isFavorite);
 	}
 
 	@Post('leads/open')

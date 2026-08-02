@@ -342,6 +342,11 @@ export class OpenMetaPhoneDto {
 	displayName?: string;
 }
 
+export class SetMetaConversationFavoriteDto {
+	@IsBoolean()
+	isFavorite: boolean;
+}
+
 export class CreateMetaQuickReplyDto {
 	@IsString()
 	@MinLength(1)

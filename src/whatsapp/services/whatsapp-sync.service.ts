@@ -1571,16 +1571,31 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.messageRepo.count({ where: { conversationId } }),
 		]);
 		const requestedLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
-		const messages = await provider.getMessages(conversation.providerChatId, {
-			limit: requestedLimit,
-			before: mode === 'older' ? conversation.oldestProviderCursor || undefined : undefined,
-			// A partial local cache (for example 1–3 messages) must be backfilled
-			// with the provider's latest page, not only messages newer than the last row.
-			after:
-				mode === 'latest' && localCount >= requestedLimit
-					? latestLocal?.providerMessageId
-					: undefined,
-		});
+		let messages: Awaited<ReturnType<WhatsAppProvider['getMessages']>>;
+		try {
+			messages = await provider.getMessages(conversation.providerChatId, {
+				limit: requestedLimit,
+				before: mode === 'older' ? conversation.oldestProviderCursor || undefined : undefined,
+				// A partial local cache (for example 1–3 messages) must be backfilled
+				// with the provider's latest page, not only messages newer than the last row.
+				after:
+					mode === 'latest' && localCount >= requestedLimit
+						? latestLocal?.providerMessageId
+						: undefined,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (
+				/session died|detached Frame|Target closed|browser page closed|not connected/i.test(
+					message,
+				)
+			) {
+				throw new BadRequestException(
+					'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.',
+				);
+			}
+			throw error;
+		}
 		// Persist provider history with bounded concurrency. Sequential hydration
 		// performs several database round trips per message and made 30 messages
 		// take tens of seconds on a remote database.
