@@ -119,6 +119,77 @@ export class AuthService {
 			loginUrl,
 		};
 	}
+
+	/** Super-admin enters a user session without changing their password. */
+	async impersonateUser(targetUserId: string, actor: { id: string; role: UserRole }) {
+		if (actor.role !== UserRole.SUPER_ADMIN) {
+			throw new ForbiddenException('Only super admin can impersonate');
+		}
+		const user = await this.userRepo.findOne({ where: { id: targetUserId } });
+		if (!user) throw new NotFoundException('User not found');
+		if (user.role === UserRole.SUPER_ADMIN) {
+			throw new ForbiddenException('Cannot impersonate another super admin');
+		}
+		if (user.status !== UserStatus.ACTIVE) {
+			throw new BadRequestException('Target user is not active');
+		}
+
+		const accessToken = this.signAccess(user.id, user.tenantId);
+		const refreshToken = this.signRefresh(user.id, user.tenantId);
+		return {
+			message: 'Impersonation session created',
+			accessToken,
+			refreshToken,
+			user: this.serialize(user),
+		};
+	}
+
+	/**
+	 * Set which sidebar pages a user can see + optional post-login landing page id.
+	 * Pass null / [] for allowedPages to restore default (all pages for their role).
+	 * Pass null / '' for loginLandingPage to restore role default redirect.
+	 */
+	async setAllowedPages(
+		targetUserId: string,
+		allowedPages: string[] | null | undefined,
+		actor: { id: string; role: UserRole },
+		loginLandingPage?: string | null,
+	) {
+		if (actor.role !== UserRole.SUPER_ADMIN) {
+			throw new ForbiddenException('Only super admin can set page access');
+		}
+		const user = await this.userRepo.findOne({ where: { id: targetUserId } });
+		if (!user) throw new NotFoundException('User not found');
+		if (user.role === UserRole.SUPER_ADMIN) {
+			throw new ForbiddenException('Cannot restrict super admin pages');
+		}
+
+		const cleaned = Array.isArray(allowedPages)
+			? [...new Set(allowedPages.map(p => String(p || '').trim()).filter(Boolean))]
+			: [];
+
+		user.allowedPages = cleaned.length ? cleaned : null;
+
+		if (loginLandingPage !== undefined) {
+			const landing = loginLandingPage ? String(loginLandingPage).trim() : '';
+			if (!landing) {
+				user.loginLandingPage = null;
+			} else if (cleaned.length && !cleaned.includes(landing)) {
+				throw new BadRequestException('Login landing page must be one of the allowed pages');
+			} else {
+				user.loginLandingPage = landing;
+			}
+		} else if (cleaned.length && user.loginLandingPage && !cleaned.includes(user.loginLandingPage)) {
+			// Drop stale landing if it was removed from allowlist
+			user.loginLandingPage = null;
+		}
+
+		await this.userRepo.save(user);
+		return {
+			message: cleaned.length ? 'Page access updated' : 'Page access reset to all pages',
+			user: this.serialize(user),
+		};
+	}
 	async updateUserProfile(userId: string, dto: any) {
 		const user = await this.userRepo.findOne({ where: { id: userId } });
 		if (!user) throw new NotFoundException('User not found');
@@ -1021,8 +1092,8 @@ export class AuthService {
 		const user = await this.userRepo.findOne({ where: { id: userId } });
 		if (!user) throw new NotFoundException('User not found');
 
-		// ----- ADMIN-ONLY fields -----
-		const isAdmin = actor?.role === UserRole.ADMIN;
+		// ----- ADMIN / SUPER_ADMIN fields -----
+		const isAdmin = actor?.role === UserRole.ADMIN || actor?.role === UserRole.SUPER_ADMIN;
 		if (!isAdmin) {
 			// Strip admin-only props if a coach sent them
 			delete (dto as any).role;

@@ -74,6 +74,26 @@ export class AuthController {
 		return this.authService.adminGenerateTempCredentials(id, req.user);
 	}
 
+	/** Enter a user session without resetting their password */
+	@Post('super-admin/impersonate/:id')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(UserRole.SUPER_ADMIN)
+	impersonate(@Param('id') id: string, @Req() req: any) {
+		return this.authService.impersonateUser(id, req.user);
+	}
+
+	/** Restrict which sidebar pages a user can see + post-login landing (null/[] = all) */
+	@Put('super-admin/users/:id/allowed-pages')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(UserRole.SUPER_ADMIN)
+	setAllowedPages(
+		@Param('id') id: string,
+		@Body() body: { allowedPages?: string[] | null; loginLandingPage?: string | null },
+		@Req() req: any,
+	) {
+		return this.authService.setAllowedPages(id, body?.allowedPages, req.user, body?.loginLandingPage);
+	}
+
 
 	@Put('profile/:id')
 	@UseGuards(JwtAuthGuard)
@@ -140,7 +160,7 @@ export class AuthController {
 
 	@Delete('user/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	async deleteUser(@Param('id') id: string) {
 		return this.authService.deleteUser(id);
 	}
@@ -160,7 +180,7 @@ export class AuthController {
 	/* NEW: approve/suspend */
 	@Put('status/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	setStatus(@Param('id') id: string, @Body('status') status: UserStatus) {
 		if (!Object.values(UserStatus).includes(status)) throw new BadRequestException('Invalid status');
 		return this.authService.setStatus(id, status);
@@ -181,10 +201,10 @@ export class AuthController {
 		return this.authService.coachCreateClient(body, req.user);
 	}
 
-	// Admin creates any user (client/coach/trainer) with auto-password, can also assign their coach right away
+	// Admin / super-admin creates any user (client/coach/admin) with password or auto temp password
 	@Post('admin/users')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	// @Roles(UserRole.ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	createUserByAdmin(@Body() body: any, @Req() req: any) {
 		return this.authService.adminCreateUser(body, req?.user.id);
 	}
@@ -253,14 +273,14 @@ export class AuthController {
 
 	@Get('user/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN, UserRole.COACH)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	async getUserById(@Param('id') id: string) {
 		return this.authService.getUserById(id);
 	}
 
 	@Put('user/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN, UserRole.COACH)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	async updateUser(@Param('id') id: string, @Body() dto: any, @Req() req: any) {
 		return this.authService.updateUser(id, dto, req.user);
 	}

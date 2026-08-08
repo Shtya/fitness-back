@@ -384,6 +384,21 @@ export class User extends CoreEntity {
 
 	@Column({ type: 'boolean', default: false })
 	canEditWorkout!: boolean;
+
+	/**
+	 * Sidebar page ids the user may see (ITEM_META ids).
+	 * null / empty = all pages for their role (default).
+	 * non-empty = only those pages.
+	 */
+	@Column('text', { array: true, nullable: true, default: null })
+	allowedPages?: string[] | null;
+
+	/**
+	 * Nav item id to open after login (must be allowed / role page).
+	 * null = role default landing.
+	 */
+	@Column({ type: 'varchar', length: 80, nullable: true, default: null })
+	loginLandingPage?: string | null;
 }
 
 /* =========================================================
