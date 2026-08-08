@@ -38,6 +38,7 @@ import { TenantModule } from './tenant/tenant.module';
 import { PhoneIntelligenceModule } from './phone-intelligence/phone-intelligence.module';
 import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
 import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
+import { QuranRevisionModule } from './quran-revision/quran-revision.module';
 
 @Module({
 	imports: [
@@ -97,6 +98,7 @@ import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 		PhoneIntelligenceModule,
 		FitnessLeadsModule,
 		MetaWhatsAppModule,
+		QuranRevisionModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],
