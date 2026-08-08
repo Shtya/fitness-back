@@ -7,7 +7,7 @@ import {
 	MetaWhatsAppConversation,
 	MetaWhatsAppMessage,
 } from '../entities/meta-whatsapp.entity';
-import { isWithinCustomerCareWindow, normalizeWaId } from './meta-whatsapp-crypto.service';
+import { isWithinCustomerCareWindow, bestMessageTimestamp, normalizeWaId, CUSTOMER_CARE_WINDOW_MS } from './meta-whatsapp-crypto.service';
 
 @Injectable()
 export class MetaWhatsAppConversationsService {
@@ -23,7 +23,11 @@ export class MetaWhatsAppConversationsService {
 	async list(q?: string, limit = 50, filter?: string) {
 		const normalizedFilter = String(filter || 'all').trim().toLowerCase();
 		const maxLimit =
-			normalizedFilter === 'replied' || normalizedFilter === 'window24h' ? 5000 : 500;
+			normalizedFilter === 'replied' ||
+			normalizedFilter === 'window24h' ||
+			normalizedFilter === 'unreplied'
+				? 5000
+				: 500;
 		const qb = this.conversationRepo
 			.createQueryBuilder('c')
 			.orderBy('c.last_message_at', 'DESC', 'NULLS LAST')
@@ -47,6 +51,9 @@ export class MetaWhatsAppConversationsService {
 			qb.andWhere('c.last_inbound_at IS NOT NULL').andWhere(
 				`c.last_inbound_at > NOW() - INTERVAL '24 hours'`,
 			);
+		} else if (normalizedFilter === 'unreplied') {
+			// Customer’s last message is waiting — we haven’t sent anything after it.
+			this.applyUnrepliedFilter(qb);
 		} else if (normalizedFilter === 'replied') {
 			qb.andWhere(
 				`EXISTS (
@@ -78,8 +85,12 @@ export class MetaWhatsAppConversationsService {
 	}
 
 	async filterCounts() {
-		const repliedQb = this.conversationRepo
-			.createQueryBuilder('c')
+		const base = () => this.conversationRepo.createQueryBuilder('c');
+
+		const unrepliedQb = base();
+		this.applyUnrepliedFilter(unrepliedQb);
+
+		const repliedQb = base()
 			.where(
 				`EXISTS (
 					SELECT 1
@@ -99,20 +110,58 @@ export class MetaWhatsAppConversationsService {
 				templateType: 'template',
 			});
 
-		const windowQb = this.conversationRepo
-			.createQueryBuilder('c')
-			.where('c.last_inbound_at IS NOT NULL')
-			.andWhere(`c.last_inbound_at > NOW() - INTERVAL '24 hours'`);
-
-		const [replied, window24h] = await Promise.all([
+		const [
+			all,
+			unread,
+			leads,
+			fav,
+			replied,
+			window24h,
+			unreplied,
+		] = await Promise.all([
+			base().getCount(),
+			base().andWhere('c.unread_count > 0').getCount(),
+			base().andWhere('c.lead_id IS NOT NULL').getCount(),
+			base().andWhere('c.is_favorite = true').getCount(),
 			repliedQb.getCount(),
-			windowQb.getCount(),
+			base()
+				.andWhere('c.last_inbound_at IS NOT NULL')
+				.andWhere(`c.last_inbound_at > NOW() - INTERVAL '24 hours'`)
+				.getCount(),
+			unrepliedQb.getCount(),
 		]);
 
 		return {
+			all: Number(all) || 0,
+			unread: Number(unread) || 0,
+			leads: Number(leads) || 0,
+			fav: Number(fav) || 0,
 			replied: Number(replied) || 0,
 			window24h: Number(window24h) || 0,
+			unreplied: Number(unreplied) || 0,
 		};
+	}
+
+	/** Last activity is inbound — business has not replied yet. */
+	private applyUnrepliedFilter(qb: any) {
+		qb.andWhere('c.last_inbound_at IS NOT NULL')
+			.andWhere('c.last_message_at IS NOT NULL')
+			.andWhere('c.last_inbound_at >= c.last_message_at')
+			.andWhere(
+				`EXISTS (
+					SELECT 1
+					FROM meta_whatsapp_messages m
+					WHERE m.conversation_id = c.id
+						AND m.direction = :unrepliedInbound
+						AND m.created_at = (
+							SELECT MAX(m2.created_at)
+							FROM meta_whatsapp_messages m2
+							WHERE m2.conversation_id = c.id
+						)
+				)`,
+			)
+			.setParameter('unrepliedInbound', MetaWaMessageDirection.INBOUND);
+		return qb;
 	}
 
 	async findRepliedToTemplateIds(conversationIds: string[]) {
@@ -149,11 +198,52 @@ export class MetaWhatsAppConversationsService {
 	}
 
 	async get(conversationId: string) {
-		return this.toConversationDto(await this.findEntity(conversationId));
+		const conversation = await this.findEntity(conversationId);
+		await this.syncLastInboundAt(conversation);
+		return this.toConversationDto(conversation);
+	}
+
+	async syncLastInboundAtById(conversationId: string) {
+		const conversation = await this.conversationRepo.findOne({ where: { id: conversationId } });
+		if (!conversation) return null;
+		return this.syncLastInboundAt(conversation);
+	}
+
+	/**
+	 * Keep customer-care window in sync with stored inbound messages.
+	 * Repairs cases where webhooks saved the message but lastInboundAt stayed null/stale.
+	 */
+	async syncLastInboundAt(conversation: MetaWhatsAppConversation) {
+		const lastInbound = await this.messageRepo.findOne({
+			where: {
+				conversationId: conversation.id,
+				direction: MetaWaMessageDirection.INBOUND,
+			},
+			order: { createdAt: 'DESC' },
+		});
+		if (!lastInbound) return conversation;
+
+		const next = bestMessageTimestamp(lastInbound.createdAt, lastInbound.providerTimestamp);
+		if (!next) return conversation;
+
+		const current = bestMessageTimestamp(conversation.lastInboundAt);
+		if (next <= current) {
+			// Still refresh DTO window if stored lastInboundAt is broken/old vs messages.
+			if (!isWithinCustomerCareWindow(conversation.lastInboundAt) && isWithinCustomerCareWindow(new Date(next))) {
+				conversation.lastInboundAt = new Date(next);
+				return this.conversationRepo.save(conversation);
+			}
+			return conversation;
+		}
+
+		conversation.lastInboundAt = new Date(next);
+		return this.conversationRepo.save(conversation);
 	}
 
 	async messages(conversationId: string, limit = 100, before?: string) {
-		await this.get(conversationId);
+		const conversation = await this.findEntity(conversationId);
+		await this.syncLastInboundAt(conversation);
+
 		const qb = this.messageRepo
 			.createQueryBuilder('m')
 			.where('m.conversation_id = :conversationId', { conversationId })
@@ -163,7 +253,47 @@ export class MetaWhatsAppConversationsService {
 			qb.andWhere('m.created_at < :before', { before: new Date(before) });
 		}
 		const rows = await qb.getMany();
-		return rows.reverse().map(m => this.serializeMessage(m));
+		const messages = rows.reverse().map(m => this.serializeMessage(m));
+		const care = await this.resolveCustomerCareWindow(conversationId, conversation);
+		return {
+			messages,
+			...care,
+		};
+	}
+
+	/**
+	 * Source of truth for the compose bar: latest inbound message time (createdAt).
+	 * Window is open for 24h from that timestamp.
+	 */
+	async resolveCustomerCareWindow(
+		conversationId: string,
+		conversation?: MetaWhatsAppConversation | null,
+	) {
+		const lastInbound = await this.messageRepo.findOne({
+			where: {
+				conversationId,
+				direction: MetaWaMessageDirection.INBOUND,
+			},
+			order: { createdAt: 'DESC' },
+		});
+
+		const lastInboundAtMs = lastInbound
+			? bestMessageTimestamp(lastInbound.createdAt, lastInbound.providerTimestamp)
+			: bestMessageTimestamp(conversation?.lastInboundAt);
+
+		const lastInboundAt = lastInboundAtMs ? new Date(lastInboundAtMs) : null;
+		const withinWindow = isWithinCustomerCareWindow(lastInboundAt);
+		const remainingMs = withinWindow && lastInboundAtMs
+			? Math.max(0, CUSTOMER_CARE_WINDOW_MS - (Date.now() - lastInboundAtMs))
+			: 0;
+
+		return {
+			lastInboundAt,
+			withinCustomerCareWindow: withinWindow,
+			canSendFreeform: withinWindow,
+			requiresTemplate: !withinWindow,
+			customerCareRemainingMs: remainingMs,
+		};
 	}
 
 	async markRead(conversationId: string) {
@@ -171,6 +301,7 @@ export class MetaWhatsAppConversationsService {
 		if (!c) throw new NotFoundException('Conversation not found');
 		c.unreadCount = 0;
 		await this.conversationRepo.save(c);
+		await this.syncLastInboundAt(c);
 
 		const lastInbound = await this.messageRepo.findOne({
 			where: {
@@ -341,14 +472,28 @@ export class MetaWhatsAppConversationsService {
 
 	async toConversationDto(c: MetaWhatsAppConversation) {
 		const repliedIds = await this.findRepliedToTemplateIds([c.id]);
-		return this.serializeConversation(c, { repliedToTemplate: repliedIds.has(c.id) });
+		const care = await this.resolveCustomerCareWindow(c.id, c);
+		return {
+			...this.serializeConversation(c, {
+				repliedToTemplate: repliedIds.has(c.id),
+				lastInboundOverride: care.lastInboundAt,
+			}),
+			canSendFreeform: care.canSendFreeform,
+			withinCustomerCareWindow: care.withinCustomerCareWindow,
+			requiresTemplate: care.requiresTemplate,
+			lastInboundAt: care.lastInboundAt,
+			customerCareRemainingMs: care.customerCareRemainingMs,
+		};
 	}
 
 	serializeConversation(
 		c: MetaWhatsAppConversation,
-		extra?: { repliedToTemplate?: boolean },
+		extra?: { repliedToTemplate?: boolean; lastInboundOverride?: Date | number | null },
 	) {
-		const withinWindow = isWithinCustomerCareWindow(c.lastInboundAt);
+		const inboundAt = extra?.lastInboundOverride ?? c.lastInboundAt;
+		const withinWindow = isWithinCustomerCareWindow(
+			inboundAt != null ? new Date(inboundAt) : c.lastInboundAt,
+		);
 		return {
 			id: c.id,
 			leadId: c.leadId,
@@ -357,7 +502,7 @@ export class MetaWhatsAppConversationsService {
 			businessName: c.businessName,
 			lastMessagePreview: c.lastMessagePreview,
 			lastMessageAt: c.lastMessageAt,
-			lastInboundAt: c.lastInboundAt,
+			lastInboundAt: inboundAt ? new Date(inboundAt) : c.lastInboundAt,
 			unreadCount: c.unreadCount,
 			isFavorite: Boolean(c.isFavorite),
 			repliedToTemplate: Boolean(extra?.repliedToTemplate),

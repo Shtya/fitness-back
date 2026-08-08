@@ -127,4 +127,19 @@ export class ChatController {
   async updateChatSettings(@Req() req: any, @Body() body: any) {
     return this.chatService.updateChatSettings(req.user.id, body);
   }
+
+  @Post('report')
+  async reportContent(@Req() req: any, @Body() body: any) {
+    return this.chatService.reportContent(req.user.id, body || {});
+  }
+
+  @Post('block/:userId')
+  async blockUser(@Req() req: any, @Param('userId') userId: string) {
+    return this.chatService.blockUser(req.user.id, userId);
+  }
+
+  @Delete('block/:userId')
+  async unblockUser(@Req() req: any, @Param('userId') userId: string) {
+    return this.chatService.unblockUser(req.user.id, userId);
+  }
 }

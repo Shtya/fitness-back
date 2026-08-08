@@ -179,10 +179,19 @@ export class FormController {
 			answers,
 		};
 
-		if (reportTo && !isUUID(reportTo)) {
+		// Frontend may send report_to=null/undefined as literal strings when the link has no coach id.
+		const normalizedReportTo =
+			reportTo &&
+			reportTo !== 'null' &&
+			reportTo !== 'undefined' &&
+			String(reportTo).trim() !== ''
+				? String(reportTo).trim()
+				: undefined;
+
+		if (normalizedReportTo && !isUUID(normalizedReportTo)) {
 			throw new BadRequestException('Please review the form using the link again.');
 		}
 
-		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], reportTo, locale);
+		return this.formService.submitFormMultipart(+id, dto, ipAddress, files || [], normalizedReportTo, locale);
 	}
 }

@@ -35,6 +35,23 @@ export class AuthController {
 		return res.json({ message: 'Logged out' });
 	}
 
+	@Post('forgot-password')
+	async forgotPassword(@Body() dto: ForgotPasswordDto) {
+		return this.authService.forgotPassword(dto);
+	}
+
+	@Post('reset-password')
+	async resetPassword(@Body() dto: ResetPasswordDto) {
+		return this.authService.resetPassword(dto);
+	}
+
+	/** Self-service account deletion (App Store / Play requirement). */
+	@Delete('me')
+	@UseGuards(JwtAuthGuard)
+	async deleteMyAccount(@Req() req: any) {
+		return this.authService.deleteUser(req.user.id);
+	}
+
 	/* ---------------------- Current User ---------------------- */
 
 	@UseGuards(JwtAuthGuard)

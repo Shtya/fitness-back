@@ -375,6 +375,8 @@ export class User extends CoreEntity {
 		badge: boolean;
 		backgroundOnly: boolean;
 		groupByConversation: boolean;
+		/** User IDs this client has blocked in chat (UGC moderation). */
+		blockedUserIds?: string[];
 	};
 
 	@Column('text', { array: true, default: '{}' })

@@ -245,9 +245,17 @@ export class MetaWhatsAppController {
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	async syncConversation(@Param('id') id: string) {
 		const conversation = await this.conversations.get(id);
-		const messages = await this.conversations.messages(id, 200);
+		const payload = await this.conversations.messages(id, 200);
+		const messages = Array.isArray(payload) ? payload : payload?.messages || [];
 		return {
-			conversation,
+			conversation: {
+				...conversation,
+				canSendFreeform: payload?.canSendFreeform ?? conversation.canSendFreeform,
+				withinCustomerCareWindow:
+					payload?.withinCustomerCareWindow ?? conversation.withinCustomerCareWindow,
+				requiresTemplate: payload?.requiresTemplate ?? conversation.requiresTemplate,
+				lastInboundAt: payload?.lastInboundAt ?? conversation.lastInboundAt,
+			},
 			messages,
 			messageCount: messages.length,
 			syncedFromDb: true,

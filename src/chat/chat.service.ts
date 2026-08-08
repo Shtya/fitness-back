@@ -2,7 +2,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, Not, Like } from 'typeorm';
-import { User, UserRole } from 'entities/global.entity';
+import { User, UserRole, Feedback, FeedbackType, FeedbackStatus } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
 
 
@@ -14,6 +14,7 @@ const DEFAULT_CHAT_SETTINGS = {
 	badge: true,
 	backgroundOnly: false,
 	groupByConversation: true,
+	blockedUserIds: [] as string[],
 };
 
 
@@ -24,6 +25,7 @@ export class ChatService {
 		@InjectRepository(ChatMessage) private messageRepo: Repository<ChatMessage>,
 		@InjectRepository(ChatParticipant) private participantRepo: Repository<ChatParticipant>,
 		@InjectRepository(User) private userRepo: Repository<User>,
+		@InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
 	) { }
 
 
@@ -73,6 +75,7 @@ export class ChatService {
 			badge: boolean;
 			backgroundOnly: boolean;
 			groupByConversation: boolean;
+			blockedUserIds: string[];
 		}>,
 	) {
 		const user = await this.userRepo.findOne({
@@ -90,6 +93,68 @@ export class ChatService {
 
 		await this.userRepo.update(userId, { chatSettings: next });
 		return next;
+	}
+
+	private blockedIdsFromSettings(settings: any): string[] {
+		const raw = settings?.blockedUserIds;
+		return Array.isArray(raw) ? raw.map(String).filter(Boolean) : [];
+	}
+
+	async blockUser(actorId: string, targetUserId: string) {
+		if (!targetUserId || targetUserId === actorId) {
+			throw new BadRequestException('Invalid user to block');
+		}
+		const settings = await this.getChatSettings(actorId);
+		const blocked = new Set(this.blockedIdsFromSettings(settings));
+		blocked.add(String(targetUserId));
+		return this.updateChatSettings(actorId, { blockedUserIds: Array.from(blocked) });
+	}
+
+	async unblockUser(actorId: string, targetUserId: string) {
+		const settings = await this.getChatSettings(actorId);
+		const next = this.blockedIdsFromSettings(settings).filter(id => id !== String(targetUserId));
+		return this.updateChatSettings(actorId, { blockedUserIds: next });
+	}
+
+	async reportContent(
+		reporterId: string,
+		body: {
+			conversationId?: string;
+			messageId?: string;
+			reportedUserId?: string;
+			reason?: string;
+			details?: string;
+		},
+	) {
+		const reporter = await this.userRepo.findOne({ where: { id: reporterId } });
+		if (!reporter) throw new NotFoundException('User not found');
+
+		const reason = String(body?.reason || 'inappropriate').slice(0, 120);
+		const details = String(body?.details || '').slice(0, 2000);
+		const title = `Chat report: ${reason}`;
+		const description = [
+			`Reporter: ${reporter.email || reporterId}`,
+			body?.reportedUserId ? `Reported user: ${body.reportedUserId}` : null,
+			body?.conversationId ? `Conversation: ${body.conversationId}` : null,
+			body?.messageId ? `Message: ${body.messageId}` : null,
+			details ? `Details: ${details}` : null,
+		]
+			.filter(Boolean)
+			.join('\n');
+
+		const feedback = this.feedbackRepo.create({
+			type: FeedbackType.ISSUE,
+			title,
+			description,
+			email: reporter.email || null,
+			name: reporter.name || null,
+			category: 'chat_moderation',
+			userId: reporterId,
+			status: FeedbackStatus.NEW,
+		});
+		await this.feedbackRepo.save(feedback);
+
+		return { success: true, id: feedback.id };
 	}
 
 	// chat.service.ts
@@ -161,7 +226,19 @@ export class ChatService {
 				}),
 			);
 
-			return conversations;
+			const settings = await this.getChatSettings(userId);
+			const blocked = new Set(this.blockedIdsFromSettings(settings));
+			const filtered =
+				blocked.size === 0
+					? conversations
+					: conversations.filter(c => {
+							const others = (c.chatParticipants || [])
+								.map((cp: any) => cp?.user?.id || cp?.userId)
+								.filter((id: string) => id && id !== userId);
+							return !others.some((id: string) => blocked.has(String(id)));
+					  });
+
+			return filtered;
 		} catch (error) {
 			console.error('Error loading conversations:', error);
 			throw new Error('Failed to load conversations');

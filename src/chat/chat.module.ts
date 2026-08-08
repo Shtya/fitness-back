@@ -5,12 +5,12 @@ import { ChatGateway } from './chat.gateway';
 import { ChatService } from './chat.service';
 import { ChatController } from './chat.controller';
 import { ChatPushService } from './chat-push.service';
-import { ChatConversation, ChatMessage, ChatParticipant, User } from 'entities/global.entity';
+import { ChatConversation, ChatMessage, ChatParticipant, User, Feedback } from 'entities/global.entity';
 import { NotificationModule } from '../notification/notification.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ChatConversation, ChatMessage, ChatParticipant, User]),
+    TypeOrmModule.forFeature([ChatConversation, ChatMessage, ChatParticipant, User, Feedback]),
     NotificationModule,
     JwtModule.registerAsync({
       useFactory: () => ({

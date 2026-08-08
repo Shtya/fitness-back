@@ -190,7 +190,9 @@ export class MetaWhatsAppMessagingService {
 		if (!text) throw new BadRequestException('Message text is required');
 
 		const { conversation, lead } = await this.resolveTarget(dto);
-		this.assertFreeformAllowed(conversation.lastInboundAt);
+		await this.conversations.syncLastInboundAt(conversation);
+		const care = await this.conversations.resolveCustomerCareWindow(conversation.id, conversation);
+		this.assertFreeformAllowed(care.lastInboundAt);
 
 		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
 		const message = this.messageRepo.create({
@@ -332,7 +334,9 @@ export class MetaWhatsAppMessagingService {
 			: this.media.guessMessageType(mimeType);
 
 		const { conversation, lead } = await this.resolveTarget(input);
-		this.assertFreeformAllowed(conversation.lastInboundAt);
+		await this.conversations.syncLastInboundAt(conversation);
+		const care = await this.conversations.resolveCustomerCareWindow(conversation.id, conversation);
+		this.assertFreeformAllowed(care.lastInboundAt);
 
 		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
 		const message = this.messageRepo.create({

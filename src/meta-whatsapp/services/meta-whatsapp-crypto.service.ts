@@ -111,7 +111,26 @@ export function normalizeWaId(phone: string | null | undefined): string | null {
 
 export const CUSTOMER_CARE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** Prefer the newest sane timestamp (ms since epoch). Rejects epoch / pre-2000 values. */
+export function bestMessageTimestamp(
+	...values: Array<Date | string | number | null | undefined>
+): number {
+	let best = 0;
+	for (const value of values) {
+		if (value == null || value === '') continue;
+		let ms = new Date(value).getTime();
+		if (!Number.isFinite(ms)) continue;
+		// Meta sometimes stores unix seconds; coerce obvious second-precision values.
+		if (ms > 0 && ms < 1e11) ms *= 1000;
+		// Ignore clearly broken dates (before ~Sep 2001)
+		if (ms < 1e12) continue;
+		if (ms > best) best = ms;
+	}
+	return best;
+}
+
 export function isWithinCustomerCareWindow(lastInboundAt: Date | null | undefined, now = new Date()) {
-	if (!lastInboundAt) return false;
-	return now.getTime() - new Date(lastInboundAt).getTime() <= CUSTOMER_CARE_WINDOW_MS;
+	const at = bestMessageTimestamp(lastInboundAt);
+	if (!at) return false;
+	return now.getTime() - at <= CUSTOMER_CARE_WINDOW_MS;
 }

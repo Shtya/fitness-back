@@ -186,7 +186,12 @@ export class MetaWhatsAppWebhookService {
 				}
 
 				const existing = await this.messageRepo.findOne({ where: { wamid } });
-				if (existing) continue;
+				if (existing) {
+					if (existing.direction === MetaWaMessageDirection.INBOUND && existing.conversationId) {
+						await this.conversations.syncLastInboundAtById(existing.conversationId);
+					}
+					continue;
+				}
 
 				const lead = await this.leadRepo
 					.createQueryBuilder('l')
