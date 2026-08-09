@@ -697,6 +697,43 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	/** Open or create a direct chat by WhatsApp id (used for story replies). */
+	async openConversationByChatId(
+		user: User,
+		accountId: string,
+		chatId: string,
+		options: { title?: string | null } = {},
+	) {
+		const accountAccess = await this.access.getAccountAccess(user, accountId);
+		if (!accountAccess.canUse) {
+			throw new ForbiddenException('WhatsApp send access denied');
+		}
+		const raw = String(chatId || '').trim();
+		if (!raw) throw new BadRequestException('Chat id is required');
+		const normalized =
+			raw.includes('@')
+				? raw
+				: /^\d+$/.test(raw.replace(/\D/g, ''))
+					? `${raw.replace(/\D/g, '')}@c.us`
+					: raw;
+		if (normalized.endsWith('@g.us') || normalized.includes('status@broadcast')) {
+			throw new BadRequestException('Cannot open this chat id for messaging');
+		}
+		const conversation = await this.ensureConversation(accountId, normalized, {
+			title: options.title || null,
+			phone: phoneFromWaId(normalized),
+		});
+		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
+		if (
+			!canSeeAll &&
+			conversation.assignedUserId &&
+			conversation.assignedUserId !== user.id
+		) {
+			throw new ForbiddenException('WhatsApp conversation access denied');
+		}
+		return conversation;
+	}
+
 	async persistMessage(
 		accountId: string,
 		normalized: NormalizedWhatsAppMessage,

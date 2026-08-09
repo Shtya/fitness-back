@@ -93,6 +93,21 @@ export class WhatsAppConversationsController {
 		);
 	}
 
+	@Post('accounts/:accountId/conversations/open')
+	openConversation(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: { chatId?: string; title?: string },
+	) {
+		const chatId = String(body?.chatId || '').trim();
+		if (!chatId) {
+			throw new BadRequestException('chatId is required');
+		}
+		return this.sync.openConversationByChatId(req.user, accountId, chatId, {
+			title: body?.title || null,
+		});
+	}
+
 	@Put('conversations/:conversationId/favorite')
 	setFavorite(
 		@Req() req: any,
