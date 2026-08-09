@@ -1622,16 +1622,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (
-				/session died|detached Frame|Target closed|browser page closed|not connected/i.test(
+			this.logger.warn(
+				`syncConversation(${mode}) getMessages failed for ${conversationId}: ${message}`,
+			);
+			// Opening a chat must still return DB history. A dead/half-ready WA Web
+			// page must not surface as an unhandled Nest 500 flood.
+			const sessionDead =
+				/session died|detached Frame|Target closed|browser page closed|not connected|Execution context was destroyed/i.test(
 					message,
-				)
-			) {
-				throw new BadRequestException(
-					'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.',
 				);
-			}
-			throw error;
+			return {
+				supported: true,
+				items: await this.listMessages(
+					user,
+					conversationId,
+					mode === 'older' ? oldestBeforeSync?.id : undefined,
+					requestedLimit,
+				),
+				hasMore: Boolean(conversation.hasMoreProviderHistory),
+				syncSkipped: true,
+				syncError: sessionDead ? 'session_dead' : 'provider_unavailable',
+				message: sessionDead
+					? 'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.'
+					: undefined,
+			};
 		}
 		// Persist provider history with bounded concurrency. Sequential hydration
 		// performs several database round trips per message and made 30 messages

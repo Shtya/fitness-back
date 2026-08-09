@@ -557,7 +557,20 @@ export class WppConnectProvider implements WhatsAppProvider {
 	/** Chromium/WA Web page died while Nest still thought the session was connected. */
 	static isSessionDeadError(error: unknown): boolean {
 		const message = error instanceof Error ? error.message : String(error || '');
-		return /detached Frame|Target closed|Session closed|Protocol error|Execution context was destroyed|Navigating frame was detached|page has been closed|Browser has been closed|Connection closed/i.test(
+		const stack = error instanceof Error ? error.stack || '' : '';
+		return /detached Frame|Target closed|Session closed|Protocol error|Execution context was destroyed|Navigating frame was detached|page has been closed|Browser has been closed|Connection closed|Attempted to use detached Frame|Session closed\./i.test(
+			`${message}\n${stack}`,
+		);
+	}
+
+	/**
+	 * WhatsApp Web Store/API glitch inside the page (often after WA Web updates or
+	 * while the chat store is still hydrating). Page may still be alive — do not
+	 * mark the whole session dead; callers should soft-fail and use DB cache.
+	 */
+	static isWhatsAppRuntimeError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error || '');
+		return /Cannot read properties of undefined \(reading ['"]?get['"]?\)|Cannot read property ['"]?get['"]? of undefined|is not a function|chat not found|No chat found|Store is not ready|Chat store is not ready/i.test(
 			message,
 		);
 	}
@@ -732,27 +745,60 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
-		try {
-			if (this.client?.getMessages) {
-				messages = await this.withTimeout(
-					this.client.getMessages(chatId, {
-						count,
-						id: options.before || options.after || undefined,
-						direction: options.before ? 'before' : options.after ? 'after' : undefined,
-					}),
-					30000,
-					`getMessages(${chatId})`,
+		let lastError: unknown = null;
+		for (let attempt = 1; attempt <= 2; attempt += 1) {
+			try {
+				if (this.client?.getMessages) {
+					messages = await this.withTimeout(
+						this.client.getMessages(chatId, {
+							count,
+							id: options.before || options.after || undefined,
+							direction: options.before
+								? 'before'
+								: options.after
+									? 'after'
+									: undefined,
+						}),
+						30000,
+						`getMessages(${chatId})`,
+					);
+				} else {
+					messages = await this.withTimeout(
+						this.client.getAllMessagesInChat(chatId, true, false),
+						30000,
+						`getAllMessagesInChat(${chatId})`,
+					);
+					messages = messages.slice(-count);
+				}
+				lastError = null;
+				break;
+			} catch (error) {
+				lastError = error;
+				if (WppConnectProvider.isSessionDeadError(error)) {
+					await this.rethrowIfSessionDead(`getMessages(${chatId})`, error);
+				}
+				const detail = error instanceof Error ? error.message : String(error);
+				this.logger.warn(
+					`getMessages(${chatId}) attempt ${attempt}/2 failed for ${this.accountId}: ${detail}`,
 				);
-			} else {
-				messages = await this.withTimeout(
-					this.client.getAllMessagesInChat(chatId, true, false),
-					30000,
-					`getAllMessagesInChat(${chatId})`,
-				);
-				messages = messages.slice(-count);
+				// Store/.get races while WA Web hydrates — brief retry before soft-fail.
+				if (
+					attempt < 2 &&
+					WppConnectProvider.isWhatsAppRuntimeError(error)
+				) {
+					await new Promise((resolve) => setTimeout(resolve, 1200));
+					continue;
+				}
+				if (WppConnectProvider.isWhatsAppRuntimeError(error)) {
+					throw new Error(
+						`WhatsApp chat store is not ready yet: ${detail}`,
+					);
+				}
+				throw error instanceof Error ? error : new Error(String(error));
 			}
-		} catch (error) {
-			await this.rethrowIfSessionDead(`getMessages(${chatId})`, error);
+		}
+		if (lastError) {
+			throw lastError instanceof Error ? lastError : new Error(String(lastError));
 		}
 		return (messages || [])
 			.map(normalizeMessage)
