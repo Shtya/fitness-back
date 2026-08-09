@@ -576,15 +576,29 @@ export class WppConnectProvider implements WhatsAppProvider {
 		);
 	}
 
+	/** Store/API broken for the whole session (cooldown is appropriate). */
+	static isStoreBrokenError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error || '');
+		return /Cannot read properties of undefined \(reading ['"]?get['"]?\)|Cannot read property ['"]?get['"]? of undefined|Store is not ready|Chat store is not ready|main UI still syncing|cooling down|is not a function/i.test(
+			message,
+		);
+	}
+
+	/** Missing chat id only — must NOT cool down the whole account. */
+	static isChatNotFoundError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error || '');
+		return /chat not found|No chat found/i.test(message);
+	}
+
 	/**
 	 * WhatsApp Web Store/API glitch inside the page (often after WA Web updates or
 	 * while the chat store is still hydrating). Page may still be alive — do not
 	 * mark the whole session dead; callers should soft-fail and use DB cache.
 	 */
 	static isWhatsAppRuntimeError(error: unknown): boolean {
-		const message = error instanceof Error ? error.message : String(error || '');
-		return /Cannot read properties of undefined \(reading ['"]?get['"]?\)|Cannot read property ['"]?get['"]? of undefined|is not a function|chat not found|No chat found|Store is not ready|Chat store is not ready|cooling down/i.test(
-			message,
+		return (
+			WppConnectProvider.isStoreBrokenError(error) ||
+			WppConnectProvider.isChatNotFoundError(error)
 		);
 	}
 
@@ -773,6 +787,86 @@ export class WppConnectProvider implements WhatsAppProvider {
 				);
 	}
 
+	private async fetchMessagesForChat(
+		chatId: string,
+		count: number,
+		options: { before?: string; after?: string } = {},
+	) {
+		if (this.client?.getMessages) {
+			return this.withTimeout(
+				this.client.getMessages(chatId, {
+					count,
+					id: options.before || options.after || undefined,
+					direction: options.before ? 'before' : options.after ? 'after' : undefined,
+				}),
+				20000,
+				`getMessages(${chatId})`,
+			);
+		}
+		const all = await this.withTimeout(
+			this.client.getAllMessagesInChat(chatId, true, false),
+			20000,
+			`getAllMessagesInChat(${chatId})`,
+		);
+		return (all || []).slice(-count);
+	}
+
+	/** Resolve a chat that exists in WA Web even when assertGetChat fails. */
+	private async ensureChatId(chatId: string): Promise<string | null> {
+		const page = this.client?.page;
+		const target = String(chatId || '').trim();
+		if (!page || !target) return null;
+		try {
+			return await this.withTimeout(
+				page.evaluate(async (id: string) => {
+					const w = window as any;
+					const WPP = w.WPP;
+					if (!WPP?.chat) return null;
+					const asSerialized = (chat: any) =>
+						chat?.id?._serialized || chat?.id || null;
+					try {
+						const existing = WPP.chat.get?.(id);
+						if (existing) return asSerialized(existing);
+					} catch {
+						/* ignore */
+					}
+					try {
+						if (typeof WPP.chat.find === 'function') {
+							const found = await WPP.chat.find(id);
+							if (found) return asSerialized(found);
+						}
+					} catch {
+						/* ignore */
+					}
+					try {
+						const list =
+							(typeof WPP.chat.list === 'function'
+								? await WPP.chat.list({ count: 800 })
+								: []) || [];
+						const user = String(id).split('@')[0];
+						const match = list.find((chat: any) => {
+							const sid = String(asSerialized(chat) || '');
+							return sid === id || (user && sid.startsWith(`${user}@`));
+						});
+						if (match) return asSerialized(match);
+					} catch {
+						/* ignore */
+					}
+					return null;
+				}, target),
+				12000,
+				`ensureChatId(${target})`,
+			);
+		} catch (error) {
+			this.logger.warn(
+				`ensureChatId(${target}) failed for ${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return null;
+		}
+	}
+
 	async getMessages(
 		chatId: string,
 		options: { limit?: number; before?: string; after?: string } = {},
@@ -792,80 +886,86 @@ export class WppConnectProvider implements WhatsAppProvider {
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
 		const chatIds = await this.resolveSendableChatIds(chatId);
-		const candidates = chatIds.length ? chatIds : [chatId];
+		const candidates = chatIds.length ? chatIds : [String(chatId)];
+		const tried = new Set<string>();
+		let lastChatMissingError: unknown = null;
 		try {
-			let lastRuntimeError: unknown = null;
 			for (const candidate of candidates) {
-				try {
-					if (this.client?.getMessages) {
-						messages = await this.withTimeout(
-							this.client.getMessages(candidate, {
-								count,
-								id: options.before || options.after || undefined,
-								direction: options.before
-									? 'before'
-									: options.after
-										? 'after'
-										: undefined,
-							}),
-							20000,
-							`getMessages(${candidate})`,
+				const queue = [candidate];
+				while (queue.length) {
+					const current = String(queue.shift() || '').trim();
+					if (!current || tried.has(current)) continue;
+					tried.add(current);
+					try {
+						messages = await this.fetchMessagesForChat(current, count, options);
+						lastChatMissingError = null;
+						this.clearChatStoreCooldown();
+						return (messages || [])
+							.map(normalizeMessage)
+							.sort((a: any, b: any) => {
+								const aTime = new Date(a?.timestamp || 0).getTime();
+								const bTime = new Date(b?.timestamp || 0).getTime();
+								if (aTime !== bTime) return aTime - bTime;
+								return String(a?.providerMessageId || '').localeCompare(
+									String(b?.providerMessageId || ''),
+								);
+							})
+							.slice(-count);
+					} catch (error) {
+						if (WppConnectProvider.isSessionDeadError(error)) throw error;
+						const detail = error instanceof Error ? error.message : String(error);
+						this.logger.warn(
+							`getMessages(${current}) failed for ${this.accountId}: ${detail}`,
 						);
-					} else {
-						messages = await this.withTimeout(
-							this.client.getAllMessagesInChat(candidate, true, false),
-							20000,
-							`getAllMessagesInChat(${candidate})`,
-						);
-						messages = messages.slice(-count);
+						if (WppConnectProvider.isStoreBrokenError(error)) {
+							this.tripChatStoreCooldown(detail);
+							throw new Error(`WhatsApp chat store is not ready yet: ${detail}`);
+						}
+						if (/timed out after/i.test(detail)) {
+							this.tripChatStoreCooldown(detail);
+							throw new Error(`WhatsApp chat store is not ready yet: ${detail}`);
+						}
+						if (WppConnectProvider.isChatNotFoundError(error)) {
+							lastChatMissingError = error;
+							const resolved = await this.ensureChatId(current);
+							if (resolved && !tried.has(resolved)) queue.push(resolved);
+							continue;
+						}
+						throw error instanceof Error ? error : new Error(String(error));
 					}
-					lastRuntimeError = null;
-					break;
-				} catch (error) {
-					lastRuntimeError = error;
-					if (WppConnectProvider.isSessionDeadError(error)) throw error;
-					const detail = error instanceof Error ? error.message : String(error);
-					if (
-						!WppConnectProvider.isWhatsAppRuntimeError(error) &&
-						!/timed out after|chat not found/i.test(detail)
-					) {
-						throw error;
-					}
-					this.logger.warn(
-						`getMessages(${candidate}) failed for ${this.accountId}: ${detail}`,
-					);
 				}
 			}
-			if (lastRuntimeError) throw lastRuntimeError;
-			this.clearChatStoreCooldown();
+			if (lastChatMissingError) {
+				// Per-chat miss only — do not cool down unrelated conversations.
+				throw new Error(`Chat not found for ${chatId}`);
+			}
 		} catch (error) {
 			if (WppConnectProvider.isSessionDeadError(error)) {
 				await this.rethrowIfSessionDead(`getMessages(${chatId})`, error);
 			}
 			const detail = error instanceof Error ? error.message : String(error);
+			if (
+				WppConnectProvider.isStoreBrokenError(error) ||
+				/timed out after|chat store is not ready/i.test(detail)
+			) {
+				if (!/cooling down|chat store is not ready yet/i.test(detail)) {
+					this.tripChatStoreCooldown(detail);
+				}
+				throw new Error(
+					detail.startsWith('WhatsApp chat store is not ready yet')
+						? detail
+						: `WhatsApp chat store is not ready yet: ${detail}`,
+				);
+			}
+			if (WppConnectProvider.isChatNotFoundError(error)) {
+				throw error instanceof Error ? error : new Error(String(error));
+			}
 			this.logger.warn(
 				`getMessages(${chatId}) failed for ${this.accountId}: ${detail}`,
 			);
-			if (
-				WppConnectProvider.isWhatsAppRuntimeError(error) ||
-				/timed out after/i.test(detail)
-			) {
-				this.tripChatStoreCooldown(detail);
-				throw new Error(`WhatsApp chat store is not ready yet: ${detail}`);
-			}
 			throw error instanceof Error ? error : new Error(String(error));
 		}
-		return (messages || [])
-			.map(normalizeMessage)
-			.sort((a: any, b: any) => {
-				const aTime = new Date(a?.timestamp || 0).getTime();
-				const bTime = new Date(b?.timestamp || 0).getTime();
-				if (aTime !== bTime) return aTime - bTime;
-				return String(a?.providerMessageId || '').localeCompare(
-					String(b?.providerMessageId || ''),
-				);
-			})
-			.slice(-count);
+		return [];
 	}
 
 	getContacts() {
@@ -932,7 +1032,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 				if (lid) candidates.add(String(lid).includes('@') ? String(lid) : `${lid}@lid`);
 				if (phone) {
 					const digits = String(phone).replace(/[^\d]/g, '');
-					if (digits) candidates.add(`${digits}@c.us`);
+					if (digits) {
+						candidates.add(`${digits}@c.us`);
+						candidates.add(`${digits}@s.whatsapp.net`);
+					}
 				}
 			}
 		} catch (error) {
@@ -950,6 +1053,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		} else if (original.endsWith('@s.whatsapp.net')) {
 			const user = original.split('@')[0];
 			if (user) candidates.add(`${user}@c.us`);
+		} else if (original.endsWith('@lid')) {
+			// Prefer LID first (WhatsApp multi-device), then phone aliases if resolved.
+			const ordered = [original, ...[...candidates].filter(id => id !== original)];
+			return ordered;
 		}
 
 		return [...candidates];

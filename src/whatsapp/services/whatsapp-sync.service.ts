@@ -1653,8 +1653,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				/session died|detached Frame|Target closed|browser page closed|not connected|Execution context was destroyed/i.test(
 					message,
 				);
+			const chatMissing = /chat not found/i.test(message);
 			return returnLocalOnly(
-				sessionDead ? 'session_dead' : 'provider_unavailable',
+				sessionDead
+					? 'session_dead'
+					: chatMissing
+						? 'chat_not_found'
+						: 'provider_unavailable',
 				sessionDead
 					? 'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.'
 					: undefined,
