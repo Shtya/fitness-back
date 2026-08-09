@@ -373,6 +373,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		this.client.onStateChange((state: string) => {
 			const value = String(state);
 			if (['CONNECTED', 'MAIN', 'CONNECTED_PHONE'].includes(value)) {
+				this.clearChatStoreCooldown();
 				this.markConnected();
 				return;
 			}
@@ -386,6 +387,14 @@ export class WppConnectProvider implements WhatsAppProvider {
 					.catch(() => undefined);
 			}
 		});
+		if (typeof this.client.onInterfaceChange === 'function') {
+			this.client.onInterfaceChange((state: any) => {
+				const display = String(state?.displayInfo || state?.mode || state || '');
+				if (/MAIN|NORMAL/i.test(display)) {
+					this.clearChatStoreCooldown();
+				}
+			});
+		}
 
 		// If the session token is already valid, mark connected immediately so the
 		// dashboard stops blocking on /connect while WhatsApp Web finishes SYNCING.
@@ -774,31 +783,60 @@ export class WppConnectProvider implements WhatsAppProvider {
 			);
 		}
 		this.assertChatStoreAvailable(`getMessages(${chatId})`);
+		// After reclaim/restart the UI can open a chat while WA is still SYNCING.
+		const mainReady = await this.waitForWhatsAppMainReady(15_000);
+		if (!mainReady) {
+			this.tripChatStoreCooldown('WhatsApp main not ready for getMessages');
+			throw new Error('WhatsApp chat store is not ready yet: main UI still syncing');
+		}
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
+		const chatIds = await this.resolveSendableChatIds(chatId);
+		const candidates = chatIds.length ? chatIds : [chatId];
 		try {
-			if (this.client?.getMessages) {
-				messages = await this.withTimeout(
-					this.client.getMessages(chatId, {
-						count,
-						id: options.before || options.after || undefined,
-						direction: options.before
-							? 'before'
-							: options.after
-								? 'after'
-								: undefined,
-					}),
-					20000,
-					`getMessages(${chatId})`,
-				);
-			} else {
-				messages = await this.withTimeout(
-					this.client.getAllMessagesInChat(chatId, true, false),
-					20000,
-					`getAllMessagesInChat(${chatId})`,
-				);
-				messages = messages.slice(-count);
+			let lastRuntimeError: unknown = null;
+			for (const candidate of candidates) {
+				try {
+					if (this.client?.getMessages) {
+						messages = await this.withTimeout(
+							this.client.getMessages(candidate, {
+								count,
+								id: options.before || options.after || undefined,
+								direction: options.before
+									? 'before'
+									: options.after
+										? 'after'
+										: undefined,
+							}),
+							20000,
+							`getMessages(${candidate})`,
+						);
+					} else {
+						messages = await this.withTimeout(
+							this.client.getAllMessagesInChat(candidate, true, false),
+							20000,
+							`getAllMessagesInChat(${candidate})`,
+						);
+						messages = messages.slice(-count);
+					}
+					lastRuntimeError = null;
+					break;
+				} catch (error) {
+					lastRuntimeError = error;
+					if (WppConnectProvider.isSessionDeadError(error)) throw error;
+					const detail = error instanceof Error ? error.message : String(error);
+					if (
+						!WppConnectProvider.isWhatsAppRuntimeError(error) &&
+						!/timed out after|chat not found/i.test(detail)
+					) {
+						throw error;
+					}
+					this.logger.warn(
+						`getMessages(${candidate}) failed for ${this.accountId}: ${detail}`,
+					);
+				}
 			}
+			if (lastRuntimeError) throw lastRuntimeError;
 			this.clearChatStoreCooldown();
 		} catch (error) {
 			if (WppConnectProvider.isSessionDeadError(error)) {
