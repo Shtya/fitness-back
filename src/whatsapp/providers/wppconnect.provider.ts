@@ -672,6 +672,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		return this.state;
 	}
 
+	getChatStoreCooldownMs() {
+		return Math.max(0, this.chatStoreCooldownUntil - Date.now());
+	}
+
 	async getChats(limit = 50) {
 		if (this.state !== 'connected') {
 			throw new Error('WhatsApp chat store is not ready yet');

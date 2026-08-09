@@ -73,6 +73,8 @@ export interface WhatsAppProvider {
 	getQr(): string | null;
 	getPairingCode(): string | null;
 	getState(): string;
+	/** Remaining ms before chat history sync should be attempted again (0 = ready). */
+	getChatStoreCooldownMs?(): number;
 	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>): void;
 	getChats(limit?: number): Promise<any[]>;
 	getMessages(

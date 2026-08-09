@@ -1608,6 +1608,25 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.messageRepo.count({ where: { conversationId } }),
 		]);
 		const requestedLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
+		const returnLocalOnly = async (syncError: string, message?: string) => ({
+			supported: true,
+			items: await this.listMessages(
+				user,
+				conversationId,
+				mode === 'older' ? oldestBeforeSync?.id : undefined,
+				requestedLimit,
+			),
+			hasMore: Boolean(conversation.hasMoreProviderHistory),
+			syncSkipped: true,
+			syncError,
+			cooldownMs: provider.getChatStoreCooldownMs?.() || 0,
+			message,
+		});
+		const cooldownMs = provider.getChatStoreCooldownMs?.() || 0;
+		if (cooldownMs > 0) {
+			// Fail fast while WA Store is cooling down — do not hammer Puppeteer.
+			return returnLocalOnly('provider_unavailable');
+		}
 		let messages: Awaited<ReturnType<WhatsAppProvider['getMessages']>>;
 		try {
 			messages = await provider.getMessages(conversation.providerChatId, {
@@ -1622,30 +1641,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.logger.warn(
-				`syncConversation(${mode}) getMessages failed for ${conversationId}: ${message}`,
-			);
+			// Only log real attempts; cooldown short-circuits above stay quiet.
+			if (!/cooling down/i.test(message)) {
+				this.logger.warn(
+					`syncConversation(${mode}) getMessages failed for ${conversationId}: ${message}`,
+				);
+			}
 			// Opening a chat must still return DB history. A dead/half-ready WA Web
 			// page must not surface as an unhandled Nest 500 flood.
 			const sessionDead =
 				/session died|detached Frame|Target closed|browser page closed|not connected|Execution context was destroyed/i.test(
 					message,
 				);
-			return {
-				supported: true,
-				items: await this.listMessages(
-					user,
-					conversationId,
-					mode === 'older' ? oldestBeforeSync?.id : undefined,
-					requestedLimit,
-				),
-				hasMore: Boolean(conversation.hasMoreProviderHistory),
-				syncSkipped: true,
-				syncError: sessionDead ? 'session_dead' : 'provider_unavailable',
-				message: sessionDead
+			return returnLocalOnly(
+				sessionDead ? 'session_dead' : 'provider_unavailable',
+				sessionDead
 					? 'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.'
 					: undefined,
-			};
+			);
 		}
 		// Persist provider history with bounded concurrency. Sequential hydration
 		// performs several database round trips per message and made 30 messages
