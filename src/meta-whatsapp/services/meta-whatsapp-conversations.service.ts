@@ -113,6 +113,7 @@ export class MetaWhatsAppConversationsService {
 		const [
 			all,
 			unread,
+			unreadMessagesRow,
 			leads,
 			fav,
 			replied,
@@ -121,6 +122,9 @@ export class MetaWhatsAppConversationsService {
 		] = await Promise.all([
 			base().getCount(),
 			base().andWhere('c.unread_count > 0').getCount(),
+			base()
+				.select('COALESCE(SUM(c.unread_count), 0)', 'unreadMessages')
+				.getRawOne(),
 			base().andWhere('c.lead_id IS NOT NULL').getCount(),
 			base().andWhere('c.is_favorite = true').getCount(),
 			repliedQb.getCount(),
@@ -134,6 +138,7 @@ export class MetaWhatsAppConversationsService {
 		return {
 			all: Number(all) || 0,
 			unread: Number(unread) || 0,
+			unreadMessages: Number(unreadMessagesRow?.unreadMessages) || 0,
 			leads: Number(leads) || 0,
 			fav: Number(fav) || 0,
 			replied: Number(replied) || 0,

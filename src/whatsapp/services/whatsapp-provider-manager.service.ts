@@ -24,6 +24,7 @@ import {
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppProvider, WhatsAppProviderEvent } from '../providers/whatsapp-provider';
 import { WppConnectProvider } from '../providers/wppconnect.provider';
+import { forceReleaseWppBrowserProfile } from '../utils/whatsapp-browser-profile';
 import { WhatsAppSessionService } from './whatsapp-session.service';
 
 @Injectable()
@@ -211,6 +212,13 @@ export class WhatsAppProviderManagerService
 			await active.disconnect().catch(() => undefined);
 			this.stopLockRenewal(accountId);
 			await this.releaseLock(accountId).catch(() => undefined);
+			await forceReleaseWppBrowserProfile(accountId).catch(error =>
+				this.logger.warn(
+					`Could not release Chromium profile for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
 		}
 
 		const promise = this.connectExclusive(accountId, phoneNumber);
@@ -425,10 +433,20 @@ export class WhatsAppProviderManagerService
 			await this.sessions.clear(accountId, account.providerName);
 		}
 		this.connectStartedAt.delete(accountId);
+		this.connecting.delete(accountId);
 		this.stopLockRenewal(accountId);
 		// User-initiated disconnect must clear foreign/stale locks too, otherwise
 		// a later connect keeps failing with "another server instance".
 		await this.forceReleaseLock(accountId);
+		// Also clear Chromium SingletonLock / zombie processes so the next connect
+		// does not die with "browser is already running for ./tokens/<id>".
+		await forceReleaseWppBrowserProfile(accountId).catch(error =>
+			this.logger.warn(
+				`Could not release Chromium profile for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			),
+		);
 		await this.accountRepo.update(accountId, {
 			status: WhatsAppAccountStatus.DISCONNECTED,
 			phoneNumber: logout ? null : undefined,
@@ -458,6 +476,7 @@ export class WhatsAppProviderManagerService
 			this.connecting.delete(accountId);
 			this.stopLockRenewal(accountId);
 			await this.forceReleaseLock(accountId);
+			await forceReleaseWppBrowserProfile(accountId).catch(() => undefined);
 			await this.sessions.clear(accountId, providerName);
 		}
 		return { ok: true };

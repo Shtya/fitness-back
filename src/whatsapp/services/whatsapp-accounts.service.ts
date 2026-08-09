@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { promises as fs } from 'fs';
 import * as path from 'path';
@@ -15,6 +15,7 @@ import {
 	WhatsAppGroup,
 	WhatsAppStatus,
 } from '../entities/whatsapp.entity';
+import { forceReleaseWppBrowserProfile } from '../utils/whatsapp-browser-profile';
 import {
 	getWhatsAppPrivacySettings,
 	mergeWhatsAppPrivacySettings,
@@ -153,23 +154,29 @@ export class WhatsAppAccountsService {
 	}
 
 	async resetData(user: User, accountId: string) {
-		const account = await this.accessService.assertAccountPermission(user, accountId, 'canManage');
+		const account = await this.accessService.assertAccountPermission(
+			user,
+			accountId,
+			'canManage',
+		);
 		const provider = this.providers.getProvider(accountId);
-		if (!provider || provider.getState() !== 'connected') {
-			throw new BadRequestException(
-				'WhatsApp is not ready. Wait for the phone connection before resetting data.',
-			);
-		}
-		try {
-			const chats = await provider.getChats(100);
-			if (!Array.isArray(chats) || chats.length === 0) {
-				throw new Error('WhatsApp returned no chats');
+		let canResyncNow = false;
+		if (provider?.getState() === 'connected') {
+			try {
+				const chats = await provider.getChats(100);
+				canResyncNow = Array.isArray(chats) && chats.length > 0;
+			} catch {
+				canResyncNow = false;
 			}
-		} catch {
-			throw new BadRequestException(
-				'WhatsApp chat data is not ready yet. Nothing was deleted; wait and try again.',
-			);
 		}
+
+		// When the browser/session is broken (common in production after a crash),
+		// close Chromium + clear SingletonLock first. Keep WhatsApp link tokens.
+		if (!canResyncNow) {
+			await this.providers.disconnect(accountId, false).catch(() => undefined);
+			await forceReleaseWppBrowserProfile(accountId).catch(() => undefined);
+		}
+
 		await removeAccountMedia(accountId);
 		await this.accountRepo.manager.transaction(async manager => {
 			// Preserve the account, provider session and staff access; purge synchronized data only.
@@ -190,7 +197,32 @@ export class WhatsAppAccountsService {
 			targetType: 'WhatsAppAccount',
 			targetId: accountId,
 		});
-		return { ok: true, status: account.status };
+
+		if (canResyncNow) {
+			return {
+				ok: true,
+				status: account.status,
+				readyToSync: true,
+			};
+		}
+
+		try {
+			const reconnected = await this.providers.connect(accountId);
+			const ready = await this.providers.waitUntilConnected(accountId, 45_000);
+			return {
+				ok: true,
+				status: reconnected.getState(),
+				readyToSync: Boolean(ready),
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				ok: true,
+				status: 'error',
+				readyToSync: false,
+				reconnectError: message,
+			};
+		}
 	}
 
 	async getAccess(user: User, accountId: string) {

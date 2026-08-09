@@ -67,6 +67,11 @@ export class WhatsAppConversationsController {
 		private readonly access: WhatsAppAccessService,
 	) {}
 
+	@Get('unread')
+	unreadTotal(@Req() req: any) {
+		return this.access.getUnreadTotal(req.user);
+	}
+
 	@Get('accounts/:accountId/conversations')
 	listConversations(
 		@Req() req: any,

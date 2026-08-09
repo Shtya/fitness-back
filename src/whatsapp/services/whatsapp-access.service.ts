@@ -115,6 +115,47 @@ export class WhatsAppAccessService {
 		);
 	}
 
+	/** Sum of unread messages across conversations the user can see. */
+	async getUnreadTotal(user: User) {
+		const accounts = await this.listAccessibleAccounts(user);
+		if (!accounts.length) {
+			return { totalUnread: 0, unreadConversations: 0 };
+		}
+
+		let totalUnread = 0;
+		let unreadConversations = 0;
+
+		for (const account of accounts) {
+			const access = await this.getAccountAccess(user, account.id);
+			const canSeeAll = this.canSeeAllConversations(user, access);
+			const qb = this.conversationRepo
+				.createQueryBuilder('conversation')
+				.select('COALESCE(SUM(conversation.unreadCount), 0)', 'totalUnread')
+				.addSelect(
+					`COUNT(*) FILTER (WHERE conversation.unreadCount > 0)`,
+					'unreadConversations',
+				)
+				.where('conversation.accountId = :accountId', { accountId: account.id })
+				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :newsletter', {
+					newsletter: '%@newsletter%',
+				})
+				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
+					broadcast: '%@broadcast%',
+				})
+				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :status', {
+					status: '%status@%',
+				});
+			if (!canSeeAll) {
+				qb.andWhere('conversation.assignedUserId = :userId', { userId: user.id });
+			}
+			const row = await qb.getRawOne();
+			totalUnread += Number(row?.totalUnread) || 0;
+			unreadConversations += Number(row?.unreadConversations) || 0;
+		}
+
+		return { totalUnread, unreadConversations };
+	}
+
 	async assertAccountPermission(
 		user: User,
 		accountId: string,

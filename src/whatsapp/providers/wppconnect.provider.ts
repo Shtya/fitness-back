@@ -9,6 +9,11 @@ import {
 	WhatsAppProviderCapabilities,
 	WhatsAppProviderEvent,
 } from './whatsapp-provider';
+import {
+	forceReleaseWppBrowserProfile,
+	isBrowserAlreadyRunningError,
+	resolveWppUserDataDir,
+} from '../utils/whatsapp-browser-profile';
 import { whatsAppTimestampToDate } from '../utils/whatsapp-time';
 
 declare const require: any;
@@ -228,8 +233,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 		// waitForLogin:false → create() returns once Chromium/WA-JS are up so HTTP
 		// /connect does not hang while the phone is stuck on SYNCING.
 		// deviceSyncTimeout:0 → do not auto-close the browser after 180s of sync.
-		this.client = await wppconnect.create({
+		const createOptions = {
 			session: this.accountId,
+			folderNameToken:
+				process.env.WHATSAPP_TOKEN_FOLDER ||
+				process.env.WPPCONNECT_TOKEN_FOLDER ||
+				'./tokens',
 			tokenStore: this.tokenStore,
 			headless: true,
 			waitForLogin: false,
@@ -241,9 +250,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 			...(normalizedPhone ? { phoneNumber: normalizedPhone } : {}),
 			puppeteerOptions: {
 				...(executablePath ? { executablePath } : {}),
+				userDataDir: resolveWppUserDataDir(this.accountId),
 				// --disable-dev-shm-usage: Docker limits /dev/shm to 64MB by default, which
 				// crashes Chromium's renderer under normal load; force it to use /tmp instead.
-				args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+				args: [
+					'--no-sandbox',
+					'--disable-setuid-sandbox',
+					'--disable-dev-shm-usage',
+					'--disable-gpu',
+				],
 			},
 			catchQR: (base64Qr: string, _ascii: string, _attempt: number, rawCode: string) => {
 				this.publishQr(base64Qr, rawCode);
@@ -271,7 +286,18 @@ export class WppConnectProvider implements WhatsAppProvider {
 					);
 				}
 			},
-		});
+		};
+
+		try {
+			this.client = await wppconnect.create(createOptions);
+		} catch (error) {
+			if (!isBrowserAlreadyRunningError(error)) throw error;
+			this.logger.warn(
+				`Chromium profile locked for ${this.accountId}; releasing zombie browser and retrying once`,
+			);
+			await forceReleaseWppBrowserProfile(this.accountId);
+			this.client = await wppconnect.create(createOptions);
+		}
 
 		this.client.onMessage((message: any) => {
 			if (isStatusMessage(message)) {
