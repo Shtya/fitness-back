@@ -724,6 +724,7 @@ export class LearningService {
 				'scrape_roadmap',
 				'scrape_topic',
 				'translate_transcript',
+				'summarize_transcript',
 				'explain_term',
 				'enhance_search_query',
 			].includes(action)
@@ -899,6 +900,23 @@ Keep the same cue ids. Preserve technical terms in English in parentheses when h
 Do not invent extra cues.`;
 		}
 
+		if (action === 'summarize_transcript') {
+			return `${base}
+
+You summarize a YouTube video from its transcript so a learner can understand the video BEFORE watching.
+Focus on what the speaker explains, the main argument, and practical takeaways.
+Reply with ONLY valid JSON:
+{
+  "tldr": string,
+  "keyConcepts": string[],
+  "terms": [{ "term": string, "definition": string }],
+  "remember": string[],
+  "takeaways": string[]
+}
+Keep keyConcepts and takeaways short (4-8 items). Prefer clarity over length.
+If locale is Arabic, write the summary in Arabic.`;
+		}
+
 		if (action === 'explain_term') {
 			return `${base}
 
@@ -1003,6 +1021,25 @@ ${ctx.excerpt || ''}`;
 				.map((cue: any) => `- ${cue.id}: ${String(cue.text || '').slice(0, 280)}`)
 				.join('\n');
 			return `Translate these transcript cues to Arabic.\nTarget language: ar\n${prompt || ''}\n\nCues:\n${chunk}`;
+		}
+		if (action === 'summarize_transcript') {
+			const ctx = dto.context || {};
+			const cues = Array.isArray(ctx.cues) ? ctx.cues : [];
+			const body = cues
+				.slice(0, 400)
+				.map((cue: any) => String(cue.text || '').trim())
+				.filter(Boolean)
+				.join(' ')
+				.slice(0, 12000);
+			return `Summarize this YouTube video from its transcript for a learner who wants to understand it before watching.
+Learning path: ${ctx.pathTitle || ''}
+Topic: ${ctx.topicTitle || ''}
+Category: ${ctx.category || ''}
+Locale: ${locale}
+${prompt || ''}
+
+Transcript excerpt:
+${body || '(empty)'}`;
 		}
 		if (action === 'explain_term') {
 			const ctx = dto.context || {};
