@@ -75,11 +75,24 @@ export interface WhatsAppProvider {
 	getState(): string;
 	/** Remaining ms before chat history sync should be attempted again (0 = ready). */
 	getChatStoreCooldownMs?(): number;
+	/** Clear history-sync cooldown (e.g. empty chat must retry). */
+	resetChatStoreCooldown?(): void;
+	/**
+	 * True when WhatsApp Web MAIN UI can serve chat history.
+	 * Prefer a fast probe — callers should fail soft when false instead of hanging.
+	 */
+	isHistoryReady?(): Promise<boolean>;
 	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>): void;
 	getChats(limit?: number): Promise<any[]>;
 	getMessages(
 		chatId: string,
-		options?: { limit?: number; before?: string; after?: string },
+		options?: {
+			limit?: number;
+			before?: string;
+			after?: string;
+			/** Extra JIDs to try (e.g. phone @c.us for a @lid conversation). */
+			aliases?: string[];
+		},
 	): Promise<NormalizedWhatsAppMessage[]>;
 	getContacts(): Promise<any[]>;
 	resolveContactIdentity?(

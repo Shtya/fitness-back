@@ -39,6 +39,7 @@ import { PhoneIntelligenceModule } from './phone-intelligence/phone-intelligence
 import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
 import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 import { QuranRevisionModule } from './quran-revision/quran-revision.module';
+import { LearningModule } from './learning/learning.module';
 
 @Module({
 	imports: [
@@ -99,6 +100,7 @@ import { QuranRevisionModule } from './quran-revision/quran-revision.module';
 		FitnessLeadsModule,
 		MetaWhatsAppModule,
 		QuranRevisionModule,
+		LearningModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

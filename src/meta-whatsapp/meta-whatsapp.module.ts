@@ -59,6 +59,7 @@ import { MetaWhatsAppTranslateService } from './services/meta-whatsapp-translate
 		MetaWhatsAppMessagingService,
 		MetaWhatsAppBulkService,
 		MetaWhatsAppQuickRepliesService,
+		MetaWhatsAppTranslateService,
 	],
 })
 export class MetaWhatsAppModule {}

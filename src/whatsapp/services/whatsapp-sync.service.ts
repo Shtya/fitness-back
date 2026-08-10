@@ -1351,78 +1351,207 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return this.access.assertConversationVisible(user, conversationId);
 	}
 
-	async listMessages(user: User, conversationId: string, before?: string, limit = 30) {
-		await this.assertConversationVisible(user, conversationId);
+	async listMessages(
+		user: User,
+		conversationId: string,
+		before?: string,
+		limit = 30,
+		options: { allowLivePull?: boolean } = {},
+	) {
+		const allowLivePull = options.allowLivePull !== false;
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
 		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
-		const query = this.messageRepo
-			.createQueryBuilder('message')
-			.leftJoinAndSelect('message.attachments', 'attachments')
-			.leftJoinAndSelect('message.reactions', 'reactions')
-			.leftJoinAndSelect('message.senderUser', 'senderUser')
-			.where('message.conversationId = :conversationId', { conversationId });
-		if (before) {
-			const cursor = await this.messageRepo.findOne({
-				where: { id: before, conversationId },
-			});
-			if (!cursor) return [];
-			if (cursor?.providerTimestamp) {
-				query.andWhere(
-					'(message.providerTimestamp < :timestamp OR (message.providerTimestamp = :timestamp AND message.id < :cursorId))',
-					{
-						timestamp: cursor.providerTimestamp,
-						cursorId: cursor.id,
+		const loadLocal = async (cursorId?: string) => {
+			const query = this.messageRepo
+				.createQueryBuilder('message')
+				.leftJoinAndSelect('message.attachments', 'attachments')
+				.leftJoinAndSelect('message.reactions', 'reactions')
+				.leftJoinAndSelect('message.senderUser', 'senderUser')
+				.where('message.conversationId = :conversationId', { conversationId });
+			if (cursorId) {
+				const cursor = await this.messageRepo.findOne({
+					where: { id: cursorId, conversationId },
+				});
+				if (!cursor) return [];
+				if (cursor?.providerTimestamp) {
+					query.andWhere(
+						'(message.providerTimestamp < :timestamp OR (message.providerTimestamp = :timestamp AND message.id < :cursorId))',
+						{
+							timestamp: cursor.providerTimestamp,
+							cursorId: cursor.id,
+						},
+					);
+				}
+			}
+			const rows = await query
+				.orderBy('message.providerTimestamp', 'DESC')
+				.addOrderBy('message.id', 'DESC')
+				.take(take)
+				.getMany();
+			for (const message of rows) {
+				const duration = Number(message.raw?.duration ?? message.raw?.mediaData?.duration ?? 0);
+				if (!(Number.isFinite(duration) && duration > 0)) continue;
+				for (const attachment of message.attachments || []) {
+					const type = String(attachment.type || '').toLowerCase();
+					if (type !== 'audio' && type !== 'ptt' && type !== 'voice') continue;
+					if (/voice-\d/i.test(String(attachment.fileName || ''))) continue;
+					const ext = String(attachment.mimeType || '').includes('webm')
+						? '.webm'
+						: String(attachment.mimeType || '').includes('mpeg')
+							? '.mp3'
+							: '.ogg';
+					attachment.fileName = `voice-${Math.round(duration)}s${ext}`;
+				}
+			}
+			const quotedProviderIds = [
+				...new Set(rows.map((item) => item.quotedProviderMessageId).filter(Boolean)),
+			] as string[];
+			if (quotedProviderIds.length) {
+				const quotedMessages = await this.messageRepo.find({
+					where: {
+						conversationId,
+						providerMessageId: In(quotedProviderIds),
 					},
+				});
+				const quotedByProviderId = new Map(
+					quotedMessages.map((message) => [message.providerMessageId, message]),
 				);
+				for (const message of rows) {
+					const quoted = message.quotedProviderMessageId
+						? quotedByProviderId.get(message.quotedProviderMessageId)
+						: null;
+					if (!quoted) continue;
+					(message as any).replyTo = {
+						id: quoted.id,
+						providerMessageId: quoted.providerMessageId,
+						text: quoted.text,
+						type: quoted.type,
+						direction: quoted.direction,
+					};
+				}
 			}
-		}
-		const items = await query
-			.orderBy('message.providerTimestamp', 'DESC')
-			.addOrderBy('message.id', 'DESC')
-			.take(take)
-			.getMany();
-		for (const message of items) {
-			const duration = Number(message.raw?.duration ?? message.raw?.mediaData?.duration ?? 0);
-			if (!(Number.isFinite(duration) && duration > 0)) continue;
-			for (const attachment of message.attachments || []) {
-				const type = String(attachment.type || '').toLowerCase();
-				if (type !== 'audio' && type !== 'ptt' && type !== 'voice') continue;
-				if (/voice-\d/i.test(String(attachment.fileName || ''))) continue;
-				const ext = String(attachment.mimeType || '').includes('webm')
-					? '.webm'
-					: String(attachment.mimeType || '').includes('mpeg')
-						? '.mp3'
-						: '.ogg';
-				attachment.fileName = `voice-${Math.round(duration)}s${ext}`;
-			}
-		}
-		const quotedProviderIds = [
-			...new Set(items.map((item) => item.quotedProviderMessageId).filter(Boolean)),
-		] as string[];
-		if (quotedProviderIds.length) {
-			const quotedMessages = await this.messageRepo.find({
-				where: {
-					conversationId,
-					providerMessageId: In(quotedProviderIds),
-				},
+			return rows.reverse();
+		};
+
+		const local = await loadLocal(before);
+		// Pagination cursor stays DB-only. First page with empty DB must come from
+		// the linked WhatsApp Web session on the phone.
+		if (local.length || before || !accountAccess.canUse || !allowLivePull) return local;
+
+		const live = await this.pullLiveMessagesFromLinkedDevice(conversation, take);
+		if (!live.length) return local;
+
+		for (const item of live) {
+			await this.persistMessage(
+				conversation.accountId,
+				{ ...item, chatId: conversation.providerChatId },
+				null,
+				false,
+				{ emitEvents: false },
+			).catch((error) => {
+				this.logger.warn(
+					`Could not persist live message ${item.providerMessageId} for ${conversationId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
 			});
-			const quotedByProviderId = new Map(
-				quotedMessages.map((message) => [message.providerMessageId, message]),
-			);
-			for (const message of items) {
-				const quoted = message.quotedProviderMessageId
-					? quotedByProviderId.get(message.quotedProviderMessageId)
-					: null;
-				if (!quoted) continue;
-				(message as any).replyTo = {
-					id: quoted.id,
-					providerMessageId: quoted.providerMessageId,
-					text: quoted.text,
-					type: quoted.type,
-					direction: quoted.direction,
-				};
+		}
+		await this.conversationRepo.update(conversation.id, {
+			lastProviderSyncAt: new Date(),
+		});
+		const saved = await loadLocal();
+		if (saved.length) return saved;
+		// Persist may fail (unique/db) — still return linked-device messages to the UI.
+		return this.mapLiveMessagesForApi(conversation.id, live);
+	}
+
+	private conversationMessageAliases(conversation: WhatsAppConversation) {
+		const aliases: string[] = [];
+		const phoneDigits = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+		if (phoneDigits) {
+			aliases.push(`${phoneDigits}@c.us`, `${phoneDigits}@s.whatsapp.net`);
+		}
+		return aliases;
+	}
+
+	private async pullLiveMessagesFromLinkedDevice(
+		conversation: WhatsAppConversation,
+		limit: number,
+	) {
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider || provider.getState() !== 'connected') return [];
+		if (typeof provider.resetChatStoreCooldown === 'function') {
+			const cooldown = provider.getChatStoreCooldownMs?.() || 0;
+			if (cooldown > 0) provider.resetChatStoreCooldown();
+		}
+		const aliases = this.conversationMessageAliases(conversation);
+		const providerChatId = String(conversation.providerChatId || '');
+		if (
+			(providerChatId.endsWith('@lid') || providerChatId.endsWith('@hosted.lid')) &&
+			typeof provider.resolveContactIdentity === 'function'
+		) {
+			const identity = await provider.resolveContactIdentity(providerChatId).catch(() => null);
+			const resolvedPhone = String(identity?.phoneNumber || '').replace(/\D/g, '');
+			if (resolvedPhone) {
+				aliases.push(`${resolvedPhone}@c.us`, `${resolvedPhone}@s.whatsapp.net`);
 			}
 		}
-		return items.reverse();
+		try {
+			const messages = await provider.getMessages(conversation.providerChatId, {
+				limit,
+				aliases: [...new Set(aliases)],
+			});
+			this.logger.log(
+				`Linked-device pull for ${conversation.id} returned ${messages.length} message(s)`,
+			);
+			return messages;
+		} catch (error) {
+			this.logger.warn(
+				`Linked-device pull failed for ${conversation.id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return [];
+		}
+	}
+
+	private mapLiveMessagesForApi(
+		conversationId: string,
+		messages: NormalizedWhatsAppMessage[],
+	) {
+		return messages.map((item) => ({
+			id: `live:${item.providerMessageId}`,
+			conversationId,
+			providerMessageId: item.providerMessageId,
+			direction: item.fromMe
+				? WhatsAppMessageDirection.OUTBOUND
+				: WhatsAppMessageDirection.INBOUND,
+			type: item.type || 'text',
+			text: item.text || null,
+			status: item.fromMe ? WhatsAppMessageStatus.SENT : WhatsAppMessageStatus.DELIVERED,
+			providerTimestamp: item.timestamp,
+			quotedProviderMessageId: item.quotedProviderMessageId || null,
+			isStarred: Boolean(item.isStarred),
+			isForwarded: Boolean(item.isForwarded),
+			attachments: (item.attachments || [])
+				.filter(attachment => attachment?.type)
+				.map((attachment, index) => ({
+					// No fake DB ids — MediaAttachment treats live-* as unavailable.
+					id: null,
+					type: attachment.type,
+					mimeType: attachment.mimeType || null,
+					fileName: attachment.fileName || null,
+					fileSizeBytes: attachment.fileSizeBytes || null,
+					providerMediaId: attachment.providerMediaId || item.providerMessageId,
+					key: `live-att:${item.providerMessageId}:${index}`,
+				})),
+			reactions: [],
+			raw: item.raw || null,
+			source: 'linked_device',
+		}));
 	}
 
 	async reactToMessage(user: User, conversationId: string, messageId: string, emoji?: string) {
@@ -1624,8 +1753,32 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		const cooldownMs = provider.getChatStoreCooldownMs?.() || 0;
 		if (cooldownMs > 0) {
-			// Fail fast while WA Store is cooling down — do not hammer Puppeteer.
-			return returnLocalOnly('provider_unavailable');
+			// Empty chats must still attempt history once — otherwise GET /messages
+			// stays [] forever while inbox metadata looks healthy.
+			if (localCount === 0 && typeof provider.resetChatStoreCooldown === 'function') {
+				provider.resetChatStoreCooldown();
+			} else {
+				return returnLocalOnly('provider_unavailable');
+			}
+		}
+		// Do not hard-block on isHistoryReady when the inbox already lists chats.
+		// A soft probe used to skip getMessages entirely and leave every
+		// conversation at 0 local messages (GET /messages → []).
+		const aliases: string[] = [];
+		const phoneDigits = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+		if (phoneDigits) {
+			aliases.push(`${phoneDigits}@c.us`, `${phoneDigits}@s.whatsapp.net`);
+		}
+		const providerChatId = String(conversation.providerChatId || '');
+		if (providerChatId.endsWith('@lid') || providerChatId.endsWith('@hosted.lid')) {
+			const identity =
+				typeof provider.resolveContactIdentity === 'function'
+					? await provider.resolveContactIdentity(providerChatId).catch(() => null)
+					: null;
+			const resolvedPhone = String(identity?.phoneNumber || '').replace(/\D/g, '');
+			if (resolvedPhone) {
+				aliases.push(`${resolvedPhone}@c.us`, `${resolvedPhone}@s.whatsapp.net`);
+			}
 		}
 		let messages: Awaited<ReturnType<WhatsAppProvider['getMessages']>>;
 		try {
@@ -1638,6 +1791,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					mode === 'latest' && localCount >= requestedLimit
 						? latestLocal?.providerMessageId
 						: undefined,
+				aliases: [...new Set(aliases)],
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1654,15 +1808,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					message,
 				);
 			const chatMissing = /chat not found/i.test(message);
+			const mainNotReady = /main UI still syncing|main not ready/i.test(message);
 			return returnLocalOnly(
 				sessionDead
 					? 'session_dead'
 					: chatMissing
 						? 'chat_not_found'
-						: 'provider_unavailable',
+						: mainNotReady
+							? 'main_not_ready'
+							: 'provider_unavailable',
 				sessionDead
 					? 'WhatsApp Web session died on the server. Reconnect the account from WhatsApp settings, then open the chat again.'
-					: undefined,
+					: mainNotReady
+						? 'WhatsApp Web is still syncing with the phone. Messages will appear when ready.'
+						: undefined,
 			);
 		}
 		// Persist provider history with bounded concurrency. Sequential hydration
@@ -1673,9 +1832,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const batch = messages.slice(index, index + historyWriteConcurrency);
 			const results = await Promise.allSettled(
 				batch.map((item) =>
-					this.persistMessage(conversation.accountId, item, null, false, {
-						emitEvents: false,
-					}),
+					// Always bind history to the opened conversation. Provider message
+					// chatIds often flip between @lid and @c.us and would otherwise
+					// create a twin conversation while the opened one stays empty.
+					this.persistMessage(
+						conversation.accountId,
+						{
+							...item,
+							chatId: conversation.providerChatId,
+						},
+						null,
+						false,
+						{
+							emitEvents: false,
+						},
+					),
 				),
 			);
 			results.forEach((result, offset) => {
@@ -1737,15 +1908,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			oldestProviderCursor: oldest,
 			hasMoreProviderHistory,
 		});
+		const items = await this.listMessages(
+			user,
+			conversationId,
+			mode === 'older' ? oldestBeforeSync?.id : undefined,
+			requestedLimit,
+			{ allowLivePull: false },
+		);
+		if (items.length) {
+			return {
+				supported: true,
+				items,
+				hasMore: hasMoreProviderHistory,
+			};
+		}
+		// If DB still empty after persist attempts, serve linked-device payload directly.
 		return {
 			supported: true,
-			items: await this.listMessages(
-				user,
-				conversationId,
-				mode === 'older' ? oldestBeforeSync?.id : undefined,
-				requestedLimit,
-			),
+			items: this.mapLiveMessagesForApi(conversationId, messages),
 			hasMore: hasMoreProviderHistory,
+			source: 'linked_device',
 		};
 	}
 

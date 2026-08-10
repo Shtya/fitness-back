@@ -24,7 +24,7 @@ export class MetaWhatsAppTranslateService {
 		const cleaned = String(text || '').trim();
 		if (!cleaned) throw new BadRequestException('text is required');
 		if (cleaned.length > MAX_CHARS) {
-			throw new BadRequestException(`text must be at most ${MAX_CHARS} characters`);
+			return this.translateLong(cleaned, targetLang);
 		}
 
 		const detected = this.detectDirection(cleaned);
@@ -51,6 +51,84 @@ export class MetaWhatsAppTranslateService {
 			this.logger.warn(`Google gtx failed: ${err?.message || err}`);
 			throw new BadRequestException('Translation failed. Try again in a moment.');
 		}
+	}
+
+	/** Free MT for long bodies — chunks under MyMemory/gtx limits. */
+	async translateLong(text: string, targetLang?: 'ar' | 'en'): Promise<TranslateResult> {
+		const cleaned = String(text || '').trim();
+		if (!cleaned) throw new BadRequestException('text is required');
+
+		const detected = this.detectDirection(cleaned);
+		const sourceLang = detected.sourceLang;
+		const to = targetLang === 'ar' || targetLang === 'en' ? targetLang : detected.targetLang;
+		if (to === sourceLang) {
+			return {
+				translatedText: cleaned,
+				sourceLang,
+				targetLang: to,
+				provider: 'passthrough',
+			};
+		}
+
+		const chunks = this.chunkText(cleaned, 4000);
+		const translatedParts: string[] = [];
+		let provider = 'passthrough';
+		for (let i = 0; i < chunks.length; i += 1) {
+			const part = chunks[i];
+			if (part.length <= MAX_CHARS) {
+				const result = await this.translate(part, to);
+				translatedParts.push(result.translatedText);
+				provider = result.provider;
+			} else {
+				// Hard split if a single paragraph exceeds the cap
+				for (const sub of this.hardSplit(part, 4000)) {
+					const result = await this.translate(sub, to);
+					translatedParts.push(result.translatedText);
+					provider = result.provider;
+				}
+			}
+			if (i < chunks.length - 1) {
+				await new Promise(resolve => setTimeout(resolve, 120));
+			}
+		}
+
+		return {
+			translatedText: translatedParts.join('\n\n').trim(),
+			sourceLang,
+			targetLang: to,
+			provider,
+		};
+	}
+
+	private chunkText(text: string, maxLen: number): string[] {
+		if (text.length <= maxLen) return [text];
+		const paragraphs = text.split(/\n{2,}/);
+		const chunks: string[] = [];
+		let current = '';
+		for (const paragraph of paragraphs) {
+			const next = current ? `${current}\n\n${paragraph}` : paragraph;
+			if (next.length <= maxLen) {
+				current = next;
+				continue;
+			}
+			if (current) chunks.push(current);
+			if (paragraph.length <= maxLen) {
+				current = paragraph;
+			} else {
+				chunks.push(...this.hardSplit(paragraph, maxLen));
+				current = '';
+			}
+		}
+		if (current) chunks.push(current);
+		return chunks.length ? chunks : [text.slice(0, maxLen)];
+	}
+
+	private hardSplit(text: string, maxLen: number): string[] {
+		const out: string[] = [];
+		for (let i = 0; i < text.length; i += maxLen) {
+			out.push(text.slice(i, i + maxLen));
+		}
+		return out;
 	}
 
 	private async translateMyMemory(
