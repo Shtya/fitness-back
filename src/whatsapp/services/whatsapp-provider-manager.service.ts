@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import {
 	NotificationAudience,
 	NotificationType,
@@ -24,6 +24,7 @@ import {
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppProvider, WhatsAppProviderEvent } from '../providers/whatsapp-provider';
 import { WppConnectProvider } from '../providers/wppconnect.provider';
+import { BaileysProvider } from '../providers/baileys.provider';
 import {
 	forceReleaseWppBrowserProfile,
 	purgeWppBrowserProfile,
@@ -198,8 +199,10 @@ export class WhatsAppProviderManagerService
 		const pending = this.connecting.get(accountId);
 		if (pending) return pending;
 
+		const desiredProvider = this.configuredProviderName();
 		const active = this.providers.get(accountId);
-		if (active?.getState() === 'connected') {
+		const wrongProvider = Boolean(active && active.name !== desiredProvider);
+		if (active?.getState() === 'connected' && !wrongProvider) {
 			return active;
 		}
 
@@ -214,22 +217,24 @@ export class WhatsAppProviderManagerService
 
 		// Reuse an in-flight browser session instead of starting a second Chromium,
 		// unless the caller is switching modes, the session is stuck, or it failed.
-		if (isInFlight && !phoneNumber && !isStuck) {
+		if (isInFlight && !phoneNumber && !isStuck && !wrongProvider) {
 			return active;
 		}
-		if (active && (phoneNumber || isStuck || isBroken || isInFlight)) {
+		if (active && (phoneNumber || isStuck || isBroken || isInFlight || wrongProvider)) {
 			this.providers.delete(accountId);
 			this.connectStartedAt.delete(accountId);
 			await active.disconnect().catch(() => undefined);
 			this.stopLockRenewal(accountId);
 			await this.releaseLock(accountId).catch(() => undefined);
-			await forceReleaseWppBrowserProfile(accountId).catch(error =>
-				this.logger.warn(
-					`Could not release Chromium profile for ${accountId}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				),
-			);
+			if (active.name === 'wppconnect' || desiredProvider === 'baileys') {
+				await forceReleaseWppBrowserProfile(accountId).catch(error =>
+					this.logger.warn(
+						`Could not release Chromium profile for ${accountId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					),
+				);
+			}
 		}
 
 		const promise = this.connectExclusive(accountId, phoneNumber);
@@ -239,6 +244,17 @@ export class WhatsAppProviderManagerService
 		} finally {
 			this.connecting.delete(accountId);
 		}
+	}
+
+	private configuredProviderName() {
+		const env = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
+		return env === 'wppconnect' ? 'wppconnect' : 'baileys';
+	}
+
+	private resolveProviderName(account: WhatsAppAccount) {
+		// Env wins so stale DB rows (created under WPP) cannot keep Chromium forever.
+		void account;
+		return this.configuredProviderName();
 	}
 
 	private async connectExclusive(accountId: string, phoneNumber?: string) {
@@ -260,13 +276,18 @@ export class WhatsAppProviderManagerService
 			);
 		}
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
-		// Keep CONNECTED in the DB while we restore the in-memory browser session.
+		const providerName = this.resolveProviderName(account);
+		// Keep CONNECTED in the DB while we restore the in-memory session.
 		if (account.status !== WhatsAppAccountStatus.CONNECTED) {
 			await this.accountRepo.update(accountId, {
 				status: WhatsAppAccountStatus.CONNECTING,
 				lastError: null,
+				providerName,
 			});
+		} else if (account.providerName !== providerName) {
+			await this.accountRepo.update(accountId, { providerName });
 		}
+		account.providerName = providerName;
 		const provider = this.createProvider(account);
 		provider.onEvent(event => this.handleEvent(accountId, event));
 		this.providers.set(accountId, provider);
@@ -302,13 +323,46 @@ export class WhatsAppProviderManagerService
 	}
 
 	private createProvider(account: WhatsAppAccount): WhatsAppProvider {
-		if (account.providerName === 'wppconnect') {
+		const providerName = this.resolveProviderName(account);
+		if (providerName === 'baileys') {
+			return new BaileysProvider(account.id);
+		}
+		if (providerName === 'wppconnect') {
 			return new WppConnectProvider(
 				account.id,
 				this.sessions.createWppTokenStore(account.id),
 			);
 		}
-		throw new Error(`Unsupported WhatsApp provider: ${account.providerName}`);
+		throw new Error(`Unsupported WhatsApp provider: ${providerName}`);
+	}
+
+	/**
+	 * Stale rows still say wppconnect even when .env switched to baileys — that is
+	 * why the dashboard kept opening Chromium and an empty ChatStore.
+	 */
+	private async migrateAccountsToConfiguredProvider() {
+		const target = this.configuredProviderName();
+		const stale = await this.accountRepo.find({
+			where: { providerName: Not(target) },
+			select: ['id', 'providerName', 'label'],
+		});
+		if (!stale.length) return;
+		this.logger.warn(
+			`Migrating ${stale.length} WhatsApp account(s) to provider "${target}" (WHATSAPP_PROVIDER)`,
+		);
+		for (const account of stale) {
+			await this.accountRepo.update(account.id, { providerName: target });
+			if (target === 'baileys') {
+				await this.sessions.clear(account.id, 'wppconnect').catch(() => undefined);
+				await purgeWppBrowserProfile(account.id).catch(error =>
+					this.logger.warn(
+						`Could not purge Chromium profile while migrating ${account.id}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					),
+				);
+			}
+		}
 	}
 
 	/**
@@ -533,6 +587,8 @@ export class WhatsAppProviderManagerService
 		if (event.type === 'connection') {
 			this.gateway.emitAccountEvent(accountId, 'connection', {
 				status: event.status,
+				reason: event.reason || undefined,
+				message: event.error || undefined,
 			});
 		}
 		for (const listener of this.listeners) {
@@ -593,10 +649,10 @@ export class WhatsAppProviderManagerService
 
 	/**
 	 * Tear down every live and persisted artifact for an account so the next
-	 * link starts from a blank Chromium profile — no leftover SingletonLock,
-	 * IndexedDB keys, Redis lock, or soft-deleted session row.
+	 * link starts from a blank session — no leftover Chromium profile, Baileys
+	 * creds, Redis lock, or soft-deleted session row.
 	 */
-	async destroySession(accountId: string, providerName = 'wppconnect') {
+	async destroySession(accountId: string, providerName = 'baileys') {
 		const provider = this.providers.get(accountId);
 		try {
 			if (provider) await provider.logout();
@@ -626,9 +682,17 @@ export class WhatsAppProviderManagerService
 					}`,
 				),
 			);
+			const baileysRoot = path.resolve(
+				process.env.WHATSAPP_BAILEYS_DIR ||
+					process.env.WHATSAPP_TOKEN_FOLDER ||
+					path.join(process.cwd(), 'tokens', 'baileys'),
+			);
+			await fs.rm(path.join(baileysRoot, accountId), { recursive: true, force: true }).catch(() => undefined);
 			await this.sessions.remove(accountId, providerName).catch(() =>
 				this.sessions.clear(accountId, providerName),
 			);
+			await this.sessions.remove(accountId, 'baileys').catch(() => undefined);
+			await this.sessions.remove(accountId, 'wppconnect').catch(() => undefined);
 		}
 		return { ok: true };
 	}
@@ -712,6 +776,13 @@ export class WhatsAppProviderManagerService
 	}
 
 	async onApplicationBootstrap() {
+		await this.migrateAccountsToConfiguredProvider().catch(error =>
+			this.logger.warn(
+				`WhatsApp provider migration failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			),
+		);
 		await this.purgeOrphanBrowserProfiles().catch(error =>
 			this.logger.warn(
 				`Orphan WhatsApp profile cleanup failed: ${
@@ -734,13 +805,14 @@ export class WhatsAppProviderManagerService
 			},
 		});
 		for (const account of accounts) {
+			const providerName = this.resolveProviderName(account);
 			const shouldRestore =
 				[
 					WhatsAppAccountStatus.CONNECTED,
 					WhatsAppAccountStatus.CONNECTING,
 					WhatsAppAccountStatus.QR_PENDING,
 				].includes(account.status) ||
-				(await this.sessions.hasActiveSession(account.id, account.providerName || 'wppconnect'));
+				(await this.sessions.hasActiveSession(account.id, providerName));
 			if (!shouldRestore) continue;
 			this.connect(account.id).catch(error =>
 				this.logger.error(`Failed to restore WhatsApp account ${account.id}`, error),

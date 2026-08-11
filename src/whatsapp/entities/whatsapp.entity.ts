@@ -54,7 +54,7 @@ export class WhatsAppAccount extends CoreEntity {
 	@Column({ name: 'phone_number', type: 'varchar', length: 40, nullable: true })
 	phoneNumber: string | null;
 
-	@Column({ name: 'provider_name', type: 'varchar', length: 40, default: 'wppconnect' })
+	@Column({ name: 'provider_name', type: 'varchar', length: 40, default: 'baileys' })
 	providerName: string;
 
 	@Column({

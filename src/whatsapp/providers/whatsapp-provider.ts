@@ -6,6 +6,7 @@ export type WhatsAppProviderEvent =
 			status: string;
 			phoneNumber?: string;
 			error?: string;
+			reason?: string;
 	  }
 	| { type: 'message'; message: NormalizedWhatsAppMessage }
 	| { type: 'message_status'; providerMessageId: string; status: string }
@@ -19,7 +20,8 @@ export type WhatsAppProviderEvent =
 	// The linked device was removed / taken over on WhatsApp's side: the stored
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
-	| { type: 'presence'; payload: any };
+	| { type: 'presence'; payload: any }
+	| { type: 'history_sync'; chats: number; messages: number };
 
 export interface NormalizedWhatsAppAttachment {
 	type: string;
@@ -129,7 +131,10 @@ export interface WhatsAppProvider {
 	pinMessage(providerMessageId: string, pinned: boolean): Promise<any>;
 	getMessageInfo(providerMessageId: string): Promise<any>;
 	markChatRead(chatId: string): Promise<any>;
-	downloadMedia(providerMessageId: string): Promise<any>;
+	downloadMedia(
+		providerMessageId: string,
+		options?: { rawHint?: any },
+	): Promise<any>;
 	/** Subscribe to typing/online presence for a chat (WppConnect). */
 	subscribePresence?(chatId: string | string[]): Promise<number | void>;
 	unsubscribePresence?(chatId: string | string[]): Promise<number | void>;

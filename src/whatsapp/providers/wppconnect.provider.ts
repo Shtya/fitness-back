@@ -2200,7 +2200,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 	}
 
-	downloadMedia(providerMessageId: string) {
+	downloadMedia(providerMessageId: string, _options?: { rawHint?: any }) {
 		return this.client.downloadMedia(providerMessageId);
 	}
 

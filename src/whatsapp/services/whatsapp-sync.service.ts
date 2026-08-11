@@ -34,6 +34,7 @@ import {
 	WhatsAppProvider,
 	WhatsAppProviderEvent,
 } from '../providers/whatsapp-provider';
+import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -143,6 +144,27 @@ function phoneFromWaId(id: string): string | null {
 	return /^\d{8,15}$/.test(user) ? user : null;
 }
 
+/** Contact/group labels that are just raw WhatsApp ids (LID / phone digits). */
+function isWeakContactDisplayName(
+	name: string | null | undefined,
+	chatId?: string | null,
+	phone?: string | null,
+): boolean {
+	const n = String(name || '').trim();
+	if (!n) return true;
+	const phoneDigits = String(phone || '').replace(/\D/g, '');
+	if (phoneDigits && n.replace(/\D/g, '') === phoneDigits && /^\+?\d[\d\s-]*$/.test(n)) {
+		return true;
+	}
+	const user = String(chatId || '')
+		.split('@')[0]
+		.split(':')[0]
+		.trim();
+	if (user && n === user) return true;
+	if (/^\d{8,20}$/.test(n)) return true;
+	return false;
+}
+
 export function providerUnreadCount(chat: any): number | null {
 	const candidates = [chat?.unreadCount, chat?.unreadMessages, chat?.countUnreadMessages];
 	for (const candidate of candidates) {
@@ -174,6 +196,23 @@ function providerMessageId(value: any): string {
 
 function safeProviderMetadata(raw: any) {
 	if (!raw || typeof raw !== 'object') return null;
+	// Baileys WAMessage (live) or already sanitized envelope.
+	if (raw.protocol === 'baileys') {
+		return (
+			sanitizeBaileysWaMessage(raw) || {
+				protocol: 'baileys',
+				id: providerMessageId(raw) || undefined,
+			}
+		);
+	}
+	if (raw.key && raw.message) {
+		return (
+			sanitizeBaileysWaMessage(raw) || {
+				protocol: 'baileys',
+				id: providerMessageId(raw) || undefined,
+			}
+		);
+	}
 	return {
 		id: providerMessageId(raw) || undefined,
 		from: waId(raw.from) || undefined,
@@ -196,6 +235,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private readonly logger = new Logger(WhatsAppSyncService.name);
 	private unsubscribe?: () => void;
 	private bootstrapping = new Set<string>();
+	private bootstrapUnlockTimers = new Map<string, NodeJS.Timeout>();
 	private persistQueue: Promise<void> = Promise.resolve();
 	private activePersists = 0;
 	private readonly maxConcurrentPersists = 1;
@@ -334,10 +374,43 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async handleProviderEvent(accountId: string, event: WhatsAppProviderEvent) {
 		if (event.type === 'message') {
 			if (!isSupportedInboxChatId(event.message?.chatId)) return;
+			const fromHistory = Boolean(
+				(event.message as any)?.__fromHistory || (event.message as any)?.raw?.__fromHistory,
+			);
 			this.enqueuePersist(
-				() => this.persistMessage(accountId, event.message, null, true),
+				() =>
+					this.persistMessage(accountId, event.message, null, !fromHistory, {
+						emitEvents: !fromHistory,
+					}),
 				`message:${accountId}:${event.message?.providerMessageId || 'unknown'}`,
 			);
+			return;
+		}
+		if (event.type === 'history_sync') {
+			this.logger.log(
+				`Baileys history sync for ${accountId}: ${event.chats} chats, ${event.messages} messages`,
+			);
+			const provider = this.providers.getProvider(accountId);
+			if (provider?.getState() === 'connected') {
+				void this.syncChatsInternal(accountId, provider, 500, {
+					syncGroupParticipants: false,
+					emitProgress: false,
+				})
+					.then((result) => {
+						this.gateway.emitAccountEvent(accountId, 'sync_completed', {
+							...result,
+							progress: 100,
+							source: 'history_sync',
+						});
+					})
+					.catch((error) =>
+						this.logger.warn(
+							`Post-history inbox sync failed for ${accountId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						),
+					);
+			}
 			return;
 		}
 		if (event.type === 'status_changed') {
@@ -384,6 +457,25 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			void this.scheduleBootstrap(accountId);
 		} else if (event.type === 'connection') {
 			this.stopInboxReconciliation(accountId);
+			if (!this.bootstrapping.has(accountId)) {
+				/* ignore */
+			} else if (
+				event.reason === 'phone_closed' ||
+				event.status === 'error' ||
+				String(event.error || '').toLowerCase().includes('phone')
+			) {
+				this.abortBootstrap(accountId, 'phone_closed');
+			} else if (
+				['disconnected', 'qr_pending', 'connecting'].includes(String(event.status || ''))
+			) {
+				this.gateway.emitAccountEvent(accountId, 'sync_progress', {
+					accountId,
+					progress: 15,
+					stage: 'phone_wait',
+					message:
+						'Keep WhatsApp open on your phone — reconnecting to finish sync…',
+				});
+			}
 		}
 		if (event.type === 'message_status') {
 			this.enqueuePersist(async () => {
@@ -542,30 +634,77 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 	}
 
+	private clearBootstrapUnlock(accountId: string) {
+		const timer = this.bootstrapUnlockTimers.get(accountId);
+		if (timer) clearTimeout(timer);
+		this.bootstrapUnlockTimers.delete(accountId);
+	}
+
+	private abortBootstrap(
+		accountId: string,
+		reason: 'phone_closed' | 'connection_lost' | 'timeout' = 'connection_lost',
+	) {
+		if (!this.bootstrapping.has(accountId)) return;
+		this.clearBootstrapUnlock(accountId);
+		this.bootstrapping.delete(accountId);
+		const message =
+			reason === 'phone_closed'
+				? 'Please open WhatsApp on your phone and keep it open — sync paused because the phone connection dropped.'
+				: reason === 'timeout'
+					? 'Inbox sync is taking longer than expected. Keep WhatsApp open on your phone, then tap Sync.'
+					: 'WhatsApp connection dropped during sync. Open WhatsApp on your phone and try Sync again.';
+		this.gateway.emitAccountEvent(accountId, 'sync_failed', {
+			message,
+			reason,
+			progress: 0,
+		});
+	}
+
 	private scheduleBootstrap(accountId: string) {
 		if (this.bootstrapping.has(accountId)) return;
 		this.bootstrapping.add(accountId);
-		// Hard unlock so a hung provider call cannot leave sync stuck forever.
+		this.clearBootstrapUnlock(accountId);
+		// Baileys history can take several minutes on first link; unlock soft.
 		const unlockTimer = setTimeout(() => {
-			if (this.bootstrapping.has(accountId)) {
+			void (async () => {
+				if (!this.bootstrapping.has(accountId)) return;
+				const count = await this.conversationRepo.count({ where: { accountId } });
+				this.clearBootstrapUnlock(accountId);
 				this.bootstrapping.delete(accountId);
+				if (count > 0) {
+					// Data already landed (often via history sync) — don't scare the user.
+					this.gateway.emitAccountEvent(accountId, 'sync_completed', {
+						progress: 100,
+						count,
+						softTimeout: true,
+					});
+					return;
+				}
 				this.gateway.emitAccountEvent(accountId, 'sync_failed', {
-					message: 'Inbox sync timed out. Click Sync to retry.',
+					message:
+						'Please keep WhatsApp open on your phone until sync finishes, then tap Sync.',
+					reason: 'timeout',
 				});
-			}
-		}, 120000);
+			})();
+		}, 300_000);
+		this.bootstrapUnlockTimers.set(accountId, unlockTimer);
+		unlockTimer.unref?.();
+
 		const run = (attempt: number) => {
-			void this.waitForInboxReady(accountId, 90000)
+			if (!this.bootstrapping.has(accountId)) return;
+			void this.waitForInboxReady(accountId, 120_000)
 				.then(ready => {
+					if (!this.bootstrapping.has(accountId)) return null;
 					if (!ready) {
 						throw new Error(
-							'WhatsApp chat store is not ready yet — the session may still be syncing on your phone.',
+							'WhatsApp is not ready yet — keep WhatsApp open on your phone.',
 						);
 					}
 					return this.bootstrapAccount(accountId);
 				})
 				.then((result) => {
-					clearTimeout(unlockTimer);
+					if (!result || !this.bootstrapping.has(accountId)) return;
+					this.clearBootstrapUnlock(accountId);
 					this.bootstrapping.delete(accountId);
 					this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 						...result,
@@ -573,11 +712,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					});
 				})
 				.catch((error) => {
+					if (!this.bootstrapping.has(accountId)) return;
 					const message = error instanceof Error ? error.message : String(error);
 					const retryable =
-						/not ready|not connected|listChats|syncing/i.test(message) ||
-						message.includes('timed out');
-					if (retryable && attempt < 3) {
+						/not ready|not connected|listChats|syncing|keep WhatsApp open/i.test(
+							message,
+						) || message.includes('timed out');
+					if (retryable && attempt < 4) {
 						this.gateway.emitAccountEvent(accountId, 'sync_progress', {
 							accountId,
 							progress: 20,
@@ -587,10 +728,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						setTimeout(() => run(attempt + 1), 4000 * attempt);
 						return;
 					}
-					clearTimeout(unlockTimer);
+					this.clearBootstrapUnlock(accountId);
 					this.bootstrapping.delete(accountId);
 					this.gateway.emitAccountEvent(accountId, 'sync_failed', {
 						message,
+						reason: 'failed',
 					});
 				});
 		};
@@ -740,12 +882,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			relations: ['contact', 'group', 'group.participants', 'assignedUser'],
 		});
 		if (existing) {
-			if (
-				existing.contact &&
-				options.title &&
-				(!existing.contact.name || existing.contact.name === existing.contact.phoneNumber)
-			) {
-				existing.contact.name = options.title;
+			if (existing.contact && options.title) {
+				const weak = isWeakContactDisplayName(
+					existing.contact.name,
+					chatId,
+					existing.contact.phoneNumber || options.phone,
+				);
+				if (weak && !isWeakContactDisplayName(options.title, chatId, options.phone)) {
+					existing.contact.name = options.title;
+					await this.contactRepo.save(existing.contact);
+				}
+			}
+			if (existing.group && options.title) {
+				const weak = isWeakContactDisplayName(existing.group.subject, chatId);
+				if (weak && !isWeakContactDisplayName(options.title, chatId)) {
+					existing.group.subject = options.title;
+					await this.groupRepo.save(existing.group);
+				}
+			}
+			if (existing.contact && options.phone && !existing.contact.phoneNumber) {
+				existing.contact.phoneNumber = options.phone;
 				await this.contactRepo.save(existing.contact);
 			}
 			return existing;
@@ -889,7 +1045,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { accountId, providerMessageId: normalized.providerMessageId },
 			relations: ['attachments', 'senderUser'],
 		});
-		if (existing) return existing;
+		if (existing) {
+			// Upgrade stripped legacy raw → Baileys media envelope when we see the live message again.
+			const nextRaw = safeProviderMetadata(normalized.raw);
+			if (
+				nextRaw &&
+				(nextRaw as any).message &&
+				(!(existing as any).raw || !(existing as any).raw?.message)
+			) {
+				await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
+				(existing as any).raw = nextRaw;
+				await this.attachmentRepo
+					.createQueryBuilder()
+					.update()
+					.set({ downloadStatus: 'pending', storagePath: null })
+					.where('message_id = :messageId', { messageId: existing.id })
+					.andWhere('download_status IN (:...statuses)', {
+						statuses: ['failed', 'pending'],
+					})
+					.execute()
+					.catch(() => undefined);
+			}
+			return existing;
+		}
 
 		let saved: WhatsAppMessage;
 		try {
@@ -956,7 +1134,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		// History hydration does not need unread reconciliation, realtime events,
 		// or a second fully-hydrated read for every individual message.
-		if (!emitEvents) return saved;
+		const fromHistory = Boolean(
+			(normalized as any)?.__fromHistory || (normalized as any)?.raw?.__fromHistory,
+		);
+		if (!emitEvents) {
+			// Still advance inbox order from Baileys history dumps without WS spam.
+			if (fromHistory && normalized.timestampReliable !== false) {
+				const historyAt = whatsAppTimestampToDate(normalized.timestamp);
+				const previous = conversation.lastMessageAt
+					? new Date(conversation.lastMessageAt).getTime()
+					: 0;
+				if (historyAt && historyAt.getTime() >= previous) {
+					await this.conversationRepo.update(conversation.id, {
+						lastMessageAt: historyAt,
+					} as any);
+				}
+			}
+			return saved;
+		}
 
 		const nextLastMessageAt =
 			normalized.timestampReliable === false || this.bootstrapping.has(accountId)
@@ -969,7 +1164,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			nextLastMessageAt != null && nextLastMessageAt.getTime() >= previousLastMessageAt;
 		// Only live inbound messages raise unread. Outbound + history sync must not.
 		const shouldCountUnread =
-			emitEvents && !normalized.fromMe && !this.bootstrapping.has(accountId);
+			emitEvents &&
+			!fromHistory &&
+			!normalized.fromMe &&
+			!this.bootstrapping.has(accountId);
 		if (shouldCountUnread) {
 			await this.conversationRepo.increment({ id: conversation.id }, 'unreadCount', 1);
 		}
@@ -1025,6 +1223,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (
 			emitEvents &&
 			notifyAssignedUser &&
+			!fromHistory &&
 			!normalized.fromMe &&
 			!this.bootstrapping.has(accountId)
 		) {
@@ -1197,13 +1396,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		let changed = false;
 		const total = list.length || 1;
 		for (const { chat, id, activityMs } of list) {
+			const isGroup = id.endsWith('@g.us');
 			const isLidChat = id.endsWith('@lid') || id.endsWith('@hosted.lid');
-			const identity =
-				isLidChat && provider.resolveContactIdentity
-					? await provider.resolveContactIdentity(id)
-					: null;
-			const rawTitle =
-				identity?.name ||
+			const provisionalTitle =
 				chat?.name ||
 				chat?.contact?.name ||
 				chat?.contact?.pushname ||
@@ -1211,8 +1406,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				chat?.formattedTitle ||
 				chat?.formattedName ||
 				null;
-			const title =
-				isLidChat && String(rawTitle || '').trim() === id.split('@')[0] ? null : rawTitle;
+			const needsIdentity =
+				!isGroup &&
+				typeof provider.resolveContactIdentity === 'function' &&
+				(isLidChat ||
+					isWeakContactDisplayName(provisionalTitle, id, phoneFromWaId(id)));
+			const identity = needsIdentity
+				? await provider.resolveContactIdentity(id).catch(() => null)
+				: null;
+			const rawTitle =
+				identity?.name ||
+				provisionalTitle ||
+				null;
+			const title = isWeakContactDisplayName(rawTitle, id, identity?.phoneNumber || phoneFromWaId(id))
+				? null
+				: rawTitle;
 			const phone =
 				identity?.phoneNumber || phoneFromWaId(id) || phoneFromWaId(waId(chat?.contact)) || null;
 			const avatarUrl =
@@ -1222,9 +1430,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				phone,
 			});
 			if (conversation.contact) {
-				const existingNameIsLid =
-					isLidChat && String(conversation.contact.name || '').trim() === id.split('@')[0];
-				const nextName = title || (existingNameIsLid ? null : conversation.contact.name);
+				const existingWeak = isWeakContactDisplayName(
+					conversation.contact.name,
+					id,
+					conversation.contact.phoneNumber,
+				);
+				const nextName =
+					title || (existingWeak ? null : conversation.contact.name);
 				const nextPhone = phone || conversation.contact.phoneNumber;
 				const nextAvatarUrl = avatarUrl || conversation.contact.avatarUrl;
 				if (
@@ -1237,6 +1449,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						phoneNumber: nextPhone || null,
 						avatarUrl: nextAvatarUrl || null,
 					});
+					changed = true;
+				}
+			}
+			if (conversation.group && title) {
+				const existingWeak = isWeakContactDisplayName(conversation.group.subject, id);
+				if (existingWeak || conversation.group.subject !== title) {
+					if (existingWeak || !conversation.group.subject) {
+						await this.groupRepo.update(conversation.group.id, { subject: title });
+						changed = true;
+					}
 				}
 			}
 			const messageActivityMs = providerChatMessageActivityMs(chat);
@@ -1588,6 +1810,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 
 		const local = await loadLocal(before);
+		// Soft-hydrate media keys from the live Baileys session for pending/failed attachments
+		// even when the UI opened the chat with live=0.
+		if (
+			local.length &&
+			!before &&
+			accountAccess.canUse &&
+			local.some((message) =>
+				(message.attachments || []).some(
+					(attachment) =>
+						attachment.downloadStatus !== 'downloaded' || !attachment.storagePath,
+				),
+			)
+		) {
+			const live = await this.pullLiveMessagesFromLinkedDevice(conversation, take).catch(
+				() => [],
+			);
+			if (live.length) {
+				for (const item of live) {
+					await this.persistMessage(
+						conversation.accountId,
+						{ ...item, chatId: conversation.providerChatId },
+						null,
+						false,
+						{ emitEvents: false },
+					).catch(() => undefined);
+				}
+				return loadLocal(before);
+			}
+		}
 		// Pagination cursor stays DB-only. First page with empty DB must come from
 		// the linked WhatsApp Web session on the phone.
 		if (local.length || before || !accountAccess.canUse || !allowLivePull) return local;
@@ -2536,15 +2787,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		try {
 			const mediaId = attachment.providerMediaId || attachment.message.providerMessageId;
 			if (!mediaId) throw new Error('Attachment has no provider media id');
+			const rawHint = attachment.message?.raw || null;
 			let data: any;
 			try {
-				data = await this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId));
+				data = await this.withMediaDownloadSlot(() =>
+					provider.downloadMedia(mediaId, { rawHint }),
+				);
 			} catch (error: any) {
 				// One soft retry after a short delay — WA Web often fails media
 				// downloads while the chat store is still hydrating.
 				await new Promise((resolve) => setTimeout(resolve, 800));
 				try {
-					data = await this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId));
+					data = await this.withMediaDownloadSlot(() =>
+						provider.downloadMedia(mediaId, { rawHint }),
+					);
 				} catch (retryError: any) {
 					const detail = String(retryError?.message || error?.message || error || '');
 					throw new Error(

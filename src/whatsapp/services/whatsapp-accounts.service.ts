@@ -99,7 +99,10 @@ export class WhatsAppAccountsService {
 				manager.create(WhatsAppAccount, {
 					label: input.label.trim(),
 					ownerAdminId: user.id,
-					providerName: input.providerName || 'wppconnect',
+					providerName:
+						input.providerName ||
+						process.env.WHATSAPP_PROVIDER ||
+						'baileys',
 					status: WhatsAppAccountStatus.DISCONNECTED,
 					providerCapabilities: mergeWhatsAppPrivacySettings(
 						{ providerCapabilities: {} },
@@ -137,13 +140,17 @@ export class WhatsAppAccountsService {
 
 	async remove(user: User, accountId: string) {
 		const account = await this.accessService.assertAccountPermission(user, accountId, 'canManage');
-		// Kill Chromium, wipe the profile on disk, drop Redis locks and session rows
-		// BEFORE deleting the DB account — otherwise orphaned tokens keep conflicting.
-		await this.providers.destroySession(accountId, account.providerName);
+		// Kill live provider, wipe disk sessions, drop Redis locks BEFORE deleting DB rows.
+		await this.providers.destroySession(accountId, account.providerName || 'baileys');
 		await removeAccountMedia(accountId);
 		await this.accountRepo.manager.transaction(async manager => {
 			await manager.delete(WhatsAppAuditLog, { accountId });
 			await manager.delete(WhatsAppConnectionLog, { accountId });
+			await manager.delete(WhatsAppConversation, { accountId });
+			await manager.delete(WhatsAppContact, { accountId });
+			await manager.delete(WhatsAppGroup, { accountId });
+			await manager.delete(WhatsAppStatus, { accountId });
+			await manager.delete(WhatsAppAccountAccess, { accountId });
 			await manager.delete(WhatsAppAccount, { id: accountId });
 		});
 		await this.audit.write({

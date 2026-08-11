@@ -1,0 +1,1094 @@
+import { Logger } from '@nestjs/common';
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import * as qrcode from 'qrcode';
+import {
+	NormalizedWhatsAppMessage,
+	NormalizedWhatsAppReaction,
+	WhatsAppProvider,
+	WhatsAppProviderCapabilities,
+	WhatsAppProviderEvent,
+} from './whatsapp-provider';
+import { loadBaileysModule } from './baileys-loader';
+import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
+
+type BaileysSocket = any;
+
+const sessionRoot = () =>
+	path.resolve(
+		process.env.WHATSAPP_BAILEYS_DIR ||
+			process.env.WHATSAPP_TOKEN_FOLDER ||
+			path.join(process.cwd(), 'tokens', 'baileys'),
+	);
+
+function jidOf(value: any): string {
+	if (!value) return '';
+	if (typeof value === 'string') return normalizeInboxJid(value);
+	return normalizeInboxJid(String(value._serialized || value.id || value.user || ''));
+}
+
+/** Keep CRM chat ids compatible with older WPP @c.us rows. */
+function normalizeInboxJid(jid: string): string {
+	const raw = String(jid || '').trim();
+	if (!raw) return '';
+	if (raw.endsWith('@s.whatsapp.net')) {
+		return `${raw.slice(0, -'@s.whatsapp.net'.length)}@c.us`;
+	}
+	return raw;
+}
+
+function toBaileysJid(jid: string): string {
+	const raw = String(jid || '').trim();
+	if (!raw) return '';
+	if (raw.endsWith('@c.us')) {
+		return `${raw.slice(0, -'@c.us'.length)}@s.whatsapp.net`;
+	}
+	return raw;
+}
+
+/** True when a label is just an id/phone — not a real contact/group name. */
+function isWeakDisplayName(
+	name: string | null | undefined,
+	chatId?: string | null,
+	phone?: string | null,
+): boolean {
+	const n = String(name || '').trim();
+	if (!n) return true;
+	const phoneDigits = String(phone || '').replace(/\D/g, '');
+	if (phoneDigits && n.replace(/\D/g, '') === phoneDigits && /^\+?\d[\d\s-]*$/.test(n)) {
+		return true;
+	}
+	const user = String(chatId || '')
+		.split('@')[0]
+		.split(':')[0]
+		.trim();
+	if (user && n === user) return true;
+	if (/^\d{8,20}$/.test(n)) return true;
+	return false;
+}
+
+function messageText(message: any): string {
+	if (!message) return '';
+	return (
+		message.conversation ||
+		message.extendedTextMessage?.text ||
+		message.imageMessage?.caption ||
+		message.videoMessage?.caption ||
+		message.documentMessage?.caption ||
+		message.buttonsResponseMessage?.selectedDisplayText ||
+		message.listResponseMessage?.title ||
+		message.templateButtonReplyMessage?.selectedDisplayText ||
+		''
+	);
+}
+
+function detectType(message: any): string {
+	if (!message) return 'text';
+	if (message.imageMessage) return 'image';
+	if (message.videoMessage) return 'video';
+	if (message.audioMessage) return message.audioMessage.ptt ? 'ptt' : 'audio';
+	if (message.documentMessage) return 'document';
+	if (message.stickerMessage) return 'sticker';
+	if (message.contactMessage || message.contactsArrayMessage) return 'contact';
+	if (message.locationMessage || message.liveLocationMessage) return 'location';
+	return 'text';
+}
+
+function toDate(ts: any): Date {
+	const n =
+		typeof ts === 'number'
+			? ts
+			: typeof ts?.toNumber === 'function'
+				? ts.toNumber()
+				: Number(ts) || 0;
+	if (!n) return new Date();
+	return new Date(n > 1e12 ? n : n * 1000);
+}
+
+/**
+ * Baileys-backed WhatsApp provider (protocol WebSocket — no Chromium).
+ * Live inbound path mirrors Dragify: messages.upsert → normalize → emit.
+ * Chat/message history is kept in-memory from upserts + history sync events
+ * and served to the existing CRM sync layer via getChats / getMessages.
+ */
+export class BaileysProvider implements WhatsAppProvider {
+	readonly name = 'baileys';
+	readonly capabilities: WhatsAppProviderCapabilities = {
+		qr: true,
+		history: true,
+		contacts: true,
+		groups: true,
+		groupParticipants: false,
+		mediaDownload: true,
+		statusFetch: false,
+		statusPublish: false,
+		statusView: false,
+		reactions: false,
+		messageActions: false,
+	};
+
+	private readonly logger = new Logger(BaileysProvider.name);
+	private socket: BaileysSocket | null = null;
+	private state: string = 'disconnected';
+	private qr: string | null = null;
+	private pairingCode: string | null = null;
+	private closing = false;
+	private reconnectTimer: NodeJS.Timeout | null = null;
+	private reconnectAttempt = 0;
+	private phoneNumberHint: string | null = null;
+	private readonly listeners = new Set<(event: WhatsAppProviderEvent) => void | Promise<void>>();
+	private readonly chats = new Map<string, any>();
+	private readonly contacts = new Map<
+		string,
+		{ id: string; name?: string | null; notify?: string | null; phoneNumber?: string | null; lid?: string | null }
+	>();
+	/** LID chat id → phone digits (no @domain). */
+	private readonly lidToPn = new Map<string, string>();
+	private readonly groupSubjectCache = new Map<string, string | null>();
+	private readonly messagesByChat = new Map<string, Map<string, NormalizedWhatsAppMessage>>();
+	/** Original WAMessage by provider id — required for Baileys media download. */
+	private readonly rawByMessageId = new Map<string, any>();
+
+	constructor(private readonly accountId: string) {}
+
+	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>) {
+		this.listeners.add(listener);
+	}
+
+	private emit(event: WhatsAppProviderEvent) {
+		for (const listener of this.listeners) {
+			try {
+				void Promise.resolve(listener(event)).catch((error) => {
+					this.logger.warn(
+						`Baileys event listener failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				});
+			} catch (error) {
+				this.logger.warn(
+					`Baileys event listener threw: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
+	getQr() {
+		return this.qr;
+	}
+
+	getPairingCode() {
+		return this.pairingCode;
+	}
+
+	getState() {
+		return this.state;
+	}
+
+	getChatStoreCooldownMs() {
+		return 0;
+	}
+
+	resetChatStoreCooldown() {}
+
+	async isChatStoreHydrated() {
+		// Baileys has no Chromium ChatStore. Once the socket is open the inbox
+		// can be reconciled from in-memory chats (including ones derived later
+		// from messages / history sync).
+		return this.state === 'connected';
+	}
+
+	async isHistoryReady() {
+		return this.state === 'connected';
+	}
+
+	private sessionDir() {
+		return path.join(sessionRoot(), this.accountId);
+	}
+
+	private setState(status: string, extra: Partial<Extract<WhatsAppProviderEvent, { type: 'connection' }>> = {}) {
+		this.state = status;
+		this.emit({ type: 'connection', status, ...extra });
+	}
+
+	private rememberChat(chatId: string, patch: Record<string, unknown> = {}) {
+		if (!chatId || chatId.includes('status@') || chatId.endsWith('@broadcast')) return;
+		const prev = this.chats.get(chatId) || {
+			id: { _serialized: chatId },
+			name: null,
+			t: 0,
+			unreadCount: 0,
+		};
+		const patchedName = patch.name != null ? String(patch.name).trim() || null : undefined;
+		const next = {
+			...prev,
+			...patch,
+			// Prefer a real display name over raw LID/phone digits.
+			name:
+				patchedName && !isWeakDisplayName(patchedName, chatId)
+					? patchedName
+					: prev.name && !isWeakDisplayName(String(prev.name), chatId)
+						? prev.name
+						: patchedName || prev.name || null,
+			id: { _serialized: chatId },
+		};
+		this.chats.set(chatId, next);
+	}
+
+	private rememberLidMapping(lid: string | null | undefined, pn: string | null | undefined) {
+		const lidId = lid ? jidOf(lid) || String(lid).trim() : '';
+		const pnRaw = pn ? String(pn).trim() : '';
+		if (!lidId || !pnRaw) return;
+		const digits = pnRaw.includes('@') ? pnRaw.split('@')[0].split(':')[0] : pnRaw.replace(/\D/g, '');
+		if (!digits) return;
+		this.lidToPn.set(lidId, digits);
+		const hosted = lidId.replace(/@lid$/i, '@hosted.lid');
+		if (hosted !== lidId) this.lidToPn.set(hosted, digits);
+	}
+
+	private rememberContact(contact: any) {
+		if (!contact) return;
+		const id = jidOf(contact.id) || jidOf(contact);
+		if (!id || id.includes('status@') || id.endsWith('@broadcast')) return;
+		const lid = contact.lid ? jidOf(contact.lid) : id.endsWith('@lid') || id.endsWith('@hosted.lid') ? id : null;
+		const phoneJid = contact.phoneNumber
+			? jidOf(contact.phoneNumber)
+			: id.endsWith('@c.us') || id.endsWith('@s.whatsapp.net')
+				? id
+				: null;
+		const phoneDigits = phoneJid
+			? phoneJid.split('@')[0].split(':')[0].replace(/\D/g, '')
+			: null;
+		const name =
+			[contact.name, contact.notify, contact.verifiedName, contact.pushname, contact.shortName]
+				.map((v) => String(v || '').trim())
+				.find((v) => v && !isWeakDisplayName(v, id, phoneDigits)) || null;
+		const notify = String(contact.notify || '').trim() || null;
+		const entry = {
+			id,
+			lid,
+			phoneNumber: phoneDigits,
+			name: name || notify,
+			notify,
+		};
+		const merge = (key: string) => {
+			if (!key) return;
+			const prev = this.contacts.get(key) || { id: key };
+			this.contacts.set(key, {
+				...prev,
+				...entry,
+				id: key,
+				name: entry.name || prev.name || null,
+				notify: entry.notify || prev.notify || null,
+				phoneNumber: entry.phoneNumber || prev.phoneNumber || null,
+				lid: entry.lid || prev.lid || null,
+			});
+		};
+		merge(id);
+		if (lid) merge(lid);
+		if (phoneDigits) {
+			merge(`${phoneDigits}@c.us`);
+			merge(`${phoneDigits}@s.whatsapp.net`);
+		}
+		if (lid && phoneDigits) this.rememberLidMapping(lid, phoneDigits);
+	}
+
+	private contactDisplayName(chatId: string): string | null {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return null;
+		const hit = this.contacts.get(id);
+		const phone = hit?.phoneNumber || this.lidToPn.get(id) || null;
+		const name = hit?.name || hit?.notify || null;
+		if (name && !isWeakDisplayName(name, id, phone)) return name;
+		if (phone) {
+			const byPhone =
+				this.contacts.get(`${phone}@c.us`) || this.contacts.get(`${phone}@s.whatsapp.net`);
+			const phoneName = byPhone?.name || byPhone?.notify || null;
+			if (phoneName && !isWeakDisplayName(phoneName, id, phone)) return phoneName;
+		}
+		return null;
+	}
+
+	private async fetchGroupSubject(groupId: string): Promise<string | null> {
+		const id = jidOf(groupId) || String(groupId || '').trim();
+		if (!id.endsWith('@g.us')) return null;
+		if (this.groupSubjectCache.has(id)) return this.groupSubjectCache.get(id) || null;
+		if (!this.socket || this.state !== 'connected') return null;
+		try {
+			const meta = await this.socket.groupMetadata(id);
+			const subject = String(meta?.subject || '').trim() || null;
+			this.groupSubjectCache.set(id, subject);
+			if (subject) this.rememberChat(id, { name: subject });
+			return subject;
+		} catch {
+			this.groupSubjectCache.set(id, null);
+			return null;
+		}
+	}
+
+	private rememberMessage(normalized: NormalizedWhatsAppMessage, rawMessage?: any) {
+		if (!normalized.chatId || !normalized.providerMessageId) return;
+		let bucket = this.messagesByChat.get(normalized.chatId);
+		if (!bucket) {
+			bucket = new Map();
+			this.messagesByChat.set(normalized.chatId, bucket);
+		}
+		bucket.set(normalized.providerMessageId, normalized);
+		if (rawMessage?.message) {
+			this.rawByMessageId.set(normalized.providerMessageId, rawMessage);
+		}
+		// Cap per-chat memory so long-lived sessions do not grow forever.
+		if (bucket.size > 500) {
+			const keys = [...bucket.keys()].slice(0, bucket.size - 500);
+			for (const key of keys) {
+				bucket.delete(key);
+				this.rawByMessageId.delete(key);
+			}
+		}
+		if (this.rawByMessageId.size > 4000) {
+			const keys = [...this.rawByMessageId.keys()].slice(0, this.rawByMessageId.size - 4000);
+			for (const key of keys) this.rawByMessageId.delete(key);
+		}
+		if (normalized.contactName && !normalized.fromMe && !normalized.chatId.endsWith('@g.us')) {
+			this.rememberContact({
+				id: normalized.chatId,
+				notify: normalized.contactName,
+				name: normalized.contactName,
+			});
+		}
+		const ts = normalized.timestamp?.getTime?.() || Date.now();
+		const existingName = this.chats.get(normalized.chatId)?.name || null;
+		const nextName =
+			this.contactDisplayName(normalized.chatId) ||
+			(normalized.contactName &&
+			!isWeakDisplayName(normalized.contactName, normalized.chatId)
+				? normalized.contactName
+				: null) ||
+			existingName;
+		this.rememberChat(normalized.chatId, {
+			t: Math.floor(ts / 1000),
+			name: nextName,
+			lastMessage: {
+				id: { _serialized: normalized.providerMessageId },
+				body: normalized.text,
+				t: Math.floor(ts / 1000),
+				fromMe: normalized.fromMe,
+				type: normalized.type,
+			},
+		});
+	}
+
+	/** Ensure every chat that has messages is visible in getChats. */
+	private ensureChatsFromMessages() {
+		for (const chatId of this.messagesByChat.keys()) {
+			if (!this.chats.has(chatId)) this.rememberChat(chatId);
+		}
+	}
+
+	private normalizeWaMessage(raw: any): NormalizedWhatsAppMessage | null {
+		const remoteJid = jidOf(raw?.key?.remoteJid);
+		const id = String(raw?.key?.id || '').trim();
+		if (!remoteJid || !id || !raw?.message) return null;
+		if (remoteJid.includes('status@') || remoteJid.endsWith('@broadcast')) return null;
+
+		const content =
+			raw.message.ephemeralMessage?.message ||
+			raw.message.viewOnceMessage?.message ||
+			raw.message.viewOnceMessageV2?.message ||
+			raw.message.viewOnceMessageV2Extension?.message ||
+			raw.message;
+		const type = detectType(content);
+		const text = messageText(content) || null;
+		const quoted =
+			content?.extendedTextMessage?.contextInfo?.stanzaId ||
+			content?.imageMessage?.contextInfo?.stanzaId ||
+			null;
+		const attachments = [];
+		if (['image', 'video', 'audio', 'ptt', 'document', 'sticker'].includes(type)) {
+			const media =
+				content.imageMessage ||
+				content.videoMessage ||
+				content.audioMessage ||
+				content.documentMessage ||
+				content.stickerMessage;
+			attachments.push({
+				type,
+				mimeType: media?.mimetype || null,
+				fileName: media?.fileName || media?.caption || null,
+				fileSizeBytes: Number(media?.fileLength) || null,
+				providerMediaId: id,
+			});
+		}
+
+		return {
+			providerMessageId: id,
+			chatId: remoteJid,
+			senderWaId: raw?.key?.participant || (raw?.key?.fromMe ? null : remoteJid),
+			fromMe: Boolean(raw?.key?.fromMe),
+			type,
+			text,
+			timestamp: toDate(raw.messageTimestamp),
+			timestampReliable: Boolean(raw.messageTimestamp),
+			quotedProviderMessageId: quoted,
+			isForwarded: Boolean(
+				content?.extendedTextMessage?.contextInfo?.isForwarded ||
+					content?.imageMessage?.contextInfo?.isForwarded,
+			),
+			contactName: raw.pushName || null,
+			attachments,
+			raw,
+		};
+	}
+
+	async connect(phoneNumber?: string) {
+		this.closing = false;
+		this.phoneNumberHint = phoneNumber ? String(phoneNumber).replace(/\D/g, '') : null;
+		this.qr = null;
+		this.pairingCode = null;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+		this.setState('connecting');
+		await this.openSocket();
+	}
+
+	private async openSocket() {
+		const baileys = await loadBaileysModule();
+		const {
+			default: makeWASocket,
+			useMultiFileAuthState,
+			DisconnectReason,
+			fetchLatestBaileysVersion,
+		} = baileys as any;
+
+		await fs.mkdir(this.sessionDir(), { recursive: true });
+		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
+		const { version } = await fetchLatestBaileysVersion();
+
+		if (this.socket) {
+			try {
+				this.socket.end?.(undefined);
+			} catch {
+				/* ignore */
+			}
+			this.socket = null;
+		}
+
+		const socket = makeWASocket({
+			auth: state,
+			version,
+			printQRInTerminal: false,
+			markOnlineOnConnect: false,
+			syncFullHistory: true,
+			browser: ['So7baFit', 'Chrome', '1.0.0'],
+		});
+		this.socket = socket;
+
+		socket.ev.on('creds.update', saveCreds);
+
+		socket.ev.on('connection.update', async (update: any) => {
+			if (this.closing) return;
+			if (update.qr) {
+				try {
+					this.qr = await qrcode.toDataURL(String(update.qr), { margin: 1, width: 320 });
+				} catch {
+					this.qr = String(update.qr);
+				}
+				this.pairingCode = null;
+				this.setState('qr_pending');
+				this.emit({ type: 'qr', qr: this.qr });
+			}
+
+			if (update.connection === 'open') {
+				this.reconnectAttempt = 0;
+				this.qr = null;
+				this.pairingCode = null;
+				const fullId = String(socket.user?.id || '');
+				const phone = fullId.split(':')[0] || this.phoneNumberHint || undefined;
+				this.setState('connected', { phoneNumber: phone });
+				return;
+			}
+
+			if (update.connection === 'close') {
+				const statusCode = Number(update.lastDisconnect?.error?.output?.statusCode || 0);
+				const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
+				this.socket = null;
+				if (this.closing) return;
+				if (loggedOut) {
+					this.setState('error', {
+						error: 'WhatsApp logged out this linked device. Scan the QR again.',
+					});
+					this.emit({
+						type: 'session_invalid',
+						reason: 'WhatsApp logged out this linked device. Scan the QR again.',
+					});
+					return;
+				}
+				// Best-effort: closed/lost/timeout usually means the phone app slept,
+				// lost network, or WhatsApp was swiped away — ask the user to reopen it.
+				const phoneLikelyClosed =
+					statusCode === DisconnectReason?.connectionClosed ||
+					statusCode === DisconnectReason?.connectionLost ||
+					statusCode === DisconnectReason?.timedOut ||
+					statusCode === 408 ||
+					statusCode === 428 ||
+					statusCode === 440 ||
+					statusCode === 500 ||
+					statusCode === 503 ||
+					!statusCode;
+				this.setState('disconnected', {
+					reason: phoneLikelyClosed ? 'phone_closed' : 'connection_lost',
+					error: phoneLikelyClosed
+						? 'WhatsApp on the phone looks closed or offline. Open WhatsApp and keep it in the foreground.'
+						: undefined,
+				});
+				this.scheduleReconnect();
+			}
+		});
+
+		socket.ev.on('messages.upsert', async (upsert: any) => {
+			const type = String(upsert?.type || '');
+			if (type && type !== 'notify' && type !== 'append') return;
+			const list = Array.isArray(upsert?.messages) ? upsert.messages : [];
+			for (const raw of list) {
+				const normalized = this.normalizeWaMessage(raw);
+				if (!normalized) continue;
+				this.rememberMessage(normalized, raw);
+				this.emit({ type: 'message', message: normalized });
+			}
+		});
+
+		socket.ev.on('messages.update', async (updates: any[]) => {
+			if (!Array.isArray(updates)) return;
+			for (const item of updates) {
+				const providerMessageId = String(item?.key?.id || '').trim();
+				if (!providerMessageId) continue;
+				const status =
+					item?.update?.status === 3 || item?.update?.status === 'READ'
+						? 'read'
+						: item?.update?.status === 2 || item?.update?.status === 'DELIVERY_ACK'
+							? 'delivered'
+							: item?.update?.status === 4 || item?.update?.status === 'PLAYED'
+								? 'played'
+								: null;
+				if (status) {
+					this.emit({ type: 'message_status', providerMessageId, status });
+				}
+			}
+		});
+
+		socket.ev.on('chats.upsert', (chats: any[]) => {
+			for (const chat of chats || []) {
+				const id = jidOf(chat?.id);
+				if (!id) continue;
+				this.rememberChat(id, {
+					name: chat.name || chat.verifiedName || null,
+					t: Number(chat.conversationTimestamp) || Number(chat.t) || 0,
+					unreadCount: Number(chat.unreadCount) || 0,
+				});
+			}
+		});
+
+		socket.ev.on('chats.update', (chats: any[]) => {
+			for (const chat of chats || []) {
+				const id = jidOf(chat?.id);
+				if (!id) continue;
+				this.rememberChat(id, {
+					name: chat.name || this.chats.get(id)?.name || null,
+					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
+					unreadCount:
+						chat.unreadCount != null
+							? Number(chat.unreadCount)
+							: this.chats.get(id)?.unreadCount || 0,
+				});
+			}
+		});
+
+		socket.ev.on('contacts.upsert', (contacts: any[]) => {
+			for (const contact of contacts || []) this.rememberContact(contact);
+		});
+
+		socket.ev.on('contacts.update', (contacts: any[]) => {
+			for (const contact of contacts || []) this.rememberContact(contact);
+		});
+
+		socket.ev.on('lid-mapping.update', (mapping: any) => {
+			this.rememberLidMapping(mapping?.lid, mapping?.pn);
+		});
+
+		// Optional history dump on link (Baileys versions that emit it).
+		socket.ev.on('messaging-history.set', (data: any) => {
+			const chats = Array.isArray(data?.chats) ? data.chats : [];
+			const messages = Array.isArray(data?.messages) ? data.messages : [];
+			const contacts = Array.isArray(data?.contacts) ? data.contacts : [];
+			const lidPnMappings = Array.isArray(data?.lidPnMappings) ? data.lidPnMappings : [];
+			for (const mapping of lidPnMappings) {
+				this.rememberLidMapping(mapping?.lid, mapping?.pn);
+			}
+			for (const contact of contacts) this.rememberContact(contact);
+			for (const chat of chats) {
+				const id = jidOf(chat?.id);
+				if (!id) continue;
+				const contactName = this.contactDisplayName(id);
+				this.rememberChat(id, {
+					name: chat.name || contactName || null,
+					t: Number(chat.conversationTimestamp) || 0,
+					unreadCount: Number(chat.unreadCount) || 0,
+				});
+			}
+			for (const raw of messages) {
+				const normalized = this.normalizeWaMessage(raw);
+				if (!normalized) continue;
+				// Mark history so sync persists without unread spam / push flood.
+				(normalized as any).__fromHistory = true;
+				if (normalized.raw && typeof normalized.raw === 'object') {
+					normalized.raw = { ...normalized.raw, __fromHistory: true };
+				}
+				this.rememberMessage(normalized, raw);
+				this.emit({ type: 'message', message: normalized });
+			}
+			this.ensureChatsFromMessages();
+			this.logger.log(
+				`Baileys history set for ${this.accountId}: ${chats.length} chats, ${messages.length} messages, ${contacts.length} contacts`,
+			);
+			this.emit({
+				type: 'history_sync',
+				chats: chats.length,
+				messages: messages.length,
+			});
+		});
+
+		if (this.phoneNumberHint && typeof socket.requestPairingCode === 'function') {
+			try {
+				const code = await socket.requestPairingCode(this.phoneNumberHint);
+				this.pairingCode = String(code || '');
+				if (this.pairingCode) {
+					this.setState('qr_pending');
+					this.emit({ type: 'pairing_code', code: this.pairingCode });
+				}
+			} catch (error) {
+				this.logger.warn(
+					`Baileys pairing code failed for ${this.accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
+	private scheduleReconnect() {
+		if (this.closing || this.reconnectTimer) return;
+		this.reconnectAttempt += 1;
+		if (this.reconnectAttempt > 12) {
+			this.setState('error', {
+				error: 'WhatsApp reconnect failed repeatedly. Reconnect from the dashboard.',
+			});
+			return;
+		}
+		const delay = Math.min(60_000, 2_000 * this.reconnectAttempt);
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+			if (this.closing) return;
+			this.setState('connecting');
+			void this.openSocket().catch((error) => {
+				this.logger.warn(
+					`Baileys reconnect failed for ${this.accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				this.scheduleReconnect();
+			});
+		}, delay);
+		this.reconnectTimer.unref?.();
+	}
+
+	async disconnect() {
+		this.closing = true;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+		try {
+			this.socket?.end?.(undefined);
+		} catch {
+			/* ignore */
+		}
+		this.socket = null;
+		this.qr = null;
+		this.pairingCode = null;
+		this.setState('disconnected');
+	}
+
+	async logout() {
+		this.closing = true;
+		try {
+			await this.socket?.logout?.();
+		} catch {
+			/* ignore */
+		}
+		try {
+			await fs.rm(this.sessionDir(), { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+		this.socket = null;
+		this.chats.clear();
+		this.contacts.clear();
+		this.lidToPn.clear();
+		this.groupSubjectCache.clear();
+		this.messagesByChat.clear();
+		this.rawByMessageId.clear();
+		this.qr = null;
+		this.pairingCode = null;
+		this.setState('disconnected');
+	}
+
+	async getChats(limit = 50) {
+		this.ensureChatsFromMessages();
+		const count = Math.min(Math.max(Number(limit) || 50, 1), 1000);
+		const list = [...this.chats.values()]
+			.sort((a, b) => Number(b.t || 0) - Number(a.t || 0))
+			.slice(0, count);
+		// Fill missing titles from contacts / group metadata before CRM sync.
+		for (const chat of list) {
+			const id = String(chat?.id?._serialized || '');
+			if (!id) continue;
+			const current = String(chat.name || '').trim();
+			if (!current || isWeakDisplayName(current, id)) {
+				const fromContact = this.contactDisplayName(id);
+				if (fromContact) {
+					chat.name = fromContact;
+					continue;
+				}
+				if (id.endsWith('@g.us')) {
+					const subject = await this.fetchGroupSubject(id);
+					if (subject) chat.name = subject;
+				}
+			}
+		}
+		return list;
+	}
+
+	async getMessages(
+		chatId: string,
+		options: { limit?: number; before?: string; after?: string; aliases?: string[] } = {},
+	) {
+		const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
+		const seed = [chatId, ...(options.aliases || [])].map(String).filter(Boolean);
+		const ids = new Set<string>();
+		for (const id of seed) {
+			ids.add(id);
+			ids.add(normalizeInboxJid(id));
+			if (id.endsWith('@c.us')) {
+				ids.add(`${id.slice(0, -'@c.us'.length)}@s.whatsapp.net`);
+			}
+		}
+		const merged = new Map<string, NormalizedWhatsAppMessage>();
+		for (const id of ids) {
+			const bucket = this.messagesByChat.get(id);
+			if (!bucket) continue;
+			for (const [key, value] of bucket) merged.set(key, value);
+		}
+		return [...merged.values()]
+			.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+			.slice(-limit);
+	}
+
+	async getContacts() {
+		return [...this.contacts.values()].map((contact) => ({
+			id: { _serialized: contact.id },
+			name: contact.name || contact.notify || null,
+			pushname: contact.notify || null,
+			number: contact.phoneNumber || null,
+		}));
+	}
+
+	async resolveContactIdentity(chatId: string) {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return null;
+
+		let phoneNumber: string | null = this.lidToPn.get(id) || this.contacts.get(id)?.phoneNumber || null;
+
+		if (
+			!phoneNumber &&
+			(id.endsWith('@lid') || id.endsWith('@hosted.lid')) &&
+			this.socket?.signalRepository?.lidMapping?.getPNForLID
+		) {
+			try {
+				const pnJid = await this.socket.signalRepository.lidMapping.getPNForLID(
+					id.endsWith('@hosted.lid') ? id : toBaileysJid(id) || id,
+				);
+				const digits = String(pnJid || '')
+					.split('@')[0]
+					.split(':')[0]
+					.replace(/\D/g, '');
+				if (digits) {
+					phoneNumber = digits;
+					this.rememberLidMapping(id, digits);
+				}
+			} catch {
+				/* ignore */
+			}
+		}
+
+		if (!phoneNumber && (id.endsWith('@c.us') || id.endsWith('@s.whatsapp.net'))) {
+			const digits = id.split('@')[0].split(':')[0].replace(/\D/g, '');
+			if (/^\d{8,15}$/.test(digits)) phoneNumber = digits;
+		}
+
+		const name = this.contactDisplayName(id) || (() => {
+			const chatName = String(this.chats.get(id)?.name || '').trim();
+			return chatName && !isWeakDisplayName(chatName, id, phoneNumber) ? chatName : null;
+		})();
+
+		if (!phoneNumber && !name) return null;
+		return { phoneNumber, name };
+	}
+
+	async getGroups() {
+		return [...this.chats.values()].filter((chat) =>
+			String(chat?.id?._serialized || '').endsWith('@g.us'),
+		);
+	}
+
+	async getGroupParticipants() {
+		return [];
+	}
+
+	async sendText(chatId: string, text: string, quotedProviderMessageId?: string) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const jid = toBaileysJid(chatId);
+		const payload: any = { text };
+		if (quotedProviderMessageId) {
+			payload.quoted = {
+				key: { remoteJid: jid, id: quotedProviderMessageId },
+				message: { conversation: '' },
+			};
+		}
+		const result = await this.socket.sendMessage(jid, payload);
+		const normalized = this.normalizeWaMessage(result);
+		if (normalized) this.rememberMessage(normalized, result);
+		return result;
+	}
+
+	async sendMedia(
+		chatId: string,
+		filePath: string,
+		options: {
+			caption?: string;
+			fileName?: string;
+			isVoice?: boolean;
+			mimeType?: string | null;
+			quotedProviderMessageId?: string;
+		} = {},
+	) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const jid = toBaileysJid(chatId);
+		const buffer = await fs.readFile(filePath);
+		const mime = String(options.mimeType || '');
+		let content: any;
+		if (options.isVoice || mime.startsWith('audio/')) {
+			content = {
+				audio: buffer,
+				mimetype: mime || 'audio/ogg; codecs=opus',
+				ptt: Boolean(options.isVoice),
+			};
+		} else if (mime.startsWith('image/')) {
+			content = { image: buffer, caption: options.caption || undefined };
+		} else if (mime.startsWith('video/')) {
+			content = { video: buffer, caption: options.caption || undefined };
+		} else {
+			content = {
+				document: buffer,
+				mimetype: mime || 'application/octet-stream',
+				fileName: options.fileName || path.basename(filePath),
+				caption: options.caption || undefined,
+			};
+		}
+		const result = await this.socket.sendMessage(jid, content);
+		const normalized = this.normalizeWaMessage(result);
+		if (normalized) this.rememberMessage(normalized, result);
+		return result;
+	}
+
+	async sendReaction() {
+		throw new Error('Reactions are not enabled for the Baileys provider yet');
+	}
+
+	async getReactions(): Promise<NormalizedWhatsAppReaction[]> {
+		return [];
+	}
+
+	async forwardMessage() {
+		throw new Error('Forward is not enabled for the Baileys provider yet');
+	}
+
+	async deleteMessage(chatId: string, providerMessageId: string, mode: 'local' | 'everyone') {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		if (mode === 'everyone') {
+			await this.socket.sendMessage(chatId, { delete: { remoteJid: chatId, id: providerMessageId, fromMe: true } });
+		}
+		const bucket = this.messagesByChat.get(chatId);
+		bucket?.delete(providerMessageId);
+		return { ok: true };
+	}
+
+	async starMessage() {
+		return { ok: false };
+	}
+
+	async pinMessage() {
+		return { ok: false };
+	}
+
+	async getMessageInfo() {
+		return null;
+	}
+
+	async markChatRead(chatId: string) {
+		if (!this.socket || this.state !== 'connected') return;
+		const jid = toBaileysJid(chatId);
+		const bucket =
+			this.messagesByChat.get(normalizeInboxJid(chatId)) ||
+			this.messagesByChat.get(chatId) ||
+			this.messagesByChat.get(jid);
+		if (!bucket?.size) {
+			this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
+			return;
+		}
+		const keys = [...bucket.values()]
+			.filter((msg) => !msg.fromMe)
+			.slice(-20)
+			.map((msg) => ({
+				remoteJid: jid,
+				id: msg.providerMessageId,
+				fromMe: false,
+			}));
+		if (keys.length && typeof this.socket.readMessages === 'function') {
+			await this.socket.readMessages(keys);
+		}
+		this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
+	}
+
+	async downloadMedia(providerMessageId: string, options: { rawHint?: any } = {}) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const id = String(providerMessageId || '').trim();
+		if (!id) throw new Error('Media message id is required');
+
+		let raw = this.rawByMessageId.get(id);
+		if (!raw?.message && options.rawHint) {
+			const hint = options.rawHint;
+			if (hint?.protocol === 'baileys' || (hint?.key && hint?.message)) {
+				raw =
+					reviveBaileysWaMessage(hint) ||
+					(hint.key && hint.message
+						? {
+								key: hint.key,
+								message: hint.message,
+								messageTimestamp: hint.messageTimestamp,
+							}
+						: null);
+			}
+		}
+		if (!raw?.message) {
+			// Last resort: scan in-memory chat buckets for this id.
+			for (const bucket of this.messagesByChat.values()) {
+				const hit = bucket.get(id);
+				if (hit?.raw?.message) {
+					raw = hit.raw;
+					break;
+				}
+			}
+		}
+		if (!raw?.message) {
+			throw new Error('Media message is not available in the current session cache');
+		}
+
+		const baileys = await loadBaileysModule();
+		const { downloadMediaMessage, downloadContentFromMessage } = baileys as any;
+		let buffer: Buffer | Uint8Array | null = null;
+
+		if (typeof downloadMediaMessage === 'function') {
+			try {
+				buffer = await downloadMediaMessage(
+					raw,
+					'buffer',
+					{},
+					{
+						reuploadRequest: this.socket.updateMediaMessage?.bind(this.socket),
+					},
+				);
+			} catch (error) {
+				this.logger.warn(
+					`downloadMediaMessage failed for ${id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+
+		if ((!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array)) &&
+			typeof downloadContentFromMessage === 'function') {
+			const content =
+				raw.message.ephemeralMessage?.message ||
+				raw.message.viewOnceMessage?.message ||
+				raw.message.viewOnceMessageV2?.message ||
+				raw.message.viewOnceMessageV2Extension?.message ||
+				raw.message;
+			const candidates: Array<{ node: any; type: string }> = [
+				{ node: content?.imageMessage, type: 'image' },
+				{ node: content?.videoMessage, type: 'video' },
+				{ node: content?.audioMessage, type: 'audio' },
+				{ node: content?.documentMessage, type: 'document' },
+				{ node: content?.stickerMessage, type: 'sticker' },
+			].filter((item) => item.node);
+			for (const candidate of candidates) {
+				try {
+					const stream = await downloadContentFromMessage(candidate.node, candidate.type);
+					const chunks: Buffer[] = [];
+					for await (const chunk of stream) {
+						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+					}
+					buffer = Buffer.concat(chunks);
+					if (buffer.length) break;
+				} catch (error) {
+					this.logger.warn(
+						`downloadContentFromMessage(${candidate.type}) failed for ${id}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+		}
+
+		if (!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) {
+			throw new Error('Baileys returned empty media');
+		}
+		// Keep a live copy so retries are cheap.
+		this.rawByMessageId.set(id, raw);
+		return { data: Buffer.from(buffer) };
+	}
+
+	async getStatuses() {
+		return [];
+	}
+
+	async publishStatus() {
+		throw new Error('Status publish is not enabled for the Baileys provider yet');
+	}
+
+	async viewStatus() {
+		return { ok: false };
+	}
+}

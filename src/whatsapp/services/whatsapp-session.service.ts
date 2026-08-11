@@ -87,6 +87,19 @@ export class WhatsAppSessionService {
 			select: ['id'],
 		});
 		if (row) return true;
+		if (providerName === 'baileys') {
+			const root = path.resolve(
+				process.env.WHATSAPP_BAILEYS_DIR ||
+					process.env.WHATSAPP_TOKEN_FOLDER ||
+					path.join(process.cwd(), 'tokens', 'baileys'),
+			);
+			try {
+				const stats = await fsp.stat(path.join(root, accountId, 'creds.json'));
+				return stats.isFile();
+			} catch {
+				return false;
+			}
+		}
 		if (providerName !== 'wppconnect') return false;
 		try {
 			const stats = await fsp.stat(
