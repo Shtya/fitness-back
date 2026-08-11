@@ -426,7 +426,11 @@ export class WhatsAppConversationsController {
 		const mimeType = String(file.mimeType || 'application/octet-stream')
 			.toLowerCase()
 			.split(';')[0];
-		const inline = safeInlineTypes.has(mimeType);
+		const inline =
+			safeInlineTypes.has(mimeType) ||
+			mimeType.startsWith('image/') ||
+			mimeType.startsWith('audio/') ||
+			mimeType.startsWith('video/');
 		res.setHeader('X-Content-Type-Options', 'nosniff');
 		res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
 		res.setHeader('Cache-Control', 'private, max-age=3600');

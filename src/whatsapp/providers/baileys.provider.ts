@@ -389,6 +389,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private normalizeWaMessage(raw: any): NormalizedWhatsAppMessage | null {
 		const remoteJid = jidOf(raw?.key?.remoteJid);
+		const remoteJidAlt = jidOf(raw?.key?.remoteJidAlt);
 		const id = String(raw?.key?.id || '').trim();
 		if (!remoteJid || !id || !raw?.message) return null;
 		if (remoteJid.includes('status@') || remoteJid.endsWith('@broadcast')) return null;
@@ -422,11 +423,28 @@ export class BaileysProvider implements WhatsAppProvider {
 			});
 		}
 
+		const fromMe = Boolean(raw?.key?.fromMe);
+		// Prefer stable phone JID when Baileys provides remoteJidAlt (LID primary).
+		const chatId =
+			remoteJid.endsWith('@lid') || remoteJid.endsWith('@hosted.lid')
+				? remoteJidAlt &&
+					(remoteJidAlt.endsWith('@c.us') || remoteJidAlt.endsWith('@s.whatsapp.net'))
+					? remoteJidAlt
+					: remoteJid
+				: remoteJid;
+		if (
+			(remoteJid.endsWith('@lid') || remoteJid.endsWith('@hosted.lid')) &&
+			remoteJidAlt &&
+			(remoteJidAlt.endsWith('@c.us') || remoteJidAlt.endsWith('@s.whatsapp.net'))
+		) {
+			this.rememberLidMapping(remoteJid, remoteJidAlt);
+		}
+
 		return {
 			providerMessageId: id,
-			chatId: remoteJid,
-			senderWaId: raw?.key?.participant || (raw?.key?.fromMe ? null : remoteJid),
-			fromMe: Boolean(raw?.key?.fromMe),
+			chatId,
+			senderWaId: raw?.key?.participant || (fromMe ? null : chatId),
+			fromMe,
 			type,
 			text,
 			timestamp: toDate(raw.messageTimestamp),
@@ -436,7 +454,8 @@ export class BaileysProvider implements WhatsAppProvider {
 				content?.extendedTextMessage?.contextInfo?.isForwarded ||
 					content?.imageMessage?.contextInfo?.isForwarded,
 			),
-			contactName: raw.pushName || null,
+			// Never use your own pushName to title the peer conversation.
+			contactName: fromMe ? null : raw.pushName || null,
 			attachments,
 			raw,
 		};
@@ -892,7 +911,28 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		const jid = toBaileysJid(chatId);
 		const buffer = await fs.readFile(filePath);
-		const mime = String(options.mimeType || '');
+		const lower = String(filePath || '').toLowerCase();
+		const mime =
+			String(options.mimeType || '').trim() ||
+			(lower.endsWith('.jpg') || lower.endsWith('.jpeg')
+				? 'image/jpeg'
+				: lower.endsWith('.png')
+					? 'image/png'
+					: lower.endsWith('.webp')
+						? 'image/webp'
+						: lower.endsWith('.gif')
+							? 'image/gif'
+							: lower.endsWith('.mp4')
+								? 'video/mp4'
+								: lower.endsWith('.ogg') || lower.endsWith('.opus')
+									? 'audio/ogg; codecs=opus'
+									: lower.endsWith('.webm')
+										? 'audio/webm; codecs=opus'
+										: lower.endsWith('.mp3')
+											? 'audio/mpeg'
+											: lower.endsWith('.m4a')
+												? 'audio/mp4'
+												: '');
 		let content: any;
 		if (options.isVoice || mime.startsWith('audio/')) {
 			content = {
@@ -901,9 +941,9 @@ export class BaileysProvider implements WhatsAppProvider {
 				ptt: Boolean(options.isVoice),
 			};
 		} else if (mime.startsWith('image/')) {
-			content = { image: buffer, caption: options.caption || undefined };
+			content = { image: buffer, caption: options.caption || undefined, mimetype: mime };
 		} else if (mime.startsWith('video/')) {
-			content = { video: buffer, caption: options.caption || undefined };
+			content = { video: buffer, caption: options.caption || undefined, mimetype: mime };
 		} else {
 			content = {
 				document: buffer,
@@ -1013,6 +1053,23 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		if (!raw?.message) {
 			throw new Error('Media message is not available in the current session cache');
+		}
+
+		// Refresh media URLs/keys for outbound (and stale) messages before download.
+		if (typeof this.socket.updateMediaMessage === 'function' && raw.key) {
+			try {
+				const refreshed = await this.socket.updateMediaMessage(raw);
+				if (refreshed?.message) {
+					raw = refreshed;
+					this.rawByMessageId.set(id, refreshed);
+				}
+			} catch (error) {
+				this.logger.warn(
+					`updateMediaMessage failed for ${id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
 		}
 
 		const baileys = await loadBaileysModule();

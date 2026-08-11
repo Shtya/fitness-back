@@ -111,6 +111,132 @@ function isValidAudioBuffer(buffer: Buffer, mimeType?: string | null) {
 	return buffer.length >= 256;
 }
 
+/** Guess MIME from filename/extension so CRM outbound media is not sent as generic documents. */
+function guessMimeFromPath(filePath: string, fallbackType?: string | null): string | null {
+	const lower = String(filePath || '').toLowerCase();
+	if (lower.endsWith('.ogg') || lower.endsWith('.opus')) return 'audio/ogg; codecs=opus';
+	if (lower.endsWith('.webm')) return 'audio/webm; codecs=opus';
+	if (lower.endsWith('.mp3')) return 'audio/mpeg';
+	if (lower.endsWith('.m4a')) return 'audio/mp4';
+	if (lower.endsWith('.wav')) return 'audio/wav';
+	if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+	if (lower.endsWith('.png')) return 'image/png';
+	if (lower.endsWith('.webp')) return 'image/webp';
+	if (lower.endsWith('.gif')) return 'image/gif';
+	if (lower.endsWith('.mp4')) return 'video/mp4';
+	if (lower.endsWith('.mov')) return 'video/quicktime';
+	if (lower.endsWith('.pdf')) return 'application/pdf';
+	const kind = String(fallbackType || '').toLowerCase();
+	if (kind === 'image') return 'image/jpeg';
+	if (kind === 'video') return 'video/mp4';
+	if (kind === 'voice' || kind === 'audio' || kind === 'ptt') return 'audio/ogg; codecs=opus';
+	return null;
+}
+
+function sniffImageMime(buffer: Buffer): string | null {
+	if (!buffer || buffer.length < 12) return null;
+	if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+	if (
+		buffer[0] === 0x89 &&
+		buffer[1] === 0x50 &&
+		buffer[2] === 0x4e &&
+		buffer[3] === 0x47
+	) {
+		return 'image/png';
+	}
+	if (
+		buffer[0] === 0x47 &&
+		buffer[1] === 0x49 &&
+		buffer[2] === 0x46 &&
+		buffer[3] === 0x38
+	) {
+		return 'image/gif';
+	}
+	if (
+		buffer.toString('ascii', 0, 4) === 'RIFF' &&
+		buffer.toString('ascii', 8, 12) === 'WEBP'
+	) {
+		return 'image/webp';
+	}
+	return null;
+}
+
+function baileysRawMediaContent(raw: any): any {
+	const message = raw?.message || null;
+	if (!message) return null;
+	return (
+		message.ephemeralMessage?.message ||
+		message.viewOnceMessage?.message ||
+		message.viewOnceMessageV2?.message ||
+		message.viewOnceMessageV2Extension?.message ||
+		message
+	);
+}
+
+function baileysRawMediaNode(raw: any): any {
+	const content = baileysRawMediaContent(raw);
+	if (!content) return null;
+	return (
+		content.imageMessage ||
+		content.videoMessage ||
+		content.audioMessage ||
+		content.documentMessage ||
+		content.stickerMessage ||
+		null
+	);
+}
+
+function baileysRawMediaScore(raw: any): number {
+	if (!raw || typeof raw !== 'object') return 0;
+	if (!raw.message) return 0;
+	const node = baileysRawMediaNode(raw);
+	if (!node) return 1;
+	let score = 2;
+	if (node.mediaKey) score += 3;
+	if (node.directPath || node.url) score += 2;
+	if (node.fileSha256 || node.fileEncSha256) score += 1;
+	return score;
+}
+
+function mediaPreviewDataUrlFromRaw(raw: any): string | null {
+	const node = baileysRawMediaNode(raw);
+	const thumb = node?.jpegThumbnail;
+	if (thumb == null) return null;
+	if (typeof thumb === 'string' && thumb.length) {
+		if (thumb.startsWith('data:')) return thumb;
+		return `data:image/jpeg;base64,${thumb}`;
+	}
+	if (Buffer.isBuffer(thumb) && thumb.length) {
+		return `data:image/jpeg;base64,${thumb.toString('base64')}`;
+	}
+	if (thumb?.type === 'Buffer' && Array.isArray(thumb.data) && thumb.data.length) {
+		return `data:image/jpeg;base64,${Buffer.from(thumb.data).toString('base64')}`;
+	}
+	return null;
+}
+
+function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+	const da = String(a || '').replace(/\D/g, '');
+	const db = String(b || '').replace(/\D/g, '');
+	if (!da || !db) return false;
+	if (da === db) return true;
+	// Egypt local 01xxxxxxxxx ↔ 201xxxxxxxxx
+	if (da.startsWith('0') && db === `20${da.slice(1)}`) return true;
+	if (db.startsWith('0') && da === `20${db.slice(1)}`) return true;
+	if (da.length >= 9 && db.length >= 9) {
+		const aTail = da.slice(-9);
+		const bTail = db.slice(-9);
+		if (aTail === bTail) return true;
+	}
+	return false;
+}
+
+function phoneAliasChatIds(digits: string): string[] {
+	const clean = String(digits || '').replace(/\D/g, '');
+	if (!clean) return [];
+	return [`${clean}@c.us`, `${clean}@s.whatsapp.net`];
+}
+
 function waId(value: any): string {
 	if (value == null || value === '') return '';
 	if (typeof value === 'string') return value;
@@ -866,45 +992,304 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { warmed };
 	}
 
+	private conversationRelations() {
+		return ['contact', 'group', 'group.participants', 'assignedUser'] as const;
+	}
+
+	private async hydrateConversation(id: string) {
+		return this.conversationRepo.findOneOrFail({
+			where: { id },
+			relations: [...this.conversationRelations()],
+		});
+	}
+
+	/** Resolve phone digits for a chat id (LID → PN via provider when needed). */
+	private async resolveChatPhoneDigits(
+		accountId: string,
+		chatId: string,
+		phoneHint?: string | null,
+	): Promise<string | null> {
+		const hint = String(phoneHint || '').replace(/\D/g, '');
+		if (hint) return hint;
+		const fromId = phoneFromWaId(chatId);
+		if (fromId) return fromId;
+		if (!chatId.endsWith('@lid') && !chatId.endsWith('@hosted.lid')) return null;
+		const provider = this.providers.getProvider(accountId);
+		if (!provider?.resolveContactIdentity) return null;
+		const identity = await provider.resolveContactIdentity(chatId).catch(() => null);
+		const digits = String(identity?.phoneNumber || '').replace(/\D/g, '');
+		return digits || null;
+	}
+
+	/**
+	 * Find an existing DIRECT conversation for the same person under an alias
+	 * (@lid ↔ @c.us / same phone), including the account owner's self-chat.
+	 */
+	private async findDirectConversationAlias(
+		accountId: string,
+		chatId: string,
+		phoneHint?: string | null,
+	): Promise<WhatsAppConversation | null> {
+		if (!chatId || chatId.endsWith('@g.us')) return null;
+		const digits = await this.resolveChatPhoneDigits(accountId, chatId, phoneHint);
+		const aliasIds = new Set<string>([chatId, ...phoneAliasChatIds(digits || '')]);
+		for (const id of [...aliasIds]) {
+			if (id.endsWith('@c.us')) {
+				aliasIds.add(id.replace(/@c\.us$/i, '@s.whatsapp.net'));
+			}
+		}
+
+		const byProviderId = await this.conversationRepo.findOne({
+			where: {
+				accountId,
+				providerChatId: In([...aliasIds]),
+				type: WhatsAppConversationType.DIRECT,
+			},
+			relations: [...this.conversationRelations()],
+		});
+		if (byProviderId && byProviderId.providerChatId !== chatId) {
+			return byProviderId;
+		}
+		if (byProviderId) return byProviderId;
+
+		if (!digits) return null;
+
+		const contacts = await this.contactRepo
+			.createQueryBuilder('c')
+			.where('c.account_id = :accountId', { accountId })
+			.andWhere(
+				`(c.wa_id IN (:...ids) OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') = :digits)`,
+				{ ids: [...aliasIds], digits },
+			)
+			.getMany();
+
+		for (const contact of contacts) {
+			const conversation = await this.conversationRepo.findOne({
+				where: {
+					accountId,
+					contactId: contact.id,
+					type: WhatsAppConversationType.DIRECT,
+				},
+				relations: [...this.conversationRelations()],
+			});
+			if (conversation) return conversation;
+		}
+
+		// Self-chat: match account phone even when contact phone formatting differs.
+		const account = await this.accountRepo.findOneBy({ id: accountId });
+		const own = String(account?.phoneNumber || '').replace(/\D/g, '');
+		if (own && phonesMatch(own, digits)) {
+			const selfContacts = await this.contactRepo
+				.createQueryBuilder('c')
+				.where('c.account_id = :accountId', { accountId })
+				.andWhere(
+					`(c.wa_id IN (:...ids) OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') IN (:...ownVariants))`,
+					{
+						ids: phoneAliasChatIds(own),
+						ownVariants: [own, own.startsWith('20') ? `0${own.slice(2)}` : `20${own.replace(/^0/, '')}`],
+					},
+				)
+				.getMany();
+			for (const contact of selfContacts) {
+				const conversation = await this.conversationRepo.findOne({
+					where: {
+						accountId,
+						contactId: contact.id,
+						type: WhatsAppConversationType.DIRECT,
+					},
+					relations: [...this.conversationRelations()],
+				});
+				if (conversation) return conversation;
+			}
+		}
+
+		return null;
+	}
+
+	private async applyConversationIdentityPatch(
+		conversation: WhatsAppConversation,
+		chatId: string,
+		options: { title?: string | null; phone?: string | null },
+	) {
+		if (conversation.contact && options.title) {
+			const weak = isWeakContactDisplayName(
+				conversation.contact.name,
+				conversation.providerChatId || chatId,
+				conversation.contact.phoneNumber || options.phone,
+			);
+			if (weak && !isWeakContactDisplayName(options.title, chatId, options.phone)) {
+				conversation.contact.name = options.title;
+				await this.contactRepo.save(conversation.contact);
+			}
+		}
+		if (conversation.group && options.title) {
+			const weak = isWeakContactDisplayName(conversation.group.subject, chatId);
+			if (weak && !isWeakContactDisplayName(options.title, chatId)) {
+				conversation.group.subject = options.title;
+				await this.groupRepo.save(conversation.group);
+			}
+		}
+		if (conversation.contact && options.phone && !conversation.contact.phoneNumber) {
+			conversation.contact.phoneNumber = options.phone;
+			await this.contactRepo.save(conversation.contact);
+		}
+		return conversation;
+	}
+
+	/**
+	 * Merge twin direct chats that share the same phone (e.g. @c.us + @lid self-chat).
+	 * Keeps the chat with more recent activity / stronger identity.
+	 */
+	private async mergeDuplicateDirectConversations(accountId: string) {
+		const directs = await this.conversationRepo.find({
+			where: { accountId, type: WhatsAppConversationType.DIRECT },
+			relations: ['contact'],
+			order: { lastMessageAt: 'DESC' } as any,
+		});
+		const groups = new Map<string, WhatsAppConversation[]>();
+		for (const conversation of directs) {
+			const digits =
+				String(conversation.contact?.phoneNumber || '').replace(/\D/g, '') ||
+				phoneFromWaId(conversation.providerChatId) ||
+				'';
+			if (!digits) continue;
+			// Normalize Egypt local/international into one bucket key.
+			const key =
+				digits.startsWith('20') && digits.length >= 11
+					? digits
+					: digits.startsWith('0') && digits.length >= 10
+						? `20${digits.slice(1)}`
+						: digits;
+			const list = groups.get(key) || [];
+			list.push(conversation);
+			groups.set(key, list);
+		}
+		let merged = 0;
+		for (const [, list] of groups) {
+			if (list.length < 2) continue;
+			const ranked = [...list].sort((a, b) => {
+				const aPhone = a.providerChatId.endsWith('@c.us') ? 1 : 0;
+				const bPhone = b.providerChatId.endsWith('@c.us') ? 1 : 0;
+				if (aPhone !== bPhone) return bPhone - aPhone;
+				const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+				const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+				return bTime - aTime;
+			});
+			const keeper = ranked[0];
+			for (const duplicate of ranked.slice(1)) {
+				await this.mergeConversationInto(keeper, duplicate);
+				merged += 1;
+			}
+		}
+		if (merged) {
+			this.logger.log(`Merged ${merged} duplicate direct conversation(s) for ${accountId}`);
+			this.gateway.emitAccountEvent(accountId, 'conversation_updated', {
+				reason: 'duplicate_conversations_merged',
+			});
+		}
+		return merged;
+	}
+
+	private async mergeConversationInto(
+		keeper: WhatsAppConversation,
+		duplicate: WhatsAppConversation,
+	) {
+		if (!keeper?.id || !duplicate?.id || keeper.id === duplicate.id) return;
+		// Move messages (skip duplicates by providerMessageId).
+		const dupMessages = await this.messageRepo.find({
+			where: { conversationId: duplicate.id },
+			select: ['id', 'providerMessageId'],
+		});
+		for (const message of dupMessages) {
+			const clash = await this.messageRepo.findOne({
+				where: {
+					accountId: keeper.accountId,
+					providerMessageId: message.providerMessageId,
+				},
+				select: ['id'],
+			});
+			if (clash) {
+				await this.messageRepo.delete(message.id);
+				continue;
+			}
+			await this.messageRepo.update(message.id, { conversationId: keeper.id });
+		}
+		// Prefer stronger contact identity on keeper.
+		if (keeper.contact && duplicate.contact) {
+			const patch: Partial<WhatsAppContact> = {};
+			if (
+				isWeakContactDisplayName(
+					keeper.contact.name,
+					keeper.providerChatId,
+					keeper.contact.phoneNumber,
+				) &&
+				!isWeakContactDisplayName(
+					duplicate.contact.name,
+					duplicate.providerChatId,
+					duplicate.contact.phoneNumber,
+				)
+			) {
+				patch.name = duplicate.contact.name;
+			}
+			if (!keeper.contact.phoneNumber && duplicate.contact.phoneNumber) {
+				patch.phoneNumber = duplicate.contact.phoneNumber;
+			}
+			if (!keeper.contact.avatarUrl && duplicate.contact.avatarUrl) {
+				patch.avatarUrl = duplicate.contact.avatarUrl;
+			}
+			if (Object.keys(patch).length) {
+				await this.contactRepo.update(keeper.contact.id, patch);
+			}
+		}
+		const keeperLast = keeper.lastMessageAt ? new Date(keeper.lastMessageAt).getTime() : 0;
+		const dupLast = duplicate.lastMessageAt ? new Date(duplicate.lastMessageAt).getTime() : 0;
+		const updates: Partial<WhatsAppConversation> = {
+			unreadCount:
+				Math.max(0, Number(keeper.unreadCount) || 0) +
+				Math.max(0, Number(duplicate.unreadCount) || 0),
+		};
+		if (dupLast > keeperLast) {
+			updates.lastMessageAt = duplicate.lastMessageAt;
+		}
+		await this.conversationRepo.update(keeper.id, updates);
+		await this.conversationRepo.delete(duplicate.id);
+		if (duplicate.contactId && duplicate.contactId !== keeper.contactId) {
+			const stillUsed = await this.conversationRepo.count({
+				where: { contactId: duplicate.contactId },
+			});
+			if (!stillUsed) {
+				await this.contactRepo.delete(duplicate.contactId).catch(() => undefined);
+			}
+		}
+	}
+
 	private async ensureConversation(
 		accountId: string,
 		chatId: string,
 		options: { title?: string | null; phone?: string | null } = {},
 	) {
-		const hydrate = async (id: string) =>
-			this.conversationRepo.findOneOrFail({
-				where: { id },
-				relations: ['contact', 'group', 'group.participants', 'assignedUser'],
-			});
-
 		const existing = await this.conversationRepo.findOne({
 			where: { accountId, providerChatId: chatId },
-			relations: ['contact', 'group', 'group.participants', 'assignedUser'],
+			relations: [...this.conversationRelations()],
 		});
 		if (existing) {
-			if (existing.contact && options.title) {
-				const weak = isWeakContactDisplayName(
-					existing.contact.name,
-					chatId,
-					existing.contact.phoneNumber || options.phone,
-				);
-				if (weak && !isWeakContactDisplayName(options.title, chatId, options.phone)) {
-					existing.contact.name = options.title;
-					await this.contactRepo.save(existing.contact);
-				}
-			}
-			if (existing.group && options.title) {
-				const weak = isWeakContactDisplayName(existing.group.subject, chatId);
-				if (weak && !isWeakContactDisplayName(options.title, chatId)) {
-					existing.group.subject = options.title;
-					await this.groupRepo.save(existing.group);
-				}
-			}
-			if (existing.contact && options.phone && !existing.contact.phoneNumber) {
-				existing.contact.phoneNumber = options.phone;
-				await this.contactRepo.save(existing.contact);
-			}
-			return existing;
+			return this.applyConversationIdentityPatch(existing, chatId, options);
+		}
+
+		// Reuse twin row for same phone / LID↔PN / self-chat instead of creating a duplicate.
+		const aliased = await this.findDirectConversationAlias(
+			accountId,
+			chatId,
+			options.phone,
+		);
+		if (aliased) {
+			const phone =
+				options.phone ||
+				(await this.resolveChatPhoneDigits(accountId, chatId, options.phone));
+			return this.applyConversationIdentityPatch(aliased, chatId, {
+				...options,
+				phone: phone || options.phone,
+			});
 		}
 
 		try {
@@ -942,19 +1327,32 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						assignedUserId: null,
 					}),
 				);
-				return hydrate(conversation.id);
+				return this.hydrateConversation(conversation.id);
 			}
 
+			const phone =
+				options.phone ||
+				(await this.resolveChatPhoneDigits(accountId, chatId, options.phone));
 			let contact = await this.contactRepo.findOne({
 				where: { accountId, waId: chatId },
 			});
+			if (!contact && phone) {
+				contact = await this.contactRepo
+					.createQueryBuilder('c')
+					.where('c.account_id = :accountId', { accountId })
+					.andWhere(
+						`(c.wa_id IN (:...ids) OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') = :digits)`,
+						{ ids: phoneAliasChatIds(phone), digits: phone },
+					)
+					.getOne();
+			}
 			if (!contact) {
 				try {
 					contact = await this.contactRepo.save(
 						this.contactRepo.create({
 							accountId,
 							waId: chatId,
-							phoneNumber: options.phone || phoneFromWaId(chatId),
+							phoneNumber: phone || phoneFromWaId(chatId),
 							name: options.title || null,
 							avatarUrl: null,
 							isBusiness: false,
@@ -967,6 +1365,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						waId: chatId,
 					});
 				}
+			} else if (phone && !contact.phoneNumber) {
+				contact.phoneNumber = phone;
+				await this.contactRepo.save(contact);
 			}
 			const conversation = await this.conversationRepo.save(
 				this.conversationRepo.create({
@@ -977,13 +1378,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					assignedUserId: null,
 				}),
 			);
-			return hydrate(conversation.id);
+			return this.hydrateConversation(conversation.id);
 		} catch (error: any) {
 			if (error?.code === '23505') {
 				const conversation = await this.conversationRepo.findOne({
 					where: { accountId, providerChatId: chatId },
 				});
-				if (conversation) return hydrate(conversation.id);
+				if (conversation) return this.hydrateConversation(conversation.id);
+				const aliasedRetry = await this.findDirectConversationAlias(
+					accountId,
+					chatId,
+					options.phone,
+				);
+				if (aliasedRetry) return aliasedRetry;
 			}
 			throw error;
 		}
@@ -1038,21 +1445,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			throw new BadRequestException('Provider message does not have stable identifiers');
 		}
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
+		const phoneHint = await this.resolveChatPhoneDigits(
+			accountId,
+			normalized.chatId,
+			null,
+		);
+		const ownDigits = String(account.phoneNumber || '').replace(/\D/g, '');
+		const isSelfChat = Boolean(ownDigits && phoneHint && phonesMatch(ownDigits, phoneHint));
+		// fromMe pushName is usually YOUR WhatsApp name — never use it to rename the peer chat.
+		const title = normalized.fromMe
+			? isSelfChat
+				? 'You'
+				: null
+			: isSelfChat
+				? 'You'
+				: normalized.contactName || null;
 		const conversation = await this.ensureConversation(accountId, normalized.chatId, {
-			title: normalized.contactName,
+			title,
+			phone: phoneHint,
 		});
 		const existing = await this.messageRepo.findOne({
 			where: { accountId, providerMessageId: normalized.providerMessageId },
 			relations: ['attachments', 'senderUser'],
 		});
 		if (existing) {
-			// Upgrade stripped legacy raw → Baileys media envelope when we see the live message again.
+			// Upgrade stripped/partial Baileys media envelope when a richer live copy arrives.
 			const nextRaw = safeProviderMetadata(normalized.raw);
-			if (
-				nextRaw &&
-				(nextRaw as any).message &&
-				(!(existing as any).raw || !(existing as any).raw?.message)
-			) {
+			const existingScore = baileysRawMediaScore((existing as any).raw);
+			const nextScore = baileysRawMediaScore(nextRaw);
+			if (nextRaw && nextScore > existingScore) {
 				await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
 				(existing as any).raw = nextRaw;
 				await this.attachmentRepo
@@ -1060,11 +1481,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					.update()
 					.set({ downloadStatus: 'pending', storagePath: null })
 					.where('message_id = :messageId', { messageId: existing.id })
-					.andWhere('download_status IN (:...statuses)', {
-						statuses: ['failed', 'pending'],
-					})
+					.andWhere(
+						'(storage_path IS NULL OR download_status IN (:...statuses))',
+						{ statuses: ['failed', 'pending'] },
+					)
 					.execute()
 					.catch(() => undefined);
+			}
+			// Prefer CRM-declared media type (image/voice) over a generic document upsert.
+			if (normalized.attachments?.length && existing.attachments?.length) {
+				const next = normalized.attachments[0];
+				const current = existing.attachments[0];
+				const nextType = String(next?.type || '').toLowerCase();
+				const currentType = String(current?.type || '').toLowerCase();
+				const shouldUpgradeType =
+					nextType &&
+					nextType !== 'document' &&
+					(currentType === 'document' || currentType !== nextType);
+				const shouldUpgradeMime =
+					next?.mimeType &&
+					(!current?.mimeType ||
+						String(current.mimeType).includes('octet-stream'));
+				if (shouldUpgradeType || shouldUpgradeMime) {
+					await this.attachmentRepo.update(current.id, {
+						...(shouldUpgradeType ? { type: next.type } : {}),
+						...(shouldUpgradeMime ? { mimeType: next.mimeType } : {}),
+					} as any);
+					if (shouldUpgradeType) current.type = next.type;
+					if (shouldUpgradeMime) current.mimeType = next.mimeType || current.mimeType;
+				}
 			}
 			return existing;
 		}
@@ -1102,6 +1547,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					where: { accountId, providerMessageId: normalized.providerMessageId },
 					relations: ['attachments', 'senderUser'],
 				});
+				const nextRaw = safeProviderMetadata(normalized.raw);
+				const existingScore = baileysRawMediaScore((existing as any).raw);
+				const nextScore = baileysRawMediaScore(nextRaw);
+				if (nextRaw && nextScore > existingScore) {
+					await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
+					(existing as any).raw = nextRaw;
+					await this.attachmentRepo
+						.createQueryBuilder()
+						.update()
+						.set({ downloadStatus: 'pending', storagePath: null })
+						.where('message_id = :messageId', { messageId: existing.id })
+						.andWhere(
+							'(storage_path IS NULL OR download_status IN (:...statuses))',
+							{ statuses: ['failed', 'pending'] },
+						)
+						.execute()
+						.catch(() => undefined);
+				}
 				const changes: Partial<WhatsAppMessage> = {};
 				if (normalized.isStarred !== undefined) {
 					changes.isStarred = Boolean(normalized.isStarred);
@@ -1231,9 +1694,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				accountId,
 				conversation.assignedUserId,
 			);
-			const title = normalized.contactName || 'New WhatsApp message';
+			const title =
+				conversation.group?.subject ||
+				conversation.contact?.name ||
+				normalized.contactName ||
+				conversation.contact?.phoneNumber ||
+				'New WhatsApp message';
 			const message =
-				normalized.text?.trim().slice(0, 240) || `New ${normalized.type || 'message'}`;
+				normalized.text?.trim().slice(0, 240) ||
+				(normalized.type === 'image'
+					? 'Photo'
+					: normalized.type === 'ptt' || normalized.type === 'audio' || normalized.type === 'voice'
+						? 'Voice message'
+						: `New ${normalized.type || 'message'}`);
 			await Promise.all(
 				recipientIds.map((userId) =>
 					this.notifications.create({
@@ -1509,7 +1982,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				reason: 'provider_inbox_reconciled',
 			});
 		}
-		return { supported: true, count, changed };
+		const merged = await this.mergeDuplicateDirectConversations(accountId).catch((error) => {
+			this.logger.warn(
+				`Duplicate conversation merge failed for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return 0;
+		});
+		return { supported: true, count, changed: changed || Boolean(merged) };
 	}
 
 	private async syncGroupMetadata(
@@ -1836,15 +2317,27 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						{ emitEvents: false },
 					).catch(() => undefined);
 				}
-				return loadLocal(before);
+				const refreshed = await loadLocal(before);
+				this.attachMediaPreviews(refreshed);
+				this.queuePendingAttachmentDownloads(refreshed);
+				return refreshed;
 			}
 		}
 		// Pagination cursor stays DB-only. First page with empty DB must come from
 		// the linked WhatsApp Web session on the phone.
-		if (local.length || before || !accountAccess.canUse || !allowLivePull) return local;
+		if (local.length || before || !accountAccess.canUse || !allowLivePull) {
+			this.attachMediaPreviews(local);
+			if (local.length && !before && accountAccess.canUse) {
+				this.queuePendingAttachmentDownloads(local);
+			}
+			return local;
+		}
 
 		const live = await this.pullLiveMessagesFromLinkedDevice(conversation, take);
-		if (!live.length) return local;
+		if (!live.length) {
+			this.attachMediaPreviews(local);
+			return local;
+		}
 
 		for (const item of live) {
 			await this.persistMessage(
@@ -1865,9 +2358,60 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			lastProviderSyncAt: new Date(),
 		});
 		const saved = await loadLocal();
-		if (saved.length) return saved;
+		if (saved.length) {
+			this.attachMediaPreviews(saved);
+			this.queuePendingAttachmentDownloads(saved);
+			return saved;
+		}
 		// Persist may fail (unique/db) — still return linked-device messages to the UI.
-		return this.mapLiveMessagesForApi(conversation.id, live);
+		const mapped = this.mapLiveMessagesForApi(conversation.id, live);
+		this.attachMediaPreviews(mapped as any);
+		return mapped;
+	}
+
+	private attachMediaPreviews(messages: WhatsAppMessage[]) {
+		for (const message of messages || []) {
+			const preview = mediaPreviewDataUrlFromRaw((message as any)?.raw);
+			if (!preview) continue;
+			for (const attachment of message.attachments || []) {
+				const type = String(attachment.type || '').toLowerCase();
+				if (!['image', 'sticker', 'video'].includes(type)) continue;
+				(attachment as any).previewDataUrl = preview;
+			}
+		}
+	}
+
+	/** Kick off durable downloads for pending/failed media once the chat is open
+	 *  and WhatsApp is connected — same moment the old WPP ChatStore path used to
+	 *  hydrate photos after link. */
+	private queuePendingAttachmentDownloads(messages: WhatsAppMessage[]) {
+		const ids: string[] = [];
+		for (const message of messages || []) {
+			if (baileysRawMediaScore((message as any)?.raw) < 5) continue;
+			for (const attachment of message.attachments || []) {
+				if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
+				if (!attachment.id) continue;
+				ids.push(attachment.id);
+			}
+		}
+		if (!ids.length) return;
+		void (async () => {
+			for (const attachmentId of ids.slice(0, 16)) {
+				if (this.attachmentDownloads.has(attachmentId)) continue;
+				const attachment = await this.attachmentRepo.findOne({
+					where: { id: attachmentId },
+					relations: ['message'],
+				});
+				if (!attachment?.message) continue;
+				const download = this.downloadAttachmentInternal(attachment)
+					.catch(() => undefined)
+					.finally(() => {
+						this.attachmentDownloads.delete(attachmentId);
+					});
+				this.attachmentDownloads.set(attachmentId, download);
+				await download;
+			}
+		})();
 	}
 
 	private conversationMessageAliases(conversation: WhatsAppConversation) {
@@ -2559,15 +3103,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		await fs.access(absolutePath);
 		const provider = this.requireProvider(conversation.accountId);
-		const mimeGuess = absolutePath.toLowerCase().endsWith('.ogg')
-			? 'audio/ogg; codecs=opus'
-			: absolutePath.toLowerCase().endsWith('.webm')
-				? 'audio/webm; codecs=opus'
-				: absolutePath.toLowerCase().endsWith('.mp3')
-					? 'audio/mpeg'
-					: absolutePath.toLowerCase().endsWith('.m4a')
-						? 'audio/mp4'
-						: null;
+		const mimeGuess =
+			guessMimeFromPath(absolutePath, input.type) ||
+			(input.type === 'voice' || input.type === 'audio' ? 'audio/ogg; codecs=opus' : null);
 		const result = await provider.sendMedia(conversation.providerChatId, absolutePath, {
 			caption: input.caption,
 			fileName: path.basename(absolutePath),
@@ -2585,7 +3123,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		await this.markReadAfterReply(conversation, accountAccess.account, provider, user.id);
 		const stat = await fs.stat(absolutePath);
-		const attachmentType = input.type === 'voice' ? 'audio' : input.type;
+		const attachmentType =
+			input.type === 'voice' ? 'ptt' : input.type === 'audio' ? 'audio' : input.type;
 		const saved = await this.persistMessage(
 			conversation.accountId,
 			{
@@ -2610,12 +3149,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			},
 			user.id,
 		);
-		const attachment = saved.attachments?.[0];
-		if (attachment) {
-			attachment.storagePath = path.relative(process.cwd(), absolutePath).replace(/\\/g, '/');
-			attachment.downloadStatus = 'downloaded';
-			await this.attachmentRepo.save(attachment);
-		}
+		// Always bind a durable copy — upsert may have created the row first, and the
+		// outgoing upload path must not be the only copy (FE / cleanup can remove it).
+		await this.bindOutboundLocalAttachment({
+			accountId: conversation.accountId,
+			providerMessageId: id,
+			messageId: saved.id,
+			sourcePath: absolutePath,
+			mimeType: mimeGuess,
+			attachmentType,
+			fileName: path.basename(absolutePath),
+			fileSizeBytes: stat.size,
+		});
+		const refreshed = await this.messageRepo.findOne({
+			where: { id: saved.id },
+			relations: ['attachments', 'senderUser'],
+		});
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId: conversation.accountId,
@@ -2624,7 +3173,78 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			targetId: saved.id,
 			metadata: { conversationId, type: input.type },
 		});
-		return { ok: true, message: saved, providerResult: { id } };
+		return { ok: true, message: refreshed || saved, providerResult: { id } };
+	}
+
+	private async bindOutboundLocalAttachment(input: {
+		accountId: string;
+		providerMessageId: string;
+		messageId: string;
+		sourcePath: string;
+		mimeType?: string | null;
+		attachmentType: string;
+		fileName: string;
+		fileSizeBytes: number;
+	}) {
+		const root = path.resolve(
+			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+		);
+		const accountFolder = path.join(root, input.accountId);
+		await fs.mkdir(accountFolder, { recursive: true });
+		let attachment =
+			(await this.attachmentRepo.find({ where: { messageId: input.messageId } }))?.[0] || null;
+		if (!attachment) {
+			const message = await this.messageRepo.findOne({
+				where: {
+					accountId: input.accountId,
+					providerMessageId: input.providerMessageId,
+				},
+				relations: ['attachments'],
+			});
+			attachment = message?.attachments?.[0] || null;
+			if (!attachment && message) {
+				attachment = await this.attachmentRepo.save(
+					this.attachmentRepo.create({
+						messageId: message.id,
+						type: input.attachmentType,
+						mimeType: input.mimeType || null,
+						fileName: input.fileName,
+						fileSizeBytes: String(input.fileSizeBytes),
+						providerMediaId: input.providerMessageId,
+						storagePath: null,
+						downloadStatus: 'pending',
+					}),
+				);
+			}
+		}
+		if (!attachment) return;
+		const safeName = `${attachment.id}-${path
+			.basename(input.fileName || 'attachment')
+			.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+		const durablePath = path.resolve(accountFolder, safeName);
+		if (!durablePath.startsWith(`${accountFolder}${path.sep}`)) {
+			throw new Error('Invalid media storage path');
+		}
+		await fs.copyFile(input.sourcePath, durablePath);
+		let mimeType = input.mimeType || attachment.mimeType || null;
+		try {
+			const bytes = await fs.readFile(durablePath);
+			mimeType =
+				sniffImageMime(bytes) ||
+				sniffAudioMime(bytes) ||
+				mimeType ||
+				guessMimeFromPath(durablePath, input.attachmentType);
+		} catch {
+			/* keep prior mime */
+		}
+		attachment.storagePath = path.relative(process.cwd(), durablePath).replace(/\\/g, '/');
+		attachment.downloadStatus = 'downloaded';
+		attachment.mimeType = mimeType;
+		attachment.type = input.attachmentType || attachment.type;
+		attachment.fileName = input.fileName || attachment.fileName;
+		attachment.fileSizeBytes = String(input.fileSizeBytes);
+		attachment.providerMediaId = input.providerMessageId;
+		await this.attachmentRepo.save(attachment);
 	}
 
 	async listGroups(user: User, accountId: string) {
@@ -2739,6 +3359,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private async downloadAttachmentInternal(attachment: WhatsAppMessageAttachment) {
+		const fresh = await this.attachmentRepo.findOne({
+			where: { id: attachment.id },
+			relations: ['message'],
+		});
+		if (fresh?.message) attachment = fresh;
+
 		if (attachment.storagePath && attachment.downloadStatus === 'downloaded') {
 			const cachedPath = path.resolve(process.cwd(), attachment.storagePath);
 			try {
@@ -2749,7 +3375,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				if (audioType && !isValidAudioBuffer(cachedBuffer, attachment.mimeType)) {
 					throw new Error('Cached audio is invalid');
 				}
-				const sniffedMime = audioType ? sniffAudioMime(cachedBuffer) : null;
+				const sniffedMime =
+					(audioType ? sniffAudioMime(cachedBuffer) : null) ||
+					sniffImageMime(cachedBuffer) ||
+					guessMimeFromPath(cachedPath, attachment.type);
 				if (sniffedMime && sniffedMime !== attachment.mimeType) {
 					attachment.mimeType = sniffedMime;
 					await this.attachmentRepo.save(attachment);
@@ -2787,20 +3416,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		try {
 			const mediaId = attachment.providerMediaId || attachment.message.providerMessageId;
 			if (!mediaId) throw new Error('Attachment has no provider media id');
-			const rawHint = attachment.message?.raw || null;
+			let rawHint = attachment.message?.raw || null;
+			const attemptDownload = async (hint: any) =>
+				this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId, { rawHint: hint }));
+
 			let data: any;
 			try {
-				data = await this.withMediaDownloadSlot(() =>
-					provider.downloadMedia(mediaId, { rawHint }),
-				);
+				data = await attemptDownload(rawHint);
 			} catch (error: any) {
-				// One soft retry after a short delay — WA Web often fails media
-				// downloads while the chat store is still hydrating.
-				await new Promise((resolve) => setTimeout(resolve, 800));
+				const refreshed = await this.refreshAttachmentRawFromLive(attachment).catch(
+					() => false,
+				);
+				if (refreshed) {
+					const reloaded = await this.attachmentRepo.findOne({
+						where: { id: attachment.id },
+						relations: ['message'],
+					});
+					if (reloaded?.message) {
+						attachment = reloaded;
+						rawHint = attachment.message?.raw || rawHint;
+					}
+				}
+				await new Promise((resolve) => setTimeout(resolve, refreshed ? 400 : 800));
 				try {
-					data = await this.withMediaDownloadSlot(() =>
-						provider.downloadMedia(mediaId, { rawHint }),
-					);
+					data = await attemptDownload(rawHint);
 				} catch (retryError: any) {
 					const detail = String(retryError?.message || error?.message || error || '');
 					throw new Error(
@@ -2818,7 +3457,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (audioType && !isValidAudioBuffer(buffer, attachment.mimeType)) {
 				throw new Error('Provider returned invalid audio media');
 			}
-			const sniffedMime = audioType ? sniffAudioMime(buffer) : null;
+			const sniffedMime =
+				(audioType ? sniffAudioMime(buffer) : null) ||
+				sniffImageMime(buffer) ||
+				guessMimeFromPath(attachment.fileName || '', attachment.type);
 			if (sniffedMime && sniffedMime !== attachment.mimeType) {
 				attachment.mimeType = sniffedMime;
 			}
@@ -2857,6 +3499,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	private async refreshAttachmentRawFromLive(
+		attachment: WhatsAppMessageAttachment,
+	): Promise<boolean> {
+		const message = attachment.message;
+		if (!message?.conversationId || !message.providerMessageId) return false;
+		const conversation = await this.conversationRepo.findOne({
+			where: { id: message.conversationId },
+			relations: ['contact'],
+		});
+		if (!conversation) return false;
+		const live = await this.pullLiveMessagesFromLinkedDevice(conversation, 80).catch(() => []);
+		const hit = live.find(
+			(item) => String(item.providerMessageId) === String(message.providerMessageId),
+		);
+		if (!hit) return false;
+		const before = baileysRawMediaScore((message as any).raw);
+		await this.persistMessage(
+			conversation.accountId,
+			{ ...hit, chatId: conversation.providerChatId },
+			null,
+			false,
+			{ emitEvents: false },
+		);
+		const updated = await this.messageRepo.findOne({ where: { id: message.id } });
+		const after = baileysRawMediaScore((updated as any)?.raw);
+		if (updated) (attachment as any).message = { ...message, ...updated };
+		return after > before;
+	}
+
 	async resolveAttachmentFile(user: User, attachmentId: string) {
 		const downloaded = await this.downloadAttachment(user, attachmentId);
 		if (!downloaded?.ok || !downloaded.path) {
@@ -2878,9 +3549,28 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const attachment = await this.attachmentRepo.findOne({
 			where: { id: attachmentId },
 		});
+		let mimeType = downloaded.mimeType || attachment?.mimeType || null;
+		if (!mimeType || String(mimeType).includes('octet-stream')) {
+			try {
+				const head = Buffer.alloc(64);
+				const handle = await fs.open(absolutePath, 'r');
+				try {
+					await handle.read(head, 0, 64, 0);
+				} finally {
+					await handle.close();
+				}
+				mimeType =
+					sniffImageMime(head) ||
+					sniffAudioMime(head) ||
+					guessMimeFromPath(absolutePath, attachment?.type) ||
+					mimeType;
+			} catch {
+				/* keep prior */
+			}
+		}
 		return {
 			absolutePath,
-			mimeType: downloaded.mimeType || attachment?.mimeType || 'application/octet-stream',
+			mimeType: mimeType || 'application/octet-stream',
 			fileName: attachment?.fileName || path.basename(absolutePath),
 		};
 	}

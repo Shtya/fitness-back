@@ -186,12 +186,12 @@ export class WhatsAppAccessService {
 			this.accessRepo.find({ where: { accountId, canView: true } }),
 		]);
 		if (!account) return [];
-		// Unassigned chats are only visible to owners / managers / assigners.
+		// Unassigned chats notify owner + staff who can use/manage/assign the inbox.
 		return [
 			...new Set([
 				account.ownerAdminId,
 				...rows
-					.filter((row) => row.canManage || row.canAssign)
+					.filter((row) => row.canManage || row.canAssign || row.canUse)
 					.map((row) => row.userId)
 					.filter(Boolean),
 			]),
