@@ -2,7 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as crypto from 'crypto';
+import { promises as fsp } from 'fs';
+import * as path from 'path';
 import { WhatsAppProviderSession } from '../entities/whatsapp.entity';
+import { resolveWppUserDataDir } from '../utils/whatsapp-browser-profile';
 
 @Injectable()
 export class WhatsAppSessionService {
@@ -66,6 +69,33 @@ export class WhatsAppSessionService {
 	async clear(accountId: string, providerName: string) {
 		await this.repo.update({ accountId, providerName }, { isActive: false });
 		return true;
+	}
+
+	/** Hard-delete the encrypted row — used when the account itself is removed. */
+	async remove(accountId: string, providerName: string) {
+		await this.repo.delete({ accountId, providerName });
+		return true;
+	}
+
+	/** Multi-device WhatsApp keeps its linked-device keys in the Chromium profile,
+	 *  not in wppconnect's setToken hook — so this table stays empty for it. Boot
+	 *  restore must look at the profile on disk too, otherwise a restart always
+	 *  falls back to a QR scan even though the session is still usable. */
+	async hasActiveSession(accountId: string, providerName = 'wppconnect') {
+		const row = await this.repo.findOne({
+			where: { accountId, providerName, isActive: true },
+			select: ['id'],
+		});
+		if (row) return true;
+		if (providerName !== 'wppconnect') return false;
+		try {
+			const stats = await fsp.stat(
+				path.join(resolveWppUserDataDir(accountId), 'Default', 'IndexedDB'),
+			);
+			return stats.isDirectory();
+		} catch {
+			return false;
+		}
 	}
 
 	createWppTokenStore(accountId: string) {

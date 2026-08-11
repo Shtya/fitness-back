@@ -1,4 +1,11 @@
-import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+	IsBoolean,
+	IsIn,
+	IsOptional,
+	IsString,
+	MaxLength,
+	MinLength,
+} from 'class-validator';
 
 export class CreateTranscriptionDto {
 	@IsOptional()
@@ -26,4 +33,42 @@ export class SaveProviderCredentialDto {
 	@MinLength(20)
 	@MaxLength(512)
 	apiKey: string;
+}
+
+export class EnhanceTranscriptionDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(2_000_000)
+	text?: string;
+
+	@IsOptional()
+	@IsIn(['ar', 'en', 'auto'])
+	locale?: 'ar' | 'en' | 'auto';
+
+	@IsOptional()
+	@IsIn(['clarity', 'punctuation', 'full'])
+	mode?: 'clarity' | 'punctuation' | 'full';
+
+	@IsOptional()
+	@IsBoolean()
+	apply?: boolean;
+}
+
+export class MemorizeTranscriptionDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(2_000_000)
+	text?: string;
+
+	@IsOptional()
+	@IsIn(['ar', 'en', 'auto'])
+	locale?: 'ar' | 'en' | 'auto';
+
+	@IsOptional()
+	@IsIn(['short', 'detailed'])
+	depth?: 'short' | 'detailed';
+
+	@IsOptional()
+	@IsBoolean()
+	includeFlashcards?: boolean;
 }

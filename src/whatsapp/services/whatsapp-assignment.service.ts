@@ -115,6 +115,7 @@ export class WhatsAppAssignmentService {
 			conversationId,
 			'conversation_assignment',
 			payload,
+			conversation.accountId,
 		);
 		if (target) {
 			this.gateway.emitToUser(target.id, 'whatsapp:assignment', payload);

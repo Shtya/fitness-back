@@ -5,6 +5,10 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 	function createService() {
 		const accountRepo = {
 			update: jest.fn().mockResolvedValue(undefined),
+			find: jest.fn().mockResolvedValue([]),
+			findOne: jest.fn().mockResolvedValue({
+				status: WhatsAppAccountStatus.DISCONNECTED,
+			}),
 			findOneBy: jest.fn().mockResolvedValue({
 				status: WhatsAppAccountStatus.DISCONNECTED,
 			}),
@@ -33,6 +37,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		};
 		const sessions = {
 			clear: jest.fn().mockResolvedValue(true),
+			remove: jest.fn().mockResolvedValue(true),
 		};
 		const redisClient = {
 			set: jest.fn().mockResolvedValue('OK'),
@@ -90,6 +95,9 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 
 	it('ignores stale QR events while the account is already connected', async () => {
 		const { service, gateway, accountRepo } = createService();
+		accountRepo.findOne.mockResolvedValue({
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
 		accountRepo.findOneBy.mockResolvedValue({
 			status: WhatsAppAccountStatus.CONNECTED,
 		});
@@ -108,6 +116,9 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 
 	it('accepts QR events when the in-memory provider is actually waiting for pairing', async () => {
 		const { service, accountRepo } = createService();
+		accountRepo.findOne.mockResolvedValue({
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
 		accountRepo.findOneBy.mockResolvedValue({
 			status: WhatsAppAccountStatus.CONNECTED,
 		});
@@ -239,7 +250,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		await expect(service.destroySession('account-1', 'wppconnect')).resolves.toEqual({
 			ok: true,
 		});
-		expect(sessions.clear).toHaveBeenCalledWith('account-1', 'wppconnect');
+		expect(sessions.remove).toHaveBeenCalledWith('account-1', 'wppconnect');
 		expect((service as any).providers.has('account-1')).toBe(false);
 	});
 

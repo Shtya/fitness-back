@@ -25,6 +25,8 @@ import { UserRole } from 'entities/global.entity';
 import {
 	SaveProviderCredentialDto,
 	UpdateTranscriptionDto,
+	EnhanceTranscriptionDto,
+	MemorizeTranscriptionDto,
 } from './dto/transcription.dto';
 import { AudioUpload, TranscriptionService } from './transcription.service';
 
@@ -89,6 +91,24 @@ export class TranscriptionController {
 	@Patch(':id')
 	update(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateTranscriptionDto) {
 		return this.transcriptionService.update(req.user.id, id, dto.text);
+	}
+
+	@Post(':id/enhance')
+	enhance(
+		@Req() req: any,
+		@Param('id') id: string,
+		@Body() dto: EnhanceTranscriptionDto,
+	) {
+		return this.transcriptionService.enhance(req.user, id, dto || {});
+	}
+
+	@Post(':id/memorize')
+	memorize(
+		@Req() req: any,
+		@Param('id') id: string,
+		@Body() dto: MemorizeTranscriptionDto,
+	) {
+		return this.transcriptionService.memorize(req.user, id, dto || {});
 	}
 
 	@Delete(':id')

@@ -7,11 +7,23 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			findOne: jest.fn(),
 			update: jest.fn().mockResolvedValue(undefined),
 		};
-		const access = {
+		const access: any = {
 			getAccountAccess: jest.fn(),
 			canSeeAllConversations: jest.fn().mockReturnValue(true),
 			notificationRecipientIds: jest.fn().mockResolvedValue([]),
 		};
+		access.assertConversationVisible = jest.fn(
+			async (user: any, conversationId: string) => {
+				const conversation = await conversationRepo.findOne({
+					where: { id: conversationId },
+				});
+				const accountAccess = await access.getAccountAccess(
+					user,
+					conversation?.accountId,
+				);
+				return { conversation, accountAccess, canSeeAll: true };
+			},
+		);
 		const providers = {
 			getProvider: jest.fn(),
 		};
@@ -28,15 +40,16 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			conversationRepo as any,
 			{} as any, // noteRepo
 			{} as any,
-			{} as any,
-			{} as any,
-			{} as any,
+			{} as any, // participantRepo
+			{} as any, // messageRepo
+			{} as any, // attachmentRepo
+			{} as any, // reactionRepo
 			access as any,
 			providers as any,
 			gateway as any,
 			audit as any,
-			{} as any,
-			{} as any,
+			{} as any, // notifications
+			{} as any, // preferenceRepo
 		);
 		return { service, gateway, conversationRepo, access, providers, audit };
 	}

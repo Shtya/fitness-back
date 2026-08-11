@@ -24,7 +24,13 @@ import {
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppProvider, WhatsAppProviderEvent } from '../providers/whatsapp-provider';
 import { WppConnectProvider } from '../providers/wppconnect.provider';
-import { forceReleaseWppBrowserProfile } from '../utils/whatsapp-browser-profile';
+import {
+	forceReleaseWppBrowserProfile,
+	purgeWppBrowserProfile,
+	resolveWppUserDataDir,
+} from '../utils/whatsapp-browser-profile';
+import { promises as fs } from 'fs';
+import * as path from 'path';
 import { WhatsAppSessionService } from './whatsapp-session.service';
 
 @Injectable()
@@ -33,6 +39,11 @@ export class WhatsAppProviderManagerService
 {
 	private readonly logger = new Logger(WhatsAppProviderManagerService.name);
 	private readonly providers = new Map<string, WhatsAppProvider>();
+	private readonly invalidatingSessions = new Set<string>();
+	private readonly lastSessionInvalidation = new Map<string, number>();
+	private readonly sessionInvalidationCooldownMs = 10 * 60 * 1000;
+	/** Space out relaunches after a repeat wipe without stranding the account. */
+	private readonly sessionRelaunchBackoffMs = 30 * 1000;
 	private readonly connecting = new Map<string, Promise<WhatsAppProvider>>();
 	private readonly connectStartedAt = new Map<string, number>();
 	private readonly listeners = new Set<
@@ -300,7 +311,107 @@ export class WhatsAppProviderManagerService
 		throw new Error(`Unsupported WhatsApp provider: ${account.providerName}`);
 	}
 
+	/**
+	 * WhatsApp dropped the pairing, so the stored Chromium profile is dead weight:
+	 * keeping it only loops the QR screen forever. Wipe it, tell the managers what
+	 * happened, then start a clean client so a scannable QR shows up immediately.
+	 */
+	private async handleSessionInvalid(accountId: string, reason: string) {
+		if (this.invalidatingSessions.has(accountId)) return;
+		this.invalidatingSessions.add(accountId);
+		// A profile we failed to delete authenticates with the same dead keys and
+		// unpairs again seconds later, so a repeat wipe earns a backoff before the
+		// next relaunch instead of burning CPU on an instant retry loop.
+		const lastAttempt = this.lastSessionInvalidation.get(accountId) || 0;
+		const isRepeat = Date.now() - lastAttempt < this.sessionInvalidationCooldownMs;
+		this.lastSessionInvalidation.set(accountId, Date.now());
+		let purgeFailed = false;
+		try {
+			this.logger.error(`Wiping WhatsApp session for ${accountId}: ${reason}`);
+			this.providers.delete(accountId);
+			this.connectStartedAt.delete(accountId);
+			this.connecting.delete(accountId);
+			this.stopLockRenewal(accountId);
+			await this.releaseLock(accountId).catch(() => undefined);
+			await purgeWppBrowserProfile(accountId).catch(error => {
+				purgeFailed = true;
+				this.logger.error(
+					`Could not purge Chromium profile for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			});
+			await this.sessions.clear(accountId, 'wppconnect').catch(() => undefined);
+			const message = purgeFailed
+				? `${reason} (the stored browser profile could not be deleted automatically — delete tokens/${accountId} and reconnect)`
+				: reason;
+			await this.accountRepo.update(accountId, {
+				status: WhatsAppAccountStatus.ERROR,
+				lastError: message,
+			});
+			await this.log(accountId, 'session_invalidated', message);
+			this.gateway.emitAccountEvent(accountId, 'session_invalid', {
+				message,
+				requiresScan: true,
+			});
+			const recipients = await this.accessRepo.find({
+				where: { accountId, canManage: true },
+			});
+			await Promise.allSettled(
+				recipients.map(recipient =>
+					this.notifications.create({
+						type: NotificationType.WHATSAPP_CONNECTION,
+						title: 'WhatsApp needs a new QR scan',
+						message: reason,
+						data: { accountId, type: 'whatsapp_connection', requiresScan: true },
+						audience: NotificationAudience.USER,
+						userId: recipient.userId,
+					}),
+				),
+			);
+		} finally {
+			this.invalidatingSessions.delete(accountId);
+		}
+
+		if (purgeFailed) {
+			this.logger.error(
+				`Not relaunching WhatsApp for ${accountId}: the Chromium profile could not be deleted. Remove tokens/${accountId} and reconnect.`,
+			);
+			return;
+		}
+
+		// A repeat wipe means something keeps unpairing us; relaunching instantly
+		// would spin. Back off, but always come back with a scannable QR — leaving
+		// the account in ERROR strands the dashboard on an empty QR poll forever.
+		const delayMs = isRepeat ? this.sessionRelaunchBackoffMs : 0;
+		if (delayMs) {
+			this.logger.warn(
+				`WhatsApp for ${accountId} was invalidated again — waiting ${Math.round(
+					delayMs / 1000,
+				)}s before offering a fresh QR.`,
+			);
+		}
+		const relaunch = () =>
+			this.connect(accountId).catch(error =>
+				this.logger.error(
+					`Could not start a fresh WhatsApp session for ${accountId}`,
+					error,
+				),
+			);
+		if (!delayMs) {
+			// Fresh profile → the new provider starts from "never linked", so an
+			// UNPAIRED state while waiting for the scan cannot retrigger this path.
+			void relaunch();
+			return;
+		}
+		setTimeout(relaunch, delayMs).unref?.();
+	}
+
 	private async handleEvent(accountId: string, event: WhatsAppProviderEvent) {
+		if (event.type === 'session_invalid') {
+			await this.handleSessionInvalid(accountId, event.reason);
+			return;
+		}
 		if (event.type === 'connection') {
 			const status = event.status as WhatsAppAccountStatus;
 			const provider = this.providers.get(accountId);
@@ -366,12 +477,17 @@ export class WhatsAppProviderManagerService
 		}
 		if (event.type === 'qr') {
 			const provider = this.providers.get(accountId);
+			// Live provider already authenticated — ignore a late QR from Chromium.
 			if (provider?.getState() === 'connected') {
 				return;
 			}
-			const account = await this.accountRepo.findOne({ where: { id: accountId } });
-			if (account?.status === WhatsAppAccountStatus.CONNECTED) {
-				return;
+			// Stale DB "connected" with no live waiter must not flip back to QR.
+			// A live connecting/qr_pending provider means the link is being rebuilt.
+			if (!provider || !['connecting', 'qr_pending'].includes(provider.getState())) {
+				const account = await this.accountRepo.findOne({ where: { id: accountId } });
+				if (account?.status === WhatsAppAccountStatus.CONNECTED) {
+					return;
+				}
 			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'qr_updated');
@@ -381,9 +497,11 @@ export class WhatsAppProviderManagerService
 			if (provider?.getState() === 'connected') {
 				return;
 			}
-			const account = await this.accountRepo.findOne({ where: { id: accountId } });
-			if (account?.status === WhatsAppAccountStatus.CONNECTED) {
-				return;
+			if (!provider || !['connecting', 'qr_pending'].includes(provider.getState())) {
+				const account = await this.accountRepo.findOne({ where: { id: accountId } });
+				if (account?.status === WhatsAppAccountStatus.CONNECTED) {
+					return;
+				}
 			}
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'pairing_code_updated');
@@ -430,23 +548,40 @@ export class WhatsAppProviderManagerService
 			this.providers.delete(accountId);
 		} else if (logout) {
 			const account = await this.accountRepo.findOneByOrFail({ id: accountId });
-			await this.sessions.clear(accountId, account.providerName);
+			await this.sessions.remove(accountId, account.providerName).catch(() =>
+				this.sessions.clear(accountId, account.providerName),
+			);
 		}
 		this.connectStartedAt.delete(accountId);
 		this.connecting.delete(accountId);
+		if (logout) {
+			this.invalidatingSessions.delete(accountId);
+			this.lastSessionInvalidation.delete(accountId);
+		}
 		this.stopLockRenewal(accountId);
 		// User-initiated disconnect must clear foreign/stale locks too, otherwise
 		// a later connect keeps failing with "another server instance".
 		await this.forceReleaseLock(accountId);
-		// Also clear Chromium SingletonLock / zombie processes so the next connect
-		// does not die with "browser is already running for ./tokens/<id>".
-		await forceReleaseWppBrowserProfile(accountId).catch(error =>
-			this.logger.warn(
-				`Could not release Chromium profile for ${accountId}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			),
-		);
+		if (logout) {
+			// Full unlink: wipe Chromium profile so the next scan cannot collide
+			// with stale multi-device keys from this account.
+			await purgeWppBrowserProfile(accountId).catch(error =>
+				this.logger.warn(
+					`Could not purge Chromium profile for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+		} else {
+			// Soft disconnect: keep the linked-device keys, only free the lock.
+			await forceReleaseWppBrowserProfile(accountId).catch(error =>
+				this.logger.warn(
+					`Could not release Chromium profile for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+		}
 		await this.accountRepo.update(accountId, {
 			status: WhatsAppAccountStatus.DISCONNECTED,
 			phoneNumber: logout ? null : undefined,
@@ -456,6 +591,11 @@ export class WhatsAppProviderManagerService
 		return { ok: true };
 	}
 
+	/**
+	 * Tear down every live and persisted artifact for an account so the next
+	 * link starts from a blank Chromium profile — no leftover SingletonLock,
+	 * IndexedDB keys, Redis lock, or soft-deleted session row.
+	 */
 	async destroySession(accountId: string, providerName = 'wppconnect') {
 		const provider = this.providers.get(accountId);
 		try {
@@ -474,10 +614,21 @@ export class WhatsAppProviderManagerService
 		} finally {
 			this.providers.delete(accountId);
 			this.connecting.delete(accountId);
+			this.connectStartedAt.delete(accountId);
+			this.invalidatingSessions.delete(accountId);
+			this.lastSessionInvalidation.delete(accountId);
 			this.stopLockRenewal(accountId);
 			await this.forceReleaseLock(accountId);
-			await forceReleaseWppBrowserProfile(accountId).catch(() => undefined);
-			await this.sessions.clear(accountId, providerName);
+			await purgeWppBrowserProfile(accountId).catch(error =>
+				this.logger.warn(
+					`Could not purge Chromium profile for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+			await this.sessions.remove(accountId, providerName).catch(() =>
+				this.sessions.clear(accountId, providerName),
+			);
 		}
 		return { ok: true };
 	}
@@ -531,17 +682,66 @@ export class WhatsAppProviderManagerService
 		);
 	}
 
+	/**
+	 * Delete Chromium profiles left behind by accounts that no longer exist.
+	 * Without this, deleted accounts keep multi-device keys on disk and can
+	 * confuse later links / eat disk for months.
+	 */
+	private async purgeOrphanBrowserProfiles() {
+		const tokensRoot = path.dirname(resolveWppUserDataDir('_'));
+		let entries: string[] = [];
+		try {
+			entries = await fs.readdir(tokensRoot);
+		} catch {
+			return;
+		}
+		const accounts = await this.accountRepo.find({ select: ['id'] });
+		const alive = new Set(accounts.map(account => account.id));
+		for (const name of entries) {
+			if (!/^[0-9a-f-]{36}$/i.test(name)) continue;
+			if (alive.has(name)) continue;
+			this.logger.warn(`Purging orphan WhatsApp browser profile ${name}`);
+			await purgeWppBrowserProfile(name).catch(error =>
+				this.logger.warn(
+					`Could not purge orphan profile ${name}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+		}
+	}
+
 	async onApplicationBootstrap() {
+		await this.purgeOrphanBrowserProfiles().catch(error =>
+			this.logger.warn(
+				`Orphan WhatsApp profile cleanup failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			),
+		);
 		const accounts = await this.accountRepo.find({
 			where: {
 				status: In([
 					WhatsAppAccountStatus.CONNECTED,
 					WhatsAppAccountStatus.CONNECTING,
 					WhatsAppAccountStatus.QR_PENDING,
+					// Session tokens often survive while DB status flips to disconnected
+					// after a Chromium crash — restore those too so users do not need
+					// a manual "reset connection" to come back online.
+					WhatsAppAccountStatus.DISCONNECTED,
+					WhatsAppAccountStatus.ERROR,
 				]),
 			},
 		});
 		for (const account of accounts) {
+			const shouldRestore =
+				[
+					WhatsAppAccountStatus.CONNECTED,
+					WhatsAppAccountStatus.CONNECTING,
+					WhatsAppAccountStatus.QR_PENDING,
+				].includes(account.status) ||
+				(await this.sessions.hasActiveSession(account.id, account.providerName || 'wppconnect'));
+			if (!shouldRestore) continue;
 			this.connect(account.id).catch(error =>
 				this.logger.error(`Failed to restore WhatsApp account ${account.id}`, error),
 			);
@@ -549,8 +749,15 @@ export class WhatsAppProviderManagerService
 	}
 
 	async onApplicationShutdown() {
+		// Chromium needs a clean close to flush the linked-device keys, but a hung
+		// browser must not block process exit either.
 		await Promise.allSettled(
-			[...this.providers.values()].map(provider => provider.disconnect()),
+			[...this.providers.values()].map(provider =>
+				Promise.race([
+					provider.disconnect(),
+					new Promise(resolve => setTimeout(resolve, 8000)),
+				]),
+			),
 		);
 		for (const accountId of this.lockRenewTimers.keys()) {
 			this.stopLockRenewal(accountId);

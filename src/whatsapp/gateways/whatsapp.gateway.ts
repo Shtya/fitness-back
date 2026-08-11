@@ -13,7 +13,6 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
-import { WhatsAppConversation } from '../entities/whatsapp.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 
 @WebSocketGateway({
@@ -35,8 +34,6 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		private readonly accessService: WhatsAppAccessService,
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
-		@InjectRepository(WhatsAppConversation)
-		private readonly conversationRepo: Repository<WhatsAppConversation>,
 	) {}
 
 	private extractToken(client: Socket): string | null {
@@ -122,16 +119,11 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			return { ok: false, error: 'Unauthorized' };
 		}
 		if (!conversationId) return { ok: false, error: 'Conversation id is required' };
-		const conversation = await this.conversationRepo.findOne({
-			where: { id: conversationId },
-		});
-		if (!conversation) return { ok: false, error: 'Conversation not found' };
-		const access = await this.accessService.getAccountAccess(user, conversation.accountId);
-		const maySeeConversation =
-			access.canManage ||
-			access.canAssign ||
-			conversation.assignedUserId === user.id;
-		if (!maySeeConversation) {
+		// Must mirror the REST visibility rule exactly. A stricter check here left
+		// users who can open a chat over HTTP without live message events in it.
+		try {
+			await this.accessService.assertConversationVisible(user, conversationId);
+		} catch {
 			return { ok: false, error: 'Conversation access denied' };
 		}
 		await client.join(`whatsapp:conversation:${conversationId}`);
@@ -153,11 +145,17 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			.emit('whatsapp:event', { accountId, event, payload, at: new Date().toISOString() });
 	}
 
-	emitConversationEvent(conversationId: string, event: string, payload: any) {
+	emitConversationEvent(
+		conversationId: string,
+		event: string,
+		payload: any,
+		accountId?: string | null,
+	) {
 		this.server
 			?.to(`whatsapp:conversation:${conversationId}`)
 			.emit('whatsapp:event', {
 				conversationId,
+				accountId: accountId || payload?.accountId || null,
 				event,
 				payload,
 				at: new Date().toISOString(),

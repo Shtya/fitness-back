@@ -136,9 +136,6 @@ export class WhatsAppAccessService {
 					'unreadConversations',
 				)
 				.where('conversation.accountId = :accountId', { accountId: account.id })
-				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :newsletter', {
-					newsletter: '%@newsletter%',
-				})
 				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 					broadcast: '%@broadcast%',
 				})

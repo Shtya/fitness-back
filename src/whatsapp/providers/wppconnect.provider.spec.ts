@@ -205,8 +205,35 @@ describe('WppConnectProvider message normalization', () => {
 		(provider as any).client = { listChats, getAllChats };
 
 		await expect(provider.getChats(50)).resolves.toHaveLength(1);
-		expect(listChats).toHaveBeenCalledWith({ count: 50 });
+		expect(listChats).toHaveBeenCalledWith({ ignoreGroupMetadata: true });
 		expect(getAllChats).not.toHaveBeenCalled();
+	});
+
+	it('keeps the newest chats when the store returns more than the limit', async () => {
+		const provider = new WppConnectProvider('account-test', {});
+		const chat = (id: string, t: number, pin = false) => ({
+			id: { _serialized: id },
+			t,
+			pin,
+		});
+		// WPP.chat.list() hands back ChatStore insertion order, which buries recent
+		// direct chats behind whatever groups happened to hydrate first.
+		const listChats = jest
+			.fn()
+			.mockResolvedValue([
+				chat('group-old@g.us', 1_700_000_000),
+				chat('group-older@g.us', 1_600_000_000),
+				chat('recent@c.us', 1_750_000_000),
+				chat('pinned@c.us', 1_500_000_000, true),
+			]);
+		(provider as any).state = 'connected';
+		(provider as any).client = { listChats };
+
+		const chats = await provider.getChats(2);
+		expect(chats.map((item: any) => item.id._serialized)).toEqual([
+			'pinned@c.us',
+			'recent@c.us',
+		]);
 	});
 
 	it('marks the session broken on detached Frame errors', async () => {
@@ -332,5 +359,93 @@ describe('WppConnectProvider message normalization', () => {
 		expect(getPnLidEntry).toHaveBeenCalled();
 		expect(sendText).toHaveBeenCalled();
 		expect(result?.id?._serialized || result?.id).toBeTruthy();
+	});
+});
+
+describe('WppConnectProvider session invalidation', () => {
+	beforeEach(() => jest.useFakeTimers());
+	afterEach(() => jest.useRealTimers());
+
+	function connectedProvider(client: any) {
+		const provider = new WppConnectProvider('account-test', {});
+		const events: any[] = [];
+		provider.onEvent(event => void events.push(event));
+		(provider as any).client = client;
+		(provider as any).state = 'connecting';
+		(provider as any).everConnected = true;
+		return { provider, events };
+	}
+
+	async function runPendingCheck() {
+		await jest.advanceTimersByTimeAsync(20_000);
+	}
+
+	it('wipes the session when the page stays unpaired', async () => {
+		const { provider, events } = connectedProvider({
+			isAuthenticated: jest.fn().mockResolvedValue(false),
+			getConnectionState: jest.fn().mockResolvedValue('UNPAIRED'),
+			close: jest.fn().mockResolvedValue(undefined),
+		});
+
+		(provider as any).scheduleSessionInvalidCheck('unpaired');
+		await runPendingCheck();
+
+		expect(events.map(event => event.type)).toContain('session_invalid');
+	});
+
+	it('keeps the session when the page re-authenticates after the state blip', async () => {
+		const { provider, events } = connectedProvider({
+			isAuthenticated: jest.fn().mockResolvedValue(true),
+			getConnectionState: jest.fn().mockResolvedValue('CONNECTED'),
+			close: jest.fn().mockResolvedValue(undefined),
+		});
+
+		(provider as any).scheduleSessionInvalidCheck('unpaired');
+		await runPendingCheck();
+
+		expect(events.map(event => event.type)).not.toContain('session_invalid');
+	});
+
+	it('never wipes the session while the provider is shutting down', async () => {
+		const { provider, events } = connectedProvider({
+			isAuthenticated: jest.fn().mockResolvedValue(false),
+			getConnectionState: jest.fn().mockResolvedValue('UNPAIRED'),
+			close: jest.fn().mockResolvedValue(undefined),
+		});
+
+		(provider as any).scheduleSessionInvalidCheck('unpaired');
+		await provider.disconnect();
+		await runPendingCheck();
+
+		expect(events.map(event => event.type)).not.toContain('session_invalid');
+	});
+
+	it('does not trust a dead page as proof the pairing is gone', async () => {
+		const { provider, events } = connectedProvider({
+			isAuthenticated: jest.fn().mockRejectedValue(new Error('Target closed')),
+			getConnectionState: jest.fn().mockRejectedValue(new Error('Target closed')),
+			close: jest.fn().mockResolvedValue(undefined),
+		});
+
+		(provider as any).scheduleSessionInvalidCheck('unpaired');
+		await runPendingCheck();
+
+		expect(events.map(event => event.type)).not.toContain('session_invalid');
+	});
+
+	it('keeps the profile once WhatsApp Web offers a QR to scan', async () => {
+		const { provider, events } = connectedProvider({
+			isAuthenticated: jest.fn().mockResolvedValue(false),
+			getConnectionState: jest.fn().mockResolvedValue('UNPAIRED'),
+			close: jest.fn().mockResolvedValue(undefined),
+		});
+
+		(provider as any).scheduleSessionInvalidCheck('unpaired');
+		await (provider as any).publishQr('data:image/png;base64,QR');
+		await runPendingCheck();
+
+		expect(events.map(event => event.type)).toContain('qr');
+		expect(events.map(event => event.type)).not.toContain('session_invalid');
+		expect(provider.getState()).toBe('qr_pending');
 	});
 });

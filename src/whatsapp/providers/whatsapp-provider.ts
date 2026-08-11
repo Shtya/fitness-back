@@ -16,6 +16,9 @@ export type WhatsAppProviderEvent =
 	  }
 	| { type: 'message_deleted'; providerMessageId: string; mode: 'everyone' }
 	| { type: 'status_changed' }
+	// The linked device was removed / taken over on WhatsApp's side: the stored
+	// browser profile can never authenticate again and must be wiped for a rescan.
+	| { type: 'session_invalid'; reason: string }
 	| { type: 'presence'; payload: any };
 
 export interface NormalizedWhatsAppAttachment {
@@ -77,6 +80,8 @@ export interface WhatsAppProvider {
 	getChatStoreCooldownMs?(): number;
 	/** Clear history-sync cooldown (e.g. empty chat must retry). */
 	resetChatStoreCooldown?(): void;
+	/** True when WhatsApp Web ChatStore has at least one chat model loaded. */
+	isChatStoreHydrated?(): Promise<boolean>;
 	/**
 	 * True when WhatsApp Web MAIN UI can serve chat history.
 	 * Prefer a fast probe — callers should fail soft when false instead of hanging.
@@ -125,6 +130,9 @@ export interface WhatsAppProvider {
 	getMessageInfo(providerMessageId: string): Promise<any>;
 	markChatRead(chatId: string): Promise<any>;
 	downloadMedia(providerMessageId: string): Promise<any>;
+	/** Subscribe to typing/online presence for a chat (WppConnect). */
+	subscribePresence?(chatId: string | string[]): Promise<number | void>;
+	unsubscribePresence?(chatId: string | string[]): Promise<number | void>;
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
 	downloadStatus?(providerStatusId: string, senderWaId?: string | null): Promise<any>;
 	getStatuses(): Promise<any[]>;

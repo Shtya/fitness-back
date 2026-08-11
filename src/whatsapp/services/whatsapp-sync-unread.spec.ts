@@ -3,6 +3,7 @@ import {
 	providerChatActivityMs,
 	providerUnreadCount,
 } from './whatsapp-sync.service';
+import { providerChatActivityRank } from '../utils/whatsapp-time';
 
 describe('providerUnreadCount', () => {
 	it('uses the provider unread count including zero', () => {
@@ -25,8 +26,8 @@ describe('isSupportedInboxChatId', () => {
 		expect(isSupportedInboxChatId('123456789@lid')).toBe(true);
 	});
 
-	it('rejects channels, statuses and broadcast lists', () => {
-		expect(isSupportedInboxChatId('120363000000000000@newsletter')).toBe(false);
+	it('rejects statuses and broadcast lists but allows channels', () => {
+		expect(isSupportedInboxChatId('120363000000000000@newsletter')).toBe(true);
 		expect(isSupportedInboxChatId('status@broadcast')).toBe(false);
 		expect(isSupportedInboxChatId('123456@broadcast')).toBe(false);
 	});
@@ -54,5 +55,19 @@ describe('providerChatActivityMs', () => {
 			}),
 		).toBe(1_710_000_000_000);
 		expect(providerChatActivityMs({ t: 1_700_000_000 })).toBe(1_700_000_000_000);
+	});
+});
+
+describe('providerChatActivityRank', () => {
+	it('ranks message-backed chats above metadata-only chats', () => {
+		const withMessage = providerChatActivityRank({
+			t: 1_700_000_000,
+			lastMessage: { t: 1_600_000_000 },
+		});
+		const metadataOnly = providerChatActivityRank({ t: 1_720_000_000 });
+		expect(withMessage.hasMessage).toBe(true);
+		expect(metadataOnly.hasMessage).toBe(false);
+		expect(withMessage.ms).toBe(1_600_000_000_000);
+		expect(metadataOnly.ms).toBe(1_720_000_000_000);
 	});
 });

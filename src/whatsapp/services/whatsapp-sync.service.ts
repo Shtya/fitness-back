@@ -15,7 +15,6 @@ import { NotificationAudience, NotificationType, User } from '../../../entities/
 import { NotificationService } from '../../notification/notification.service';
 import {
 	WhatsAppAccount,
-	WhatsAppAccountStatus,
 	WhatsAppContact,
 	WhatsAppConversation,
 	WhatsAppConversationNote,
@@ -38,7 +37,12 @@ import {
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
-import { whatsAppTimestampToDate, whatsAppTimestampToMs } from '../utils/whatsapp-time';
+import {
+	providerChatActivityMs as providerChatActivityMsFromChat,
+	providerChatMessageActivityMs,
+	whatsAppTimestampToDate,
+	whatsAppTimestampToMs,
+} from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 
 function decodeProviderMedia(data: any): Buffer {
@@ -64,14 +68,35 @@ function decodeProviderMedia(data: any): Buffer {
 	return Buffer.from(raw, 'base64');
 }
 
+function sniffAudioMime(buffer: Buffer): string | null {
+	if (!buffer || buffer.length < 4) return null;
+	if (buffer.subarray(0, 4).toString('ascii') === 'OggS') return 'audio/ogg';
+	if (buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+		return 'audio/webm';
+	}
+	if (
+		buffer.subarray(0, 3).toString('ascii') === 'ID3' ||
+		(buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)
+	) {
+		return 'audio/mpeg';
+	}
+	if (buffer.length >= 8 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+		return 'audio/mp4';
+	}
+	return null;
+}
+
 function isValidAudioBuffer(buffer: Buffer, mimeType?: string | null) {
 	if (buffer.length < 64) return false;
+	// Prefer magic-byte sniffing — WhatsApp often stores ogg/opus under a mismatched mime.
+	if (sniffAudioMime(buffer)) return true;
 	const mime = String(mimeType || '').toLowerCase();
+	if (!mime || mime.includes('octet-stream') || mime === 'application/ogg') {
+		return buffer.length >= 64;
+	}
 	if (mime.includes('ogg')) return buffer.subarray(0, 4).toString('ascii') === 'OggS';
 	if (mime.includes('webm')) {
-		return (
-			buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
-		);
+		return buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
 	}
 	if (mime.includes('mpeg') || mime.includes('mp3')) {
 		return (
@@ -82,7 +107,7 @@ function isValidAudioBuffer(buffer: Buffer, mimeType?: string | null) {
 	if (mime.includes('mp4') || mime.includes('m4a')) {
 		return buffer.subarray(4, 8).toString('ascii') === 'ftyp';
 	}
-	return true;
+	return buffer.length >= 256;
 }
 
 function waId(value: any): string {
@@ -104,19 +129,8 @@ export function isSupportedInboxChatId(id: string): boolean {
 		.trim()
 		.toLowerCase();
 	if (!normalized) return false;
-	return (
-		!normalized.includes('status@') &&
-		!normalized.includes('@broadcast') &&
-		!normalized.includes('@newsletter')
-	);
-}
-
-function isProviderChannel(chat: any): boolean {
-	return Boolean(
-		chat?.isChannel ||
-			chat?.isNewsletter ||
-			String(chat?.id?.server || chat?.server || '').toLowerCase() === 'newsletter',
-	);
+	// Allow @newsletter channels. Exclude status + classic broadcast lists.
+	return !normalized.includes('status@') && !normalized.includes('@broadcast');
 }
 
 function phoneFromWaId(id: string): string | null {
@@ -140,42 +154,7 @@ export function providerUnreadCount(chat: any): number | null {
 }
 
 export function providerChatActivityMs(chat: any): number {
-	let collectionLast: any;
-	try {
-		collectionLast = chat?.msgs?.last?.();
-	} catch {
-		collectionLast = null;
-	}
-	const collections = [
-		chat?.msgs?._models,
-		chat?.msgs?.models,
-		Array.isArray(chat?.msgs) ? chat.msgs : null,
-		chat?.messages,
-	];
-	const collectionMessages = collections.filter(Array.isArray).flatMap((items) => items.slice(-3));
-	const messageCandidates = [
-		chat?.lastMessage,
-		chat?.lastMsg,
-		collectionLast,
-		...collectionMessages,
-	];
-	const actualMessageTimes = messageCandidates
-		.flatMap((message) => [
-			whatsAppTimestampToDate(message?.t)?.getTime(),
-			whatsAppTimestampToDate(message?.timestamp)?.getTime(),
-			whatsAppTimestampToDate(message?.providerTimestamp)?.getTime(),
-			whatsAppTimestampToDate(message?.messageTimestamp)?.getTime(),
-		])
-		.filter((value): value is number => Number.isFinite(value));
-	if (actualMessageTimes.length) return Math.max(...actualMessageTimes);
-
-	// ChatModel.t is only a fallback: provider metadata updates can move it even
-	// when the last real message in the conversation is much older.
-	return (
-		whatsAppTimestampToDate(chat?.t)?.getTime() ||
-		whatsAppTimestampToDate(chat?.timestamp)?.getTime() ||
-		0
-	);
+	return providerChatActivityMsFromChat(chat);
 }
 
 function providerMessageId(value: any): string {
@@ -221,6 +200,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private activePersists = 0;
 	private readonly maxConcurrentPersists = 1;
 	private conversationUpdateTimers = new Map<string, NodeJS.Timeout>();
+	private conversationUpdatePayloads = new Map<string, Record<string, unknown>>();
+	private attachmentDownloads = new Map<string, Promise<any>>();
+	private activeMediaDownloads = 0;
+	private readonly maxConcurrentMediaDownloads = 2;
 	private sendOperations = new Map<string, Promise<unknown>>();
 	private inboxReconcileTimers = new Map<string, NodeJS.Timeout>();
 	private inboxReconcileInFlight = new Set<string>();
@@ -283,11 +266,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				this.stopInboxReconciliation(accountId);
 				return;
 			}
+			const cooldown = provider.getChatStoreCooldownMs?.() || 0;
+			if (cooldown > 0) return;
 			this.inboxReconcileInFlight.add(accountId);
-			void this.syncChatsInternal(accountId, provider, 100, {
-				syncGroupParticipants: false,
-				emitProgress: false,
-			})
+			void (async () => {
+				if (typeof provider.isChatStoreHydrated === 'function') {
+					const ready = await provider.isChatStoreHydrated().catch(() => false);
+					if (!ready) {
+						this.logger.debug(
+							`Inbox reconcile skipped for ${accountId}: ChatStore not hydrated`,
+						);
+						return;
+					}
+				}
+				await this.syncChatsInternal(accountId, provider, 500, {
+					syncGroupParticipants: false,
+					emitProgress: false,
+				});
+			})()
 				.catch((error) =>
 					this.logger.warn(
 						`Automatic WhatsApp inbox reconciliation failed for ${accountId}: ${
@@ -350,6 +346,39 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 			return;
 		}
+		if (event.type === 'presence') {
+			const chatId = String(event.payload?.chatId || '');
+			if (!chatId || !isSupportedInboxChatId(chatId)) return;
+			const conversation = await this.conversationRepo.findOne({
+				where: { accountId, providerChatId: chatId },
+			});
+			if (!conversation) return;
+			const state = String(event.payload?.state || 'unavailable');
+			const typing = state === 'composing' || state === 'recording';
+			this.gateway.emitAccountEvent(accountId, 'presence', {
+				conversationId: conversation.id,
+				chatId,
+				state,
+				isOnline: Boolean(event.payload?.isOnline),
+				typing,
+				recording: state === 'recording',
+				t: event.payload?.t || Date.now(),
+			});
+			this.gateway.emitConversationEvent(
+				conversation.id,
+				'presence',
+				{
+					conversationId: conversation.id,
+					state,
+					isOnline: Boolean(event.payload?.isOnline),
+					typing,
+					recording: state === 'recording',
+					t: event.payload?.t || Date.now(),
+				},
+				accountId,
+			);
+			return;
+		}
 		if (event.type === 'connection' && event.status === 'connected') {
 			this.startInboxReconciliation(accountId);
 			void this.scheduleBootstrap(accountId);
@@ -362,11 +391,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					where: { accountId, providerMessageId: event.providerMessageId },
 				});
 				if (message) {
-					this.gateway.emitConversationEvent(message.conversationId, 'message_status', {
-						messageId: message.id,
-						providerMessageId: event.providerMessageId,
-						status: event.status,
-					});
+					this.gateway.emitConversationEvent(
+						message.conversationId,
+						'message_status',
+						{
+							messageId: message.id,
+							providerMessageId: event.providerMessageId,
+							status: event.status,
+						},
+						accountId,
+					);
 				}
 			}, `message_status:${accountId}:${event.providerMessageId}`);
 			return;
@@ -390,10 +424,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					providerDeletedAt,
 					text: null,
 				});
-				this.gateway.emitConversationEvent(message.conversationId, 'message_updated', {
-					messageId: message.id,
-					changes: { deletedMode: event.mode, providerDeletedAt, text: null },
-				});
+				this.gateway.emitConversationEvent(
+					message.conversationId,
+					'message_updated',
+					{
+						messageId: message.id,
+						changes: { deletedMode: event.mode, providerDeletedAt, text: null },
+					},
+					accountId,
+				);
 			}, `message_deleted:${accountId}:${event.providerMessageId}`);
 		}
 	}
@@ -431,12 +470,32 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { messageId: message.id },
 			order: { created_at: 'ASC' },
 		});
-		this.gateway.emitConversationEvent(message.conversationId, 'message_reactions', {
-			messageId: message.id,
-			providerMessageId: providerMessageIdValue,
-			reactions: saved,
-		});
+		this.gateway.emitConversationEvent(
+			message.conversationId,
+			'message_reactions',
+			{
+				messageId: message.id,
+				providerMessageId: providerMessageIdValue,
+				reactions: saved,
+			},
+			accountId,
+		);
 		return saved;
+	}
+
+	/** WhatsApp Web media downloads all run through one Puppeteer page. Letting a
+	 *  chat full of photos and voice notes hit it at once made every request time
+	 *  out, so only a couple are in flight at a time. */
+	private async withMediaDownloadSlot<T>(task: () => Promise<T>): Promise<T> {
+		while (this.activeMediaDownloads >= this.maxConcurrentMediaDownloads) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		this.activeMediaDownloads += 1;
+		try {
+			return await task();
+		} finally {
+			this.activeMediaDownloads -= 1;
+		}
 	}
 
 	private enqueuePersist(task: () => Promise<unknown>, context = 'unknown') {
@@ -544,11 +603,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const provider = this.providers.getProvider(accountId);
 			if (!provider || provider.getState() !== 'connected') return false;
 			try {
-				const chats = await provider.getChats(1);
-				if (Array.isArray(chats)) return true;
+				// Light probe — never run the full getChats retry/getAllChats storm here.
+				if (typeof provider.isHistoryReady === 'function') {
+					if (await provider.isHistoryReady()) return true;
+				} else {
+					const chats = await provider.getChats(1);
+					if (Array.isArray(chats)) return true;
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				if (!/not ready|not connected|listChats|null/i.test(message)) {
+				if (!/not ready|not connected|listChats|null|cooling down/i.test(message)) {
 					throw error;
 				}
 			}
@@ -557,7 +621,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return false;
 	}
 
-	async bootstrapAccount(accountId: string, limit = 40) {
+	async bootstrapAccount(accountId: string, limit = 500) {
 		const provider = this.requireProvider(accountId);
 		this.gateway.emitAccountEvent(accountId, 'sync_started', {
 			accountId,
@@ -581,11 +645,83 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			stage: 'chats_done',
 			chats,
 		});
+		// Do NOT prefetch message history for top N chats here.
+		// That stampeded getMessages while ChatStore was still empty, blocked the
+		// open-chat path, and felt like "endless sync" — WhatsApp Web loads
+		// history on demand when a chat is opened (plus live onMessage).
 		return {
 			contacts: { supported: false, skipped: true },
 			chats,
 			progress: 100,
 		};
+	}
+
+	/**
+	 * Optional deep warm — kept for manual/ops use. Not called from bootstrap.
+	 * Prefer on-demand sync/latest when the user opens a conversation.
+	 */
+	private async prefetchTopChatHistories(
+		accountId: string,
+		chatLimit = 5,
+		messageLimit = 30,
+	) {
+		const provider = this.requireProvider(accountId);
+		if (!provider.capabilities?.history) return { warmed: 0 };
+		if (typeof provider.isChatStoreHydrated === 'function') {
+			const ready = await provider.isChatStoreHydrated().catch(() => false);
+			if (!ready) {
+				this.logger.warn(
+					`prefetchTopChatHistories skipped for ${accountId}: ChatStore not hydrated`,
+				);
+				return { warmed: 0 };
+			}
+		}
+		const unreadFirst = await this.conversationRepo
+			.createQueryBuilder('conversation')
+			.leftJoinAndSelect('conversation.contact', 'contact')
+			.where('conversation.accountId = :accountId', { accountId })
+			.andWhere('conversation.unreadCount > 0')
+			.orderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
+			.take(Math.min(chatLimit, 5))
+			.getMany();
+		const seen = new Set<string>();
+		const queue = unreadFirst
+			.filter(item => {
+				if (seen.has(item.id)) return false;
+				seen.add(item.id);
+				return true;
+			})
+			.slice(0, chatLimit);
+
+		let warmed = 0;
+		for (const conversation of queue) {
+			try {
+				const localCount = await this.messageRepo.count({
+					where: { conversationId: conversation.id },
+				});
+				if (localCount >= Math.min(20, messageLimit)) continue;
+				const aliases = this.conversationMessageAliases(conversation);
+				const messages = await provider.getMessages(conversation.providerChatId, {
+					limit: messageLimit,
+					aliases,
+				});
+				if (!messages?.length) continue;
+				for (const message of messages) {
+					await this.persistMessage(accountId, message, null, false, {
+						emitEvents: false,
+					}).catch(() => null);
+				}
+				warmed += 1;
+				await new Promise(resolve => setTimeout(resolve, 500));
+			} catch (error) {
+				this.logger.debug(
+					`prefetch history skipped for ${conversation.id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+		return { warmed };
 	}
 
 	private async ensureConversation(
@@ -869,7 +1005,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		if (emitEvents) {
-			this.gateway.emitConversationEvent(conversation.id, 'message', hydrated);
+			this.gateway.emitConversationEvent(conversation.id, 'message', hydrated, accountId);
 			this.scheduleConversationUpdated(accountId, {
 				conversationId: conversation.id,
 				assignedUserId: conversation.assignedUserId,
@@ -920,16 +1056,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return hydrated;
 	}
 
+	/** Coalesces bursts without postponing them: the pending timer is never reset,
+	 *  so the inbox row always updates within one window of the first message
+	 *  instead of drifting while a contact keeps typing. */
 	private scheduleConversationUpdated(accountId: string, payload: Record<string, unknown>) {
 		const timerKey = `${accountId}:${String(payload.conversationId || 'unknown')}`;
-		const existing = this.conversationUpdateTimers.get(timerKey);
-		if (existing) clearTimeout(existing);
+		this.conversationUpdatePayloads.set(timerKey, payload);
+		if (this.conversationUpdateTimers.has(timerKey)) return;
 		this.conversationUpdateTimers.set(
 			timerKey,
 			setTimeout(() => {
 				this.conversationUpdateTimers.delete(timerKey);
-				this.gateway.emitAccountEvent(accountId, 'conversation_updated', payload);
-			}, 1200),
+				const latest = this.conversationUpdatePayloads.get(timerKey);
+				this.conversationUpdatePayloads.delete(timerKey);
+				if (latest) {
+					this.gateway.emitAccountEvent(accountId, 'conversation_updated', latest);
+				}
+			}, 250),
 		);
 	}
 
@@ -967,7 +1110,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { supported: true, count };
 	}
 
-	async syncChats(user: User, accountId: string, limit = 100) {
+	async syncChats(user: User, accountId: string, limit = 500) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const provider = this.requireProvider(accountId);
 		this.gateway.emitAccountEvent(accountId, 'sync_started', {
@@ -996,7 +1139,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async syncChatsInternal(
 		accountId: string,
 		provider: WhatsAppProvider,
-		limit = 40,
+		limit = 500,
 		options: { syncGroupParticipants?: boolean; emitProgress?: boolean } = {},
 	) {
 		if (!provider.capabilities.history) return { supported: false, count: 0 };
@@ -1021,12 +1164,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				});
 			}, 8000);
 		try {
-			chats = await provider.getChats(Math.min(limit, 100));
+			chats = await provider.getChats(Math.min(limit, 1000));
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			const stillWarming =
+				/not ready|cooling down|still syncing|empty after retries|timed out/i.test(message);
 			throw new BadRequestException(
-				message.includes('not ready')
-					? 'WhatsApp is waiting for the linked session. Open the account connection status and try again.'
+				stillWarming
+					? 'WhatsApp chat store is not ready yet — keep the phone online; sync will retry automatically.'
 					: message || 'Could not load chats from WhatsApp',
 			);
 		} finally {
@@ -1046,7 +1191,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				const activityMs = providerChatActivityMs(chat);
 				return { chat, id, activityMs };
 			})
-			.filter((item) => isSupportedInboxChatId(item.id) && !isProviderChannel(item.chat))
+			.filter((item) => isSupportedInboxChatId(item.id))
 			.sort((a, b) => b.activityMs - a.activityMs);
 		let count = 0;
 		let changed = false;
@@ -1094,7 +1239,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					});
 				}
 			}
-			const lastMessageAt = activityMs ? new Date(activityMs) : null;
+			const messageActivityMs = providerChatMessageActivityMs(chat);
+			// Only promote inbox order from real message activity. Metadata-only
+			// ChatModel.t (common on groups before MsgCollection hydrates) used to
+			// park silent groups at the top of the CRM inbox.
+			const trustedActivityMs = messageActivityMs ?? (conversation.lastMessageAt ? null : activityMs);
+			const lastMessageAt = trustedActivityMs ? new Date(trustedActivityMs) : null;
 			const unreadCount = providerUnreadCount(chat);
 			const updates: Partial<WhatsAppConversation> = {};
 			if (
@@ -1102,8 +1252,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				lastMessageAt.getTime() !==
 					(conversation.lastMessageAt ? new Date(conversation.lastMessageAt).getTime() : 0)
 			) {
-				// Always trust provider chat activity time on inbox sync so "now"/unreliable
-				// message fallbacks cannot keep months-old chats pinned as recent minutes.
 				updates.lastMessageAt = lastMessageAt;
 			}
 			if (
@@ -1189,15 +1337,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
 		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
 		const pageNumber = Math.max(Number(page) || 1, 1);
-		if (accountAccess.account.status !== WhatsAppAccountStatus.CONNECTED) {
-			return {
-				items: [],
-				total: 0,
-				page: pageNumber,
-				limit: take,
-				scope: canSeeAll ? 'all' : 'assigned',
-			};
-		}
+		// Always serve inbox rows from DB — even while the live session is offline —
+		// so the CRM stays usable after Chromium/session drops. Live sync remains
+		// gated separately behind a connected provider.
 		const query = this.conversationRepo
 			.createQueryBuilder('conversation')
 			.leftJoinAndSelect('conversation.contact', 'contact')
@@ -1210,9 +1352,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				{ preferenceUserId: user.id },
 			)
 			.where('conversation.accountId = :accountId', { accountId })
-			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :newsletter', {
-				newsletter: '%@newsletter%',
-			})
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
 			})
@@ -1245,6 +1384,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					OR contact.phoneNumber ILIKE :search
 					OR group.subject ILIKE :search
 					OR conversation.providerChatId ILIKE :search
+					OR EXISTS (
+						SELECT 1 FROM whatsapp_messages message_search
+						WHERE message_search.conversation_id = conversation.id
+							AND message_search.text ILIKE :search
+					)
 				)`,
 				{ search: `%${normalizedSearch}%` },
 			);
@@ -1351,6 +1495,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return this.access.assertConversationVisible(user, conversationId);
 	}
 
+	private async subscribeConversationPresence(conversation: WhatsAppConversation) {
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider?.subscribePresence || !conversation.providerChatId) return;
+		await provider.subscribePresence(conversation.providerChatId);
+	}
+
 	async listMessages(
 		user: User,
 		conversationId: string,
@@ -1363,6 +1513,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			user,
 			conversationId,
 		);
+		void this.subscribeConversationPresence(conversation).catch(() => undefined);
 		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
 		const loadLocal = async (cursorId?: string) => {
 			const query = this.messageRepo
@@ -1470,8 +1621,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	private conversationMessageAliases(conversation: WhatsAppConversation) {
 		const aliases: string[] = [];
+		const providerChatId = String(conversation.providerChatId || '');
+		const lidUser = providerChatId.includes('@')
+			? providerChatId.split('@')[0]
+			: '';
 		const phoneDigits = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
-		if (phoneDigits) {
+		// Never treat the LID numeric id as a phone — that produced bogus
+		// 15-digit @c.us lookups (Chat not found) and drowned real history sync.
+		if (phoneDigits && phoneDigits !== lidUser && phoneDigits.length <= 15) {
 			aliases.push(`${phoneDigits}@c.us`, `${phoneDigits}@s.whatsapp.net`);
 		}
 		return aliases;
@@ -1646,7 +1803,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await provider.starMessage(message.providerMessageId, isStarred);
 		await this.messageRepo.update(message.id, { isStarred });
 		const result = { messageId, changes: { isStarred } };
-		this.gateway.emitConversationEvent(conversationId, 'message_updated', result);
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'message_updated',
+			result,
+			message.accountId,
+		);
 		return result;
 	}
 
@@ -1656,7 +1818,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const pinnedUntil = isPinned ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) : null;
 		await this.messageRepo.update(message.id, { isPinned, pinnedUntil });
 		const result = { messageId, changes: { isPinned, pinnedUntil } };
-		this.gateway.emitConversationEvent(conversationId, 'message_updated', result);
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'message_updated',
+			result,
+			message.accountId,
+		);
 		return result;
 	}
 
@@ -1685,7 +1852,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			messageId,
 			changes: { deletedMode: mode, providerDeletedAt, text: null },
 		};
-		this.gateway.emitConversationEvent(conversationId, 'message_updated', result);
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'message_updated',
+			result,
+			conversation.accountId,
+		);
 		return result;
 	}
 
@@ -1723,13 +1895,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (!provider.capabilities.history) {
 			return { supported: false, items: [], hasMore: false };
 		}
-		const [latestLocal, oldestBeforeSync, localCount] = await Promise.all([
-			mode === 'latest'
-				? this.messageRepo.findOne({
-						where: { conversationId },
-						order: { providerTimestamp: 'DESC' },
-					})
-				: Promise.resolve(null),
+		const [oldestBeforeSync, localCount] = await Promise.all([
 			this.messageRepo.findOne({
 				where: { conversationId },
 				order: { providerTimestamp: 'ASC' },
@@ -1739,11 +1905,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const requestedLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
 		const returnLocalOnly = async (syncError: string, message?: string) => ({
 			supported: true,
+			// Never live-pull again here — we just tried the provider.
 			items: await this.listMessages(
 				user,
 				conversationId,
 				mode === 'older' ? oldestBeforeSync?.id : undefined,
 				requestedLimit,
+				{ allowLivePull: false },
 			),
 			hasMore: Boolean(conversation.hasMoreProviderHistory),
 			syncSkipped: true,
@@ -1764,19 +1932,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// Do not hard-block on isHistoryReady when the inbox already lists chats.
 		// A soft probe used to skip getMessages entirely and leave every
 		// conversation at 0 local messages (GET /messages → []).
-		const aliases: string[] = [];
-		const phoneDigits = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
-		if (phoneDigits) {
-			aliases.push(`${phoneDigits}@c.us`, `${phoneDigits}@s.whatsapp.net`);
-		}
+		const aliases: string[] = [...this.conversationMessageAliases(conversation)];
 		const providerChatId = String(conversation.providerChatId || '');
 		if (providerChatId.endsWith('@lid') || providerChatId.endsWith('@hosted.lid')) {
+			const lidUser = providerChatId.split('@')[0] || '';
 			const identity =
 				typeof provider.resolveContactIdentity === 'function'
 					? await provider.resolveContactIdentity(providerChatId).catch(() => null)
 					: null;
 			const resolvedPhone = String(identity?.phoneNumber || '').replace(/\D/g, '');
-			if (resolvedPhone) {
+			if (resolvedPhone && resolvedPhone !== lidUser && resolvedPhone.length <= 15) {
 				aliases.push(`${resolvedPhone}@c.us`, `${resolvedPhone}@s.whatsapp.net`);
 			}
 		}
@@ -1785,12 +1950,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			messages = await provider.getMessages(conversation.providerChatId, {
 				limit: requestedLimit,
 				before: mode === 'older' ? conversation.oldestProviderCursor || undefined : undefined,
-				// A partial local cache (for example 1–3 messages) must be backfilled
-				// with the provider's latest page, not only messages newer than the last row.
-				after:
-					mode === 'latest' && localCount >= requestedLimit
-						? latestLocal?.providerMessageId
-						: undefined,
+				// Always pull the latest page for "latest" sync and merge into DB.
+				// Using `after: latestLocal` previously skipped mid-history gaps when
+				// a partial prefetch left 50+ rows that were not actually contiguous.
+				after: undefined,
 				aliases: [...new Set(aliases)],
 			});
 		} catch (error) {
@@ -1808,7 +1971,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					message,
 				);
 			const chatMissing = /chat not found/i.test(message);
-			const mainNotReady = /main UI still syncing|main not ready/i.test(message);
+			const mainNotReady = /main UI still syncing|main not ready|not ready|cooling down/i.test(
+				message,
+			);
 			return returnLocalOnly(
 				sessionDead
 					? 'session_dead'
@@ -1823,6 +1988,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						? 'WhatsApp Web is still syncing with the phone. Messages will appear when ready.'
 						: undefined,
 			);
+		}
+		if (!Array.isArray(messages) || messages.length === 0) {
+			// Empty provider page with empty DB usually means ChatStore has not hydrated
+			// this JID yet (common for @lid / groups right after link). Soft-skip so the
+			// UI keeps retrying instead of showing a permanent "no messages" empty state.
+			if (localCount === 0) {
+				return returnLocalOnly(
+					'main_not_ready',
+					'WhatsApp Web is still syncing with the phone. Messages will appear when ready.',
+				);
+			}
+			const items = await this.listMessages(
+				user,
+				conversationId,
+				mode === 'older' ? oldestBeforeSync?.id : undefined,
+				requestedLimit,
+				{ allowLivePull: false },
+			);
+			return {
+				supported: true,
+				items,
+				hasMore: Boolean(conversation.hasMoreProviderHistory),
+			};
 		}
 		// Persist provider history with bounded concurrency. Sequential hydration
 		// performs several database round trips per message and made 30 messages
@@ -2280,6 +2468,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ...group, conversationId: conversation?.id || null };
 	}
 
+	/** Media that is not on disk is pulled through the single linked WhatsApp Web
+	 *  page. Concurrent requests for the same attachment (chat reopened, retry,
+	 *  bulk download) share one download instead of queueing duplicate work. */
 	async downloadAttachment(user: User, attachmentId: string) {
 		const attachment = await this.attachmentRepo.findOne({
 			where: { id: attachmentId },
@@ -2287,6 +2478,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		if (!attachment) throw new NotFoundException('WhatsApp attachment not found');
 		await this.assertConversationVisible(user, attachment.message.conversationId);
+		const inFlight = this.attachmentDownloads.get(attachmentId);
+		if (inFlight) return inFlight;
+		const download = this.downloadAttachmentInternal(attachment).finally(() => {
+			this.attachmentDownloads.delete(attachmentId);
+		});
+		this.attachmentDownloads.set(attachmentId, download);
+		return download;
+	}
+
+	private async downloadAttachmentInternal(attachment: WhatsAppMessageAttachment) {
 		if (attachment.storagePath && attachment.downloadStatus === 'downloaded') {
 			const cachedPath = path.resolve(process.cwd(), attachment.storagePath);
 			try {
@@ -2296,6 +2497,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 				if (audioType && !isValidAudioBuffer(cachedBuffer, attachment.mimeType)) {
 					throw new Error('Cached audio is invalid');
+				}
+				const sniffedMime = audioType ? sniffAudioMime(cachedBuffer) : null;
+				if (sniffedMime && sniffedMime !== attachment.mimeType) {
+					attachment.mimeType = sniffedMime;
+					await this.attachmentRepo.save(attachment);
 				}
 				return {
 					ok: true,
@@ -2312,7 +2518,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				await this.attachmentRepo.save(attachment);
 			}
 		}
-		const provider = this.requireProvider(attachment.message.accountId);
+		const provider = this.providers.getProvider(attachment.message.accountId);
+		const providerState =
+			provider?.getState?.() || this.providers.getProviderState?.(attachment.message.accountId);
+		if (!provider || providerState !== 'connected') {
+			attachment.downloadStatus = 'pending';
+			await this.attachmentRepo.save(attachment);
+			throw new BadRequestException(
+				'WhatsApp media is not ready yet. Wait for the account to finish syncing, then retry.',
+			);
+		}
 		if (!provider.capabilities.mediaDownload) {
 			return { ok: false, supported: false };
 		}
@@ -2323,20 +2538,33 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (!mediaId) throw new Error('Attachment has no provider media id');
 			let data: any;
 			try {
-				data = await provider.downloadMedia(mediaId);
+				data = await this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId));
 			} catch (error: any) {
-				const detail = String(error?.message || error || '');
-				throw new Error(
-					detail && detail !== 'Object' ? detail : 'Media is unavailable from WhatsApp right now',
-				);
+				// One soft retry after a short delay — WA Web often fails media
+				// downloads while the chat store is still hydrating.
+				await new Promise((resolve) => setTimeout(resolve, 800));
+				try {
+					data = await this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId));
+				} catch (retryError: any) {
+					const detail = String(retryError?.message || error?.message || error || '');
+					throw new Error(
+						detail && detail !== 'Object'
+							? detail
+							: 'Media is unavailable from WhatsApp right now',
+					);
+				}
 			}
 			const buffer = decodeProviderMedia(data);
 			if (!buffer.length) throw new Error('Provider returned empty media');
-			if (
-				['audio', 'ptt', 'voice'].includes(String(attachment.type || '').toLowerCase()) &&
-				!isValidAudioBuffer(buffer, attachment.mimeType)
-			) {
+			const audioType = ['audio', 'ptt', 'voice'].includes(
+				String(attachment.type || '').toLowerCase(),
+			);
+			if (audioType && !isValidAudioBuffer(buffer, attachment.mimeType)) {
 				throw new Error('Provider returned invalid audio media');
+			}
+			const sniffedMime = audioType ? sniffAudioMime(buffer) : null;
+			if (sniffedMime && sniffedMime !== attachment.mimeType) {
+				attachment.mimeType = sniffedMime;
 			}
 			const root = path.resolve(
 				process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),

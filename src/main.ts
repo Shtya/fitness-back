@@ -54,6 +54,11 @@ async function bootstrap() {
     }),
   );
 
+  // Without this, onApplicationShutdown never runs and the WhatsApp Chromium
+  // profile is killed mid-write on every restart, which burns the linked-device
+  // session and forces a new QR scan.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT || 3030;
 
   // VPS / PM2: we ALWAYS listen here

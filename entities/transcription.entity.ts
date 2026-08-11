@@ -27,6 +27,19 @@ export class Transcription {
 	@Column({ type: 'text' })
 	text: string;
 
+	/** Raw ASR (or pre-enhance) snapshot for before/after compare. */
+	@Column({ type: 'text', nullable: true })
+	originalText: string | null;
+
+	@Column({ type: 'text', nullable: true })
+	enhancedText: string | null;
+
+	@Column({ type: 'jsonb', nullable: true })
+	enhancementMeta: Record<string, unknown> | null;
+
+	@Column({ type: 'jsonb', nullable: true })
+	memorizePayload: Record<string, unknown> | null;
+
 	@Column({ type: 'varchar', length: 16, default: 'auto' })
 	requestedLanguage: string;
 

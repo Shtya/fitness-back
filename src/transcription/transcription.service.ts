@@ -17,7 +17,12 @@ import * as crypto from 'crypto';
 import { createReadStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { Repository } from 'typeorm';
-import { CreateTranscriptionDto } from './dto/transcription.dto';
+import { AiFreeService } from '../ai-free/ai-free.service';
+import {
+	CreateTranscriptionDto,
+	EnhanceTranscriptionDto,
+	MemorizeTranscriptionDto,
+} from './dto/transcription.dto';
 
 type WhisperResponse = {
 	text: string;
@@ -50,6 +55,7 @@ export class TranscriptionService {
 		@InjectRepository(TranscriptionProviderCredential)
 		private readonly credentialRepo: Repository<TranscriptionProviderCredential>,
 		private readonly config: ConfigService,
+		private readonly aiFree: AiFreeService,
 	) {}
 
 	private counts(text: string) {
@@ -450,5 +456,226 @@ export class TranscriptionService {
 		if (!record) throw new NotFoundException('Transcription not found');
 		await this.transcriptionRepo.remove(record);
 		return { ok: true };
+	}
+
+	private resolveLocale(
+		locale: string | undefined,
+		requestedLanguage: string | null | undefined,
+		text: string,
+	) {
+		const explicit = String(locale || '').toLowerCase();
+		if (explicit.startsWith('ar')) return 'ar';
+		if (explicit.startsWith('en')) return 'en';
+		const requested = String(requestedLanguage || '').toLowerCase();
+		if (requested.startsWith('ar')) return 'ar';
+		if (requested.startsWith('en')) return 'en';
+		const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+		return arabicChars > Math.max(8, text.length * 0.12) ? 'ar' : 'en';
+	}
+
+	private tryParseJson(text: unknown) {
+		const raw = String(text || '').trim();
+		if (!raw) return null;
+		const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+		const candidate = fenced || raw;
+		try {
+			return JSON.parse(candidate);
+		} catch {
+			const start = candidate.indexOf('{');
+			const end = candidate.lastIndexOf('}');
+			if (start >= 0 && end > start) {
+				try {
+					return JSON.parse(candidate.slice(start, end + 1));
+				} catch {
+					return null;
+				}
+			}
+			return null;
+		}
+	}
+
+	private asObject(value: unknown): Record<string, any> {
+		return value && typeof value === 'object' && !Array.isArray(value)
+			? (value as Record<string, any>)
+			: {};
+	}
+
+	private asStringArray(value: unknown, limit = 24) {
+		if (!Array.isArray(value)) return [];
+		return value
+			.map(item => String(item || '').trim())
+			.filter(Boolean)
+			.slice(0, limit);
+	}
+
+	async enhance(user: any, id: string, dto: EnhanceTranscriptionDto) {
+		const userId = String(user?.id || '');
+		const record = await this.transcriptionRepo.findOne({ where: { id, userId } });
+		if (!record) throw new NotFoundException('Transcription not found');
+
+		const before = String(dto?.text ?? record.text ?? '').trim();
+		if (!before) throw new BadRequestException('Transcript text is required');
+		if (before.length > 2_000_000) {
+			throw new BadRequestException('Transcript text is too long');
+		}
+
+		const locale = this.resolveLocale(dto?.locale, record.requestedLanguage, before);
+		const mode = dto?.mode || 'full';
+		const apply = dto?.apply === true;
+
+		const system = `You are an expert speech-to-text cleanup editor for So7baFit Transcript.
+Fix ASR mistakes, unclear speech, broken words, and punctuation while preserving the speaker's meaning.
+Do NOT invent facts, names, numbers, or topics that are not supported by the source text.
+Keep mixed Arabic/English as spoken. Prefer natural readable sentences.
+${locale === 'ar' ? 'Write the enhanced transcript primarily in Arabic when the source is Arabic.' : 'Write the enhanced transcript primarily in English when the source is English.'}
+Reply with ONLY valid JSON (no markdown fences):
+{
+  "enhancedText": string,
+  "changesSummary": string[]
+}
+Mode: ${mode}
+- clarity: fix garbled / wrong words from unclear speech
+- punctuation: mostly punctuation, casing, and paragraph breaks
+- full: clarity + punctuation + light grammar cleanup`;
+
+		const userMessage = `Clean up this speech transcript.\nMode: ${mode}\nLocale: ${locale}\n\n--- TRANSCRIPT ---\n${before.slice(0, 120_000)}`;
+
+		const ai = await this.aiFree.chat(user, {
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: userMessage },
+			],
+			allowFallback: true,
+			useProjectKnowledge: false,
+		} as any);
+
+		const parsed = this.asObject(this.tryParseJson(ai?.reply));
+		const enhancedText = String(parsed.enhancedText || '').trim() || before;
+		const changesSummary = this.asStringArray(parsed.changesSummary, 12);
+
+		if (!record.originalText) {
+			record.originalText = before;
+		}
+		record.enhancedText = enhancedText;
+		record.enhancementMeta = {
+			mode,
+			locale,
+			changesSummary,
+			provider: ai?.provider || null,
+			model: ai?.actualModel || null,
+			enhancedAt: new Date().toISOString(),
+		};
+
+		if (apply) {
+			record.text = enhancedText;
+			Object.assign(record, this.counts(enhancedText));
+		}
+
+		const saved = await this.transcriptionRepo.save(record);
+		return {
+			id: saved.id,
+			originalText: before,
+			enhancedText,
+			changesSummary,
+			provider: ai?.provider || null,
+			applied: apply,
+			transcription: saved,
+		};
+	}
+
+	async memorize(user: any, id: string, dto: MemorizeTranscriptionDto) {
+		const userId = String(user?.id || '');
+		const record = await this.transcriptionRepo.findOne({ where: { id, userId } });
+		if (!record) throw new NotFoundException('Transcription not found');
+
+		const source = String(
+			dto?.text ?? record.enhancedText ?? record.text ?? '',
+		).trim();
+		if (!source) throw new BadRequestException('Transcript text is required');
+
+		const locale = this.resolveLocale(dto?.locale, record.requestedLanguage, source);
+		const depth = dto?.depth || 'detailed';
+		const includeFlashcards = dto?.includeFlashcards !== false;
+
+		const system = `You are a study coach that turns speech transcripts into memorable, detailed notes for So7baFit.
+Expand unclear spoken ideas into clearer explanations WITHOUT inventing unsupported facts.
+Add helpful context, definitions, and study cues based on what the speaker actually talked about.
+${locale === 'ar' ? 'Respond in Arabic.' : 'Respond in clear English.'}
+Depth: ${depth}
+Reply with ONLY valid JSON (no markdown fences):
+{
+  "tldr": string,
+  "expandedNotes": string,
+  "keyPoints": string[],
+  "terms": [{ "term": string, "definition": string }],
+  "remember": string[],
+  "flashcards": [{ "front": string, "back": string, "difficulty": "easy"|"medium"|"hard" }],
+  "openQuestions": string[]
+}
+Rules:
+- expandedNotes should add more detail and clarity than the raw transcript
+- keep flashcards ${includeFlashcards ? 'useful (4-10 cards)' : 'as an empty array'}
+- do not invent URLs or fake citations`;
+
+		const userMessage = `Create a memorize pack from this transcript.\nDepth: ${depth}\nLocale: ${locale}\n\n--- TRANSCRIPT ---\n${source.slice(0, 100_000)}`;
+
+		const ai = await this.aiFree.chat(user, {
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: userMessage },
+			],
+			allowFallback: true,
+			useProjectKnowledge: false,
+		} as any);
+
+		const parsed = this.asObject(this.tryParseJson(ai?.reply));
+		const terms = Array.isArray(parsed.terms)
+			? parsed.terms
+					.map((item: any) => ({
+						term: String(item?.term || '').trim(),
+						definition: String(item?.definition || '').trim(),
+					}))
+					.filter(item => item.term && item.definition)
+					.slice(0, 20)
+			: [];
+		const flashcards = Array.isArray(parsed.flashcards)
+			? parsed.flashcards
+					.map((item: any) => ({
+						front: String(item?.front || '').trim(),
+						back: String(item?.back || '').trim(),
+						difficulty: ['easy', 'medium', 'hard'].includes(item?.difficulty)
+							? item.difficulty
+							: 'medium',
+					}))
+					.filter(item => item.front && item.back)
+					.slice(0, includeFlashcards ? 12 : 0)
+			: [];
+
+		const memorize = {
+			tldr: String(parsed.tldr || '').trim(),
+			expandedNotes: String(parsed.expandedNotes || '').trim(),
+			keyPoints: this.asStringArray(parsed.keyPoints, 12),
+			terms,
+			remember: this.asStringArray(parsed.remember, 12),
+			flashcards,
+			openQuestions: this.asStringArray(parsed.openQuestions, 10),
+			provider: ai?.provider || null,
+			model: ai?.actualModel || null,
+			createdAt: new Date().toISOString(),
+			depth,
+			locale,
+		};
+
+		if (!memorize.tldr && !memorize.expandedNotes) {
+			throw new BadGatewayException('AI did not return a usable memorize payload');
+		}
+
+		record.memorizePayload = memorize;
+		const saved = await this.transcriptionRepo.save(record);
+		return {
+			id: saved.id,
+			memorize,
+			transcription: saved,
+		};
 	}
 }

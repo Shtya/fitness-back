@@ -14,13 +14,30 @@ import {
 	isBrowserAlreadyRunningError,
 	resolveWppUserDataDir,
 } from '../utils/whatsapp-browser-profile';
-import { whatsAppTimestampToDate } from '../utils/whatsapp-time';
+import {
+	providerChatActivityMs,
+	providerChatActivityRank,
+	whatsAppTimestampToDate,
+} from '../utils/whatsapp-time';
 
 declare const require: any;
 
 function serializedId(value: any): string | null {
 	return value?._serialized || value?.id || (typeof value === 'string' ? value : null);
 }
+
+/** WA-JS states that no stored profile can recover from — a rescan is the only fix. */
+const SESSION_INVALID_STATES: Record<string, string> = {
+	UNPAIRED: 'WhatsApp removed this linked device. Scan the QR code again to reconnect.',
+	UNPAIRED_IDLE:
+		'WhatsApp removed this linked device. Scan the QR code again to reconnect.',
+	CONFLICT:
+		'This WhatsApp session was opened somewhere else and took over the link. Scan the QR code again.',
+	DEPRECATED_VERSION:
+		'WhatsApp Web rejected this client version. Scan the QR code again after the server updates.',
+	TOS_BLOCK: 'WhatsApp blocked this account (terms of service).',
+	SMB_TOS_BLOCK: 'WhatsApp blocked this business account (terms of service).',
+};
 
 function looksLikeMediaPayload(value: unknown) {
 	const text = String(value || '');
@@ -167,9 +184,20 @@ export class WppConnectProvider implements WhatsAppProvider {
 	private authReconcileTimer: ReturnType<typeof setInterval> | null = null;
 	private authReconcileStopTimer: ReturnType<typeof setTimeout> | null = null;
 	private statusChangeTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Distinguishes "never linked yet" from "was linked and lost the pairing". */
+	private everConnected = false;
+	/** Chromium emits UNPAIRED while tearing down; that must not look like a logout. */
+	private closing = false;
+	private sessionInvalidTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Pause getMessages storms when WA Store/.get is broken or still hydrating. */
 	private chatStoreCooldownUntil = 0;
 	private chatStoreFailStreak = 0;
+	/** wppconnect's deprecated wapi history loaders are gone from recent WA Web builds. */
+	private legacyHistoryApiGone = false;
+	/** Coalesce parallel getChats callers (bootstrap + reconcile + wait probes). */
+	private getChatsInFlight: Promise<any[]> | null = null;
+	/** Serialize history reads — parallel getMessages storms break ChatStore.get. */
+	private getMessagesChain: Promise<unknown> = Promise.resolve();
 
 	constructor(
 		private readonly accountId: string,
@@ -230,6 +258,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 		const normalizedPhone = phoneNumber ? String(phoneNumber).replace(/[^\d]/g, '') : '';
 		this.qr = null;
 		this.pairingCode = null;
+		this.closing = false;
+		this.clearSessionInvalidCheck();
 
 		this.state = 'connecting';
 		this.emit({ type: 'connection', status: this.state });
@@ -283,6 +313,18 @@ export class WppConnectProvider implements WhatsAppProvider {
 						String(status),
 					)
 				) {
+					// Ignore closes we initiated, and startup blips while Chromium is
+					// still launching — marking broken here caused reconnect storms.
+					if (this.closing) {
+						this.logger.debug(`WhatsApp statusFind: ${status} ignored (closing)`);
+						return;
+					}
+					if (this.state === 'connecting' || this.state === 'qr_pending') {
+						this.logger.warn(
+							`WhatsApp statusFind: ${status} during ${this.state} — ignored`,
+						);
+						return;
+					}
 					this.logger.warn(`WhatsApp statusFind: ${status}`);
 					void this.markSessionBroken(
 						`WhatsApp Web closed (${status}). Reconnect the account from the dashboard.`,
@@ -337,6 +379,25 @@ export class WppConnectProvider implements WhatsAppProvider {
 				this.emit({ type: 'message_status', providerMessageId, status });
 			}
 		});
+		if (typeof this.client.onPresenceChanged === 'function') {
+			this.client.onPresenceChanged((presence: any) => {
+				const chatId = serializedId(presence?.id) || String(presence?.id || '');
+				if (!chatId) return;
+				this.emit({
+					type: 'presence',
+					payload: {
+						chatId,
+						isOnline: Boolean(presence?.isOnline),
+						isGroup: Boolean(presence?.isGroup),
+						state: String(presence?.state || 'unavailable'),
+						t: Number(presence?.t) || Date.now(),
+						participants: Array.isArray(presence?.participants)
+							? presence.participants
+							: undefined,
+					},
+				});
+			});
+		}
 		if (typeof this.client.onReactionMessage === 'function') {
 			this.client.onReactionMessage((reaction: any) => {
 				const messageId = serializedId(reaction?.msgId);
@@ -377,6 +438,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 				this.markConnected();
 				return;
 			}
+			const invalidReason = SESSION_INVALID_STATES[value];
+			// UNPAIRED is also the normal state of a fresh profile waiting for its
+			// first scan, so only a session that was already live counts as lost.
+			if (invalidReason && this.everConnected && !this.closing) {
+				this.scheduleSessionInvalidCheck(invalidReason);
+				return;
+			}
 			// Phone often stays on SYNCING for a long time after auth; treat as usable.
 			if (['SYNCING', 'NORMAL', 'PAIRING'].includes(value)) {
 				void this.client
@@ -404,7 +472,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 				await this.markConnected();
 			}
 		} catch (error) {
-			this.logger.warn(`Could not probe WhatsApp auth state: ${String(error)}`);
+			const detail = String(error || '');
+			// WPP injects after page load — probing too early is normal noise.
+			if (/WPP is not defined/i.test(detail)) {
+				this.logger.debug(`WhatsApp auth probe waiting for WPP: ${detail}`);
+			} else {
+				this.logger.warn(`Could not probe WhatsApp auth state: ${detail}`);
+			}
 		}
 
 		// Continue login/sync in the background — never await this in connect().
@@ -530,7 +604,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 		if (!value || value === this.qr) return;
 		this.qr = value;
-		this.state = 'qr_pending';
+		this.enterQrPending();
 		this.emit({ type: 'qr', qr: value });
 		this.emit({ type: 'connection', status: this.state });
 	}
@@ -547,14 +621,27 @@ export class WppConnectProvider implements WhatsAppProvider {
 		const value = String(code || '').trim();
 		if (!value || value === this.pairingCode) return;
 		this.pairingCode = value;
-		this.state = 'qr_pending';
+		this.enterQrPending();
 		this.emit({ type: 'pairing_code', code: value });
 		this.emit({ type: 'connection', status: this.state });
+	}
+
+	/**
+	 * WhatsApp Web is offering a scan screen. It reports UNPAIRED while doing so,
+	 * which is correct rather than a lost pairing — wiping the profile here would
+	 * destroy the very QR the user is about to scan.
+	 */
+	private enterQrPending() {
+		this.state = 'qr_pending';
+		this.everConnected = false;
+		this.clearSessionInvalidCheck();
 	}
 
 	private async markConnected() {
 		if (this.state === 'connected') return;
 		this.clearChatStoreCooldown();
+		this.clearSessionInvalidCheck();
+		this.everConnected = true;
 		this.state = 'connected';
 		this.qr = null;
 		this.pairingCode = null;
@@ -584,6 +671,16 @@ export class WppConnectProvider implements WhatsAppProvider {
 		return /Store is not ready|Chat store is not ready|main UI still syncing|cooling down/i.test(
 			message,
 		);
+	}
+
+	/**
+	 * wppconnect still ships loadEarlierMessages / loadAndGetAllMessagesInChat, but
+	 * they call wapi's `loadEarlierMsgs`, which recent WhatsApp Web builds dropped.
+	 * Retrying them costs a 20s timeout per chat and buries the real failure in logs.
+	 */
+	static isLegacyHistoryApiGone(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error || '');
+		return /loadEarlierMsgs is not a function/i.test(message);
 	}
 
 	/** Per-chat WA-JS glitch (missing Chat.get / assertGetChat) — try next alias. */
@@ -644,7 +741,97 @@ export class WppConnectProvider implements WhatsAppProvider {
 		);
 	}
 
+	/** Fast probe: ChatStore has at least one loaded chat model. */
+	async isChatStoreHydrated(): Promise<boolean> {
+		const page = this.client?.page;
+		if (!page || this.state !== 'connected') return false;
+		try {
+			const count = await this.withTimeout(
+				page.evaluate(() => {
+					const Store = (window as any).Store;
+					try {
+						if (typeof Store?.Chat?.getModelsArray === 'function') {
+							return Store.Chat.getModelsArray()?.length || 0;
+						}
+						if (Store?.Chat?.models) {
+							const models = Store.Chat.models;
+							if (Array.isArray(models)) return models.length;
+							if (typeof models?.length === 'number') return models.length;
+						}
+					} catch {
+						return 0;
+					}
+					// Store.Chat existing with 0 models is NOT hydrated — treating it
+					// as ready caused 20–30s empty getMessages storms that crash Chromium.
+					return 0;
+				}),
+				3_000,
+				'isChatStoreHydrated',
+			);
+			return Number(count) > 0;
+		} catch {
+			return false;
+		}
+	}
+
+	private clearSessionInvalidCheck() {
+		if (!this.sessionInvalidTimer) return;
+		clearTimeout(this.sessionInvalidTimer);
+		this.sessionInvalidTimer = null;
+	}
+
+	/**
+	 * Wiping the profile is destructive, so never act on a single state event:
+	 * reconnects and shutdowns both flash UNPAIRED for a moment. Re-probe the live
+	 * page after a delay and only give up when it is still unauthenticated.
+	 */
+	private scheduleSessionInvalidCheck(reason: string) {
+		if (this.sessionInvalidTimer) return;
+		this.sessionInvalidTimer = setTimeout(async () => {
+			this.sessionInvalidTimer = null;
+			if (this.closing || !this.client || this.state === 'connected') return;
+			// A scan screen is already the recovery path — nothing left to wipe.
+			if (this.state === 'qr_pending' || this.qr || this.pairingCode) return;
+			try {
+				if (await this.client.isAuthenticated?.()) return;
+				const state = String((await this.client.getConnectionState?.()) || '');
+				if (state && !SESSION_INVALID_STATES[state]) return;
+			} catch {
+				// A dead page cannot prove the pairing is gone — leave the profile alone.
+				return;
+			}
+			await this.markSessionInvalid(reason);
+		}, 15_000);
+		this.sessionInvalidTimer.unref?.();
+	}
+
+	/** Pairing is gone for good — the caller wipes the profile and asks for a rescan. */
+	private async markSessionInvalid(reason: string) {
+		this.closing = true;
+		this.clearSessionInvalidCheck();
+		this.stopAuthReconciliation();
+		if (this.statusChangeTimer) {
+			clearTimeout(this.statusChangeTimer);
+			this.statusChangeTimer = null;
+		}
+		this.everConnected = false;
+		this.logger.error(`WhatsApp session invalidated for ${this.accountId}: ${reason}`);
+		try {
+			await this.client?.close?.();
+		} catch {
+			/* ignore close errors on a dead page */
+		}
+		this.client = null;
+		this.qr = null;
+		this.pairingCode = null;
+		this.state = 'error';
+		this.emit({ type: 'session_invalid', reason });
+	}
+
 	private async markSessionBroken(reason: string) {
+		if (this.closing && this.state === 'error') return;
+		this.closing = true;
+		this.clearSessionInvalidCheck();
 		this.stopAuthReconciliation();
 		if (this.statusChangeTimer) {
 			clearTimeout(this.statusChangeTimer);
@@ -681,6 +868,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async disconnect() {
+		this.closing = true;
+		this.clearSessionInvalidCheck();
 		this.stopAuthReconciliation();
 		if (this.statusChangeTimer) {
 			clearTimeout(this.statusChangeTimer);
@@ -744,11 +933,45 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 	}
 
+	/** WhatsApp orders the inbox by pinned first, then most recent activity. */
+	private static sortChatsByActivity(chats: any[]): any[] {
+		return [...chats].sort((a, b) => {
+			const pinned = Number(Boolean(b?.pin)) - Number(Boolean(a?.pin));
+			if (pinned) return pinned;
+			const aRank = providerChatActivityRank(a);
+			const bRank = providerChatActivityRank(b);
+			// Message-backed activity must win over metadata-only group `t` bumps
+			// so fresh links do not fill the sync window with silent groups.
+			if (aRank.hasMessage !== bRank.hasMessage) {
+				return aRank.hasMessage ? -1 : 1;
+			}
+			return bRank.ms - aRank.ms;
+		});
+	}
+
 	async getChats(limit = 50) {
 		if (this.state !== 'connected') {
 			throw new Error('WhatsApp chat store is not ready yet');
 		}
-		const count = Math.min(Math.max(Number(limit) || 50, 1), 200);
+		// Cap high enough for large inboxes; metadata sync is cheap vs message hydrate.
+		const count = Math.min(Math.max(Number(limit) || 50, 1), 1000);
+
+		// Bootstrap, waitForInboxReady, and 30s reconcile used to stampede listChats /
+		// getAllChats in parallel — ChatStore stays empty and every caller times out.
+		if (this.getChatsInFlight) {
+			const shared = await this.getChatsInFlight;
+			return WppConnectProvider.sortChatsByActivity(shared).slice(0, count);
+		}
+
+		this.getChatsInFlight = this.fetchChatsFromStore()
+			.finally(() => {
+				this.getChatsInFlight = null;
+			});
+		const chats = await this.getChatsInFlight;
+		return WppConnectProvider.sortChatsByActivity(chats).slice(0, count);
+	}
+
+	private async fetchChatsFromStore(): Promise<any[]> {
 		const withTimeout = async <T>(promise: Promise<T>, ms: number, label: string) => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			try {
@@ -769,60 +992,54 @@ export class WppConnectProvider implements WhatsAppProvider {
 		let lastError: unknown = new Error(
 			'Could not load chats from WhatsApp — chat list was empty after retries. The session may still be syncing; try again shortly.',
 		);
+		let sawEmptyStore = false;
 
-		// Prefer a bounded listChats call — getAllChats can hang forever on large inboxes.
-		for (let attempt = 1; attempt <= 5; attempt += 1) {
+		const tryListChats = async (options?: Record<string, unknown>) => {
 			const client = this.client;
 			if (!client || this.state !== 'connected') {
 				throw new Error('WhatsApp chat store is not ready yet');
 			}
-			if (typeof client.listChats !== 'function') break;
+			if (typeof client.listChats !== 'function') return null;
+			const listed = await withTimeout(
+				client.listChats(options || { ignoreGroupMetadata: true }),
+				12_000,
+				'listChats',
+			);
+			if (Array.isArray(listed) && listed.length) return listed;
+			if (Array.isArray(listed)) sawEmptyStore = true;
+			return null;
+		};
+
+		// Prefer listChats only. Never fall back to deprecated getAllChats — it
+		// stamps the renderer while ChatStore is empty and often ends in browserClose.
+		for (let attempt = 1; attempt <= 2; attempt += 1) {
 			try {
-				const listed = await withTimeout(
-					client.listChats({ count }),
-					25000,
-					'listChats',
-				);
-				if (Array.isArray(listed) && listed.length) return listed;
+				const listed =
+					(await tryListChats({ ignoreGroupMetadata: true })) ||
+					(await tryListChats({ count: 300 }));
+				if (listed?.length) return listed;
 				lastError = new Error('WhatsApp chat store is not ready yet');
+				if (Array.isArray(listed) || listed === null) sawEmptyStore = true;
 			} catch (error) {
 				lastError = error;
 				if (WppConnectProvider.isSessionDeadError(error)) {
 					await this.rethrowIfSessionDead('listChats', error);
 				}
 			}
-			if (attempt < 5) {
-				await new Promise((resolve) => setTimeout(resolve, 2000));
+			if (attempt < 2) {
+				await new Promise((resolve) => setTimeout(resolve, 1200));
 			}
 		}
 
-		for (let attempt = 1; attempt <= 3; attempt += 1) {
-			const client = this.client;
-			if (!client || this.state !== 'connected') {
-				throw new Error('WhatsApp chat store is not ready yet');
-			}
-			if (typeof client.getAllChats !== 'function') break;
-			try {
-				const chats =
-					(await withTimeout(client.getAllChats(), 20000, 'getAllChats')) || [];
-				if (Array.isArray(chats) && chats.length) {
-					return chats.slice(0, count);
-				}
-				lastError = new Error('WhatsApp chat store is not ready yet');
-			} catch (error) {
-				lastError = error;
-				this.logger.warn(
-					`getAllChats failed/timeout for ${this.accountId}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-				if (WppConnectProvider.isSessionDeadError(error)) {
-					await this.rethrowIfSessionDead('getAllChats', error);
-				}
-			}
-			if (attempt < 3) {
-				await new Promise((resolve) => setTimeout(resolve, 1500));
-			}
+		// MAIN can be NORMAL while ChatStore is still hydrating. Returning [] lets
+		// bootstrap/reconcile finish quietly so the UI can retry without error toasts.
+		const mainReady = await this.waitForWhatsAppMainReady(1_500);
+		if (mainReady || sawEmptyStore) {
+			this.logger.warn(
+				`getChats: MAIN ready but ChatStore still empty for ${this.accountId} — returning [] for retry`,
+			);
+			this.tripMainNotReadyBackoff('ChatStore empty during getChats');
+			return [];
 		}
 
 		throw lastError instanceof Error
@@ -850,6 +1067,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 			} catch (error) {
 				if (WppConnectProvider.isSessionDeadError(error)) throw error;
 				const detail = error instanceof Error ? error.message : String(error);
+				if (WppConnectProvider.isLegacyHistoryApiGone(error)) {
+					this.legacyHistoryApiGone = true;
+					this.logger.warn(
+						`${label} is unavailable on this WhatsApp Web build — skipping the deprecated history loaders from now on.`,
+					);
+					return fallback;
+				}
 				// Chat-not-found / undefined.get must not abort the whole hydrate path.
 				if (
 					WppConnectProvider.isChatNotFoundError(error) ||
@@ -857,7 +1081,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 					WppConnectProvider.isStoreBrokenError(error) ||
 					/timed out after/i.test(detail)
 				) {
-					this.logger.warn(`${label} soft-failed for ${this.accountId}: ${detail}`);
+					// Alias misses are expected while ChatStore keys on @lid — keep quiet.
+					if (WppConnectProvider.isChatNotFoundError(error)) {
+						this.logger.debug(`${label} soft-failed for ${this.accountId}: ${detail}`);
+					} else {
+						this.logger.warn(`${label} soft-failed for ${this.accountId}: ${detail}`);
+					}
 					return fallback;
 				}
 				this.logger.warn(`${label} soft-failed for ${this.accountId}: ${detail}`);
@@ -867,6 +1096,18 @@ export class WppConnectProvider implements WhatsAppProvider {
 
 		const viaClientGetMessages = async (id: string) => {
 			if (!this.client?.getMessages) return [];
+			// wa-js assertGetChat crashes when Store.Chat is missing — common for
+			// @lid / @g.us while the store is still hydrating. Skip the client path
+			// when we have a live page (page hydrate is safer). Keep client path for
+			// unit tests / mocks that have no Puppeteer page.
+			if (
+				this.client?.page &&
+				(id.endsWith('@lid') ||
+					id.endsWith('@hosted.lid') ||
+					id.endsWith('@g.us'))
+			) {
+				return [];
+			}
 			const messages = await softClientCall(
 				`getMessages(${id})`,
 				() =>
@@ -880,11 +1121,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 			return Array.isArray(messages) ? messages : [];
 		};
 
-		let messages = await viaClientGetMessages(target);
+		const preferPageFirst =
+			target.endsWith('@lid') ||
+			target.endsWith('@hosted.lid') ||
+			target.endsWith('@g.us');
+
+		let messages: any[] = [];
+		if (preferPageFirst) {
+			messages = await this.fetchMessagesViaPage(target, count, options);
+			if (messages.length) return messages;
+		}
+
+		messages = await viaClientGetMessages(target);
 		if (messages.length) return messages;
 
 		const resolved = (await this.ensureChatId(target)) || target;
 		if (resolved !== target) {
+			if (preferPageFirst) {
+				messages = await this.fetchMessagesViaPage(resolved, count, options);
+				if (messages.length) return messages;
+			}
 			messages = await viaClientGetMessages(resolved);
 			if (messages.length) return messages;
 		}
@@ -897,7 +1153,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 			if (messages.length) return messages;
 		}
 
-		if (typeof this.client.loadEarlierMessages === 'function') {
+		// Legacy loaders also go through assertGetChat — skip for LID/groups.
+		if (
+			!preferPageFirst &&
+			!this.legacyHistoryApiGone &&
+			typeof this.client.loadEarlierMessages === 'function'
+		) {
 			await softClientCall(
 				`loadEarlierMessages(${resolved})`,
 				() => this.client.loadEarlierMessages(resolved),
@@ -909,7 +1170,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 			if (messages.length) return messages;
 		}
 
-		if (typeof this.client.loadAndGetAllMessagesInChat === 'function') {
+		if (
+			!preferPageFirst &&
+			!this.legacyHistoryApiGone &&
+			typeof this.client.loadAndGetAllMessagesInChat === 'function'
+		) {
 			const all = await softClientCall(
 				`loadAndGetAllMessagesInChat(${resolved})`,
 				() => this.client.loadAndGetAllMessagesInChat(resolved, true, true),
@@ -918,7 +1183,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 			if (Array.isArray(all) && all.length) return all.slice(-count);
 		}
 
-		if (typeof this.client.getAllMessagesInChat === 'function') {
+		if (
+			!preferPageFirst &&
+			!this.legacyHistoryApiGone &&
+			typeof this.client.getAllMessagesInChat === 'function'
+		) {
 			const all = await softClientCall(
 				`getAllMessagesInChat(${resolved})`,
 				() => this.client.getAllMessagesInChat(resolved, true, false),
@@ -1038,10 +1307,13 @@ export class WppConnectProvider implements WhatsAppProvider {
 							/* ignore */
 						}
 
+						// Only call WPP.chat.getMessages when ChatStore exists —
+						// otherwise wa-js assertGetChat → undefined reading 'get'.
+						const chatStoreReady = Boolean(Store?.Chat?.get);
 						let fromApi: any[] = [];
 						const sid = asSerialized(chat) || id;
-						try {
-							if (typeof WPP?.chat?.getMessages === 'function') {
+						if (chatStoreReady && typeof WPP?.chat?.getMessages === 'function') {
+							try {
 								const opts: Record<string, unknown> = { count: limit };
 								if (cursor.before) {
 									opts.direction = 'before';
@@ -1051,14 +1323,24 @@ export class WppConnectProvider implements WhatsAppProvider {
 									opts.id = cursor.after;
 								}
 								fromApi = (await WPP.chat.getMessages(sid, opts)) || [];
+							} catch {
+								fromApi = [];
 							}
-						} catch {
-							fromApi = [];
 						}
 
 						try {
 							if (typeof chat?.msgs?.loadEarlierMsgs === 'function') {
 								await chat.msgs.loadEarlierMsgs();
+							} else if (
+								chatStoreReady &&
+								!fromApi.length &&
+								typeof WPP?.chat?.getMessages === 'function' &&
+								!cursor.before &&
+								!cursor.after
+							) {
+								// Recent WA Web builds removed loadEarlierMsgs; asking for the
+								// full history is what pulls a never-opened chat off the server.
+								fromApi = (await WPP.chat.getMessages(sid, { count: -1 })) || [];
 							}
 						} catch {
 							/* ignore */
@@ -1084,7 +1366,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 					count,
 					{ before: options.before, after: options.after },
 				),
-				30_000,
+				10_000,
 				`fetchMessagesViaPage(${target})`,
 			);
 			return Array.isArray(list) ? list : [];
@@ -1172,6 +1454,24 @@ export class WppConnectProvider implements WhatsAppProvider {
 			aliases?: string[];
 		} = {},
 	) {
+		const run = () => this.getMessagesExclusive(chatId, options);
+		const next = this.getMessagesChain.then(run, run);
+		this.getMessagesChain = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		return next;
+	}
+
+	private async getMessagesExclusive(
+		chatId: string,
+		options: {
+			limit?: number;
+			before?: string;
+			after?: string;
+			aliases?: string[];
+		} = {},
+	) {
 		if (this.state !== 'connected' || !this.client) {
 			throw new Error(
 				'WhatsApp account is not connected. Reconnect the account, then try again.',
@@ -1179,24 +1479,46 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 		this.assertChatStoreAvailable(`getMessages(${chatId})`);
 		// Prefer MAIN, but do not refuse forever when inbox list already works.
-		const mainReady = await this.waitForWhatsAppMainReady(8_000);
+		const mainReady = await this.waitForWhatsAppMainReady(2_000);
 		if (!mainReady) {
 			this.logger.warn(
 				`getMessages(${chatId}): isMainReady still false — attempting fetch anyway for ${this.accountId}`,
 			);
 		}
+		// Empty ChatStore → every alias fails with Chat not found / undefined.get.
+		// Fail fast so open-chat + UI retries are not drowned by a history stampede.
+		// Skip the probe when there is no Puppeteer page (unit tests / mocks).
+		if (this.client?.page) {
+			const storeHydrated = await this.isChatStoreHydrated();
+			if (!storeHydrated) {
+				this.tripMainNotReadyBackoff('ChatStore empty during getMessages');
+				this.logger.warn(
+					`getMessages(${chatId}): ChatStore empty for ${this.accountId} — returning []`,
+				);
+				return [];
+			}
+		}
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
 		let messages: any[] = [];
 		const chatIds = await this.resolveSendableChatIds(chatId);
+		const primary = String(chatId || '').trim();
+		const primaryUser = primary.includes('@') ? primary.split('@')[0] : '';
+		const isLid =
+			primary.endsWith('@lid') || primary.endsWith('@hosted.lid');
 		const aliasIds = (options.aliases || [])
 			.map((id) => String(id || '').trim())
-			.filter(Boolean);
-		// For @lid chats, try phone aliases early — MsgCollection is often keyed by @c.us.
-		const preferPhoneFirst =
-			String(chatId).endsWith('@lid') || String(chatId).endsWith('@hosted.lid');
-		const merged = preferPhoneFirst
-			? [...aliasIds, ...chatIds, String(chatId)]
-			: [...chatIds, ...aliasIds, String(chatId)];
+			.filter(Boolean)
+			.filter((id) => {
+				// LID numeric id stored as "phone" produced bogus @c.us candidates.
+				if (!isLid || !primaryUser) return true;
+				const user = id.includes('@') ? id.split('@')[0] : id;
+				if (user !== primaryUser) return true;
+				return !(id.endsWith('@c.us') || id.endsWith('@s.whatsapp.net'));
+			});
+		// Prefer the conversation's own JID (often @lid) before phone aliases.
+		// Phone-first caused Chat not found storms when ChatStore only had LID keys.
+		const isGroup = primary.endsWith('@g.us');
+		const merged = [...chatIds, primary, ...aliasIds];
 		const candidates = [...new Set(merged.filter(Boolean))];
 		const tried = new Set<string>();
 		let lastChatMissingError: unknown = null;
@@ -1208,7 +1530,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 					if (!current || tried.has(current)) continue;
 					tried.add(current);
 					try {
-						messages = await this.fetchMessagesForChat(current, count, options);
+						// For LID threads, page-hydrate every candidate (including phone
+						// aliases) — never fall through to client.getMessages on @c.us
+						// aliases (assertGetChat → Chat not found noise).
+						const isPhoneAlias =
+							current.endsWith('@c.us') || current.endsWith('@s.whatsapp.net');
+						const lidPhoneAliasOnly = isLid && isPhoneAlias;
+						if (
+							isLid ||
+							isGroup ||
+							current.endsWith('@lid') ||
+							current.endsWith('@hosted.lid') ||
+							current.endsWith('@g.us')
+						) {
+							messages = await this.fetchMessagesViaPage(current, count, options);
+							if (!messages.length && !lidPhoneAliasOnly) {
+								messages = await this.fetchMessagesForChat(current, count, options);
+							}
+						} else {
+							messages = await this.fetchMessagesForChat(current, count, options);
+						}
 						lastChatMissingError = null;
 						if (Array.isArray(messages) && messages.length) {
 							this.clearChatStoreCooldown();
@@ -1834,6 +2175,29 @@ export class WppConnectProvider implements WhatsAppProvider {
 			}
 		}
 		if (lastError) throw lastError;
+	}
+
+	async subscribePresence(chatId: string | string[]) {
+		if (!this.client || typeof this.client.subscribePresence !== 'function') return 0;
+		try {
+			return await this.client.subscribePresence(chatId);
+		} catch (error) {
+			this.logger.debug(
+				`subscribePresence failed for ${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return 0;
+		}
+	}
+
+	async unsubscribePresence(chatId: string | string[]) {
+		if (!this.client || typeof this.client.unsubscribePresence !== 'function') return 0;
+		try {
+			return await this.client.unsubscribePresence(chatId);
+		} catch {
+			return 0;
+		}
 	}
 
 	downloadMedia(providerMessageId: string) {

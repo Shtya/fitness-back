@@ -143,7 +143,7 @@ export class WhatsAppConversationsController {
 	syncChats(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
-		@Query('limit') limit = '100',
+		@Query('limit') limit = '500',
 	) {
 		return this.sync.syncChats(req.user, accountId, Number(limit));
 	}
@@ -174,8 +174,14 @@ export class WhatsAppConversationsController {
 		@Param('conversationId') conversationId: string,
 		@Query('before') before?: string,
 		@Query('limit') limit = '30',
+		@Query('live') live?: string,
 	) {
-		return this.sync.listMessages(req.user, conversationId, before, Number(limit));
+		// live=0|false skips the linked-device pull — used for previews and the
+		// initial DB paint before POST sync/latest does the heavy provider work.
+		const allowLivePull = !['0', 'false', 'no'].includes(String(live || '').toLowerCase());
+		return this.sync.listMessages(req.user, conversationId, before, Number(limit), {
+			allowLivePull,
+		});
 	}
 
 	@Put('conversations/:conversationId/messages/:messageId/reaction')

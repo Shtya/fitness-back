@@ -137,18 +137,22 @@ export class WhatsAppAccountsService {
 
 	async remove(user: User, accountId: string) {
 		const account = await this.accessService.assertAccountPermission(user, accountId, 'canManage');
+		// Kill Chromium, wipe the profile on disk, drop Redis locks and session rows
+		// BEFORE deleting the DB account — otherwise orphaned tokens keep conflicting.
 		await this.providers.destroySession(accountId, account.providerName);
 		await removeAccountMedia(accountId);
 		await this.accountRepo.manager.transaction(async manager => {
 			await manager.delete(WhatsAppAuditLog, { accountId });
+			await manager.delete(WhatsAppConnectionLog, { accountId });
 			await manager.delete(WhatsAppAccount, { id: accountId });
 		});
 		await this.audit.write({
 			actorUserId: user.id,
-			accountId,
+			accountId: null,
 			action: 'whatsapp.account.deleted',
 			targetType: 'WhatsAppAccount',
 			targetId: accountId,
+			metadata: { label: account.label },
 		});
 		return { ok: true };
 	}
@@ -163,7 +167,7 @@ export class WhatsAppAccountsService {
 		let canResyncNow = false;
 		if (provider?.getState() === 'connected') {
 			try {
-				const chats = await provider.getChats(100);
+		const chats = await provider.getChats(500);
 				canResyncNow = Array.isArray(chats) && chats.length > 0;
 			} catch {
 				canResyncNow = false;
