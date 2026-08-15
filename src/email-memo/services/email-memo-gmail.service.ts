@@ -30,6 +30,15 @@ export class EmailMemoGmailService {
 		private readonly connections: Repository<EmailMemoGmailConnection>,
 	) {}
 
+	private envRedirectUri() {
+		return gmailRedirectUri(
+			this.config.get<string>('GOOGLE_REDIRECT_URI') ||
+				this.config.get<string>('GOOGLE_REDIRECT_BASE_URL') ||
+				process.env.GOOGLE_REDIRECT_URI ||
+				process.env.GOOGLE_REDIRECT_BASE_URL,
+		);
+	}
+
 	private maskClientId(id: string) {
 		const value = String(id || '').trim();
 		if (value.length < 12) return value ? '••••' : '';
@@ -98,7 +107,7 @@ export class EmailMemoGmailService {
 			source: app.source,
 			clientIdMasked: app.clientId ? this.maskClientId(app.clientId) : '',
 			hasClientSecret: Boolean(app.clientSecret),
-			redirectUri: gmailRedirectUri(),
+			redirectUri: this.envRedirectUri(),
 			maxAccounts: EmailMemoGmailService.MAX_ACCOUNTS,
 		};
 	}
@@ -134,7 +143,7 @@ export class EmailMemoGmailService {
 			code: 'email-memo-credential-test',
 			client_id: app.clientId,
 			client_secret: app.clientSecret,
-			redirect_uri: gmailRedirectUri(),
+			redirect_uri: this.envRedirectUri(),
 			grant_type: 'authorization_code',
 		});
 		const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -149,7 +158,7 @@ export class EmailMemoGmailService {
 		}
 		if (error === 'redirect_uri_mismatch') {
 			throw new BadRequestException(
-				`Google rejected the redirect URI. Add this exact URI to the OAuth client: ${gmailRedirectUri()}`,
+				`Google rejected the redirect URI. Add this exact URI to the OAuth client: ${this.envRedirectUri()}`,
 			);
 		}
 		const rows = await this.listForUser(userId);
@@ -210,7 +219,7 @@ export class EmailMemoGmailService {
 		return Boolean(app.clientId && app.clientSecret);
 	}
 
-	async authUrl(userId: string, locale = 'en', connectionId?: string, returnOrigin?: string) {
+	async authUrl(userId: string, locale = 'en', connectionId?: string, returnOrigin?: string, popup = false) {
 		const app = await this.resolveOAuthApp(userId);
 		if (!app.clientId || !app.clientSecret) {
 			throw new BadRequestException(
@@ -230,13 +239,22 @@ export class EmailMemoGmailService {
 			this.config.get<string>('FRONTEND_URL'),
 		);
 		const row = await this.resolveAuthTarget(userId, connectionId);
+		const redirectUri = this.envRedirectUri();
 		const state = this.jwt.sign(
-			{ purpose: 'email-memo-gmail', userId, locale, connectionId: row.id, returnOrigin: frontendOrigin },
+			{
+				purpose: 'email-memo-gmail',
+				userId,
+				locale,
+				connectionId: row.id,
+				returnOrigin: frontendOrigin,
+				redirectUri,
+				popup: Boolean(popup),
+			},
 			{ expiresIn: '15m' },
 		);
 		const params = new URLSearchParams({
 			client_id: app.clientId,
-			redirect_uri: gmailRedirectUri(),
+			redirect_uri: redirectUri,
 			response_type: 'code',
 			scope: GMAIL_SCOPES,
 			access_type: 'offline',
@@ -274,11 +292,18 @@ export class EmailMemoGmailService {
 		);
 	}
 
-	frontendRedirect(locale: string, status: 'connected' | 'error', error?: string, returnOrigin?: string) {
+	frontendRedirect(
+		locale: string,
+		status: 'connected' | 'error',
+		error?: string,
+		returnOrigin?: string,
+		popup?: boolean,
+	) {
 		const origin = resolveFrontendOrigin(returnOrigin, this.config.get<string>('FRONTEND_URL'));
 		const loc = ['en', 'ar'].includes(locale) ? locale : 'en';
 		const query = new URLSearchParams({ gmail: status });
 		if (error) query.set('error', error.slice(0, 180));
+		if (popup) query.set('popup', '1');
 		return `${origin}/${loc}/dashboard/email-memo?${query.toString()}`;
 	}
 
@@ -292,7 +317,7 @@ export class EmailMemoGmailService {
 		if (payload?.purpose !== 'email-memo-gmail' || !payload?.userId) {
 			throw new BadRequestException('Invalid OAuth state');
 		}
-		const tokens = await this.exchangeCode(code, payload.userId);
+		const tokens = await this.exchangeCode(code, payload.userId, payload.redirectUri);
 		const profile = await this.gmailGet(tokens.accessToken, '/gmail/v1/users/me/profile');
 		const email = String(profile?.emailAddress || '').trim().toLowerCase();
 		if (!email) throw new BadRequestException('Gmail profile did not return an email address');
@@ -330,6 +355,7 @@ export class EmailMemoGmailService {
 			locale: payload.locale || 'en',
 			email,
 			returnOrigin: payload.returnOrigin,
+			popup: Boolean(payload.popup),
 		};
 	}
 
@@ -415,6 +441,26 @@ export class EmailMemoGmailService {
 		}
 	}
 
+	async listInboxMessageIds(
+		connection: EmailMemoGmailConnection,
+		opts: { max?: number; pageToken?: string; q?: string } = {},
+	) {
+		const max = Math.min(Math.max(Number(opts.max) || 50, 1), 100);
+		const qs = new URLSearchParams({
+			maxResults: String(max),
+			q: String(opts.q || 'in:inbox'),
+		});
+		if (opts.pageToken) qs.set('pageToken', String(opts.pageToken));
+		const data = await this.authedRequest(connection, `/gmail/v1/users/me/messages?${qs.toString()}`);
+		return {
+			messageIds: (data?.messages || [])
+				.map((item: { id?: string }) => String(item?.id || '').trim())
+				.filter(Boolean),
+			nextPageToken: data?.nextPageToken || null,
+			resultSizeEstimate: Number(data?.resultSizeEstimate || 0),
+		};
+	}
+
 	async getMessage(connection: EmailMemoGmailConnection, gmailMessageId: string) {
 		const raw = await this.authedRequest(
 			connection,
@@ -467,7 +513,7 @@ export class EmailMemoGmailService {
 		await this.connections.save(connection);
 	}
 
-	private async exchangeCode(code: string, userId: string): Promise<GmailOAuthTokens> {
+	private async exchangeCode(code: string, userId: string, redirectUri?: string): Promise<GmailOAuthTokens> {
 		const app = await this.resolveOAuthApp(userId);
 		if (!app.clientId || !app.clientSecret) {
 			throw new BadRequestException('Google OAuth app is not configured');
@@ -476,7 +522,7 @@ export class EmailMemoGmailService {
 			code,
 			client_id: app.clientId,
 			client_secret: app.clientSecret,
-			redirect_uri: gmailRedirectUri(),
+			redirect_uri: redirectUri || this.envRedirectUri(),
 			grant_type: 'authorization_code',
 		});
 		const res = await fetch('https://oauth2.googleapis.com/token', {

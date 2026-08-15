@@ -28,6 +28,21 @@ export class UpdateTranscriptionDto {
 	text: string;
 }
 
+export class CreateTextTranscriptionDto {
+	@IsString()
+	@MaxLength(2_000_000)
+	text: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(255)
+	originalFileName?: string;
+
+	@IsOptional()
+	@IsIn(['auto', 'ar', 'en'])
+	language?: 'auto' | 'ar' | 'en';
+}
+
 export class SaveProviderCredentialDto {
 	@IsString()
 	@MinLength(20)
@@ -71,4 +86,15 @@ export class MemorizeTranscriptionDto {
 	@IsOptional()
 	@IsBoolean()
 	includeFlashcards?: boolean;
+}
+
+export class SummarizeTranscriptionDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(2_000_000)
+	text?: string;
+
+	@IsOptional()
+	@IsIn(['ar', 'en', 'auto'])
+	locale?: 'ar' | 'en' | 'auto';
 }

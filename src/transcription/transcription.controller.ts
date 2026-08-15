@@ -27,6 +27,8 @@ import {
 	UpdateTranscriptionDto,
 	EnhanceTranscriptionDto,
 	MemorizeTranscriptionDto,
+	CreateTextTranscriptionDto,
+	SummarizeTranscriptionDto,
 } from './dto/transcription.dto';
 import { AudioUpload, TranscriptionService } from './transcription.service';
 
@@ -83,6 +85,11 @@ export class TranscriptionController {
 		return this.transcriptionService.transcribe(req.user.id, file, dto);
 	}
 
+	@Post('from-text')
+	createFromText(@Req() req: any, @Body() dto: CreateTextTranscriptionDto) {
+		return this.transcriptionService.createFromText(req.user.id, dto);
+	}
+
 	@Get()
 	list(@Req() req: any, @Query('limit') limit?: string) {
 		return this.transcriptionService.list(req.user.id, Number(limit));
@@ -109,6 +116,15 @@ export class TranscriptionController {
 		@Body() dto: MemorizeTranscriptionDto,
 	) {
 		return this.transcriptionService.memorize(req.user, id, dto || {});
+	}
+
+	@Post(':id/summarize')
+	summarize(
+		@Req() req: any,
+		@Param('id') id: string,
+		@Body() dto: SummarizeTranscriptionDto,
+	) {
+		return this.transcriptionService.summarize(req.user, id, dto || {});
 	}
 
 	@Delete(':id')

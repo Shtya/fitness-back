@@ -19,9 +19,11 @@ import { unlink } from 'fs/promises';
 import { Repository } from 'typeorm';
 import { AiFreeService } from '../ai-free/ai-free.service';
 import {
+	CreateTextTranscriptionDto,
 	CreateTranscriptionDto,
 	EnhanceTranscriptionDto,
 	MemorizeTranscriptionDto,
+	SummarizeTranscriptionDto,
 } from './dto/transcription.dto';
 
 type WhisperResponse = {
@@ -433,6 +435,35 @@ export class TranscriptionService {
 		return this.transcriptionRepo.save(record);
 	}
 
+	async createFromText(userId: string, dto: CreateTextTranscriptionDto) {
+		const text = String(dto?.text || '').trim();
+		if (!text) throw new BadRequestException('text is required');
+		if (text.length > 2_000_000) {
+			throw new BadRequestException('Transcript text is too long');
+		}
+		const language = dto?.language || 'auto';
+		if (!['auto', 'ar', 'en'].includes(language)) {
+			throw new BadRequestException('language must be auto, ar, or en');
+		}
+		const originalFileName = String(dto?.originalFileName || 'whatsapp-selection.txt').slice(
+			0,
+			255,
+		);
+		const record = this.transcriptionRepo.create({
+			userId,
+			originalFileName,
+			provider: 'local',
+			text,
+			requestedLanguage: language,
+			detectedLanguage: null,
+			customVocabulary: null,
+			durationSeconds: 0,
+			processingTimeSeconds: 0,
+			...this.counts(text),
+		});
+		return this.transcriptionRepo.save(record);
+	}
+
 	async list(userId: string, limit = 25) {
 		const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
 		return this.transcriptionRepo.find({
@@ -675,6 +706,75 @@ Rules:
 		return {
 			id: saved.id,
 			memorize,
+			transcription: saved,
+		};
+	}
+
+	async summarize(user: any, id: string, dto: SummarizeTranscriptionDto) {
+		const userId = String(user?.id || '');
+		const record = await this.transcriptionRepo.findOne({ where: { id, userId } });
+		if (!record) throw new NotFoundException('Transcription not found');
+
+		const source = String(dto?.text ?? record.enhancedText ?? record.text ?? '').trim();
+		if (!source) throw new BadRequestException('Transcript text is required');
+		if (source.length > 2_000_000) {
+			throw new BadRequestException('Transcript text is too long');
+		}
+
+		const locale = this.resolveLocale(dto?.locale, record.requestedLanguage, source);
+		const system = `You are a CRM assistant for So7baFit WhatsApp conversations.
+Read a timeline of text tickets and voice transcripts. Infer what the person is asking for and summarize it.
+Do NOT invent facts, products, prices, dates, or names that are not supported by the source.
+Keep mixed Arabic/English as written.
+${locale === 'ar' ? 'Respond in Arabic.' : 'Respond in clear English.'}
+Reply with ONLY valid JSON (no markdown fences):
+{
+  "tldr": string,
+  "request": string,
+  "context": string,
+  "asks": string[],
+  "nextSteps": string[]
+}
+Rules:
+- tldr: 1-2 sentences
+- request: the concrete ask / ticket
+- context: useful surrounding detail
+- asks: distinct requests (max 8)
+- nextSteps: practical follow-ups (max 6), not fabricated commitments`;
+
+		const userMessage = `Summarize this WhatsApp selection and extract the request.\nLocale: ${locale}\n\n--- TIMELINE ---\n${source.slice(0, 100_000)}`;
+
+		const ai = await this.aiFree.chat(user, {
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: userMessage },
+			],
+			allowFallback: true,
+			useProjectKnowledge: false,
+		} as any);
+
+		const parsed = this.asObject(this.tryParseJson(ai?.reply));
+		const summary = {
+			tldr: String(parsed.tldr || '').trim(),
+			request: String(parsed.request || '').trim(),
+			context: String(parsed.context || '').trim(),
+			asks: this.asStringArray(parsed.asks, 8),
+			nextSteps: this.asStringArray(parsed.nextSteps, 6),
+			provider: ai?.provider || null,
+			model: ai?.actualModel || null,
+			createdAt: new Date().toISOString(),
+			locale,
+		};
+
+		if (!summary.tldr && !summary.request) {
+			throw new BadGatewayException('AI did not return a usable summary');
+		}
+
+		record.summaryPayload = summary;
+		const saved = await this.transcriptionRepo.save(record);
+		return {
+			id: saved.id,
+			summary,
 			transcription: saved,
 		};
 	}

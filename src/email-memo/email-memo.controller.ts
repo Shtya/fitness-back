@@ -15,7 +15,16 @@ import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../../entities/global.entity';
-import { UpdateEmailMemoSettingsDto, SaveGmailCredentialsDto, EmailMemoSenderDto } from './dto/email-memo.dto';
+import {
+	UpdateEmailMemoSettingsDto,
+	SaveGmailCredentialsDto,
+	EmailMemoSenderDto,
+	ImportGmailInboxDto,
+	SendNowEmailMemoDto,
+	ConnectEmailMemoWhatsAppDto,
+	DisconnectEmailMemoWhatsAppDto,
+	UseEmailMemoWhatsAppDto,
+} from './dto/email-memo.dto';
 import { EmailMemoGmailService } from './services/email-memo-gmail.service';
 import { EmailMemoService } from './services/email-memo.service';
 import { EmailMemoWhatsAppService } from './services/email-memo-whatsapp.service';
@@ -47,6 +56,7 @@ export class EmailMemoController {
 		@Query('locale') locale?: string,
 		@Query('connectionId') connectionId?: string,
 		@Query('returnOrigin') returnOrigin?: string,
+		@Query('popup') popup?: string,
 	) {
 		return {
 			url: await this.service.gmailAuthUrl(
@@ -54,6 +64,7 @@ export class EmailMemoController {
 				locale,
 				connectionId,
 				returnOrigin || req.headers?.origin,
+				popup === '1' || popup === 'true',
 			),
 		};
 	}
@@ -87,16 +98,22 @@ export class EmailMemoController {
 		@Res() res: Response,
 	) {
 		if (error || !code) {
-			return res.redirect(this.gmail.frontendRedirect('en', 'error', error || 'Missing code'));
+			return res.redirect(this.gmail.frontendRedirect('en', 'error', error || 'Missing code', undefined, true));
 		}
 		try {
 			const result = await this.gmail.handleCallback(code, state);
 			return res.redirect(
-				this.gmail.frontendRedirect(result.locale, 'connected', undefined, result.returnOrigin),
+				this.gmail.frontendRedirect(
+					result.locale,
+					'connected',
+					undefined,
+					result.returnOrigin,
+					result.popup,
+				),
 			);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Gmail connect failed';
-			return res.redirect(this.gmail.frontendRedirect('en', 'error', message));
+			return res.redirect(this.gmail.frontendRedirect('en', 'error', message, undefined, true));
 		}
 	}
 
@@ -128,6 +145,28 @@ export class EmailMemoController {
 		return this.service.syncGmail(req.user.id, id);
 	}
 
+	@Post('gmail/import')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	importInbox(@Req() req: any, @Body() dto: ImportGmailInboxDto) {
+		return this.service.importInbox(req.user.id, {
+			connectionId: dto.connectionId,
+			pageToken: dto.pageToken,
+			limit: dto.limit,
+		});
+	}
+
+	@Post('gmail/accounts/:id/import')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	importInboxAccount(@Req() req: any, @Param('id') id: string, @Body() dto: ImportGmailInboxDto) {
+		return this.service.importInbox(req.user.id, {
+			connectionId: id,
+			pageToken: dto.pageToken,
+			limit: dto.limit,
+		});
+	}
+
 	@Get('senders')
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(...ROLES)
@@ -152,8 +191,8 @@ export class EmailMemoController {
 	@Post('whatsapp/connect')
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(...ROLES)
-	connectWhatsApp(@Req() req: any) {
-		return this.whatsapp.connect(req.user.id);
+	connectWhatsApp(@Req() req: any, @Body() dto: ConnectEmailMemoWhatsAppDto) {
+		return this.whatsapp.connect(req.user.id, dto || {});
 	}
 
 	@Get('whatsapp/qr')
@@ -173,8 +212,15 @@ export class EmailMemoController {
 	@Post('whatsapp/disconnect')
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(...ROLES)
-	disconnectWhatsApp(@Req() req: any) {
-		return this.whatsapp.disconnect(req.user.id, true);
+	disconnectWhatsApp(@Req() req: any, @Body() dto: DisconnectEmailMemoWhatsAppDto) {
+		return this.whatsapp.disconnect(req.user.id, true, dto?.accountId);
+	}
+
+	@Post('whatsapp/use')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	useWhatsApp(@Req() req: any, @Body() dto: UseEmailMemoWhatsAppDto) {
+		return this.whatsapp.useAccount(req.user.id, dto.accountId);
 	}
 
 	@Post('whatsapp/test')
@@ -191,11 +237,32 @@ export class EmailMemoController {
 		return { ok: true, ...sent };
 	}
 
+	@Post('send-now')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	sendNow(@Req() req: any, @Body() dto: SendNowEmailMemoDto) {
+		return this.service.sendNow(req.user.id, {
+			ids: dto.ids,
+			limit: dto.limit,
+		});
+	}
+
 	@Get('messages')
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(...ROLES)
-	messages(@Req() req: any, @Query('limit') limit?: string) {
-		return this.service.listMessages(req.user.id, Number(limit) || 40);
+	messages(
+		@Req() req: any,
+		@Query('limit') limit?: string,
+		@Query('sender') sender?: string,
+		@Query('inbox') inbox?: string,
+		@Query('q') q?: string,
+	) {
+		return this.service.listMessages(req.user.id, {
+			limit: Number(limit) || 80,
+			sender,
+			inbox,
+			q,
+		});
 	}
 
 	@Get('messages/:id')

@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import {
 	EmailMemoAiMemo,
 	EmailMemoDeliveryStatus,
@@ -19,8 +19,11 @@ import { EmailMemoWhatsAppService } from './email-memo-whatsapp.service';
 import { EmailMemoGateway } from '../email-memo.gateway';
 import {
 	ExtractedGmailMessage,
+	gmailAfterDate,
 	isBlockedGmailMessage,
+	isSenderExcluded,
 	looksLikeNewsletter,
+	startOfZonedDay,
 } from '../utils/email-memo.utils';
 
 const PRIORITY_RANK: Record<string, number> = { low: 1, medium: 2, high: 3 };
@@ -74,6 +77,43 @@ export class EmailMemoProcessorService {
 		return { queued: messageIds.length };
 	}
 
+	async importInbox(
+		connection: EmailMemoGmailConnection,
+		opts: { pageToken?: string; max?: number; q?: string; process?: boolean } = {},
+	) {
+		const listed = await this.gmail.listInboxMessageIds(connection, {
+			max: opts.max,
+			pageToken: opts.pageToken,
+			q: opts.q,
+		});
+		let imported = 0;
+		const ids = listed.messageIds;
+		let cursor = 0;
+		const process = opts.process !== false;
+		const workers = Array.from({ length: Math.min(3, Math.max(1, ids.length)) }, async () => {
+			while (cursor < ids.length) {
+				const messageId = ids[cursor];
+				cursor += 1;
+				try {
+					await this.ingestMessage(connection, messageId, { process });
+					imported += 1;
+				} catch (error) {
+					this.logger.warn(
+						`Inbox import failed for ${messageId}: ${error instanceof Error ? error.message : error}`,
+					);
+				}
+			}
+		});
+		await Promise.all(workers);
+		return {
+			imported,
+			listed: ids.length,
+			nextPageToken: listed.nextPageToken,
+			hasMore: Boolean(listed.nextPageToken),
+			inboxEstimate: listed.resultSizeEstimate,
+		};
+	}
+
 	async handlePubSub(emailAddress: string, historyId?: string) {
 		const connection = await this.gmail.findByAddress(emailAddress);
 		if (!connection) return { ok: true, ignored: true };
@@ -110,7 +150,11 @@ export class EmailMemoProcessorService {
 		}
 	}
 
-	private async ingestMessage(connection: EmailMemoGmailConnection, gmailMessageId: string) {
+	private async ingestMessage(
+		connection: EmailMemoGmailConnection,
+		gmailMessageId: string,
+		opts: { process?: boolean } = {},
+	) {
 		const existing = await this.messages.findOne({
 			where: { gmailConnectionId: connection.id, gmailMessageId },
 		});
@@ -175,6 +219,8 @@ export class EmailMemoProcessorService {
 			return;
 		}
 
+		if (opts.process === false) return;
+
 		await this.processPipeline(row, settings);
 	}
 
@@ -202,11 +248,7 @@ export class EmailMemoProcessorService {
 		}
 		const blob = `${extracted.senderEmail} ${extracted.senderName} ${extracted.subject}`.toLowerCase();
 		const senderEmail = String(extracted.senderEmail || '').trim().toLowerCase();
-		if ((settings.senderExclude || []).some((value) => {
-			const needle = String(value || '').trim().toLowerCase();
-			if (!needle) return false;
-			return senderEmail === needle || blob.includes(needle);
-		})) return 'excluded_sender';
+		if (isSenderExcluded(senderEmail, settings.senderExclude || [])) return 'excluded_sender';
 		if (settings.senderInclude?.length && !matchList(settings.senderInclude, blob)) {
 			return 'sender_mismatch';
 		}
@@ -234,64 +276,86 @@ export class EmailMemoProcessorService {
 		return true;
 	}
 
-	async processPipeline(row: EmailMemoGmailMessage, settings?: EmailMemoNotificationSettings) {
-		const cfg = settings || (await this.settings.getOrCreate(row.userId));
+	async ensureMemo(row: EmailMemoGmailMessage, settings: EmailMemoNotificationSettings) {
 		row.status = EmailMemoMessageStatus.PROCESSING;
-		row.attemptCount += 1;
+		row.errorMessage = null;
+		await this.messages.save(row);
+		this.gateway.emitToUser(row.userId, 'email-memo:message', {
+			id: row.id,
+			status: row.status,
+			subject: row.subject,
+		});
+
+		let memo = await this.memos.findOne({ where: { gmailMessageId: row.id } });
+		if (!memo) {
+			const generated = await this.ai.generateMemo({
+				settings,
+				userId: row.userId,
+				senderName: row.senderName || '',
+				senderEmail: row.senderEmail || '',
+				subject: row.subject || '',
+				bodyText: row.bodyText || '',
+				receivedAt: row.receivedAt,
+			});
+			await this.bumpUsage(row.userId, 'ai_requests');
+			await this.bumpUsage(row.userId, 'emails_processed');
+			const inbox = (await this.gmail.getConnectionById(row.gmailConnectionId))?.gmailAddress || null;
+			const formatted = this.ai.formatWhatsApp({
+				settings,
+				fromLabel: generated.fromLabel,
+				subjectLabel: generated.subjectLabel,
+				memoText: generated.memoText,
+				actionText: generated.actionText,
+				deadline: generated.deadline,
+				gmailUrl: row.gmailUrl,
+				inboxLabel: inbox,
+			});
+			memo = await this.memos.save(
+				this.memos.create({
+					userId: row.userId,
+					gmailMessageId: row.id,
+					provider: generated.provider,
+					model: generated.model,
+					memoText: generated.memoText,
+					actionText: generated.actionText,
+					priority: generated.priority,
+					deadline: generated.deadline,
+					formattedMessage: formatted,
+					promptVersion: 'v2',
+				}),
+			);
+		}
+
+		row.status = EmailMemoMessageStatus.AI_COMPLETED;
+		row.skipReason = null;
+		await this.messages.save(row);
+		this.gateway.emitToUser(row.userId, 'email-memo:message', {
+			id: row.id,
+			status: row.status,
+			subject: row.subject,
+		});
+		return memo;
+	}
+
+	async processPipeline(
+		row: EmailMemoGmailMessage,
+		settings?: EmailMemoNotificationSettings,
+		opts: { forceSend?: boolean } = {},
+	) {
+		const cfg = settings || (await this.settings.getOrCreate(row.userId));
+		row.attemptCount = (Number(row.attemptCount) || 0) + 1;
 		row.errorMessage = null;
 		await this.messages.save(row);
 
 		try {
-			let memo = await this.memos.findOne({ where: { gmailMessageId: row.id } });
-			if (!memo) {
-				const generated = await this.ai.generateMemo({
-					settings: cfg,
-					userId: row.userId,
-					senderName: row.senderName || '',
-					senderEmail: row.senderEmail || '',
-					subject: row.subject || '',
-					bodyText: row.bodyText || '',
-					receivedAt: row.receivedAt,
-				});
-				await this.bumpUsage(row.userId, 'ai_requests');
-				await this.bumpUsage(row.userId, 'emails_processed');
-				const inbox = (await this.gmail.getConnectionById(row.gmailConnectionId))?.gmailAddress || null;
-				const formatted = this.ai.formatWhatsApp({
-					settings: cfg,
-					fromLabel: generated.fromLabel,
-					subjectLabel: generated.subjectLabel,
-					memoText: generated.memoText,
-					actionText: generated.actionText,
-					deadline: generated.deadline,
-					gmailUrl: row.gmailUrl,
-					inboxLabel: inbox,
-				});
-				memo = await this.memos.save(
-					this.memos.create({
-						userId: row.userId,
-						gmailMessageId: row.id,
-						provider: generated.provider,
-						model: generated.model,
-						memoText: generated.memoText,
-						actionText: generated.actionText,
-						priority: generated.priority,
-						deadline: generated.deadline,
-						formattedMessage: formatted,
-						promptVersion: 'v2',
-					}),
-				);
-			}
-
-			row.status = EmailMemoMessageStatus.AI_COMPLETED;
-			await this.messages.save(row);
-			this.gateway.emitToUser(row.userId, 'email-memo:message', {
-				id: row.id,
-				status: row.status,
-			});
+			const memo = await this.ensureMemo(row, cfg);
 
 			const minRank = PRIORITY_RANK[cfg.minPriority] || 1;
 			const memoRank = PRIORITY_RANK[memo.priority || 'medium'] || 2;
-			if (memoRank < minRank || (cfg.onlyImportant && (memo.priority || '') !== 'high')) {
+			if (
+				!opts.forceSend &&
+				(memoRank < minRank || (cfg.onlyImportant && (memo.priority || '') !== 'high'))
+			) {
 				row.status = EmailMemoMessageStatus.SKIPPED;
 				row.skipReason = 'priority';
 				row.processedAt = new Date();
@@ -299,13 +363,13 @@ export class EmailMemoProcessorService {
 				return;
 			}
 
-			if (!cfg.whatsappEnabled) {
+			if (!cfg.whatsappEnabled && !opts.forceSend) {
 				row.processedAt = new Date();
 				await this.messages.save(row);
 				return;
 			}
 
-			if (cfg.notificationMode !== 'immediate') {
+			if (!opts.forceSend && cfg.notificationMode !== 'immediate') {
 				row.sendAfter =
 					cfg.notificationMode === 'batch30'
 						? new Date(Date.now() + 30 * 60 * 1000)
@@ -358,6 +422,7 @@ export class EmailMemoProcessorService {
 		row.status = EmailMemoMessageStatus.SENT;
 		row.processedAt = new Date();
 		row.errorMessage = null;
+		row.skipReason = null;
 		row.nextRetryAt = null;
 		await this.messages.save(row);
 		await this.bumpUsage(row.userId, 'whatsapp_sent');
@@ -454,10 +519,21 @@ export class EmailMemoProcessorService {
 	private async bumpUsage(userId: string, field: 'emails_processed' | 'ai_requests' | 'whatsapp_sent') {
 		const day = utcDay();
 		let row = await this.usage.findOne({ where: { userId, day } });
-		if (!row) row = this.usage.create({ userId, day });
-		if (field === 'emails_processed') row.emailsProcessed += 1;
-		if (field === 'ai_requests') row.aiRequests += 1;
-		if (field === 'whatsapp_sent') row.whatsappSent += 1;
+		if (!row) {
+			row = this.usage.create({
+				userId,
+				day,
+				emailsProcessed: 0,
+				aiRequests: 0,
+				whatsappSent: 0,
+			});
+		}
+		row.emailsProcessed = Math.max(0, Number(row.emailsProcessed) || 0);
+		row.aiRequests = Math.max(0, Number(row.aiRequests) || 0);
+		row.whatsappSent = Math.max(0, Number(row.whatsappSent) || 0);
+		if (field === 'emails_processed') row.emailsProcessed = row.emailsProcessed + 1;
+		if (field === 'ai_requests') row.aiRequests = row.aiRequests + 1;
+		if (field === 'whatsapp_sent') row.whatsappSent = row.whatsappSent + 1;
 		await this.usage.save(row);
 	}
 
@@ -479,5 +555,168 @@ export class EmailMemoProcessorService {
 				meta: meta || null,
 			}),
 		);
+	}
+
+	async sendNow(userId: string, opts: { ids?: string[]; limit?: number } = {}) {
+		const linked = await this.whatsapp.getConnection(userId);
+		if (!linked.connected) throw new BadRequestException('WhatsApp is not connected');
+		const settings = await this.settings.getOrCreate(userId);
+		const take = Math.min(Math.max(Number(opts.limit) || 30, 1), 40);
+		const ids = (opts.ids || []).map((id) => String(id || '').trim()).filter(Boolean).slice(0, 40);
+
+		this.emitSendProgress(userId, { phase: 'collect', current: 0, total: 0 });
+		const connections = await this.gmail.listConnectedForUser(userId);
+		for (const connection of connections) {
+			try {
+				await this.importInbox(connection, {
+					max: 40,
+					q: `in:inbox after:${gmailAfterDate()}`,
+					process: false,
+				});
+			} catch (error) {
+				this.logger.warn(
+					`Send now import failed for ${connection.id}: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		}
+
+		const loaded = ids.length
+			? await this.messages.find({ where: { userId, id: In(ids) }, order: { receivedAt: 'DESC' } })
+			: await this.messages.find({
+					where: {
+						userId,
+						status: Not(EmailMemoMessageStatus.SENT),
+						receivedAt: MoreThanOrEqual(startOfZonedDay()),
+					},
+					order: { receivedAt: 'DESC' },
+					take: 80,
+				});
+
+		let sent = 0;
+		let failed = 0;
+		let skipped = 0;
+		const eligible: EmailMemoGmailMessage[] = [];
+		for (const row of loaded) {
+			if (row.status === EmailMemoMessageStatus.SENT) {
+				skipped += 1;
+				continue;
+			}
+			const sender = String(row.senderEmail || '').trim().toLowerCase();
+			if (sender && isSenderExcluded(sender, settings.senderExclude || [])) {
+				skipped += 1;
+				continue;
+			}
+			eligible.push(row);
+		}
+		const rows = eligible.slice(0, take);
+		const total = rows.length;
+		this.emitSendProgress(userId, { phase: 'memo', current: 0, total });
+
+		const ready: Array<{ row: EmailMemoGmailMessage; memo: EmailMemoAiMemo }> = [];
+		for (let i = 0; i < rows.length; i += 1) {
+			const row = rows[i];
+			try {
+				const memo = await this.ensureMemo(row, settings);
+				this.emitSendProgress(userId, {
+					phase: 'memo',
+					current: i + 1,
+					total,
+					id: row.id,
+					subject: row.subject,
+					status: row.status,
+				});
+				this.gateway.emitToUser(userId, 'email-memo:message', {
+					id: row.id,
+					status: row.status,
+					subject: row.subject,
+				});
+				if (memo && row.status !== EmailMemoMessageStatus.SENT) ready.push({ row, memo });
+				else skipped += 1;
+			} catch (error) {
+				failed += 1;
+				row.status = EmailMemoMessageStatus.FAILED;
+				row.errorMessage = error instanceof Error ? error.message : String(error);
+				await this.messages.save(row);
+				this.emitSendProgress(userId, {
+					phase: 'memo',
+					current: i + 1,
+					total,
+					id: row.id,
+					subject: row.subject,
+					status: row.status,
+				});
+				this.gateway.emitToUser(userId, 'email-memo:message', {
+					id: row.id,
+					status: row.status,
+					subject: row.subject,
+					error: row.errorMessage,
+				});
+				this.logger.warn(
+					`Send now memo failed for ${row.id}: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		}
+
+		this.emitSendProgress(userId, { phase: 'send', current: 0, total: ready.length });
+		for (let i = 0; i < ready.length; i += 1) {
+			const item = ready[i];
+			const latest = (await this.messages.findOne({ where: { id: item.row.id } })) || item.row;
+			if (latest.status === EmailMemoMessageStatus.SENT) {
+				skipped += 1;
+				this.emitSendProgress(userId, {
+					phase: 'send',
+					current: i + 1,
+					total: ready.length,
+					id: latest.id,
+					subject: latest.subject,
+					status: latest.status,
+				});
+				continue;
+			}
+			try {
+				await this.deliver(latest, item.memo, settings);
+				const fresh = await this.messages.findOne({ where: { id: latest.id } });
+				if (fresh?.status === EmailMemoMessageStatus.SENT) sent += 1;
+				else skipped += 1;
+				this.emitSendProgress(userId, {
+					phase: 'send',
+					current: i + 1,
+					total: ready.length,
+					id: latest.id,
+					subject: latest.subject,
+					status: fresh?.status || latest.status,
+				});
+			} catch (error) {
+				failed += 1;
+				latest.status = EmailMemoMessageStatus.FAILED;
+				latest.errorMessage = error instanceof Error ? error.message : String(error);
+				await this.messages.save(latest);
+				this.emitSendProgress(userId, {
+					phase: 'send',
+					current: i + 1,
+					total: ready.length,
+					id: latest.id,
+					subject: latest.subject,
+					status: latest.status,
+				});
+				this.gateway.emitToUser(userId, 'email-memo:message', {
+					id: latest.id,
+					status: latest.status,
+					subject: latest.subject,
+					error: latest.errorMessage,
+				});
+				this.logger.warn(
+					`Send now deliver failed for ${latest.id}: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		}
+
+		const result = { sent, failed, skipped, processed: rows.length, total };
+		this.emitSendProgress(userId, { phase: 'done', ...result });
+		return result;
+	}
+
+	private emitSendProgress(userId: string, payload: Record<string, unknown>) {
+		this.gateway.emitToUser(userId, 'email-memo:send-progress', payload);
 	}
 }

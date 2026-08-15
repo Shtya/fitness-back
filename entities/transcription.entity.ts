@@ -40,6 +40,9 @@ export class Transcription {
 	@Column({ type: 'jsonb', nullable: true })
 	memorizePayload: Record<string, unknown> | null;
 
+	@Column({ type: 'jsonb', nullable: true })
+	summaryPayload: Record<string, unknown> | null;
+
 	@Column({ type: 'varchar', length: 16, default: 'auto' })
 	requestedLanguage: string;
 

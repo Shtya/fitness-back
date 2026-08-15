@@ -390,6 +390,9 @@ export class EmailMemoNotificationSettings {
 	@Column({ name: 'target_chat_name', type: 'varchar', length: 160, nullable: true })
 	targetChatName: string | null;
 
+	@Column({ name: 'poll_interval_hours', type: 'int', default: 1 })
+	pollIntervalHours: number;
+
 	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
 	createdAt: Date;
 

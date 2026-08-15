@@ -69,6 +69,27 @@ function decodeProviderMedia(data: any): Buffer {
 	return Buffer.from(raw, 'base64');
 }
 
+function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
+	const text = String(normalized?.text || '')
+		.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\u00AD]/g, '')
+		.trim();
+	if (text) return true;
+	if (normalized?.attachments?.length) return true;
+	const type = String(normalized?.type || '').toLowerCase();
+	return [
+		'image',
+		'video',
+		'audio',
+		'ptt',
+		'voice',
+		'document',
+		'sticker',
+		'location',
+		'contact',
+		'poll',
+	].includes(type);
+}
+
 function sniffAudioMime(buffer: Buffer): string | null {
 	if (!buffer || buffer.length < 4) return null;
 	if (buffer.subarray(0, 4).toString('ascii') === 'OggS') return 'audio/ogg';
@@ -301,16 +322,20 @@ export function providerUnreadCount(chat: any): number | null {
 	return null;
 }
 
-/** WhatsApp unread must not overwrite CRM unread after the thread already exists
- *  in the inbox. persistMessage increments live inbound; markConversationRead
- *  zeros it. Copying the phone badge after open resurrected "unread" chats. */
+/** Phone unread can clear an existing CRM badge, but must not resurrect one.
+ *  persistMessage increments live inbound; markConversationRead zeros local
+ *  unread. Copying a positive WhatsApp count after the CRM already opened the
+ *  thread used to bring "unread" badges back. A phone-side read/reply reports
+ *  unread 0 and that must follow into the CRM. */
 export function shouldCopyProviderUnread(
 	currentUnread: number,
 	lastMessageAt: Date | string | null | undefined,
 	providerUnread: number | null,
 ): boolean {
-	if (providerUnread == null || providerUnread <= 0) return false;
-	if (Math.max(0, Number(currentUnread) || 0) > 0) return false;
+	if (providerUnread == null) return false;
+	const current = Math.max(0, Number(currentUnread) || 0);
+	if (providerUnread === 0) return current > 0;
+	if (current > 0) return false;
 	return !lastMessageAt;
 }
 
@@ -522,6 +547,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						emitEvents: !fromHistory,
 					}),
 				`message:${accountId}:${event.message?.providerMessageId || 'unknown'}`,
+			);
+			return;
+		}
+		if (event.type === 'chat_unread') {
+			if (this.bootstrapping.has(accountId) || event.unreadCount !== 0) return;
+			const chatId = String(event.chatId || '');
+			if (!isSupportedInboxChatId(chatId)) return;
+			this.enqueuePersist(
+				() => this.clearUnreadFromPhoneByChatId(accountId, chatId),
+				`chat-read:${accountId}:${chatId}`,
 			);
 			return;
 		}
@@ -1450,6 +1485,34 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return conversation;
 	}
 
+	/** Phone opened or replied in this thread — drop the CRM unread badge. */
+	private async clearUnreadFromPhone(accountId: string, conversationId: string) {
+		if (!conversationId) return;
+		const result = await this.conversationRepo
+			.createQueryBuilder()
+			.update(WhatsAppConversation)
+			.set({ unreadCount: 0 })
+			.where('id = :id', { id: conversationId })
+			.andWhere('unread_count > 0')
+			.execute();
+		if (!Number(result.affected)) return;
+		this.gateway.emitAccountEvent(accountId, 'conversation_read', {
+			conversationId,
+			reason: 'phone_read',
+		});
+	}
+
+	private async clearUnreadFromPhoneByChatId(accountId: string, chatId: string) {
+		const conversation =
+			(await this.conversationRepo.findOne({
+				where: { accountId, providerChatId: chatId },
+				select: ['id', 'unreadCount'],
+			})) ||
+			(await this.findDirectConversationAlias(accountId, chatId, null));
+		if (!conversation?.id) return;
+		await this.clearUnreadFromPhone(accountId, conversation.id);
+	}
+
 	async persistMessage(
 		accountId: string,
 		normalized: NormalizedWhatsAppMessage,
@@ -1458,6 +1521,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		options: { emitEvents?: boolean } = {},
 	) {
 		const emitEvents = options.emitEvents !== false;
+		const fromHistory = Boolean(
+			(normalized as any)?.__fromHistory || (normalized as any)?.raw?.__fromHistory,
+		);
 		if (!normalized.providerMessageId || !normalized.chatId) {
 			throw new BadRequestException('Provider message does not have stable identifiers');
 		}
@@ -1485,6 +1551,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { accountId, providerMessageId: normalized.providerMessageId },
 			relations: ['attachments', 'senderUser'],
 		});
+		if (!existing && !hasChatVisibleContent(normalized)) {
+			this.logger.debug(
+				`Skipping empty WhatsApp envelope ${normalized.providerMessageId} in ${conversation.id}`,
+			);
+			return this.messageRepo.create({
+				accountId,
+				conversationId: conversation.id,
+				providerMessageId: normalized.providerMessageId,
+				providerName: account.providerName,
+				direction: normalized.fromMe
+					? WhatsAppMessageDirection.OUTBOUND
+					: WhatsAppMessageDirection.INBOUND,
+				type: normalized.type || 'text',
+				text: null,
+				status: normalized.fromMe ? WhatsAppMessageStatus.SENT : WhatsAppMessageStatus.DELIVERED,
+			});
+		}
 		if (existing) {
 			// Upgrade stripped/partial Baileys media envelope when a richer live copy arrives.
 			const nextRaw = safeProviderMetadata(normalized.raw);
@@ -1527,6 +1610,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					if (shouldUpgradeType) current.type = next.type;
 					if (shouldUpgradeMime) current.mimeType = next.mimeType || current.mimeType;
 				}
+			}
+			if (emitEvents && !fromHistory && normalized.fromMe && !this.bootstrapping.has(accountId)) {
+				await this.clearUnreadFromPhone(accountId, conversation.id);
 			}
 			return existing;
 		}
@@ -1591,6 +1677,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					await this.messageRepo.update(existing.id, changes);
 					Object.assign(existing, changes);
 				}
+				if (emitEvents && !fromHistory && normalized.fromMe && !this.bootstrapping.has(accountId)) {
+					await this.clearUnreadFromPhone(accountId, conversation.id);
+				}
 				return existing;
 			}
 			throw error;
@@ -1614,9 +1703,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		// History hydration does not need unread reconciliation, realtime events,
 		// or a second fully-hydrated read for every individual message.
-		const fromHistory = Boolean(
-			(normalized as any)?.__fromHistory || (normalized as any)?.raw?.__fromHistory,
-		);
 		if (!emitEvents) {
 			// Still advance inbox order from Baileys history dumps without WS spam.
 			if (fromHistory && normalized.timestampReliable !== false) {
@@ -1650,6 +1736,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			!this.bootstrapping.has(accountId);
 		if (shouldCountUnread) {
 			await this.conversationRepo.increment({ id: conversation.id }, 'unreadCount', 1);
+		} else if (
+			emitEvents &&
+			!fromHistory &&
+			normalized.fromMe &&
+			!this.bootstrapping.has(accountId)
+		) {
+			await this.clearUnreadFromPhone(accountId, conversation.id);
 		}
 		if (shouldBumpLastMessage) {
 			await this.conversationRepo.update(conversation.id, {
@@ -1994,6 +2087,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (Object.keys(updates).length) {
 				await this.conversationRepo.update(conversation.id, updates);
 				changed = true;
+				if (updates.unreadCount === 0 && Number(conversation.unreadCount) > 0) {
+					this.gateway.emitAccountEvent(accountId, 'conversation_read', {
+						conversationId: conversation.id,
+						reason: 'provider_unread_zero',
+					});
+				}
 			}
 			if (
 				options.syncGroupParticipants &&
@@ -2532,7 +2631,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		conversationId: string,
 		messages: NormalizedWhatsAppMessage[],
 	) {
-		return messages.map((item) => ({
+		return messages
+			.filter((item) => hasChatVisibleContent(item))
+			.map((item) => ({
 			id: `live:${item.providerMessageId}`,
 			conversationId,
 			providerMessageId: item.providerMessageId,

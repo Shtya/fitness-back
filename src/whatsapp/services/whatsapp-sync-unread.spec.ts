@@ -21,11 +21,17 @@ describe('providerUnreadCount', () => {
 });
 
 describe('shouldCopyProviderUnread', () => {
-	it('does not copy WhatsApp unread onto an existing CRM thread', () => {
+	it('does not copy a positive WhatsApp unread onto an existing CRM thread', () => {
 		expect(shouldCopyProviderUnread(0, new Date(), 4)).toBe(false);
 		expect(shouldCopyProviderUnread(2, null, 8)).toBe(false);
 		expect(shouldCopyProviderUnread(0, null, 3)).toBe(true);
 		expect(shouldCopyProviderUnread(0, null, 0)).toBe(false);
+	});
+
+	it('clears CRM unread when WhatsApp reports the chat was read on the phone', () => {
+		expect(shouldCopyProviderUnread(5, new Date(), 0)).toBe(true);
+		expect(shouldCopyProviderUnread(1, null, 0)).toBe(true);
+		expect(shouldCopyProviderUnread(0, new Date(), 0)).toBe(false);
 	});
 });
 

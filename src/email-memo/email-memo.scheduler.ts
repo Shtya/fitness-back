@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { EmailMemoGmailService } from './services/email-memo-gmail.service';
 import { EmailMemoProcessorService } from './services/email-memo-processor.service';
+import { EmailMemoSettingsService } from './services/email-memo-settings.service';
 
 @Injectable()
 export class EmailMemoScheduler {
@@ -11,6 +12,7 @@ export class EmailMemoScheduler {
 	constructor(
 		private readonly gmail: EmailMemoGmailService,
 		private readonly processor: EmailMemoProcessorService,
+		private readonly settings: EmailMemoSettingsService,
 	) {}
 
 	@Cron(CronExpression.EVERY_MINUTE)
@@ -21,6 +23,14 @@ export class EmailMemoScheduler {
 			const rows = await this.gmail.listConnected();
 			for (const row of rows) {
 				try {
+					const cfg = await this.settings.getOrCreate(row.userId);
+					const hours = Math.min(24, Math.max(1, Number(cfg.pollIntervalHours) || 1));
+					if (
+						row.lastSyncedAt &&
+						Date.now() - new Date(row.lastSyncedAt).getTime() < hours * 60 * 60 * 1000
+					) {
+						continue;
+					}
 					await this.processor.processConnection(row);
 				} catch (error) {
 					this.logger.warn(

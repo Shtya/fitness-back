@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EmailMemoNotificationSettings } from '../entities/email-memo.entity';
 import { UpdateEmailMemoSettingsDto } from '../dto/email-memo.dto';
+import { normalizeWhatsAppChatId } from '../utils/email-memo.utils';
 
 const DEFAULTS: Partial<EmailMemoNotificationSettings> = {
 	processAllIncoming: true,
@@ -30,6 +31,7 @@ const DEFAULTS: Partial<EmailMemoNotificationSettings> = {
 	notificationMode: 'immediate',
 	targetChatId: null,
 	targetChatName: null,
+	pollIntervalHours: 1,
 };
 
 @Injectable()
@@ -50,7 +52,11 @@ export class EmailMemoSettingsService {
 
 	async update(userId: string, dto: UpdateEmailMemoSettingsDto) {
 		const row = await this.getOrCreate(userId);
-		Object.assign(row, dto);
+		const next: UpdateEmailMemoSettingsDto = { ...dto };
+		if (next.targetChatId !== undefined) {
+			next.targetChatId = normalizeWhatsAppChatId(next.targetChatId) || null;
+		}
+		Object.assign(row, next);
 		return this.repo.save(row);
 	}
 
@@ -81,6 +87,7 @@ export class EmailMemoSettingsService {
 			notificationMode: row.notificationMode,
 			targetChatId: row.targetChatId,
 			targetChatName: row.targetChatName,
+			pollIntervalHours: Math.min(24, Math.max(1, Number(row.pollIntervalHours) || 1)),
 		};
 	}
 }

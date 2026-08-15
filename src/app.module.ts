@@ -42,6 +42,7 @@ import { QuranRevisionModule } from './quran-revision/quran-revision.module';
 import { LearningModule } from './learning/learning.module';
 import { AiContentStudioModule } from './ai-content-studio/ai-content-studio.module';
 import { EmailMemoModule } from './email-memo/email-memo.module';
+import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.module';
 
 @Module({
 	imports: [
@@ -106,6 +107,7 @@ import { EmailMemoModule } from './email-memo/email-memo.module';
 		LearningModule,
 		AiContentStudioModule,
 		EmailMemoModule,
+		GoldIntelligenceModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

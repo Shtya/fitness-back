@@ -21,7 +21,8 @@ export type WhatsAppProviderEvent =
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
 	| { type: 'presence'; payload: any }
-	| { type: 'history_sync'; chats: number; messages: number };
+	| { type: 'history_sync'; chats: number; messages: number }
+	| { type: 'chat_unread'; chatId: string; unreadCount: number };
 
 export interface NormalizedWhatsAppAttachment {
 	type: string;

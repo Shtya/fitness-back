@@ -2,9 +2,13 @@ import {
 	IsArray,
 	IsBoolean,
 	IsIn,
+	IsInt,
 	IsOptional,
 	IsString,
+	IsUUID,
+	Max,
 	MaxLength,
+	Min,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 
@@ -122,6 +126,17 @@ export class UpdateEmailMemoSettingsDto {
 	@IsString()
 	@MaxLength(160)
 	targetChatName?: string | null;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(24)
+	@Transform(({ value }) => {
+		const n = Number(value);
+		if (!Number.isFinite(n)) return 1;
+		return Math.min(24, Math.max(1, Math.round(n)));
+	})
+	pollIntervalHours?: number;
 }
 
 export class SaveGmailCredentialsDto {
@@ -141,10 +156,80 @@ export class SaveGmailCredentialsDto {
 	connectionId?: string;
 }
 
+export class ImportGmailInboxDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(36)
+	connectionId?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(256)
+	pageToken?: string;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(100)
+	@Transform(({ value }) => {
+		const n = Number(value);
+		if (!Number.isFinite(n)) return 50;
+		return Math.min(100, Math.max(1, Math.round(n)));
+	})
+	limit?: number;
+}
+
 export class EmailMemoSenderDto {
 	@IsString()
 	@MaxLength(320)
 	email: string;
+}
+
+export class SendNowEmailMemoDto {
+	@IsOptional()
+	@IsArray()
+	@Transform(({ value }) =>
+		(Array.isArray(value) ? value : []).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 40),
+	)
+	ids?: string[];
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(40)
+	@Transform(({ value }) => {
+		const n = Number(value);
+		if (!Number.isFinite(n)) return 30;
+		return Math.min(40, Math.max(1, Math.round(n)));
+	})
+	limit?: number;
+}
+
+const toBoolean = (value: unknown) =>
+	value === true || value === 'true' || value === 1 || value === '1';
+
+export class ConnectEmailMemoWhatsAppDto {
+	@IsOptional()
+	@Transform(({ value }) =>
+		value === undefined || value === null || value === '' ? undefined : toBoolean(value),
+	)
+	@IsBoolean()
+	extra?: boolean;
+
+	@IsOptional()
+	@IsUUID()
+	accountId?: string;
+}
+
+export class DisconnectEmailMemoWhatsAppDto {
+	@IsOptional()
+	@IsUUID()
+	accountId?: string;
+}
+
+export class UseEmailMemoWhatsAppDto {
+	@IsUUID()
+	accountId: string;
 }
 
 export class EmailMemoLocaleQueryDto {

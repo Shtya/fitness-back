@@ -67,6 +67,19 @@ function isWeakDisplayName(
 	return false;
 }
 
+function unwrapMessageContent(message: any): any {
+	if (!message || typeof message !== 'object') return message;
+	return (
+		message.ephemeralMessage?.message ||
+		message.viewOnceMessage?.message ||
+		message.viewOnceMessageV2?.message ||
+		message.viewOnceMessageV2Extension?.message ||
+		message.documentWithCaptionMessage?.message ||
+		message.editedMessage?.message ||
+		message
+	);
+}
+
 function messageText(message: any): string {
 	if (!message) return '';
 	return (
@@ -78,6 +91,11 @@ function messageText(message: any): string {
 		message.buttonsResponseMessage?.selectedDisplayText ||
 		message.listResponseMessage?.title ||
 		message.templateButtonReplyMessage?.selectedDisplayText ||
+		message.contactMessage?.displayName ||
+		message.contactsArrayMessage?.displayName ||
+		message.pollCreationMessage?.name ||
+		message.pollCreationMessageV3?.name ||
+		message.eventMessage?.name ||
 		''
 	);
 }
@@ -91,7 +109,28 @@ function detectType(message: any): string {
 	if (message.stickerMessage) return 'sticker';
 	if (message.contactMessage || message.contactsArrayMessage) return 'contact';
 	if (message.locationMessage || message.liveLocationMessage) return 'location';
+	if (message.pollCreationMessage || message.pollCreationMessageV3) return 'poll';
 	return 'text';
+}
+
+const CONTROL_ONLY_KEYS = new Set([
+	'protocolMessage',
+	'senderKeyDistributionMessage',
+	'messageContextInfo',
+	'reactionMessage',
+	'encReactionMessage',
+	'pollUpdateMessage',
+	'keepInChatMessage',
+	'pinInChatMessage',
+	'placeholderMessage',
+	'associatedChildMessage',
+]);
+
+function isControlOnlyContent(content: any): boolean {
+	if (!content || typeof content !== 'object') return true;
+	const keys = Object.keys(content).filter((key) => content[key] != null);
+	if (!keys.length) return true;
+	return keys.every((key) => CONTROL_ONLY_KEYS.has(key));
 }
 
 function toDate(ts: any): Date {
@@ -404,12 +443,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!remoteJid || !id || !raw?.message) return null;
 		if (remoteJid.includes('status@') || remoteJid.endsWith('@broadcast')) return null;
 
-		const content =
-			raw.message.ephemeralMessage?.message ||
-			raw.message.viewOnceMessage?.message ||
-			raw.message.viewOnceMessageV2?.message ||
-			raw.message.viewOnceMessageV2Extension?.message ||
-			raw.message;
+		const content = unwrapMessageContent(raw.message);
+		if (isControlOnlyContent(content)) return null;
 		const type = detectType(content);
 		const text = messageText(content) || null;
 		const quoted =
@@ -431,6 +466,15 @@ export class BaileysProvider implements WhatsAppProvider {
 				fileSizeBytes: Number(media?.fileLength) || null,
 				providerMediaId: id,
 			});
+		}
+		if (
+			type === 'text' &&
+			!String(text || '')
+				.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\u00AD]/g, '')
+				.trim() &&
+			!attachments.length
+		) {
+			return null;
 		}
 
 		const fromMe = Boolean(raw?.key?.fromMe);
@@ -634,14 +678,22 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const chat of chats || []) {
 				const id = jidOf(chat?.id);
 				if (!id) continue;
+				const nextUnread =
+					chat.unreadCount != null
+						? Math.max(0, Math.floor(Number(chat.unreadCount) || 0))
+						: this.chats.get(id)?.unreadCount || 0;
 				this.rememberChat(id, {
 					name: chat.name || this.chats.get(id)?.name || null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
-					unreadCount:
-						chat.unreadCount != null
-							? Number(chat.unreadCount)
-							: this.chats.get(id)?.unreadCount || 0,
+					unreadCount: nextUnread,
 				});
+				if (chat.unreadCount != null && Number.isFinite(Number(chat.unreadCount))) {
+					this.emit({
+						type: 'chat_unread',
+						chatId: id,
+						unreadCount: nextUnread,
+					});
+				}
 			}
 		});
 

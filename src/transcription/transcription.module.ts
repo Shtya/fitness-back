@@ -8,7 +8,7 @@ import { AiFreeModule } from '../ai-free/ai-free.module';
 import { TranscriptionController } from './transcription.controller';
 import { TranscriptionService } from './transcription.service';
 
-/** WhatsApp-style ASR + AI enhance/memorize post-processing. */
+/** WhatsApp-style ASR + AI enhance / summarize / memorize post-processing. */
 @Module({
 	imports: [
 		TypeOrmModule.forFeature([Transcription, TranscriptionProviderCredential]),
