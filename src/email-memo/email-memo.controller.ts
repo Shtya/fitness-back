@@ -46,8 +46,16 @@ export class EmailMemoController {
 		@Req() req: any,
 		@Query('locale') locale?: string,
 		@Query('connectionId') connectionId?: string,
+		@Query('returnOrigin') returnOrigin?: string,
 	) {
-		return { url: await this.service.gmailAuthUrl(req.user.id, locale, connectionId) };
+		return {
+			url: await this.service.gmailAuthUrl(
+				req.user.id,
+				locale,
+				connectionId,
+				returnOrigin || req.headers?.origin,
+			),
+		};
 	}
 
 	@Put('gmail/credentials')
@@ -83,7 +91,9 @@ export class EmailMemoController {
 		}
 		try {
 			const result = await this.gmail.handleCallback(code, state);
-			return res.redirect(this.gmail.frontendRedirect(result.locale, 'connected'));
+			return res.redirect(
+				this.gmail.frontendRedirect(result.locale, 'connected', undefined, result.returnOrigin),
+			);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Gmail connect failed';
 			return res.redirect(this.gmail.frontendRedirect('en', 'error', message));

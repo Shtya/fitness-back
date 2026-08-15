@@ -22,12 +22,37 @@ export type ExtractedGmailMessage = {
 
 const BLOCKED_LABELS = new Set(['SENT', 'DRAFT', 'SPAM', 'TRASH']);
 
-export function firstFrontendOrigin(raw?: string | null) {
-	const value = String(raw || '')
+export function allowedFrontendOrigins(raw?: string | null) {
+	const fromEnv = String(raw || process.env.FRONTEND_URL || '')
 		.split(',')
-		.map((item) => item.trim())
-		.find(Boolean);
-	return (value || 'http://localhost:3000').replace(/\/$/, '');
+		.map((item) => item.trim().replace(/\/$/, ''))
+		.filter(Boolean);
+	return [
+		...new Set([
+			...fromEnv,
+			'http://localhost:3000',
+			'http://127.0.0.1:3000',
+			'https://so7bafit.com',
+			'https://www.so7bafit.com',
+		]),
+	];
+}
+
+export function firstFrontendOrigin(raw?: string | null) {
+	return allowedFrontendOrigins(raw)[0];
+}
+
+export function resolveFrontendOrigin(candidate?: string | null, raw?: string | null) {
+	const allowed = allowedFrontendOrigins(raw);
+	try {
+		if (candidate) {
+			const origin = new URL(candidate).origin;
+			if (allowed.includes(origin)) return origin;
+		}
+	} catch {
+		/* ignore invalid */
+	}
+	return firstFrontendOrigin(raw);
 }
 
 export function publicApiOrigin() {

@@ -8,9 +8,9 @@ import { EmailMemoCryptoService } from './email-memo-crypto.service';
 import {
 	extractGmailPayload,
 	ExtractedGmailMessage,
-	firstFrontendOrigin,
 	gmailRedirectUri,
 	GmailOAuthTokens,
+	resolveFrontendOrigin,
 } from '../utils/email-memo.utils';
 
 const GMAIL_SCOPES = [
@@ -164,7 +164,23 @@ export class EmailMemoGmailService {
 		};
 	}
 
+	private envOAuthApp() {
+		const clientId = (
+			this.config.get<string>('GOOGLE_CLIENT_ID') ||
+			process.env.GOOGLE_CLIENT_ID ||
+			''
+		).trim();
+		const clientSecret = (
+			this.config.get<string>('GOOGLE_CLIENT_SECRET') ||
+			process.env.GOOGLE_CLIENT_SECRET ||
+			''
+		).trim();
+		return { clientId, clientSecret, source: 'env' as const };
+	}
+
 	private async resolveOAuthApp(userId?: string) {
+		const envApp = this.envOAuthApp();
+		if (envApp.clientId && envApp.clientSecret) return envApp;
 		if (userId) {
 			const rows = await this.listForUser(userId);
 			const row = rows.find((item) => item.encryptedOauthApp) || rows[0];
@@ -181,16 +197,12 @@ export class EmailMemoGmailService {
 				}
 			}
 		}
-		const clientId = this.config.get<string>('GOOGLE_CLIENT_ID')?.trim() || '';
-		const clientSecret = this.config.get<string>('GOOGLE_CLIENT_SECRET')?.trim() || '';
-		return { clientId, clientSecret, source: 'env' as const };
+		return envApp;
 	}
 
 	googleConfigured() {
-		return Boolean(
-			this.config.get<string>('GOOGLE_CLIENT_ID')?.trim() &&
-				this.config.get<string>('GOOGLE_CLIENT_SECRET')?.trim(),
-		);
+		const app = this.envOAuthApp();
+		return Boolean(app.clientId && app.clientSecret);
 	}
 
 	async googleConfiguredForUser(userId: string) {
@@ -198,22 +210,28 @@ export class EmailMemoGmailService {
 		return Boolean(app.clientId && app.clientSecret);
 	}
 
-	async authUrl(userId: string, locale = 'en', connectionId?: string) {
+	async authUrl(userId: string, locale = 'en', connectionId?: string, returnOrigin?: string) {
 		const app = await this.resolveOAuthApp(userId);
 		if (!app.clientId || !app.clientSecret) {
 			throw new BadRequestException(
 				'Enter your Google Client ID and Client Secret first, then test them.',
 			);
 		}
-		const meta = await this.oauthAppMeta(userId);
-		if (!meta.readyToConnect) {
-			throw new BadRequestException(
-				'Connect with Google is not ready yet. Use your Google Cloud keys in Advanced, test them, then connect.',
-			);
+		if (app.source !== 'env') {
+			const meta = await this.oauthAppMeta(userId);
+			if (!meta.readyToConnect) {
+				throw new BadRequestException(
+					'Connect with Google is not ready yet. Use your Google Cloud keys in Advanced, test them, then connect.',
+				);
+			}
 		}
+		const frontendOrigin = resolveFrontendOrigin(
+			returnOrigin,
+			this.config.get<string>('FRONTEND_URL'),
+		);
 		const row = await this.resolveAuthTarget(userId, connectionId);
 		const state = this.jwt.sign(
-			{ purpose: 'email-memo-gmail', userId, locale, connectionId: row.id },
+			{ purpose: 'email-memo-gmail', userId, locale, connectionId: row.id, returnOrigin: frontendOrigin },
 			{ expiresIn: '15m' },
 		);
 		const params = new URLSearchParams({
@@ -256,8 +274,8 @@ export class EmailMemoGmailService {
 		);
 	}
 
-	frontendRedirect(locale: string, status: 'connected' | 'error', error?: string) {
-		const origin = firstFrontendOrigin(this.config.get<string>('FRONTEND_URL'));
+	frontendRedirect(locale: string, status: 'connected' | 'error', error?: string, returnOrigin?: string) {
+		const origin = resolveFrontendOrigin(returnOrigin, this.config.get<string>('FRONTEND_URL'));
 		const loc = ['en', 'ar'].includes(locale) ? locale : 'en';
 		const query = new URLSearchParams({ gmail: status });
 		if (error) query.set('error', error.slice(0, 180));
@@ -307,7 +325,12 @@ export class EmailMemoGmailService {
 		await this.startWatch(row.id).catch((error) => {
 			this.logger.warn(`Gmail watch not started: ${error instanceof Error ? error.message : error}`);
 		});
-		return { userId: payload.userId, locale: payload.locale || 'en', email };
+		return {
+			userId: payload.userId,
+			locale: payload.locale || 'en',
+			email,
+			returnOrigin: payload.returnOrigin,
+		};
 	}
 
 	async disconnect(userId: string, connectionId?: string) {

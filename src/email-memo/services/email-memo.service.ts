@@ -98,8 +98,8 @@ export class EmailMemoService {
 		};
 	}
 
-	async gmailAuthUrl(userId: string, locale?: string, connectionId?: string) {
-		return this.gmail.authUrl(userId, locale, connectionId);
+	async gmailAuthUrl(userId: string, locale?: string, connectionId?: string, returnOrigin?: string) {
+		return this.gmail.authUrl(userId, locale, connectionId, returnOrigin);
 	}
 
 	async syncGmail(userId: string, connectionId?: string) {
