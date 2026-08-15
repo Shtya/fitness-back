@@ -59,7 +59,7 @@ export class MetaWhatsAppBulkService {
 	) {}
 
 	async start(userId: string, dto: StartMetaBulkDto) {
-		await this.configService.requireRuntime({ requireEnabled: true });
+		const runtime = await this.configService.requireRuntime(userId, { requireEnabled: true });
 		const templateName = String(dto.templateName || '').trim();
 		if (!templateName) throw new BadRequestException('Template name is required');
 
@@ -76,7 +76,11 @@ export class MetaWhatsAppBulkService {
 			throw new BadRequestException('No recipients with valid phone numbers');
 		}
 
-		const previouslySent = await this.previouslySentWaIds(recipients.map(r => r.waId));
+		const previouslySent = await this.previouslySentWaIds(
+			recipients.map(r => r.waId),
+			undefined,
+			runtime.config.id,
+		);
 		const toSend = recipients.filter(r => !previouslySent.has(r.waId));
 		const toSkip = recipients.filter(r => previouslySent.has(r.waId));
 
@@ -84,6 +88,7 @@ export class MetaWhatsAppBulkService {
 		const job = this.jobRepo.create({
 			status: allSkipped ? MetaWaBulkJobStatus.DONE : MetaWaBulkJobStatus.RUNNING,
 			createdBy: userId || null,
+			configId: runtime.config.id,
 			templateName,
 			templateLanguage: (dto.language || 'en').trim(),
 			templateComponents: {
@@ -148,13 +153,14 @@ export class MetaWhatsAppBulkService {
 	}
 
 	/** Preview which phones were already messaged successfully. */
-	async checkPhones(dto: CheckMetaBulkPhonesDto) {
+	async checkPhones(userId: string, dto: CheckMetaBulkPhonesDto) {
+		const config = await this.configService.getOrCreate(userId);
 		const phones = Array.isArray(dto?.phones) ? dto.phones : [];
 		const normalized = phones
 			.map(p => ({ raw: String(p || ''), waId: normalizeWaId(p) }))
 			.filter(x => x.waId);
 		const uniqueWa = [...new Set(normalized.map(x => x.waId!))];
-		const contacted = await this.previouslySentWaIds(uniqueWa);
+		const contacted = await this.previouslySentWaIds(uniqueWa, undefined, config.id);
 		return {
 			total: uniqueWa.length,
 			contactedCount: contacted.size,
@@ -168,9 +174,11 @@ export class MetaWhatsAppBulkService {
 		};
 	}
 
-	async getJob(jobId: string) {
+	async getJob(jobId: string, configId?: string) {
 		const job = await this.jobRepo.findOne({ where: { id: jobId } });
-		if (!job) throw new NotFoundException('Bulk job not found');
+		if (!job || (configId && job.configId !== configId)) {
+			throw new NotFoundException('Bulk job not found');
+		}
 
 		// Resume worker only if job is active and no in-memory pace (worker died)
 		const hasPace = this.paceByJob.has(jobId);
@@ -245,8 +253,10 @@ export class MetaWhatsAppBulkService {
 		};
 	}
 
-	async listJobs(limit = 30) {
+	async listJobs(userId: string, limit = 30) {
+		const config = await this.configService.getOrCreate(userId);
 		const jobs = await this.jobRepo.find({
+			where: { configId: config.id },
 			order: { createdAt: 'DESC' },
 			take: Math.min(Math.max(limit, 1), 100),
 		});
@@ -254,8 +264,9 @@ export class MetaWhatsAppBulkService {
 	}
 
 	async cancel(userId: string, jobId: string) {
+		const config = await this.configService.getOrCreate(userId);
 		const job = await this.jobRepo.findOne({ where: { id: jobId } });
-		if (!job) throw new NotFoundException('Bulk job not found');
+		if (!job || job.configId !== config.id) throw new NotFoundException('Bulk job not found');
 		if (
 			job.status === MetaWaBulkJobStatus.DONE ||
 			job.status === MetaWaBulkJobStatus.CANCELLED
@@ -333,7 +344,11 @@ export class MetaWhatsAppBulkService {
 
 						let already = new Set<string>();
 						try {
-							already = await this.previouslySentWaIds([item.waId], job.id);
+							already = await this.previouslySentWaIds(
+								[item.waId],
+								job.id,
+								job.configId || undefined,
+							);
 						} catch (err: any) {
 							this.logger.warn(
 								`previouslySentWaIds failed (continuing send): ${err?.message || err}`,
@@ -476,6 +491,7 @@ export class MetaWhatsAppBulkService {
 	private async previouslySentWaIds(
 		waIds: string[],
 		excludeJobId?: string,
+		configId?: string | null,
 	): Promise<Set<string>> {
 		const ids = [...new Set((waIds || []).map(id => String(id || '').trim()).filter(Boolean))];
 		if (!ids.length) return new Set();
@@ -492,6 +508,14 @@ export class MetaWhatsAppBulkService {
 				.andWhere('i.wa_id IN (:...ids)', { ids });
 			if (excludeJobId) {
 				bulkQb.andWhere('i.job_id != :excludeJobId', { excludeJobId });
+			}
+			if (configId) {
+				bulkQb.innerJoin(
+					'meta_whatsapp_bulk_jobs',
+					'j',
+					'j.id = i.job_id AND j.config_id = :configId',
+					{ configId },
+				);
 			}
 			const bulkRows = await bulkQb.getRawMany<{ waId: string }>();
 			for (const row of bulkRows) {
@@ -520,9 +544,12 @@ export class MetaWhatsAppBulkService {
 						MetaWaMessageStatus.READ,
 					],
 				})
-				.andWhere('c.wa_id IN (:...ids)', { ids })
-				.getRawMany<{ waId: string }>();
-			for (const row of msgRows) {
+				.andWhere('c.wa_id IN (:...ids)', { ids });
+			if (configId) {
+				msgRows.andWhere('c.config_id = :configId', { configId });
+			}
+			const messageRows = await msgRows.getRawMany<{ waId: string }>();
+			for (const row of messageRows) {
 				if (row.waId) contacted.add(row.waId);
 			}
 		} catch (err: any) {
@@ -616,7 +643,10 @@ export class MetaWhatsAppBulkService {
 
 		// Auto-fill from Meta template definition when map was not provided.
 		try {
-			const templates = await this.configService.listTemplates();
+			if (!job.createdBy) {
+				throw new Error('Bulk job has no owner');
+			}
+			const templates = await this.configService.listTemplates(job.createdBy);
 			const def =
 				templates.find(
 					(t: any) =>

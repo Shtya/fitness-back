@@ -40,6 +40,8 @@ import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
 import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 import { QuranRevisionModule } from './quran-revision/quran-revision.module';
 import { LearningModule } from './learning/learning.module';
+import { AiContentStudioModule } from './ai-content-studio/ai-content-studio.module';
+import { EmailMemoModule } from './email-memo/email-memo.module';
 
 @Module({
 	imports: [
@@ -53,6 +55,7 @@ import { LearningModule } from './learning/learning.module';
 			password: process.env.DATABASE_PASSWORD,
 			database: process.env.DATABASE_NAME,
 			entities: [__dirname + '/../**/*.entity{.ts,.js}'],
+			autoLoadEntities: true,
 			// Never let TypeORM mutate a production schema implicitly.
 			// Production deployments must apply reviewed migrations instead.
 			synchronize:
@@ -101,6 +104,8 @@ import { LearningModule } from './learning/learning.module';
 		MetaWhatsAppModule,
 		QuranRevisionModule,
 		LearningModule,
+		AiContentStudioModule,
+		EmailMemoModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

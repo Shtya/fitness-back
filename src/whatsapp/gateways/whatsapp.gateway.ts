@@ -151,15 +151,19 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		payload: any,
 		accountId?: string | null,
 	) {
-		this.server
-			?.to(`whatsapp:conversation:${conversationId}`)
-			.emit('whatsapp:event', {
-				conversationId,
-				accountId: accountId || payload?.accountId || null,
-				event,
-				payload,
-				at: new Date().toISOString(),
-			});
+		const resolvedAccountId = accountId || payload?.accountId || null;
+		const packet = {
+			conversationId,
+			accountId: resolvedAccountId,
+			event,
+			payload,
+			at: new Date().toISOString(),
+		};
+		const rooms = [`whatsapp:conversation:${conversationId}`];
+		if (resolvedAccountId) rooms.push(`whatsapp:account:${resolvedAccountId}`);
+		// Passing rooms as an array delivers the packet once even if the client
+		// joined both the inbox room and the open-chat room.
+		this.server?.to(rooms).emit('whatsapp:event', packet);
 	}
 
 	emitToUser(userId: string, event: string, payload: any) {

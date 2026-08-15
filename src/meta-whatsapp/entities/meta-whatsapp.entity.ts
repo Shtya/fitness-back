@@ -94,6 +94,14 @@ export class MetaWhatsAppConfig {
 	@Column({ name: 'updated_by', type: 'uuid', nullable: true })
 	updatedBy: string | null;
 
+	@Index('idx_meta_wa_config_owner')
+	@Column({ name: 'owner_user_id', type: 'uuid', nullable: true })
+	ownerUserId: string | null;
+
+	@Index('idx_meta_wa_config_tenant')
+	@Column({ name: 'tenant_id', type: 'uuid', nullable: true })
+	tenantId: string | null;
+
 	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
 	createdAt: Date;
 
@@ -103,14 +111,18 @@ export class MetaWhatsAppConfig {
 
 @Entity('meta_whatsapp_conversations')
 @Index('idx_meta_wa_conversations_lead', ['leadId'])
+@Index('idx_meta_wa_conversations_config', ['configId'])
+@Index('uq_meta_wa_conversations_config_wa', ['configId', 'waId'], { unique: true })
 export class MetaWhatsAppConversation {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
 
+	@Column({ name: 'config_id', type: 'uuid', nullable: true })
+	configId: string | null;
+
 	@Column({ name: 'lead_id', type: 'uuid', nullable: true })
 	leadId: string | null;
 
-	@Index('uq_meta_wa_conversations_wa_id', { unique: true })
 	@Column({ name: 'wa_id', type: 'varchar', length: 32 })
 	waId: string;
 
@@ -247,6 +259,9 @@ export class MetaWhatsAppBulkJob {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
 
+	@Column({ name: 'config_id', type: 'uuid', nullable: true })
+	configId: string | null;
+
 	@Column({ type: 'varchar', length: 16, default: MetaWaBulkJobStatus.QUEUED })
 	status: MetaWaBulkJobStatus;
 
@@ -338,6 +353,9 @@ export class MetaWhatsAppActivityLog {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
 
+	@Column({ name: 'config_id', type: 'uuid', nullable: true })
+	configId: string | null;
+
 	@Column({ type: 'varchar', length: 64 })
 	action: string;
 
@@ -353,9 +371,13 @@ export class MetaWhatsAppActivityLog {
 
 @Entity('meta_whatsapp_quick_replies')
 @Index('idx_meta_wa_quick_replies_sort', ['sortOrder'])
+@Index('idx_meta_wa_quick_replies_config', ['configId'])
 export class MetaWhatsAppQuickReply {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
+
+	@Column({ name: 'config_id', type: 'uuid', nullable: true })
+	configId: string | null;
 
 	@Column({ type: 'varchar', length: 120 })
 	title: string;

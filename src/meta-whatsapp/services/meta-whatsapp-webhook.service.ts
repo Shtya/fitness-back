@@ -38,13 +38,9 @@ export class MetaWhatsAppWebhookService {
 		if (mode !== 'subscribe' || !token || !challenge) {
 			throw new UnauthorizedException('Invalid webhook verification request');
 		}
-		const runtime = await this.configService.resolveSecretsForWebhook();
-		if (!runtime) throw new UnauthorizedException('Meta WhatsApp is not configured');
-		const ok =
-			this.crypto.verifyTokenMatches(token, runtime.config.verifyTokenHash) ||
-			token === runtime.secrets.verifyToken;
-		if (!ok) throw new UnauthorizedException('Verify token mismatch');
-		await this.activity.log('webhook.verified', null, {});
+		const runtime = await this.configService.resolveSecretsByVerifyToken(token);
+		if (!runtime) throw new UnauthorizedException('Verify token mismatch');
+		await this.activity.log('webhook.verified', null, {}, runtime.config.id);
 		return challenge;
 	}
 
@@ -53,16 +49,23 @@ export class MetaWhatsAppWebhookService {
 		signatureHeader: string | undefined,
 		payload: any,
 	) {
-		const runtime = await this.configService.resolveSecretsForWebhook();
+		const parsed =
+			payload && typeof payload === 'object'
+				? payload
+				: this.parseWebhookJson(rawBody);
+		const phoneNumberId = this.extractPhoneNumberId(parsed);
+		const runtime = phoneNumberId
+			? await this.configService.resolveSecretsByPhoneNumberId(phoneNumberId)
+			: null;
 		if (!runtime?.secrets.appSecret) {
-			this.logger.warn('Rejected Meta webhook: App Secret not configured');
+			this.logger.warn('Rejected Meta webhook: App Secret not configured for this phone number');
 			throw new UnauthorizedException('App secret not configured');
 		}
 		if (!rawBody || (Buffer.isBuffer(rawBody) && rawBody.length === 0)) {
 			this.logger.warn(
 				'Rejected Meta webhook: missing rawBody (signature cannot be verified). Restart API with Nest rawBody enabled.',
 			);
-			await this.activity.log('webhook.raw_body_missing', null, {});
+			await this.activity.log('webhook.raw_body_missing', null, {}, runtime.config.id);
 			throw new UnauthorizedException('Missing raw request body for signature verification');
 		}
 		const valid = this.crypto.verifyMetaSignature(
@@ -74,7 +77,7 @@ export class MetaWhatsAppWebhookService {
 			this.logger.warn('Rejected Meta webhook: invalid signature (check App Secret)');
 			await this.activity.log('webhook.signature_invalid', null, {
 				hasSignature: Boolean(signatureHeader),
-			});
+			}, runtime.config.id);
 			throw new UnauthorizedException('Invalid Meta signature');
 		}
 
@@ -86,14 +89,18 @@ export class MetaWhatsAppWebhookService {
 		let processed = 0;
 		let inbound = 0;
 		let statuses = 0;
-		const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+		const entries = Array.isArray(parsed?.entry) ? parsed.entry : [];
 		for (const entry of entries) {
 			const changes = Array.isArray(entry?.changes) ? entry.changes : [];
 			for (const change of changes) {
 				if (change?.field !== 'messages') continue;
 				const value = change.value || {};
 				const statusCount = await this.processStatuses(value.statuses);
-				const messageCount = await this.processMessages(value.messages, value.contacts);
+				const messageCount = await this.processMessages(
+					value.messages,
+					value.contacts,
+					runtime.config.id,
+				);
 				statuses += statusCount;
 				inbound += messageCount;
 				processed += statusCount + messageCount;
@@ -164,7 +171,35 @@ export class MetaWhatsAppWebhookService {
 		return count;
 	}
 
-	private async processMessages(messages: any[] | undefined, contacts: any[] | undefined) {
+	private parseWebhookJson(rawBody: Buffer | string | undefined): any {
+		try {
+			const text = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody || '');
+			return JSON.parse(text);
+		} catch {
+			return null;
+		}
+	}
+
+	private extractPhoneNumberId(payload: any): string | null {
+		const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+		for (const entry of entries) {
+			const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+			for (const change of changes) {
+				const id =
+					change?.value?.metadata?.phone_number_id ||
+					change?.value?.metadata?.phoneNumberId ||
+					change?.value?.phone_number_id;
+				if (id) return String(id);
+			}
+		}
+		return null;
+	}
+
+	private async processMessages(
+		messages: any[] | undefined,
+		contacts: any[] | undefined,
+		configId: string,
+	) {
 		if (!Array.isArray(messages) || !messages.length) return 0;
 		const contactByWa = new Map<string, string>();
 		for (const c of contacts || []) {
@@ -205,6 +240,7 @@ export class MetaWhatsAppWebhookService {
 					.catch(() => null);
 				const contactName = contactByWa.get(waId) || contacts?.[0]?.profile?.name || null;
 				const conversation = await this.conversations.findOrCreateByWaId({
+					configId,
 					waId,
 					leadId: lead?.id || null,
 					displayName: contactName || lead?.businessName || waId,
@@ -244,7 +280,7 @@ export class MetaWhatsAppWebhookService {
 		}
 
 		if (count > 0) {
-			await this.activity.log('webhook.messages_received', null, { count });
+			await this.activity.log('webhook.messages_received', null, { count }, configId);
 		}
 		return count;
 	}

@@ -63,7 +63,7 @@ function isWeakDisplayName(
 		.split(':')[0]
 		.trim();
 	if (user && n === user) return true;
-	if (/^\d{8,20}$/.test(n)) return true;
+	if (/^\d{8,32}$/.test(n)) return true;
 	return false;
 }
 
@@ -145,9 +145,12 @@ export class BaileysProvider implements WhatsAppProvider {
 	/** LID chat id → phone digits (no @domain). */
 	private readonly lidToPn = new Map<string, string>();
 	private readonly groupSubjectCache = new Map<string, string | null>();
+	private readonly avatarUrlCache = new Map<string, { url: string | null; at: number }>();
 	private readonly messagesByChat = new Map<string, Map<string, NormalizedWhatsAppMessage>>();
 	/** Original WAMessage by provider id — required for Baileys media download. */
 	private readonly rawByMessageId = new Map<string, any>();
+	private connectedAtMs = 0;
+	private historySyncChunks = 0;
 
 	constructor(private readonly accountId: string) {}
 
@@ -194,14 +197,21 @@ export class BaileysProvider implements WhatsAppProvider {
 	resetChatStoreCooldown() {}
 
 	async isChatStoreHydrated() {
-		// Baileys has no Chromium ChatStore. Once the socket is open the inbox
-		// can be reconciled from in-memory chats (including ones derived later
-		// from messages / history sync).
-		return this.state === 'connected';
+		return this.isHistoryReady();
 	}
 
 	async isHistoryReady() {
-		return this.state === 'connected';
+		if (this.state !== 'connected') return false;
+		// Do not treat socket-open as "inbox ready". WhatsApp still has to send
+		// messaging-history.set; bootstrapping immediately produced a 1–2 chat
+		// inbox and left every other thread without messages.
+		if (this.historySyncChunks > 0) return true;
+		if (!this.connectedAtMs) return false;
+		const openForMs = Date.now() - this.connectedAtMs;
+		// Some sessions never emit history (phone asleep). Give WhatsApp a window,
+		// then proceed with whatever chats.upsert already delivered.
+		if (this.chats.size > 0 && openForMs >= 8_000) return true;
+		return openForMs >= 12_000;
 	}
 
 	private sessionDir() {
@@ -525,6 +535,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				this.reconnectAttempt = 0;
 				this.qr = null;
 				this.pairingCode = null;
+				this.connectedAtMs = Date.now();
 				const fullId = String(socket.user?.id || '');
 				const phone = fullId.split(':')[0] || this.phoneNumberHint || undefined;
 				this.setState('connected', { phoneNumber: phone });
@@ -569,12 +580,20 @@ export class BaileysProvider implements WhatsAppProvider {
 		});
 
 		socket.ev.on('messages.upsert', async (upsert: any) => {
-			const type = String(upsert?.type || '');
-			if (type && type !== 'notify' && type !== 'append') return;
+			const type = String(upsert?.type || 'notify');
 			const list = Array.isArray(upsert?.messages) ? upsert.messages : [];
+			// notify = live while online. append / other types are store / history
+			// dumps and must still be remembered, or only the first live chat appears.
+			const fromHistory = type !== 'notify';
 			for (const raw of list) {
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
+				if (fromHistory) {
+					(normalized as any).__fromHistory = true;
+					if (normalized.raw && typeof normalized.raw === 'object') {
+						normalized.raw = { ...normalized.raw, __fromHistory: true };
+					}
+				}
 				this.rememberMessage(normalized, raw);
 				this.emit({ type: 'message', message: normalized });
 			}
@@ -670,6 +689,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				this.emit({ type: 'message', message: normalized });
 			}
 			this.ensureChatsFromMessages();
+			this.historySyncChunks += 1;
 			this.logger.log(
 				`Baileys history set for ${this.accountId}: ${chats.length} chats, ${messages.length} messages, ${contacts.length} contacts`,
 			);
@@ -738,6 +758,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.socket = null;
 		this.qr = null;
 		this.pairingCode = null;
+		this.connectedAtMs = 0;
 		this.setState('disconnected');
 	}
 
@@ -758,10 +779,13 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.contacts.clear();
 		this.lidToPn.clear();
 		this.groupSubjectCache.clear();
+		this.avatarUrlCache.clear();
 		this.messagesByChat.clear();
 		this.rawByMessageId.clear();
 		this.qr = null;
 		this.pairingCode = null;
+		this.connectedAtMs = 0;
+		this.historySyncChunks = 0;
 		this.setState('disconnected');
 	}
 
@@ -795,16 +819,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		chatId: string,
 		options: { limit?: number; before?: string; after?: string; aliases?: string[] } = {},
 	) {
-		const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
-		const seed = [chatId, ...(options.aliases || [])].map(String).filter(Boolean);
-		const ids = new Set<string>();
-		for (const id of seed) {
-			ids.add(id);
-			ids.add(normalizeInboxJid(id));
-			if (id.endsWith('@c.us')) {
-				ids.add(`${id.slice(0, -'@c.us'.length)}@s.whatsapp.net`);
-			}
-		}
+		const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+		const ids = this.collectMessageLookupIds(chatId, options.aliases);
 		const merged = new Map<string, NormalizedWhatsAppMessage>();
 		for (const id of ids) {
 			const bucket = this.messagesByChat.get(id);
@@ -816,6 +832,46 @@ export class BaileysProvider implements WhatsAppProvider {
 			.slice(-limit);
 	}
 
+	/** LID and @c.us are often stored in different memory buckets for the same person. */
+	private collectMessageLookupIds(chatId: string, aliases: string[] = []): string[] {
+		const seed = [chatId, ...(aliases || [])].map(String).filter(Boolean);
+		const ids = new Set<string>();
+		const add = (value: string | null | undefined) => {
+			const raw = String(value || '').trim();
+			if (!raw) return;
+			ids.add(raw);
+			const normalized = normalizeInboxJid(raw);
+			if (normalized) ids.add(normalized);
+			if (raw.endsWith('@c.us')) {
+				ids.add(`${raw.slice(0, -'@c.us'.length)}@s.whatsapp.net`);
+			}
+			if (normalized.endsWith('@c.us')) {
+				ids.add(`${normalized.slice(0, -'@c.us'.length)}@s.whatsapp.net`);
+			}
+		};
+		for (const id of seed) add(id);
+		for (const id of [...ids]) {
+			const contact = this.contacts.get(id);
+			add(contact?.lid || null);
+			const digits =
+				this.lidToPn.get(id) ||
+				contact?.phoneNumber ||
+				null;
+			if (digits) {
+				add(`${digits}@c.us`);
+				add(`${digits}@s.whatsapp.net`);
+			}
+		}
+		for (const id of [...ids]) {
+			const user = id.split('@')[0]?.split(':')[0] || '';
+			if (!user) continue;
+			for (const [lid, phone] of this.lidToPn) {
+				if (phone === user) add(lid);
+			}
+		}
+		return [...ids];
+	}
+
 	async getContacts() {
 		return [...this.contacts.values()].map((contact) => ({
 			id: { _serialized: contact.id },
@@ -823,6 +879,28 @@ export class BaileysProvider implements WhatsAppProvider {
 			pushname: contact.notify || null,
 			number: contact.phoneNumber || null,
 		}));
+	}
+
+	async getProfilePictureUrl(chatId: string): Promise<string | null> {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return null;
+		const cached = this.avatarUrlCache.get(id);
+		if (cached && Date.now() - cached.at < 6 * 60 * 60 * 1000) {
+			return cached.url;
+		}
+		if (!this.socket || this.state !== 'connected') {
+			return cached?.url || null;
+		}
+		try {
+			const jid = toBaileysJid(id) || id;
+			const url = await this.socket.profilePictureUrl(jid, 'preview');
+			const next = String(url || '').trim() || null;
+			this.avatarUrlCache.set(id, { url: next, at: Date.now() });
+			return next;
+		} catch {
+			this.avatarUrlCache.set(id, { url: null, at: Date.now() });
+			return cached?.url || null;
+		}
 	}
 
 	async resolveContactIdentity(chatId: string) {

@@ -65,10 +65,16 @@ export class MetaWhatsAppController {
 		private readonly translateService: MetaWhatsAppTranslateService,
 	) {}
 
+	private uid(req: any): string {
+		const id = req?.user?.id;
+		if (!id) throw new BadRequestException('Authenticated user is required');
+		return id;
+	}
+
 	@Get('status')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	status() {
-		return this.config.getPublicStatus();
+	status(@Req() req: any) {
+		return this.config.getPublicStatus(this.uid(req));
 	}
 
 	@Get('usage-billing')
@@ -97,8 +103,8 @@ export class MetaWhatsAppController {
 
 	@Get('templates')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	templates() {
-		return this.config.listTemplates();
+	templates(@Req() req: any) {
+		return this.config.listTemplates(this.uid(req));
 	}
 
 	@Get('templates/seed')
@@ -180,55 +186,59 @@ export class MetaWhatsAppController {
 
 	@Get('activity')
 	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-	activityLogs(@Query('limit') limit?: string) {
-		return this.activity.list(limit ? Number(limit) : 50);
+	async activityLogs(@Req() req: any, @Query('limit') limit?: string) {
+		const cfg = await this.config.getOrCreate(this.uid(req));
+		return this.activity.list(cfg.id, limit ? Number(limit) : 50);
 	}
 
 	@Get('conversations')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	listConversations(
+		@Req() req: any,
 		@Query('q') q?: string,
 		@Query('limit') limit?: string,
 		@Query('filter') filter?: string,
 	) {
-		return this.conversations.list(q, limit ? Number(limit) : 50, filter);
+		return this.conversations.list(this.uid(req), q, limit ? Number(limit) : 50, filter);
 	}
 
 	@Get('conversations/counts')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	conversationFilterCounts() {
-		return this.conversations.filterCounts();
+	conversationFilterCounts(@Req() req: any) {
+		return this.conversations.filterCounts(this.uid(req));
 	}
 
 	@Post('conversations/open-phone')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	openPhone(@Body() dto: OpenMetaPhoneDto) {
-		return this.conversations.openByPhone(dto.phone, dto.displayName);
+	openPhone(@Req() req: any, @Body() dto: OpenMetaPhoneDto) {
+		return this.conversations.openByPhone(this.uid(req), dto.phone, dto.displayName);
 	}
 
 	@Get('conversations/:id')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	getConversation(@Param('id') id: string) {
-		return this.conversations.get(id);
+	getConversation(@Req() req: any, @Param('id') id: string) {
+		return this.conversations.get(this.uid(req), id);
 	}
 
 	@Get('conversations/:id/messages')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	messages(
+		@Req() req: any,
 		@Param('id') id: string,
 		@Query('limit') limit?: string,
 		@Query('before') before?: string,
 	) {
-		return this.conversations.messages(id, limit ? Number(limit) : 100, before);
+		return this.conversations.messages(this.uid(req), id, limit ? Number(limit) : 100, before);
 	}
 
 	@Post('conversations/:id/read')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	async markRead(@Param('id') id: string) {
-		const result = await this.conversations.markRead(id);
+	async markRead(@Req() req: any, @Param('id') id: string) {
+		const userId = this.uid(req);
+		const result = await this.conversations.markRead(userId, id);
 		if (result.lastInboundWamid) {
 			try {
-				const runtime = await this.config.requireRuntime({ requireEnabled: true });
+				const runtime = await this.config.requireRuntime(userId, { requireEnabled: true });
 				await this.cloudApi.markAsRead(
 					runtime.secrets.accessToken,
 					runtime.config.phoneNumberId!,
@@ -243,9 +253,10 @@ export class MetaWhatsAppController {
 
 	@Post('conversations/:id/sync')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	async syncConversation(@Param('id') id: string) {
-		const conversation = await this.conversations.get(id);
-		const payload = await this.conversations.messages(id, 200);
+	async syncConversation(@Req() req: any, @Param('id') id: string) {
+		const userId = this.uid(req);
+		const conversation = await this.conversations.get(userId, id);
+		const payload = await this.conversations.messages(userId, id, 200);
 		const messages = Array.isArray(payload) ? payload : payload?.messages || [];
 		return {
 			conversation: {
@@ -267,16 +278,17 @@ export class MetaWhatsAppController {
 	@Put('conversations/:id/favorite')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	setConversationFavorite(
+		@Req() req: any,
 		@Param('id') id: string,
 		@Body() dto: SetMetaConversationFavoriteDto,
 	) {
-		return this.conversations.setFavorite(id, dto.isFavorite);
+		return this.conversations.setFavorite(this.uid(req), id, dto.isFavorite);
 	}
 
 	@Post('leads/open')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	openLead(@Body() dto: OpenLeadConversationDto) {
-		return this.conversations.openForLead(dto.leadId);
+	openLead(@Req() req: any, @Body() dto: OpenLeadConversationDto) {
+		return this.conversations.openForLead(this.uid(req), dto.leadId);
 	}
 
 	@Post('messages/text')
@@ -326,8 +338,8 @@ export class MetaWhatsAppController {
 
 	@Get('messages/:id/media')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	async getMedia(@Param('id') id: string, @Res() res: Response) {
-		const media = await this.media.resolveMessageMedia(id);
+	async getMedia(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
+		const media = await this.media.resolveMessageMedia(this.uid(req), id);
 		res.setHeader('Content-Type', media.mimeType);
 		res.setHeader(
 			'Content-Disposition',
@@ -345,20 +357,21 @@ export class MetaWhatsAppController {
 
 	@Post('bulk/check-phones')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	checkBulkPhones(@Body() dto: CheckMetaBulkPhonesDto) {
-		return this.bulk.checkPhones(dto);
+	checkBulkPhones(@Req() req: any, @Body() dto: CheckMetaBulkPhonesDto) {
+		return this.bulk.checkPhones(this.uid(req), dto);
 	}
 
 	@Get('bulk')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	listBulk(@Query('limit') limit?: string) {
-		return this.bulk.listJobs(limit ? Number(limit) : 30);
+	async listBulk(@Req() req: any, @Query('limit') limit?: string) {
+		return this.bulk.listJobs(this.uid(req), limit ? Number(limit) : 30);
 	}
 
 	@Get('bulk/:id')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	getBulk(@Param('id') id: string) {
-		return this.bulk.getJob(id);
+	async getBulk(@Req() req: any, @Param('id') id: string) {
+		const cfg = await this.config.getOrCreate(this.uid(req));
+		return this.bulk.getJob(id, cfg.id);
 	}
 
 	@Post('bulk/:id/cancel')
@@ -381,14 +394,18 @@ export class MetaWhatsAppController {
 
 	@Put('quick-replies/:id')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	updateQuickReply(@Param('id') id: string, @Body() dto: UpdateMetaQuickReplyDto) {
-		return this.quickReplies.update(id, dto);
+	updateQuickReply(
+		@Req() req: any,
+		@Param('id') id: string,
+		@Body() dto: UpdateMetaQuickReplyDto,
+	) {
+		return this.quickReplies.update(this.uid(req), id, dto);
 	}
 
 	@Delete('quick-replies/:id')
 	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
-	deleteQuickReply(@Param('id') id: string) {
-		return this.quickReplies.remove(id);
+	deleteQuickReply(@Req() req: any, @Param('id') id: string) {
+		return this.quickReplies.remove(this.uid(req), id);
 	}
 
 	@Post('translate')

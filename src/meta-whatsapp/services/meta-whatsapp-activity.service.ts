@@ -10,18 +10,25 @@ export class MetaWhatsAppActivityService {
 		private readonly repo: Repository<MetaWhatsAppActivityLog>,
 	) {}
 
-	async log(action: string, actorId: string | null, details?: Record<string, any>) {
+	async log(
+		action: string,
+		actorId: string | null,
+		details?: Record<string, any>,
+		configId?: string | null,
+	) {
 		const row = this.repo.create({
 			action,
 			actorId,
+			configId: configId || null,
 			details: details || null,
 		});
 		await this.repo.save(row);
 		return row;
 	}
 
-	async list(limit = 50) {
+	async list(configId: string, limit = 50) {
 		return this.repo.find({
+			where: { configId },
 			order: { createdAt: 'DESC' },
 			take: Math.min(Math.max(limit, 1), 200),
 		});

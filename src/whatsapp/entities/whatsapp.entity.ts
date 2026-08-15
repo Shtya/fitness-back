@@ -193,6 +193,9 @@ export class WhatsAppGroup extends CoreEntity {
 	@Column({ name: 'participant_count', type: 'int', default: 0 })
 	participantCount: number;
 
+	@Column({ name: 'avatar_url', type: 'varchar', length: 1024, nullable: true })
+	avatarUrl: string | null;
+
 	@Column({ name: 'metadata_synced_at', type: 'timestamptz', nullable: true })
 	metadataSyncedAt: Date | null;
 

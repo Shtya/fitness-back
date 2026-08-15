@@ -105,6 +105,7 @@ export interface WhatsAppProvider {
 	resolveContactIdentity?(
 		chatId: string,
 	): Promise<{ phoneNumber?: string | null; name?: string | null } | null>;
+	getProfilePictureUrl?(chatId: string): Promise<string | null>;
 	getGroups(): Promise<any[]>;
 	getGroupParticipants(groupId: string): Promise<any[]>;
 	sendText(chatId: string, text: string, quotedProviderMessageId?: string): Promise<any>;

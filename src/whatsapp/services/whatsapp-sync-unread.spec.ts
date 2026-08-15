@@ -2,6 +2,7 @@ import {
 	isSupportedInboxChatId,
 	providerChatActivityMs,
 	providerUnreadCount,
+	shouldCopyProviderUnread,
 } from './whatsapp-sync.service';
 import { providerChatActivityRank } from '../utils/whatsapp-time';
 
@@ -16,6 +17,15 @@ describe('providerUnreadCount', () => {
 		expect(providerUnreadCount({ countUnreadMessages: -2 })).toBe(0);
 		expect(providerUnreadCount({ unreadCount: 'invalid' })).toBeNull();
 		expect(providerUnreadCount({})).toBeNull();
+	});
+});
+
+describe('shouldCopyProviderUnread', () => {
+	it('does not copy WhatsApp unread onto an existing CRM thread', () => {
+		expect(shouldCopyProviderUnread(0, new Date(), 4)).toBe(false);
+		expect(shouldCopyProviderUnread(2, null, 8)).toBe(false);
+		expect(shouldCopyProviderUnread(0, null, 3)).toBe(true);
+		expect(shouldCopyProviderUnread(0, null, 0)).toBe(false);
 	});
 });
 

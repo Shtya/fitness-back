@@ -46,12 +46,18 @@ export class MetaWhatsAppMediaService {
 		return full;
 	}
 
-	async resolveMessageMedia(messageId: string): Promise<{
+	async resolveMessageMedia(userId: string, messageId: string): Promise<{
 		buffer: Buffer;
 		mimeType: string;
 		fileName: string;
 	}> {
-		const message = await this.messageRepo.findOne({ where: { id: messageId } });
+		const runtime = await this.configService.requireRuntime(userId, { requireEnabled: false });
+		const message = await this.messageRepo
+			.createQueryBuilder('m')
+			.innerJoin('meta_whatsapp_conversations', 'c', 'c.id = m.conversation_id')
+			.where('m.id = :id', { id: messageId })
+			.andWhere('c.config_id = :configId', { configId: runtime.config.id })
+			.getOne();
 		if (!message) throw new NotFoundException('Message not found');
 
 		if (message.mediaUrl && !/^https?:\/\//i.test(message.mediaUrl)) {
@@ -81,7 +87,6 @@ export class MetaWhatsAppMediaService {
 
 		if (!message.mediaId) throw new NotFoundException('Message has no media');
 
-		const runtime = await this.configService.requireRuntime({ requireEnabled: false });
 		const meta = await this.cloudApi.getMediaUrl(
 			runtime.secrets.accessToken,
 			message.mediaId,

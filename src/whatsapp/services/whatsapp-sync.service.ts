@@ -287,7 +287,7 @@ function isWeakContactDisplayName(
 		.split(':')[0]
 		.trim();
 	if (user && n === user) return true;
-	if (/^\d{8,20}$/.test(n)) return true;
+	if (/^\d{8,32}$/.test(n)) return true;
 	return false;
 }
 
@@ -299,6 +299,19 @@ export function providerUnreadCount(chat: any): number | null {
 		if (Number.isFinite(value)) return Math.max(0, Math.floor(value));
 	}
 	return null;
+}
+
+/** WhatsApp unread must not overwrite CRM unread after the thread already exists
+ *  in the inbox. persistMessage increments live inbound; markConversationRead
+ *  zeros it. Copying the phone badge after open resurrected "unread" chats. */
+export function shouldCopyProviderUnread(
+	currentUnread: number,
+	lastMessageAt: Date | string | null | undefined,
+	providerUnread: number | null,
+): boolean {
+	if (providerUnread == null || providerUnread <= 0) return false;
+	if (Math.max(0, Number(currentUnread) || 0) > 0) return false;
+	return !lastMessageAt;
 }
 
 export function providerChatActivityMs(chat: any): number {
@@ -522,9 +535,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					syncGroupParticipants: false,
 					emitProgress: false,
 				})
-					.then((result) => {
+					.then(async (result) => {
+						const warmed = await this.prefetchTopChatHistories(accountId, 8, 40).catch(
+							() => ({ warmed: 0 }),
+						);
 						this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 							...result,
+							warmed: warmed?.warmed || 0,
 							progress: 100,
 							source: 'history_sync',
 						});
@@ -1303,7 +1320,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 							this.groupRepo.create({
 								accountId,
 								waId: chatId,
-								subject: options.title || chatId,
+								subject: options.title || 'Group',
 								description: null,
 								ownerWaId: null,
 								participantCount: 0,
@@ -1867,6 +1884,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			.sort((a, b) => b.activityMs - a.activityMs);
 		let count = 0;
 		let changed = false;
+		let avatarFetches = 0;
 		const total = list.length || 1;
 		for (const { chat, id, activityMs } of list) {
 			const isGroup = id.endsWith('@g.us');
@@ -1896,12 +1914,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				: rawTitle;
 			const phone =
 				identity?.phoneNumber || phoneFromWaId(id) || phoneFromWaId(waId(chat?.contact)) || null;
-			const avatarUrl =
-				chat?.contact?.profilePicThumbObj?.eurl || chat?.profilePicThumbObj?.eurl || null;
 			const conversation = await this.ensureConversation(accountId, id, {
 				title,
 				phone,
 			});
+			let avatarUrl =
+				chat?.contact?.profilePicThumbObj?.eurl || chat?.profilePicThumbObj?.eurl || null;
+			const existingAvatar = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
+			if (
+				!avatarUrl &&
+				!existingAvatar &&
+				typeof provider.getProfilePictureUrl === 'function' &&
+				avatarFetches < 20
+			) {
+				avatarUrl = await provider.getProfilePictureUrl(id).catch(() => null);
+				avatarFetches += 1;
+			}
+			avatarUrl = avatarUrl || existingAvatar || null;
 			if (conversation.contact) {
 				const existingWeak = isWeakContactDisplayName(
 					conversation.contact.name,
@@ -1934,6 +1963,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					}
 				}
 			}
+			if (conversation.group && avatarUrl && avatarUrl !== conversation.group.avatarUrl) {
+				await this.groupRepo.update(conversation.group.id, { avatarUrl });
+				changed = true;
+			}
 			const messageActivityMs = providerChatMessageActivityMs(chat);
 			// Only promote inbox order from real message activity. Metadata-only
 			// ChatModel.t (common on groups before MsgCollection hydrates) used to
@@ -1950,10 +1983,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				updates.lastMessageAt = lastMessageAt;
 			}
 			if (
-				unreadCount !== null &&
-				unreadCount !== Math.max(0, Number(conversation.unreadCount) || 0)
+				shouldCopyProviderUnread(
+					conversation.unreadCount,
+					conversation.lastMessageAt,
+					unreadCount,
+				)
 			) {
-				updates.unreadCount = unreadCount;
+				updates.unreadCount = unreadCount as number;
 			}
 			if (Object.keys(updates).length) {
 				await this.conversationRepo.update(conversation.id, updates);
@@ -2204,6 +2240,27 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await provider.subscribePresence(conversation.providerChatId);
 	}
 
+	private async hydrateConversationAvatar(conversation: WhatsAppConversation) {
+		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
+		if (existing) return;
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider || provider.getState() !== 'connected') return;
+		if (typeof provider.getProfilePictureUrl !== 'function') return;
+		const url = await provider.getProfilePictureUrl(conversation.providerChatId).catch(() => null);
+		if (!url) return;
+		if (conversation.contact) {
+			await this.contactRepo.update(conversation.contact.id, { avatarUrl: url });
+			conversation.contact.avatarUrl = url;
+		} else if (conversation.group) {
+			await this.groupRepo.update(conversation.group.id, { avatarUrl: url });
+			conversation.group.avatarUrl = url;
+		}
+		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_updated', {
+			reason: 'avatar_hydrated',
+			conversationId: conversation.id,
+		});
+	}
+
 	async listMessages(
 		user: User,
 		conversationId: string,
@@ -2217,7 +2274,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversationId,
 		);
 		void this.subscribeConversationPresence(conversation).catch(() => undefined);
-		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
+		void this.hydrateConversationAvatar(conversation).catch(() => undefined);
+		const take = Math.min(Math.max(Number(limit) || 100, 1), 200);
 		const loadLocal = async (cursorId?: string) => {
 			const query = this.messageRepo
 				.createQueryBuilder('message')
@@ -2697,7 +2755,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}),
 			this.messageRepo.count({ where: { conversationId } }),
 		]);
-		const requestedLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
+		const requestedLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
 		const returnLocalOnly = async (syncError: string, message?: string) => ({
 			supported: true,
 			// Never live-pull again here — we just tried the provider.
@@ -2955,8 +3013,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (shouldSendReceipt) {
 			const provider = this.providers.getProvider(conversation.accountId);
 			if (provider?.getState() === 'connected') {
-				await provider.markChatRead(conversation.providerChatId);
-				providerReceiptSent = true;
+				try {
+					await provider.markChatRead(conversation.providerChatId);
+					providerReceiptSent = true;
+				} catch (error) {
+					this.logger.warn(
+						`Could not send WhatsApp read receipt for ${conversationId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
 			}
 		}
 		await this.conversationRepo.update(conversationId, { unreadCount: 0 });
@@ -3297,7 +3363,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 			}
 			try {
-				const providerGroups = (await provider.getGroups()) || [];
+				const providerGroups = (await (provider as any).getGroups?.()) || [];
 				const providerGroup = providerGroups.find(
 					(item: any) => waId(item) === group!.waId || waId(item?.id) === group!.waId,
 				);

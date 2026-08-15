@@ -25,7 +25,7 @@ async function main() {
 		}
 
 		const config = app.get(MetaWhatsAppConfigService);
-		const status = await config.getPublicStatus();
+		const status = await config.getPublicStatus(actor.id);
 		console.log(
 			JSON.stringify(
 				{

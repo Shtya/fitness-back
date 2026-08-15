@@ -1498,7 +1498,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 				return [];
 			}
 		}
-		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
+		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
 		let messages: any[] = [];
 		const chatIds = await this.resolveSendableChatIds(chatId);
 		const primary = String(chatId || '').trim();
@@ -1683,6 +1683,20 @@ export class WppConnectProvider implements WhatsAppProvider {
 		} catch {
 			return null;
 		}
+	}
+
+	async getProfilePictureUrl(chatId: string): Promise<string | null> {
+		if (!chatId || !this.client) return null;
+		try {
+			if (typeof this.client.getProfilePicFromServer === 'function') {
+				const pic = await this.client.getProfilePicFromServer(chatId);
+				const url = String(pic?.eurl || pic?.imgFull || pic?.imgUrl || '').trim();
+				if (url) return url;
+			}
+		} catch {
+			/* ignore */
+		}
+		return null;
 	}
 
 	getGroups() {

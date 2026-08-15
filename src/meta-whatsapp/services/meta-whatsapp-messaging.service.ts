@@ -189,12 +189,12 @@ export class MetaWhatsAppMessagingService {
 		const text = String(dto.text || '').trim();
 		if (!text) throw new BadRequestException('Message text is required');
 
-		const { conversation, lead } = await this.resolveTarget(dto);
+		const { conversation, lead } = await this.resolveTarget(userId, dto);
 		await this.conversations.syncLastInboundAt(conversation);
 		const care = await this.conversations.resolveCustomerCareWindow(conversation.id, conversation);
 		this.assertFreeformAllowed(care.lastInboundAt);
 
-		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
+		const runtime = await this.configService.requireRuntime(userId, { requireEnabled: true });
 		const message = this.messageRepo.create({
 			conversationId: conversation.id,
 			direction: MetaWaMessageDirection.OUTBOUND,
@@ -233,13 +233,13 @@ export class MetaWhatsAppMessagingService {
 		if (!templateName) throw new BadRequestException('Template name is required');
 		const language = (dto.language || 'en').trim();
 
-		const { conversation, lead } = await this.resolveTarget(dto);
-		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
+		const { conversation, lead } = await this.resolveTarget(userId, dto);
+		const runtime = await this.configService.requireRuntime(userId, { requireEnabled: true });
 
 		let previewBody = '';
 		let templateDef: any = null;
 		try {
-			const templates = await this.configService.listTemplates();
+			const templates = await this.configService.listTemplates(userId);
 			templateDef =
 				templates.find(
 					(t: any) =>
@@ -333,12 +333,12 @@ export class MetaWhatsAppMessagingService {
 			? 'voice'
 			: this.media.guessMessageType(mimeType);
 
-		const { conversation, lead } = await this.resolveTarget(input);
+		const { conversation, lead } = await this.resolveTarget(userId, input);
 		await this.conversations.syncLastInboundAt(conversation);
 		const care = await this.conversations.resolveCustomerCareWindow(conversation.id, conversation);
 		this.assertFreeformAllowed(care.lastInboundAt);
 
-		const runtime = await this.configService.requireRuntime({ requireEnabled: true });
+		const runtime = await this.configService.requireRuntime(userId, { requireEnabled: true });
 		const message = this.messageRepo.create({
 			conversationId: conversation.id,
 			direction: MetaWaMessageDirection.OUTBOUND,
@@ -448,19 +448,27 @@ export class MetaWhatsAppMessagingService {
 		throw error;
 	}
 
-	private async resolveTarget(dto: {
-		conversationId?: string;
-		leadId?: string;
-		phone?: string;
-	}) {
+	private async resolveTarget(
+		userId: string,
+		dto: {
+			conversationId?: string;
+			leadId?: string;
+			phone?: string;
+		},
+	) {
 		let lead: FitnessLead | null = null;
 		if (dto.leadId) {
 			lead = await this.leadRepo.findOne({ where: { id: dto.leadId } });
 			if (!lead) throw new NotFoundException('Lead not found');
 		}
 
+		const config = await this.configService.getOrCreate(userId);
+
 		if (dto.conversationId) {
-			const conversationEntity = await this.conversations.findEntity(dto.conversationId);
+			const conversationEntity = await this.conversations.findEntity(
+				dto.conversationId,
+				config.id,
+			);
 			return { conversation: conversationEntity, lead };
 		}
 
@@ -468,6 +476,7 @@ export class MetaWhatsAppMessagingService {
 		if (!phone) throw new BadRequestException('A valid phone number is required');
 
 		const conversation = await this.conversations.findOrCreateByWaId({
+			configId: config.id,
 			waId: phone,
 			leadId: lead?.id || null,
 			displayName: lead?.businessName || phone,

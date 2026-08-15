@@ -5,7 +5,8 @@ import {
 	ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
+import { User } from 'entities/global.entity';
 import {
 	MetaWaConnectionStatus,
 	MetaWhatsAppConfig,
@@ -18,29 +19,66 @@ import {
 	getSo7baSeedTemplatePreviews,
 	SO7BA_META_TEMPLATE_SEEDS,
 } from '../seeds/so7ba-meta-templates.seed';
+import { metaWaOwnerUserId, MetaWaActor } from '../meta-whatsapp-actor';
 
 @Injectable()
 export class MetaWhatsAppConfigService {
 	constructor(
 		@InjectRepository(MetaWhatsAppConfig)
 		private readonly configRepo: Repository<MetaWhatsAppConfig>,
+		@InjectRepository(User)
+		private readonly userRepo: Repository<User>,
 		private readonly crypto: MetaWhatsAppCryptoService,
 		private readonly cloudApi: MetaWhatsAppCloudApiService,
 		private readonly activity: MetaWhatsAppActivityService,
 	) {}
 
-	async getOrCreate(): Promise<MetaWhatsAppConfig> {
-		const existing = await this.configRepo.find({ order: { createdAt: 'ASC' }, take: 1 });
-		if (existing[0]) return existing[0];
-		const row = this.configRepo.create({
-			enabled: false,
-			connectionStatus: MetaWaConnectionStatus.DISCONNECTED,
+	async getOrCreate(userId: string): Promise<MetaWhatsAppConfig> {
+		if (!userId) {
+			throw new BadRequestException('Authenticated user is required');
+		}
+		const actor = await this.loadActor(userId);
+		const ownerUserId = metaWaOwnerUserId(actor);
+		const tenantId = actor.tenantId || null;
+
+		const existing = await this.configRepo.findOne({ where: { ownerUserId } });
+		if (existing) {
+			if (tenantId && !existing.tenantId) {
+				existing.tenantId = tenantId;
+				await this.configRepo.save(existing);
+			}
+			return existing;
+		}
+
+		const legacy = await this.configRepo.findOne({
+			where: { ownerUserId: IsNull() },
+			order: { createdAt: 'ASC' },
 		});
-		return this.configRepo.save(row);
+		if (legacy) {
+			const email = String(actor.email || '').toLowerCase();
+			const canClaim =
+				email === 'admin@gmail.com' ||
+				(legacy.updatedBy &&
+					(legacy.updatedBy === userId || legacy.updatedBy === ownerUserId));
+			if (canClaim) {
+				legacy.ownerUserId = ownerUserId;
+				legacy.tenantId = tenantId || legacy.tenantId;
+				return this.configRepo.save(legacy);
+			}
+		}
+
+		return this.configRepo.save(
+			this.configRepo.create({
+				enabled: false,
+				connectionStatus: MetaWaConnectionStatus.DISCONNECTED,
+				ownerUserId,
+				tenantId,
+			}),
+		);
 	}
 
-	async getPublicStatus() {
-		const cfg = await this.getOrCreate();
+	async getPublicStatus(userId: string) {
+		const cfg = await this.getOrCreate(userId);
 		const secrets = this.safeSecrets(cfg);
 		const webhookCallbackUrl = this.buildWebhookCallbackUrl(cfg.webhookPath);
 		return {
@@ -89,7 +127,7 @@ export class MetaWhatsAppConfigService {
 	}
 
 	async save(userId: string, dto: SaveMetaWhatsAppConfigDto) {
-		const cfg = await this.getOrCreate();
+		const cfg = await this.getOrCreate(userId);
 		const current = this.safeSecrets(cfg) || {
 			accessToken: '',
 			appSecret: '',
@@ -143,18 +181,23 @@ export class MetaWhatsAppConfigService {
 		cfg.lastError = null;
 		await this.configRepo.save(cfg);
 
-		await this.activity.log('config.saved', userId, {
-			phoneNumberId: cfg.phoneNumberId,
-			wabaId: cfg.wabaId,
-			enabled: cfg.enabled,
-			secretsUpdated: secretsComplete && touchingSecrets,
-		});
+		await this.activity.log(
+			'config.saved',
+			userId,
+			{
+				phoneNumberId: cfg.phoneNumberId,
+				wabaId: cfg.wabaId,
+				enabled: cfg.enabled,
+				secretsUpdated: secretsComplete && touchingSecrets,
+			},
+			cfg.id,
+		);
 
-		return this.getPublicStatus();
+		return this.getPublicStatus(userId);
 	}
 
 	async setEnabled(userId: string, enabled: boolean) {
-		const cfg = await this.getOrCreate();
+		const cfg = await this.getOrCreate(userId);
 		if (enabled) {
 			this.assertConnectionFields(cfg, this.safeSecrets(cfg));
 		}
@@ -162,14 +205,19 @@ export class MetaWhatsAppConfigService {
 		if (!enabled) cfg.connectionStatus = MetaWaConnectionStatus.DISABLED;
 		cfg.updatedBy = userId || null;
 		await this.configRepo.save(cfg);
-		await this.activity.log(enabled ? 'integration.enabled' : 'integration.disabled', userId);
-		return this.getPublicStatus();
+		await this.activity.log(
+			enabled ? 'integration.enabled' : 'integration.disabled',
+			userId,
+			undefined,
+			cfg.id,
+		);
+		return this.getPublicStatus(userId);
 	}
 
 	async validate(userId: string) {
-		const cfg = await this.getOrCreate();
+		const cfg = await this.getOrCreate(userId);
 		this.assertConnectionFields(cfg, this.safeSecrets(cfg));
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		try {
 			const result = await this.cloudApi.validateCredentials({
 				accessToken: runtime.secrets.accessToken,
@@ -188,7 +236,7 @@ export class MetaWhatsAppConfigService {
 				wabaId: result.wabaId,
 				wabaAutoResolved: result.wabaAutoResolved,
 			});
-			return { ok: true, ...result, status: await this.getPublicStatus() };
+			return { ok: true, ...result, status: await this.getPublicStatus(userId) };
 		} catch (error) {
 			runtime.config.connectionStatus = MetaWaConnectionStatus.ERROR;
 			runtime.config.lastError =
@@ -220,8 +268,8 @@ export class MetaWhatsAppConfigService {
 		return resolved.wabaId;
 	}
 
-	async listTemplates() {
-		const runtime = await this.requireRuntime();
+	async listTemplates(userId: string) {
+		const runtime = await this.requireRuntime(userId);
 		const phoneId = String(runtime.config.phoneNumberId || '').trim();
 		let wabaId = String(runtime.config.wabaId || '').trim();
 
@@ -260,7 +308,7 @@ export class MetaWhatsAppConfigService {
 		userId: string,
 		file: { buffer: Buffer; mimetype?: string; originalname?: string },
 	) {
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		const wabaId = await this.ensureWabaId(runtime);
 		if (!file?.buffer?.length) {
 			throw new BadRequestException('Sample media file is required');
@@ -311,7 +359,7 @@ export class MetaWhatsAppConfigService {
 			exampleHeaderParams?: string[];
 		},
 	) {
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		const wabaId = await this.ensureWabaId(runtime);
 		const name = String(dto.name || '')
 			.trim()
@@ -394,7 +442,7 @@ export class MetaWhatsAppConfigService {
 			exampleHeaderParams?: string[];
 		},
 	) {
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		const id = String(templateId || '').trim();
 		if (!id) throw new BadRequestException('Template id is required');
 
@@ -458,7 +506,7 @@ export class MetaWhatsAppConfigService {
 	}
 
 	async listTemplateLibrary(userId: string, query?: { search?: string; language?: string }) {
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		try {
 			const templates = await this.cloudApi.listTemplateLibrary(runtime.secrets.accessToken, {
 				search: query?.search,
@@ -509,7 +557,7 @@ export class MetaWhatsAppConfigService {
 			buttonPhone?: string;
 		},
 	) {
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		const wabaId = await this.ensureWabaId(runtime);
 		const name = String(dto.name || '')
 			.trim()
@@ -564,7 +612,7 @@ export class MetaWhatsAppConfigService {
 		if (!name) {
 			throw new BadRequestException('Template name is required');
 		}
-		const runtime = await this.requireRuntime();
+		const runtime = await this.requireRuntime(userId);
 		const wabaId = await this.ensureWabaId(runtime);
 		try {
 			const result = await this.cloudApi.deleteMessageTemplate(
@@ -694,7 +742,7 @@ export class MetaWhatsAppConfigService {
 			.replace(/[^a-z0-9_]/g, '_');
 		const nameMap = { ...defaultNameMap, ...(dto?.nameMap || {}) };
 
-		const existing = await this.listTemplates();
+		const existing = await this.listTemplates(userId);
 		const results: Array<{
 			sourceName: string;
 			sourceLanguage?: string;
@@ -851,8 +899,15 @@ export class MetaWhatsAppConfigService {
 		}
 	}
 
-	async requireRuntime(options?: { requireEnabled?: boolean }) {
-		const config = await this.getOrCreate();
+	async requireRuntime(userId: string, options?: { requireEnabled?: boolean }) {
+		const config = await this.getOrCreate(userId);
+		return this.runtimeFromConfig(config, options);
+	}
+
+	runtimeFromConfig(
+		config: MetaWhatsAppConfig,
+		options?: { requireEnabled?: boolean },
+	) {
 		if (options?.requireEnabled && !config.enabled) {
 			throw new ServiceUnavailableException('Meta WhatsApp integration is disabled');
 		}
@@ -866,17 +921,62 @@ export class MetaWhatsAppConfigService {
 		return { config, secrets };
 	}
 
-	async resolveSecretsForWebhook(): Promise<{
+	async resolveSecretsByPhoneNumberId(phoneNumberId: string): Promise<{
 		config: MetaWhatsAppConfig;
 		secrets: MetaWhatsAppSecrets;
 	} | null> {
-		const config = await this.getOrCreate();
-		if (!config.encryptedCredentials) return null;
+		const id = String(phoneNumberId || '').trim();
+		if (!id) return null;
+		const config = await this.configRepo.findOne({ where: { phoneNumberId: id } });
+		return this.safeRuntime(config);
+	}
+
+	async resolveSecretsByVerifyToken(token: string): Promise<{
+		config: MetaWhatsAppConfig;
+		secrets: MetaWhatsAppSecrets;
+	} | null> {
+		const rows = await this.configRepo.find({
+			where: {},
+			take: 200,
+		});
+		for (const config of rows) {
+			const runtime = this.safeRuntime(config);
+			if (!runtime) continue;
+			const ok =
+				this.crypto.verifyTokenMatches(token, config.verifyTokenHash) ||
+				token === runtime.secrets.verifyToken;
+			if (ok) return runtime;
+		}
+		return null;
+	}
+
+	private safeRuntime(config: MetaWhatsAppConfig | null): {
+		config: MetaWhatsAppConfig;
+		secrets: MetaWhatsAppSecrets;
+	} | null {
+		if (!config?.encryptedCredentials) return null;
 		try {
 			return { config, secrets: this.crypto.decryptSecrets(config.encryptedCredentials) };
 		} catch {
 			return null;
 		}
+	}
+
+	private async loadActor(userId: string): Promise<MetaWaActor> {
+		const user = await this.userRepo.findOne({
+			where: { id: userId },
+			select: ['id', 'tenantId', 'adminId', 'role', 'email'],
+		});
+		if (user) {
+			return {
+				id: user.id,
+				tenantId: user.tenantId,
+				adminId: user.adminId,
+				role: user.role,
+				email: user.email,
+			};
+		}
+		return { id: userId };
 	}
 
 	private safeSecrets(cfg: MetaWhatsAppConfig): MetaWhatsAppSecrets | null {

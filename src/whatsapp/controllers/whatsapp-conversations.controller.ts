@@ -173,7 +173,7 @@ export class WhatsAppConversationsController {
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
 		@Query('before') before?: string,
-		@Query('limit') limit = '30',
+		@Query('limit') limit = '100',
 		@Query('live') live?: string,
 	) {
 		// live=0|false skips the linked-device pull — used for previews and the
@@ -257,7 +257,7 @@ export class WhatsAppConversationsController {
 	syncLatest(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Query('limit') limit = '30',
+		@Query('limit') limit = '100',
 	) {
 		return this.sync.syncConversation(req.user, conversationId, 'latest', Number(limit));
 	}
@@ -266,7 +266,7 @@ export class WhatsAppConversationsController {
 	syncOlder(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Query('limit') limit = '30',
+		@Query('limit') limit = '100',
 	) {
 		return this.sync.syncConversation(req.user, conversationId, 'older', Number(limit));
 	}

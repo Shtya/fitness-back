@@ -60,15 +60,19 @@ export class MetaWhatsAppUsageBillingService {
 	) {}
 
 	async getDashboard(userId?: string) {
+		if (!userId) {
+			return { title: 'WhatsApp Usage & Billing', error: 'Authentication required' };
+		}
+		const config = await this.configService.getOrCreate(userId);
 		const now = new Date();
 		const thisStart = startOfMonth(now);
 		const thisEnd = endOfMonth(now);
 		const prev = prevMonthRange(now);
 
 		const [localThis, localPrev, metaBundle] = await Promise.all([
-			this.buildLocalPeriod(thisStart, thisEnd),
-			this.buildLocalPeriod(prev.start, prev.end),
-			this.fetchMetaAnalyticsSafe(thisStart, thisEnd),
+			this.buildLocalPeriod(thisStart, thisEnd, config.id),
+			this.buildLocalPeriod(prev.start, prev.end, config.id),
+			this.fetchMetaAnalyticsSafe(userId, thisStart, thisEnd),
 		]);
 
 		await this.activitySafe(userId);
@@ -177,7 +181,7 @@ export class MetaWhatsAppUsageBillingService {
 		}
 	}
 
-	private async buildLocalPeriod(start: Date, end: Date) {
+	private async buildLocalPeriod(start: Date, end: Date, configId: string) {
 		const rows = await this.messageRepo
 			.createQueryBuilder('m')
 			.leftJoin(MetaWhatsAppConversation, 'c', 'c.id = m.conversation_id')
@@ -196,6 +200,7 @@ export class MetaWhatsAppUsageBillingService {
 				'c.wa_id AS "waId"',
 			])
 			.where('m.created_at BETWEEN :start AND :end', { start, end })
+			.andWhere('c.config_id = :configId', { configId })
 			.getRawMany();
 
 		const byCategory = emptyCategoryBucket();
@@ -390,7 +395,7 @@ export class MetaWhatsAppUsageBillingService {
 		return 'UNKNOWN';
 	}
 
-	private async fetchMetaAnalyticsSafe(start: Date, end: Date) {
+	private async fetchMetaAnalyticsSafe(userId: string, start: Date, end: Date) {
 		const errors: string[] = [];
 		let messaging: any = null;
 		let pricing: any = null;
@@ -398,7 +403,7 @@ export class MetaWhatsAppUsageBillingService {
 		let pricingCostTotal: number | null = null;
 
 		try {
-			const runtime = await this.configService.requireRuntime({ requireEnabled: false });
+			const runtime = await this.configService.requireRuntime(userId, { requireEnabled: false });
 			const wabaId = await this.configService.ensureWabaId(runtime);
 			const startUnix = Math.floor(start.getTime() / 1000);
 			const endUnix = Math.floor(end.getTime() / 1000);

@@ -8,6 +8,7 @@ import {
 	MetaWhatsAppMessage,
 } from '../entities/meta-whatsapp.entity';
 import { isWithinCustomerCareWindow, bestMessageTimestamp, normalizeWaId, CUSTOMER_CARE_WINDOW_MS } from './meta-whatsapp-crypto.service';
+import { MetaWhatsAppConfigService } from './meta-whatsapp-config.service';
 
 @Injectable()
 export class MetaWhatsAppConversationsService {
@@ -18,9 +19,16 @@ export class MetaWhatsAppConversationsService {
 		private readonly messageRepo: Repository<MetaWhatsAppMessage>,
 		@InjectRepository(FitnessLead)
 		private readonly leadRepo: Repository<FitnessLead>,
+		private readonly configService: MetaWhatsAppConfigService,
 	) {}
 
-	async list(q?: string, limit = 50, filter?: string) {
+	private async ownerConfigId(userId: string) {
+		const cfg = await this.configService.getOrCreate(userId);
+		return cfg.id;
+	}
+
+	async list(userId: string, q?: string, limit = 50, filter?: string) {
+		const configId = await this.ownerConfigId(userId);
 		const normalizedFilter = String(filter || 'all').trim().toLowerCase();
 		const maxLimit =
 			normalizedFilter === 'replied' ||
@@ -30,6 +38,7 @@ export class MetaWhatsAppConversationsService {
 				: 500;
 		const qb = this.conversationRepo
 			.createQueryBuilder('c')
+			.where('c.config_id = :configId', { configId })
 			.orderBy('c.last_message_at', 'DESC', 'NULLS LAST')
 			.take(Math.min(Math.max(Number(limit) || 50, 1), maxLimit));
 
@@ -84,14 +93,18 @@ export class MetaWhatsAppConversationsService {
 		);
 	}
 
-	async filterCounts() {
-		const base = () => this.conversationRepo.createQueryBuilder('c');
+	async filterCounts(userId: string) {
+		const configId = await this.ownerConfigId(userId);
+		const base = () =>
+			this.conversationRepo
+				.createQueryBuilder('c')
+				.where('c.config_id = :configId', { configId });
 
 		const unrepliedQb = base();
 		this.applyUnrepliedFilter(unrepliedQb);
 
 		const repliedQb = base()
-			.where(
+			.andWhere(
 				`EXISTS (
 					SELECT 1
 					FROM meta_whatsapp_messages t
@@ -196,14 +209,18 @@ export class MetaWhatsAppConversationsService {
 		return new Set(rows.map(row => row.conversationId).filter(Boolean));
 	}
 
-	async findEntity(conversationId: string) {
+	async findEntity(conversationId: string, configId?: string) {
 		const c = await this.conversationRepo.findOne({ where: { id: conversationId } });
 		if (!c) throw new NotFoundException('Conversation not found');
+		if (configId && c.configId !== configId) {
+			throw new NotFoundException('Conversation not found');
+		}
 		return c;
 	}
 
-	async get(conversationId: string) {
-		const conversation = await this.findEntity(conversationId);
+	async get(userId: string, conversationId: string) {
+		const configId = await this.ownerConfigId(userId);
+		const conversation = await this.findEntity(conversationId, configId);
 		await this.syncLastInboundAt(conversation);
 		return this.toConversationDto(conversation);
 	}
@@ -245,8 +262,9 @@ export class MetaWhatsAppConversationsService {
 		return this.conversationRepo.save(conversation);
 	}
 
-	async messages(conversationId: string, limit = 100, before?: string) {
-		const conversation = await this.findEntity(conversationId);
+	async messages(userId: string, conversationId: string, limit = 100, before?: string) {
+		const configId = await this.ownerConfigId(userId);
+		const conversation = await this.findEntity(conversationId, configId);
 		await this.syncLastInboundAt(conversation);
 
 		const qb = this.messageRepo
@@ -301,9 +319,8 @@ export class MetaWhatsAppConversationsService {
 		};
 	}
 
-	async markRead(conversationId: string) {
-		const c = await this.conversationRepo.findOne({ where: { id: conversationId } });
-		if (!c) throw new NotFoundException('Conversation not found');
+	async markRead(userId: string, conversationId: string) {
+		const c = await this.findEntity(conversationId, await this.ownerConfigId(userId));
 		c.unreadCount = 0;
 		await this.conversationRepo.save(c);
 		await this.syncLastInboundAt(c);
@@ -322,26 +339,28 @@ export class MetaWhatsAppConversationsService {
 		};
 	}
 
-	async setFavorite(conversationId: string, isFavorite: boolean) {
-		const c = await this.findEntity(conversationId);
+	async setFavorite(userId: string, conversationId: string, isFavorite: boolean) {
+		const c = await this.findEntity(conversationId, await this.ownerConfigId(userId));
 		c.isFavorite = Boolean(isFavorite);
 		await this.conversationRepo.save(c);
 		return this.toConversationDto(c);
 	}
 
-	async openByPhone(phone: string, displayName?: string) {
+	async openByPhone(userId: string, phone: string, displayName?: string) {
 		const waId = normalizeWaId(phone);
 		if (!waId) {
 			throw new BadRequestException(
 				'Invalid phone number. Use country code, e.g. 2010xxxxxxx or +20 10 xxxx xxxx',
 			);
 		}
+		const configId = await this.ownerConfigId(userId);
 		const lead = await this.leadRepo
 			.createQueryBuilder('l')
 			.where(`regexp_replace(COALESCE(l.phone, ''), '\\D', '', 'g') = :waId`, { waId })
 			.getOne()
 			.catch(() => null);
 		const conversation = await this.findOrCreateByWaId({
+			configId,
 			waId,
 			leadId: lead?.id || null,
 			displayName: displayName || lead?.businessName || waId,
@@ -403,31 +422,25 @@ export class MetaWhatsAppConversationsService {
 		};
 	}
 
-	async openForLead(leadId: string) {
+	async openForLead(userId: string, leadId: string) {
 		const lead = await this.leadRepo.findOne({ where: { id: leadId } });
 		if (!lead) throw new NotFoundException('Lead not found');
 		const waId = normalizeWaId(lead.phone);
 		if (!waId) throw new NotFoundException('Lead has no valid WhatsApp phone number');
 
-		let conversation = await this.conversationRepo.findOne({ where: { waId } });
-		if (!conversation) {
-			conversation = this.conversationRepo.create({
+		return this.toConversationDto(
+			await this.findOrCreateByWaId({
+				configId: await this.ownerConfigId(userId),
 				waId,
 				leadId: lead.id,
 				displayName: lead.businessName || waId,
 				businessName: lead.businessName || null,
-			});
-		} else {
-			conversation.leadId = lead.id;
-			conversation.businessName = lead.businessName || conversation.businessName;
-			conversation.displayName =
-				conversation.displayName || lead.businessName || waId;
-		}
-		await this.conversationRepo.save(conversation);
-		return this.toConversationDto(conversation);
+			}),
+		);
 	}
 
 	async findOrCreateByWaId(input: {
+		configId: string;
 		waId: string;
 		leadId?: string | null;
 		displayName?: string | null;
@@ -435,12 +448,17 @@ export class MetaWhatsAppConversationsService {
 	}) {
 		const waId = normalizeWaId(input.waId);
 		if (!waId) throw new NotFoundException('Invalid WhatsApp id');
-		let conversation = await this.conversationRepo.findOne({ where: { waId } });
+		if (!input.configId) throw new BadRequestException('WhatsApp config is required');
+		let conversation = await this.conversationRepo.findOne({
+			where: { configId: input.configId, waId },
+		});
 
 		// Migrate legacy rows stored as local EG 01… into E.164 201…
 		if (!conversation && waId.startsWith('20') && waId.length >= 11) {
 			const local = `0${waId.slice(2)}`;
-			const legacy = await this.conversationRepo.findOne({ where: { waId: local } });
+			const legacy = await this.conversationRepo.findOne({
+				where: { configId: input.configId, waId: local },
+			});
 			if (legacy) {
 				legacy.waId = waId;
 				conversation = legacy;
@@ -449,6 +467,7 @@ export class MetaWhatsAppConversationsService {
 
 		if (!conversation) {
 			conversation = this.conversationRepo.create({
+				configId: input.configId,
 				waId,
 				leadId: input.leadId || null,
 				displayName: input.displayName || input.businessName || waId,

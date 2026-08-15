@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { FitnessLead } from '../fitness-leads/entities/fitness-leads.entity';
+import { User } from 'entities/global.entity';
 import {
 	MetaWhatsAppActivityLog,
 	MetaWhatsAppBulkItem,
@@ -36,6 +37,7 @@ import { MetaWhatsAppTranslateService } from './services/meta-whatsapp-translate
 			MetaWhatsAppActivityLog,
 			MetaWhatsAppQuickReply,
 			FitnessLead,
+			User,
 		]),
 	],
 	controllers: [MetaWhatsAppController, MetaWhatsAppWebhookController],

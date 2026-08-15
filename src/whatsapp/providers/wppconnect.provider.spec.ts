@@ -189,7 +189,7 @@ describe('WppConnectProvider message normalization', () => {
 		const provider = providerWithMessages([]);
 		await provider.getMessages('chat@g.us', { limit: 500, before: 'cursor-1' });
 		expect((provider as any).client.getMessages).toHaveBeenCalledWith('chat@g.us', {
-			count: 100,
+			count: 200,
 			id: 'cursor-1',
 			direction: 'before',
 		});
