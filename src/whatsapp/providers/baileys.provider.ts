@@ -133,6 +133,46 @@ function isControlOnlyContent(content: any): boolean {
 	return keys.every((key) => CONTROL_ONLY_KEYS.has(key));
 }
 
+export type BaileysDisconnectKind = 'logged_out' | 'replaced' | 'phone_closed' | 'connection_lost';
+
+/**
+ * WhatsApp allows one WebSocket per linked-device identity. When we (or another
+ * process) open a second socket with the same creds, the previous one is kicked
+ * with conflict/replaced — that is not the phone going to sleep.
+ */
+export function classifyBaileysDisconnect(
+	update: any,
+	DisconnectReason?: { loggedOut?: number; connectionReplaced?: number; connectionClosed?: number; connectionLost?: number; timedOut?: number },
+): BaileysDisconnectKind {
+	const err = update?.lastDisconnect?.error;
+	const statusCode = Number(err?.output?.statusCode || 0);
+	const msg = String(err?.message || err?.output?.payload?.message || err?.data || '');
+	const node = err?.data?.content?.[0] || err?.data || err?.reasonNode || {};
+	const inner = Array.isArray(err?.data?.content) ? err.data.content[0] : null;
+	const replaced =
+		statusCode === DisconnectReason?.connectionReplaced ||
+		statusCode === 440 ||
+		/stream errored \(conflict\)|conflict.*replaced|type":"replaced"/i.test(msg) ||
+		node?.tag === 'conflict' ||
+		node?.attrs?.type === 'replaced' ||
+		inner?.tag === 'conflict' ||
+		inner?.attrs?.type === 'replaced';
+	if (statusCode === DisconnectReason?.loggedOut || statusCode === 401) {
+		return 'logged_out';
+	}
+	if (replaced) return 'replaced';
+	const phoneLikelyClosed =
+		statusCode === DisconnectReason?.connectionClosed ||
+		statusCode === DisconnectReason?.connectionLost ||
+		statusCode === DisconnectReason?.timedOut ||
+		statusCode === 408 ||
+		statusCode === 428 ||
+		statusCode === 500 ||
+		statusCode === 503 ||
+		!statusCode;
+	return phoneLikelyClosed ? 'phone_closed' : 'connection_lost';
+}
+
 function toDate(ts: any): Date {
 	const n =
 		typeof ts === 'number'
@@ -168,6 +208,8 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private readonly logger = new Logger(BaileysProvider.name);
 	private socket: BaileysSocket | null = null;
+	private socketGeneration = 0;
+	private opening: Promise<void> | null = null;
 	private state: string = 'disconnected';
 	private qr: string | null = null;
 	private pairingCode: string | null = null;
@@ -524,11 +566,21 @@ export class BaileysProvider implements WhatsAppProvider {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		if (this.opening) return this.opening;
+		if (this.socket && this.state === 'connected') return;
 		this.setState('connecting');
 		await this.openSocket();
 	}
 
 	private async openSocket() {
+		if (this.opening) return this.opening;
+		this.opening = this.openSocketOnce().finally(() => {
+			this.opening = null;
+		});
+		return this.opening;
+	}
+
+	private async openSocketOnce() {
 		const baileys = await loadBaileysModule();
 		const {
 			default: makeWASocket,
@@ -541,13 +593,15 @@ export class BaileysProvider implements WhatsAppProvider {
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
 		const { version } = await fetchLatestBaileysVersion();
 
-		if (this.socket) {
+		const generation = ++this.socketGeneration;
+		const previous = this.socket;
+		this.socket = null;
+		if (previous) {
 			try {
-				this.socket.end?.(undefined);
+				previous.end?.(undefined);
 			} catch {
 				/* ignore */
 			}
-			this.socket = null;
 		}
 
 		const socket = makeWASocket({
@@ -564,6 +618,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		socket.ev.on('connection.update', async (update: any) => {
 			if (this.closing) return;
+			if (generation !== this.socketGeneration || this.socket !== socket) return;
 			if (update.qr) {
 				try {
 					this.qr = await qrcode.toDataURL(String(update.qr), { margin: 1, width: 320 });
@@ -587,11 +642,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 
 			if (update.connection === 'close') {
-				const statusCode = Number(update.lastDisconnect?.error?.output?.statusCode || 0);
-				const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
-				this.socket = null;
+				if (this.socket === socket) this.socket = null;
 				if (this.closing) return;
-				if (loggedOut) {
+				const kind = classifyBaileysDisconnect(update, DisconnectReason);
+				if (kind === 'logged_out') {
 					this.setState('error', {
 						error: 'WhatsApp logged out this linked device. Scan the QR again.',
 					});
@@ -601,23 +655,23 @@ export class BaileysProvider implements WhatsAppProvider {
 					});
 					return;
 				}
-				// Best-effort: closed/lost/timeout usually means the phone app slept,
-				// lost network, or WhatsApp was swiped away — ask the user to reopen it.
-				const phoneLikelyClosed =
-					statusCode === DisconnectReason?.connectionClosed ||
-					statusCode === DisconnectReason?.connectionLost ||
-					statusCode === DisconnectReason?.timedOut ||
-					statusCode === 408 ||
-					statusCode === 428 ||
-					statusCode === 440 ||
-					statusCode === 500 ||
-					statusCode === 503 ||
-					!statusCode;
+				if (kind === 'replaced') {
+					this.logger.warn(
+						`WhatsApp session replaced for ${this.accountId}; waiting before a single reconnect.`,
+					);
+					this.setState('disconnected', {
+						reason: 'session_replaced',
+						error: 'This linked device signed in from another connection. Reconnecting once…',
+					});
+					this.scheduleReconnect(8_000);
+					return;
+				}
 				this.setState('disconnected', {
-					reason: phoneLikelyClosed ? 'phone_closed' : 'connection_lost',
-					error: phoneLikelyClosed
-						? 'WhatsApp on the phone looks closed or offline. Open WhatsApp and keep it in the foreground.'
-						: undefined,
+					reason: kind === 'phone_closed' ? 'phone_closed' : 'connection_lost',
+					error:
+						kind === 'phone_closed'
+							? 'WhatsApp on the phone looks closed or offline. Open WhatsApp and keep it in the foreground.'
+							: undefined,
 				});
 				this.scheduleReconnect();
 			}
@@ -770,8 +824,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
-	private scheduleReconnect() {
-		if (this.closing || this.reconnectTimer) return;
+	private scheduleReconnect(minDelayMs = 0) {
+		if (this.closing || this.reconnectTimer || this.opening) return;
 		this.reconnectAttempt += 1;
 		if (this.reconnectAttempt > 12) {
 			this.setState('error', {
@@ -779,10 +833,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			});
 			return;
 		}
-		const delay = Math.min(60_000, 2_000 * this.reconnectAttempt);
+		const delay = Math.max(minDelayMs, Math.min(60_000, 2_000 * this.reconnectAttempt));
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
-			if (this.closing) return;
+			if (this.closing || this.opening) return;
 			this.setState('connecting');
 			void this.openSocket().catch((error) => {
 				this.logger.warn(
@@ -798,6 +852,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async disconnect() {
 		this.closing = true;
+		this.socketGeneration += 1;
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
@@ -816,6 +871,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async logout() {
 		this.closing = true;
+		this.socketGeneration += 1;
 		try {
 			await this.socket?.logout?.();
 		} catch {

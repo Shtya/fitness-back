@@ -391,6 +391,7 @@ export class EmailMemoProcessorService {
 				status: row.status,
 				error: row.errorMessage,
 			});
+			if (opts.forceSend) throw error;
 		}
 	}
 

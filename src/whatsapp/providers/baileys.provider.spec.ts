@@ -1,4 +1,4 @@
-import { BaileysProvider } from './baileys.provider';
+import { BaileysProvider, classifyBaileysDisconnect } from './baileys.provider';
 
 describe('BaileysProvider inbox lookup', () => {
 	it('returns messages stored under LID when querying the phone JID', async () => {
@@ -31,5 +31,42 @@ describe('BaileysProvider inbox lookup', () => {
 
 		(provider as any).historySyncChunks = 1;
 		await expect(provider.isHistoryReady()).resolves.toBe(true);
+	});
+});
+
+describe('classifyBaileysDisconnect', () => {
+	it('treats conflict/replaced as a session replacement, not a closed phone', () => {
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: { error: { message: 'Stream Errored (conflict)' } },
+			}),
+		).toBe('replaced');
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: { error: { output: { statusCode: 440 } } },
+			}),
+		).toBe('replaced');
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: {
+					error: {
+						data: { content: [{ tag: 'conflict', attrs: { type: 'replaced' } }] },
+					},
+				},
+			}),
+		).toBe('replaced');
+	});
+
+	it('still recognizes a real phone/network drop and a logout', () => {
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: { error: { output: { statusCode: 428 } } },
+			}),
+		).toBe('phone_closed');
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: { error: { output: { statusCode: 401 } } },
+			}),
+		).toBe('logged_out');
 	});
 });

@@ -201,7 +201,7 @@ export class WhatsAppProviderManagerService
 
 		const desiredProvider = this.configuredProviderName();
 		const active = this.providers.get(accountId);
-		const wrongProvider = Boolean(active && active.name !== desiredProvider);
+		const wrongProvider = Boolean(active?.name && active.name !== desiredProvider);
 		if (active?.getState() === 'connected' && !wrongProvider) {
 			return active;
 		}
@@ -220,6 +220,27 @@ export class WhatsAppProviderManagerService
 		if (isInFlight && !phoneNumber && !isStuck && !wrongProvider) {
 			return active;
 		}
+
+		// A dropped Baileys socket is still the same linked device. Spawning a
+		// second client with the same creds makes WhatsApp emit conflict/replaced
+		// and the two sockets kick each other forever.
+		if (active && !wrongProvider && !phoneNumber && !isStuck && !isBroken) {
+			const state = active.getState();
+			if (state === 'disconnected') {
+				const reuse = (async () => {
+					this.connectStartedAt.set(accountId, Date.now());
+					await active.connect();
+					return active;
+				})();
+				this.connecting.set(accountId, reuse);
+				try {
+					return await reuse;
+				} finally {
+					this.connecting.delete(accountId);
+				}
+			}
+		}
+
 		if (active && (phoneNumber || isStuck || isBroken || isInFlight || wrongProvider)) {
 			this.providers.delete(accountId);
 			this.connectStartedAt.delete(accountId);

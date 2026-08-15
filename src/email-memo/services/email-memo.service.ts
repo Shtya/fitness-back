@@ -4,6 +4,7 @@ import { ILike, Repository } from 'typeorm';
 import { UpdateEmailMemoSettingsDto } from '../dto/email-memo.dto';
 import {
 	EmailMemoGmailMessage,
+	EmailMemoMessageStatus,
 	EmailMemoProcessingLog,
 } from '../entities/email-memo.entity';
 import { addExcludedSender, removeExcludedSender, senderProvider, isSenderExcluded } from '../utils/email-memo.utils';
@@ -223,9 +224,21 @@ export class EmailMemoService {
 	async retryMessage(userId: string, id: string) {
 		const row = await this.messages.findOne({ where: { id, userId } });
 		if (!row) throw new NotFoundException('Email not found');
+		const wa = await this.whatsapp.getConnection(userId);
+		if (!wa.connected) {
+			throw new BadRequestException('WhatsApp is not connected. Scan the QR code first.');
+		}
 		const settings = await this.settings.getOrCreate(userId);
-		await this.processor.processPipeline(row, settings);
-		return { ok: true };
+		try {
+			await this.processor.processPipeline(row, settings, { forceSend: true });
+		} catch (error) {
+			throw new BadRequestException(error instanceof Error ? error.message : String(error));
+		}
+		const fresh = await this.messages.findOne({ where: { id, userId } });
+		if (!fresh || fresh.status !== EmailMemoMessageStatus.SENT) {
+			throw new BadRequestException(fresh?.errorMessage || 'Retry failed. Memo was not sent.');
+		}
+		return { ok: true, status: fresh.status };
 	}
 
 	async sendNow(userId: string, opts: { ids?: string[]; limit?: number } = {}) {

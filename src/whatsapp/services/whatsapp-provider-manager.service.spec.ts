@@ -146,9 +146,15 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			token: 'provider-secret',
 		});
 
-		expect(gateway.emitAccountEvent).toHaveBeenCalledWith('account-1', 'connection', {
-			status: WhatsAppAccountStatus.CONNECTED,
-		});
+		expect(gateway.emitAccountEvent).toHaveBeenCalledWith(
+			'account-1',
+			'connection',
+			expect.objectContaining({
+				status: WhatsAppAccountStatus.CONNECTED,
+			}),
+		);
+		expect(gateway.emitAccountEvent.mock.calls[0][2]).not.toHaveProperty('token');
+		expect(gateway.emitAccountEvent.mock.calls[0][2]).not.toHaveProperty('phoneNumber');
 		expect(logRepo.create).toHaveBeenCalledWith(
 			expect.objectContaining({
 				metadata: { status: WhatsAppAccountStatus.CONNECTED },
@@ -165,6 +171,22 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 
 		await expect(service.connect('account-1')).resolves.toBe(provider);
 		expect(accountRepo.update).not.toHaveBeenCalled();
+	});
+
+	it('reuses a disconnected Baileys provider instead of opening a second socket', async () => {
+		const { service, accountRepo } = createService();
+		const provider = {
+			name: 'baileys',
+			getState: jest.fn().mockReturnValue('disconnected'),
+			connect: jest.fn().mockResolvedValue(undefined),
+			disconnect: jest.fn(),
+		};
+		(service as any).providers.set('account-1', provider);
+
+		await expect(service.connect('account-1')).resolves.toBe(provider);
+		expect(provider.connect).toHaveBeenCalledTimes(1);
+		expect(provider.disconnect).not.toHaveBeenCalled();
+		expect(accountRepo.findOneByOrFail).not.toHaveBeenCalled();
 	});
 
 	it('stores lastError and drops a timed-out connecting provider', async () => {

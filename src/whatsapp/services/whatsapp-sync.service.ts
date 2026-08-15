@@ -637,6 +637,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.stopInboxReconciliation(accountId);
 			if (!this.bootstrapping.has(accountId)) {
 				/* ignore */
+			} else if (event.reason === 'session_replaced') {
+				this.gateway.emitAccountEvent(accountId, 'sync_progress', {
+					accountId,
+					progress: 15,
+					stage: 'phone_wait',
+					message: 'WhatsApp session was replaced — reconnecting…',
+				});
 			} else if (
 				event.reason === 'phone_closed' ||
 				event.status === 'error' ||
