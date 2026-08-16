@@ -1,25 +1,39 @@
 import { atempoChain, ffmpegPitchFilter, resolveFfmpegPreset, resolveGroqSpeech } from './whatsapp-voice-changer';
 
 describe('resolveGroqSpeech', () => {
-	it('keeps Arabic text on an Arabic PlayAI voice and model', () => {
-		expect(resolveGroqSpeech('Fritz-PlayAI', 'مرحبا أحمد')).toEqual({
-			model: 'playai-tts-arabic',
-			voice: 'Ahmad-PlayAI',
+	it('keeps Arabic text on an Arabic Orpheus voice and model', () => {
+		expect(resolveGroqSpeech('troy', 'مرحبا أحمد')).toEqual({
+			model: 'canopylabs/orpheus-arabic-saudi',
+			voice: 'abdullah',
+			responseFormat: 'wav',
+		});
+		expect(resolveGroqSpeech('aisha', 'أهلا')).toEqual({
+			model: 'canopylabs/orpheus-arabic-saudi',
+			voice: 'aisha',
+			responseFormat: 'wav',
 		});
 		expect(resolveGroqSpeech('Amira-PlayAI', 'أهلا')).toEqual({
-			model: 'playai-tts-arabic',
-			voice: 'Amira-PlayAI',
+			model: 'canopylabs/orpheus-arabic-saudi',
+			voice: 'aisha',
+			responseFormat: 'wav',
 		});
 	});
 
-	it('keeps English text on an English PlayAI voice and model', () => {
-		expect(resolveGroqSpeech('Ahmad-PlayAI', 'hello there')).toEqual({
-			model: 'playai-tts',
-			voice: 'Fritz-PlayAI',
+	it('keeps English text on an English Orpheus voice and model', () => {
+		expect(resolveGroqSpeech('abdullah', 'hello there')).toEqual({
+			model: 'canopylabs/orpheus-v1-english',
+			voice: 'troy',
+			responseFormat: 'wav',
 		});
-		expect(resolveGroqSpeech('Arista-PlayAI', 'hello there')).toEqual({
-			model: 'playai-tts',
-			voice: 'Arista-PlayAI',
+		expect(resolveGroqSpeech('hannah', 'hello there')).toEqual({
+			model: 'canopylabs/orpheus-v1-english',
+			voice: 'hannah',
+			responseFormat: 'wav',
+		});
+		expect(resolveGroqSpeech('Fritz-PlayAI', 'hello there')).toEqual({
+			model: 'canopylabs/orpheus-v1-english',
+			voice: 'troy',
+			responseFormat: 'wav',
 		});
 	});
 });

@@ -34,6 +34,7 @@ import {
 	minimaxVoiceIdFromName,
 	resolveFfmpegPreset,
 	resolveGroqSpeech,
+	normalizeGroqVoice,
 } from '../utils/whatsapp-voice-changer';
 
 export type VoiceChangerUpload = {
@@ -145,7 +146,7 @@ export class WhatsAppVoiceChangerService {
 			provider,
 			preset: row.preset || 'deeper',
 			pitchSemitones: Number(row.pitchSemitones) || -6,
-			voiceId: row.voiceId || null,
+			voiceId: provider === 'groq' ? normalizeGroqVoice(row.voiceId) || null : row.voiceId || null,
 			credentials: credentialStatus,
 			catalog: liveCatalog ? await this.catalogForUser(userId) : this.cloneCatalog(),
 		};
@@ -297,7 +298,7 @@ export class WhatsAppVoiceChangerService {
 			return this.transformGroq(file, apiKey, options.voiceId || settings.voiceId);
 		}
 		if (provider === 'openai') {
-			return this.transformOpenAi(file, apiKey, options.voiceId || settings.voiceId);
+			return this.transformOpenAi(userId, file, apiKey, options.voiceId || settings.voiceId);
 		}
 		if (provider === 'huggingface') {
 			return this.transformHuggingFace(file, apiKey, options.voiceId || settings.voiceId);
@@ -663,15 +664,35 @@ export class WhatsAppVoiceChangerService {
 	}
 
 	private async transcribeSpeech(userId: string, file: VoiceChangerUpload) {
+		const attempts: Array<{ label: string; run: () => Promise<string> }> = [];
 		const groq = await this.resolveApiKey(userId, 'groq');
-		if (groq) return this.transcribeGroq(file, groq);
+		if (groq) attempts.push({ label: 'Groq', run: () => this.transcribeGroq(file, groq) });
 		const openai = await this.resolveApiKey(userId, 'openai');
-		if (openai) return this.transcribeOpenAi(file, openai);
+		if (openai) attempts.push({ label: 'OpenAI', run: () => this.transcribeOpenAi(file, openai) });
 		const huggingface = await this.resolveApiKey(userId, 'huggingface');
-		if (huggingface) return this.transcribeHuggingFace(file, huggingface);
-		throw new BadRequestException(
-			'Fish Audio and MiniMax clone the voice then respeak the words. Save a free Groq key first so the WhatsApp note can be transcribed.',
-		);
+		if (huggingface) {
+			attempts.push({ label: 'Hugging Face', run: () => this.transcribeHuggingFace(file, huggingface) });
+		}
+		if (!attempts.length) {
+			throw new BadRequestException(
+				'Fish Audio and MiniMax clone the voice then respeak the words. Save a free Groq key first so the WhatsApp note can be transcribed.',
+			);
+		}
+		let lastError: unknown;
+		for (const [index, attempt] of attempts.entries()) {
+			try {
+				return await attempt.run();
+			} catch (error) {
+				lastError = error;
+				const last = index === attempts.length - 1;
+				if (last || !this.isRecoverableTranscriptionError(error)) {
+					throw error instanceof BadRequestException || error instanceof BadGatewayException
+						? error
+						: this.providerError(error, `${attempt.label} transcription failed`);
+				}
+			}
+		}
+		throw this.providerError(lastError, 'Speech transcription failed');
 	}
 
 	private async listFishAudioVoices(apiKey: string) {
@@ -926,11 +947,11 @@ export class WhatsAppVoiceChangerService {
 
 	private async transformGroq(file: VoiceChangerUpload, apiKey: string, voiceId?: string | null) {
 		const text = await this.transcribeGroq(file, apiKey);
-		const { model, voice } = resolveGroqSpeech(voiceId, text);
+		const { model, voice, responseFormat } = resolveGroqSpeech(voiceId, text);
 		try {
 			const response = await axios.post(
 				'https://api.groq.com/openai/v1/audio/speech',
-				{ model, voice, input: text.slice(0, 4000), response_format: 'mp3' },
+				{ model, voice, input: text.slice(0, 4000), response_format: responseFormat },
 				{
 					headers: { Authorization: `Bearer ${apiKey}` },
 					responseType: 'arraybuffer',
@@ -939,8 +960,8 @@ export class WhatsAppVoiceChangerService {
 			);
 			return {
 				buffer: Buffer.from(response.data),
-				mimeType: 'audio/mpeg',
-				fileName: this.renamed(file.originalname, 'mp3'),
+				mimeType: responseFormat === 'wav' ? 'audio/wav' : 'audio/mpeg',
+				fileName: this.renamed(file.originalname, responseFormat),
 			};
 		} catch (error: any) {
 			throw this.providerError(error, 'Groq text-to-speech failed');
@@ -975,33 +996,50 @@ export class WhatsAppVoiceChangerService {
 		}
 	}
 
-	private async transformOpenAi(file: VoiceChangerUpload, apiKey: string, voiceId?: string | null) {
-		const text = await this.transcribeOpenAi(file, apiKey);
-		const voice = String(voiceId || '').trim() || 'alloy';
-		const models = ['gpt-4o-mini-tts', 'tts-1'] as const;
-		let lastError: unknown;
-		for (const model of models) {
-			try {
-				const response = await axios.post(
-					'https://api.openai.com/v1/audio/speech',
-					{ model, voice, input: text.slice(0, 4000) },
-					{
-						headers: { Authorization: `Bearer ${apiKey}` },
-						responseType: 'arraybuffer',
-						timeout: 60_000,
-						validateStatus: (status) => status >= 200 && status < 300,
-					},
-				);
-				return {
-					buffer: Buffer.from(response.data),
-					mimeType: 'audio/mpeg',
-					fileName: this.renamed(file.originalname, 'mp3'),
-				};
-			} catch (error: any) {
-				lastError = error;
+	private async transformOpenAi(
+		userId: string,
+		file: VoiceChangerUpload,
+		apiKey: string,
+		voiceId?: string | null,
+	) {
+		try {
+			const text = await this.transcribeOpenAi(file, apiKey);
+			const voice = String(voiceId || '').trim() || 'alloy';
+			const models = ['gpt-4o-mini-tts', 'tts-1'] as const;
+			let lastError: unknown;
+			for (const model of models) {
+				try {
+					const response = await axios.post(
+						'https://api.openai.com/v1/audio/speech',
+						{ model, voice, input: text.slice(0, 4000) },
+						{
+							headers: { Authorization: `Bearer ${apiKey}` },
+							responseType: 'arraybuffer',
+							timeout: 60_000,
+							validateStatus: (status) => status >= 200 && status < 300,
+						},
+					);
+					return {
+						buffer: Buffer.from(response.data),
+						mimeType: 'audio/mpeg',
+						fileName: this.renamed(file.originalname, 'mp3'),
+					};
+				} catch (error: any) {
+					lastError = error;
+					if (!this.isRecoverableTranscriptionError(error)) break;
+				}
 			}
+			throw this.providerError(lastError, 'OpenAI text-to-speech failed');
+		} catch (error) {
+			if (!this.isRecoverableTranscriptionError(error)) throw error;
+			const groq = await this.resolveApiKey(userId, 'groq');
+			if (groq) return this.transformGroq(file, groq, null);
+			const huggingface = await this.resolveApiKey(userId, 'huggingface');
+			if (huggingface) return this.transformHuggingFace(file, huggingface, null);
+			throw new BadRequestException(
+				'OpenAI quota is exhausted. Save a free Groq key, or use the free pitch changer.',
+			);
 		}
-		throw this.providerError(lastError, 'OpenAI text-to-speech failed');
 	}
 
 	private async transcribeOpenAi(file: VoiceChangerUpload, apiKey: string) {
@@ -1060,15 +1098,35 @@ export class WhatsAppVoiceChangerService {
 	}
 
 	private async transcribeHuggingFace(file: VoiceChangerUpload, apiKey: string) {
-		const buffer = await fs.readFile(file.path);
+		const prepared = await this.prepareCloneSample(file);
 		try {
+			const form = new FormData();
+			form.append('file', createReadStream(prepared.path), {
+				filename: prepared.originalname || 'voice.wav',
+				contentType: prepared.mime || 'audio/wav',
+			});
+			form.append('model', 'openai/whisper-large-v3');
+			try {
+				const response = await axios.post('https://router.huggingface.co/v1/audio/transcriptions', form, {
+					headers: { ...form.getHeaders(), Authorization: `Bearer ${apiKey}` },
+					timeout: 120_000,
+					maxBodyLength: Infinity,
+					maxContentLength: Infinity,
+				});
+				const text = String(response.data?.text || '').trim();
+				if (text) return text;
+			} catch {
+				/* fall through to the hf-inference ASR payload */
+			}
+
+			const wav = await fs.readFile(prepared.path);
 			const response = await axios.post(
 				`${HUGGINGFACE_INFERENCE_URL}/openai/whisper-large-v3`,
-				buffer,
+				{ inputs: wav.toString('base64') },
 				{
 					headers: {
 						Authorization: `Bearer ${apiKey}`,
-						'Content-Type': file.mimetype || 'audio/webm',
+						'Content-Type': 'application/json',
 					},
 					timeout: 120_000,
 					maxBodyLength: Infinity,
@@ -1081,7 +1139,24 @@ export class WhatsAppVoiceChangerService {
 		} catch (error: any) {
 			if (error instanceof BadRequestException) throw error;
 			throw this.providerError(error, 'Hugging Face transcription failed');
+		} finally {
+			if (prepared.temp) await fs.rm(prepared.temp, { force: true }).catch(() => undefined);
 		}
+	}
+
+	private isRecoverableTranscriptionError(error: unknown) {
+		const message = `${error instanceof Error ? error.message : ''} ${this.extractProviderMessage(this.decodeAxiosErrorBody(error)) || ''}`;
+		if (/could not hear any speech/i.test(message)) return false;
+		const status = Number(
+			(error as any)?.response?.status ||
+				(typeof (error as any)?.getStatus === 'function' ? (error as any).getStatus() : 0) ||
+				(error as any)?.status ||
+				0,
+		);
+		if (status === 400 || status === 402 || status === 403 || status === 429 || status === 503) return true;
+		return /quota|billing|insufficient_quota|exceeded your current quota|decommissioned|no longer supported|plan and billing|transcription failed|status code 400/i.test(
+			message,
+		);
 	}
 
 	private isElevenLabsCloneShortAudioError(error: unknown) {

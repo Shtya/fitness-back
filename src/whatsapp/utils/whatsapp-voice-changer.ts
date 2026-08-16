@@ -141,20 +141,24 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		label: 'Groq (Whisper + Arabic TTS)',
 		labelAr: 'Groq (تفريغ ثم صوت عربي)',
 		description:
-			'Free-tier Speech-to-text then a new TTS voice. Fast. Arabic uses playai-tts-arabic. This is not a clone of your voice.',
+			'Free-tier Speech-to-text then Orpheus TTS. Fast. Arabic uses canopylabs/orpheus-arabic-saudi. This is not a clone of your voice.',
 		descriptionAr:
-			'تفريغ مجاني ثم نطق بصوت جديد. سريع. العربي يستخدم playai-tts-arabic. هذا ليس استنساخاً لصوتك.',
+			'تفريغ مجاني ثم نطق Orpheus. سريع. العربي يستخدم canopylabs/orpheus-arabic-saudi. هذا ليس استنساخاً لصوتك.',
 		keyUrl: 'https://console.groq.com/keys',
 		keyHint: 'Sign up at console.groq.com → API Keys → Create API Key. The free tier is enough to try.',
 		keyHintAr: 'سجّل في console.groq.com → API Keys → إنشاء مفتاح. الخطة المجانية تكفي للتجربة.',
 		envFallback: 'GROQ_API_KEY',
 		voices: [
-			{ id: 'Ahmad-PlayAI', label: 'Ahmad (Arabic)', labelAr: 'أحمد (عربي)', category: 'arabic' },
-			{ id: 'Nasser-PlayAI', label: 'Nasser (Arabic)', labelAr: 'ناصر (عربي)', category: 'arabic' },
-			{ id: 'Amira-PlayAI', label: 'Amira (Arabic)', labelAr: 'أميرة (عربي)', category: 'arabic' },
-			{ id: 'Khalid-PlayAI', label: 'Khalid (Arabic)', labelAr: 'خالد (عربي)', category: 'arabic' },
-			{ id: 'Fritz-PlayAI', label: 'Fritz (English)', labelAr: 'فريتز (إنجليزي)' },
-			{ id: 'Arista-PlayAI', label: 'Arista (English)', labelAr: 'أريستا (إنجليزي)' },
+			{ id: 'abdullah', label: 'Abdullah (Arabic)', labelAr: 'عبدالله (عربي)', category: 'arabic' },
+			{ id: 'aisha', label: 'Aisha (Arabic)', labelAr: 'عائشة (عربي)', category: 'arabic' },
+			{ id: 'fahad', label: 'Fahad (Arabic)', labelAr: 'فهد (عربي)', category: 'arabic' },
+			{ id: 'sultan', label: 'Sultan (Arabic)', labelAr: 'سلطان (عربي)', category: 'arabic' },
+			{ id: 'lulwa', label: 'Lulwa (Arabic)', labelAr: 'لؤلؤة (عربي)', category: 'arabic' },
+			{ id: 'noura', label: 'Noura (Arabic)', labelAr: 'نورة (عربي)', category: 'arabic' },
+			{ id: 'troy', label: 'Troy (English)', labelAr: 'تروي (إنجليزي)' },
+			{ id: 'hannah', label: 'Hannah (English)', labelAr: 'هانا (إنجليزي)' },
+			{ id: 'austin', label: 'Austin (English)', labelAr: 'أوستن (إنجليزي)' },
+			{ id: 'autumn', label: 'Autumn (English)', labelAr: 'أوتم (إنجليزي)' },
 		],
 	},
 	{
@@ -226,25 +230,39 @@ export function isArabicVoiceText(text: string) {
 	return /[\u0600-\u06FF]/.test(String(text || ''));
 }
 
-const GROQ_ARABIC_VOICES = new Set([
-	'Ahmad-PlayAI',
-	'Nasser-PlayAI',
-	'Amira-PlayAI',
-	'Khalid-PlayAI',
-]);
+const GROQ_ARABIC_VOICES = new Set(['abdullah', 'aisha', 'fahad', 'sultan', 'lulwa', 'noura']);
+const GROQ_ENGLISH_VOICES = new Set(['troy', 'hannah', 'austin', 'autumn', 'diana', 'daniel']);
+const GROQ_TTS_ARABIC_MODEL = 'canopylabs/orpheus-arabic-saudi';
+const GROQ_TTS_ENGLISH_MODEL = 'canopylabs/orpheus-v1-english';
+const GROQ_VOICE_ALIASES: Record<string, string> = {
+	'Ahmad-PlayAI': 'abdullah',
+	'Nasser-PlayAI': 'fahad',
+	'Amira-PlayAI': 'aisha',
+	'Khalid-PlayAI': 'sultan',
+	'Fritz-PlayAI': 'troy',
+	'Arista-PlayAI': 'hannah',
+};
+
+export function normalizeGroqVoice(voiceId: string | null | undefined) {
+	const requested = String(voiceId || '').trim();
+	if (!requested) return '';
+	return GROQ_VOICE_ALIASES[requested] || requested.toLowerCase();
+}
 
 export function resolveGroqSpeech(voiceId: string | null | undefined, text: string) {
 	const arabic = isArabicVoiceText(text);
-	const requested = String(voiceId || '').trim();
+	const requested = normalizeGroqVoice(voiceId);
 	if (arabic) {
 		return {
-			model: 'playai-tts-arabic',
-			voice: GROQ_ARABIC_VOICES.has(requested) ? requested : 'Ahmad-PlayAI',
+			model: GROQ_TTS_ARABIC_MODEL,
+			voice: GROQ_ARABIC_VOICES.has(requested) ? requested : 'abdullah',
+			responseFormat: 'wav' as const,
 		};
 	}
 	return {
-		model: 'playai-tts',
-		voice: !requested || GROQ_ARABIC_VOICES.has(requested) ? 'Fritz-PlayAI' : requested,
+		model: GROQ_TTS_ENGLISH_MODEL,
+		voice: GROQ_ENGLISH_VOICES.has(requested) ? requested : 'troy',
+		responseFormat: 'wav' as const,
 	};
 }
 

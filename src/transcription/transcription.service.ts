@@ -503,19 +503,43 @@ export class TranscriptionService {
 		return { ok: true };
 	}
 
+	private detectScriptLocale(text: string) {
+		const sample = String(text || '');
+		const arabicChars = (sample.match(/[\u0600-\u06FF]/g) || []).length;
+		const latinChars = (sample.match(/[A-Za-z]/g) || []).length;
+		if (arabicChars === 0 && latinChars === 0) return 'en';
+		return arabicChars >= latinChars ? 'ar' : 'en';
+	}
+
 	private resolveLocale(
 		locale: string | undefined,
 		requestedLanguage: string | null | undefined,
 		text: string,
 	) {
 		const explicit = String(locale || '').toLowerCase();
+		if (explicit === 'auto' || !explicit) {
+			return this.detectScriptLocale(text);
+		}
 		if (explicit.startsWith('ar')) return 'ar';
 		if (explicit.startsWith('en')) return 'en';
 		const requested = String(requestedLanguage || '').toLowerCase();
 		if (requested.startsWith('ar')) return 'ar';
 		if (requested.startsWith('en')) return 'en';
-		const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
-		return arabicChars > Math.max(8, text.length * 0.12) ? 'ar' : 'en';
+		return this.detectScriptLocale(text);
+	}
+
+	private looksTranslated(source: string, enhanced: string) {
+		const sourceLocale = this.detectScriptLocale(source);
+		const outputLocale = this.detectScriptLocale(enhanced);
+		if (sourceLocale === outputLocale) return false;
+		const sourceAr = (source.match(/[\u0600-\u06FF]/g) || []).length;
+		const outputAr = (enhanced.match(/[\u0600-\u06FF]/g) || []).length;
+		const sourceEn = (source.match(/[A-Za-z]/g) || []).length;
+		const outputEn = (enhanced.match(/[A-Za-z]/g) || []).length;
+		if (sourceLocale === 'ar') {
+			return sourceAr >= 20 && outputAr < Math.max(8, sourceAr * 0.35);
+		}
+		return sourceEn >= 20 && outputEn < Math.max(8, sourceEn * 0.35);
 	}
 
 	private tryParseJson(text: unknown) {
@@ -564,15 +588,31 @@ export class TranscriptionService {
 			throw new BadRequestException('Transcript text is too long');
 		}
 
-		const locale = this.resolveLocale(dto?.locale, record.requestedLanguage, before);
+		const locale = this.detectScriptLocale(before);
 		const mode = dto?.mode || 'full';
 		const apply = dto?.apply === true;
 
 		const system = `You are an expert speech-to-text cleanup editor for So7baFit Transcript.
-Fix ASR mistakes, unclear speech, broken words, and punctuation while preserving the speaker's meaning.
-Do NOT invent facts, names, numbers, or topics that are not supported by the source text.
-Keep mixed Arabic/English as spoken. Prefer natural readable sentences.
-${locale === 'ar' ? 'Write the enhanced transcript primarily in Arabic when the source is Arabic.' : 'Write the enhanced transcript primarily in English when the source is English.'}
+Your job is to repair ASR mistakes from context. You must NEVER translate the transcript into another language.
+
+LANGUAGE RULES (mandatory):
+- Detect the speaker's language from the source text, not from the UI.
+- If the speaker spoke Arabic (including dialect / Egyptian), the enhanced text MUST stay Arabic.
+- If the speaker spoke English, the enhanced text MUST stay English.
+- If they mixed languages (code-switching), keep each phrase in the language it was actually spoken. Do not unify everything into one language.
+- Never convert Arabic speech into English, and never convert English speech into Arabic.
+
+WHAT TO FIX:
+- Wrong, garbled, or context-incoherent words. Infer the intended word from surrounding meaning.
+- Example: ASR wrote an English fragment like "deal with" but the Arabic speaker meant an offer / "Deal" / عرض. Restore the intended wording in the SAME language the speaker used.
+- Broken punctuation, spacing, obvious grammar slips, and unreadable ASR tokens.
+
+WHAT NOT TO DO:
+- Do NOT translate.
+- Do NOT rewrite the meaning, add facts, names, numbers, or topics that are not supported by the source.
+- Do NOT drop content.
+- changesSummary must be short notes in the same language as the source.
+
 Reply with ONLY valid JSON (no markdown fences):
 {
   "enhancedText": string,
@@ -581,9 +621,10 @@ Reply with ONLY valid JSON (no markdown fences):
 Mode: ${mode}
 - clarity: fix garbled / wrong words from unclear speech
 - punctuation: mostly punctuation, casing, and paragraph breaks
-- full: clarity + punctuation + light grammar cleanup`;
+- full: clarity + punctuation + light grammar cleanup
+Output language: ${locale === 'ar' ? 'Arabic (same as source)' : 'English (same as source)'}`;
 
-		const userMessage = `Clean up this speech transcript.\nMode: ${mode}\nLocale: ${locale}\n\n--- TRANSCRIPT ---\n${before.slice(0, 120_000)}`;
+		const userMessage = `Clean up this speech transcript in-place. Do not translate.\nMode: ${mode}\nSource language: ${locale}\n\n--- TRANSCRIPT ---\n${before.slice(0, 120_000)}`;
 
 		const ai = await this.aiFree.chat(user, {
 			messages: [
@@ -595,8 +636,16 @@ Mode: ${mode}
 		} as any);
 
 		const parsed = this.asObject(this.tryParseJson(ai?.reply));
-		const enhancedText = String(parsed.enhancedText || '').trim() || before;
-		const changesSummary = this.asStringArray(parsed.changesSummary, 12);
+		const rawEnhanced = String(parsed.enhancedText || '').trim() || before;
+		const translated = this.looksTranslated(before, rawEnhanced);
+		const enhancedText = translated ? before : rawEnhanced;
+		const changesSummary = translated
+			? [
+					this.detectScriptLocale(before) === 'ar'
+						? 'تم الإبقاء على لغة المصدر وتجاهل تحويل النص للغة أخرى.'
+						: 'Enhancement stayed in the source language; a translated rewrite was discarded.',
+				]
+			: this.asStringArray(parsed.changesSummary, 12);
 
 		if (!record.originalText) {
 			record.originalText = before;
@@ -735,12 +784,13 @@ Rules:
 			throw new BadRequestException('Transcript text is too long');
 		}
 
-		const locale = this.resolveLocale(dto?.locale, record.requestedLanguage, source);
+		const locale = this.detectScriptLocale(source);
 		const system = `You are a CRM assistant for So7baFit WhatsApp conversations.
 Read a timeline of text tickets and voice transcripts. Infer what the person is asking for and summarize it.
 Do NOT invent facts, products, prices, dates, or names that are not supported by the source.
 Keep mixed Arabic/English as written.
-${locale === 'ar' ? 'Respond in Arabic.' : 'Respond in clear English.'}
+${locale === 'ar' ? 'Respond in Arabic, the same language as the source.' : 'Respond in clear English, the same language as the source.'}
+Never translate the source into a different language.
 Reply with ONLY valid JSON (no markdown fences):
 {
   "tldr": string,
