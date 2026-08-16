@@ -153,9 +153,6 @@ export class WhatsAppStickersService {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const row = await this.stickerRepo.findOne({ where: { id: stickerId, accountId } });
 		if (!row) throw new NotFoundException('Sticker not found');
-		if (row.source !== 'upload') {
-			throw new BadRequestException('Only uploaded stickers can be removed');
-		}
 		const absolutePath = this.resolveStoredPath(row.storagePath);
 		await this.stickerRepo.softRemove(row);
 		if (absolutePath && absolutePath.includes(`${path.sep}stickers${path.sep}`)) {
@@ -386,7 +383,7 @@ export class WhatsAppStickersService {
 			mimeType: row.mimeType,
 			fileName: row.fileName,
 			isAnimated: Boolean(row.isAnimated),
-			canDelete: row.source === 'upload',
+			canDelete: true,
 			url: `/whatsapp/accounts/${row.accountId}/stickers/${row.id}/content`,
 			createdAt: row.created_at,
 		};

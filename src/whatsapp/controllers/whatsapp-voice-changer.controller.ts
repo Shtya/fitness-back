@@ -10,10 +10,11 @@ import {
 	Req,
 	StreamableFile,
 	UploadedFile,
+	UploadedFiles,
 	UseGuards,
 	UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { randomUUID } from 'crypto';
 import { unlink } from 'fs/promises';
 import { diskStorage } from 'multer';
@@ -58,6 +59,47 @@ export class WhatsAppVoiceChangerController {
 		return this.voiceChanger.removeCredential(req.user.id, provider);
 	}
 
+	@Post('clone')
+	@UseInterceptors(
+		FilesInterceptor('files', 10, {
+			storage: diskStorage({
+				destination: tmpdir(),
+				filename: (_req, _file, callback) => callback(null, `wa-voice-clone-${randomUUID()}`),
+			}),
+			limits: { fileSize: 15 * 1024 * 1024, files: 10 },
+			fileFilter: (_req, file, callback) => {
+				const mime = String(file.mimetype || '').toLowerCase();
+				const name = String(file.originalname || '').toLowerCase();
+				const allowed =
+					mime.startsWith('audio/') ||
+					mime.includes('webm') ||
+					mime.includes('ogg') ||
+					mime.includes('mpeg') ||
+					mime.includes('wav') ||
+					mime.includes('mp4') ||
+					/\.(webm|ogg|mp3|wav|m4a|mp4|aac|flac)$/.test(name);
+				callback(allowed ? null : new BadRequestException('Unsupported audio format'), allowed);
+			},
+		}),
+	)
+	async cloneVoice(
+		@Req() req: any,
+		@UploadedFiles() files: VoiceChangerUpload[],
+		@Body() body: { name?: string; consent?: string },
+	) {
+		const samples = files || [];
+		try {
+			return await this.voiceChanger.cloneVoice(
+				req.user.id,
+				samples,
+				String(body?.name || ''),
+				String(body?.consent || '').toLowerCase() === 'true',
+			);
+		} finally {
+			await Promise.all(samples.map((file) => unlink(file.path).catch(() => undefined)));
+		}
+	}
+
 	@Post('transform')
 	@UseInterceptors(
 		FileInterceptor('file', {
@@ -65,7 +107,7 @@ export class WhatsAppVoiceChangerController {
 				destination: tmpdir(),
 				filename: (_req, _file, callback) => callback(null, `wa-voice-changer-${randomUUID()}`),
 			}),
-			limits: { fileSize: 12 * 1024 * 1024, files: 1 },
+			limits: { fileSize: 25 * 1024 * 1024, files: 1 },
 			fileFilter: (_req, file, callback) => {
 				const mime = String(file.mimetype || '').toLowerCase();
 				const allowed =

@@ -2,6 +2,7 @@ export const VOICE_CHANGER_PROVIDER_IDS = [
 	'off',
 	'ffmpeg',
 	'elevenlabs',
+	'clone',
 	'groq',
 	'openai',
 	'huggingface',
@@ -14,6 +15,7 @@ export type VoiceChangerVoiceOption = {
 	id: string;
 	label: string;
 	labelAr: string;
+	category?: string;
 };
 
 export type VoiceChangerProviderCatalog = {
@@ -92,6 +94,22 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 			{ id: 'pFZP5JQG7iQjIQuC4Bku', label: 'Lily', labelAr: 'ليلي' },
 			{ id: 'iP95p4xoKVk53GoZ742B', label: 'Chris', labelAr: 'كريس' },
 		],
+	},
+	{
+		id: 'clone',
+		needsKey: true,
+		kind: 'trial',
+		label: 'Clone a reference voice',
+		labelAr: 'استنساخ صوت مرجعي',
+		description:
+			'Upload several samples of a voice you have permission to use. ElevenLabs learns the tone, then your WhatsApp notes are converted into that voice.',
+		descriptionAr:
+			'ارفع عدة تسجيلات لصوت مصرّح لك به. ElevenLabs يحلل النبرة، وبعدها الرسائل الصوتية على واتساب بتتحول لصوت الشخص ده.',
+		keyUrl: 'https://elevenlabs.io/app/settings/api-keys',
+		keyHint: 'Uses the same ElevenLabs API key. Instant Voice Cloning needs a plan that allows custom clones.',
+		keyHintAr: 'يستخدم نفس مفتاح ElevenLabs. استنساخ الصوت الفوري يحتاج خطة تسمح بالـ custom clones.',
+		envFallback: 'ELEVENLABS_API_KEY',
+		voices: [],
 	},
 	{
 		id: 'groq',

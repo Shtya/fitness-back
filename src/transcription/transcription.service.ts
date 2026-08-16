@@ -162,6 +162,20 @@ export class TranscriptionService {
 		};
 	}
 
+	/** Stored transcription key only — env fallback stays with the caller. */
+	async tryReadStoredApiKey(provider: string): Promise<{ key: string; lastFour: string } | null> {
+		if (!CLOUD_PROVIDERS.includes(provider as CloudProvider)) return null;
+		const stored = await this.credentialRepo.findOne({ where: { provider } });
+		if (!stored?.encryptedApiKey) return null;
+		try {
+			const key = this.decryptCredential(stored.encryptedApiKey)?.trim();
+			if (!key) return null;
+			return { key, lastFour: stored.keyLastFour || key.slice(-4) };
+		} catch {
+			return null;
+		}
+	}
+
 	async saveCredential(userId: string, provider: string, apiKey: string) {
 		this.assertCloudProvider(provider);
 		const normalized = apiKey.trim();

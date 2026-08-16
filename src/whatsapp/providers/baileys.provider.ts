@@ -184,6 +184,22 @@ export function classifyBaileysDisconnect(
 	return phoneLikelyClosed ? 'phone_closed' : 'connection_lost';
 }
 
+async function resolveBaileysSocketVersion(baileys: any): Promise<number[]> {
+	const configured = process.env.WHATSAPP_BAILEYS_VERSION?.trim();
+	if (configured) {
+		const parts = configured.split(/[.,]/).map((part) => Number(part.trim()));
+		if (parts.length === 3 && parts.every((n) => Number.isFinite(n) && n >= 0)) {
+			return parts;
+		}
+	}
+	const web = await baileys.fetchLatestWaWebVersion?.().catch(() => null);
+	if (web?.isLatest && Array.isArray(web.version) && web.version.length === 3) {
+		return web.version;
+	}
+	const fallback = await baileys.fetchLatestBaileysVersion();
+	return fallback.version;
+}
+
 function toDate(ts: any): Date {
 	const n =
 		typeof ts === 'number'
@@ -633,14 +649,15 @@ export class BaileysProvider implements WhatsAppProvider {
 	async connect(phoneNumber?: string) {
 		this.closing = false;
 		this.phoneNumberHint = phoneNumber ? String(phoneNumber).replace(/\D/g, '') : null;
-		this.qr = null;
-		this.pairingCode = null;
+		if (this.opening) return this.opening;
+		if (this.socket && this.state === 'connected') return;
+		if (this.socket && ['connecting', 'qr_pending'].includes(this.state)) return;
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
-		if (this.opening) return this.opening;
-		if (this.socket && this.state === 'connected') return;
+		this.qr = null;
+		this.pairingCode = null;
 		this.setState('connecting');
 		await this.openSocket();
 	}
@@ -659,12 +676,12 @@ export class BaileysProvider implements WhatsAppProvider {
 			default: makeWASocket,
 			useMultiFileAuthState,
 			DisconnectReason,
-			fetchLatestBaileysVersion,
+			Browsers,
 		} = baileys as any;
 
 		await fs.mkdir(this.sessionDir(), { recursive: true });
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
-		const { version } = await fetchLatestBaileysVersion();
+		const version = await resolveBaileysSocketVersion(baileys);
 
 		this.socketOpened = false;
 		const generation = ++this.socketGeneration;
@@ -676,6 +693,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			} catch {
 				/* ignore */
 			}
+			await new Promise((resolve) => setTimeout(resolve, 400));
 		}
 
 		const socket = makeWASocket({
@@ -684,7 +702,8 @@ export class BaileysProvider implements WhatsAppProvider {
 			printQRInTerminal: false,
 			markOnlineOnConnect: false,
 			syncFullHistory: true,
-			browser: ['So7baFit', 'Chrome', '1.0.0'],
+			connectTimeoutMs: 60_000,
+			browser: Browsers?.ubuntu?.('Chrome') || Browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'],
 		});
 		this.socket = socket;
 
@@ -719,9 +738,14 @@ export class BaileysProvider implements WhatsAppProvider {
 			if (update.connection === 'close') {
 				if (this.socket === socket) this.socket = null;
 				if (this.closing) return;
+				const err = update?.lastDisconnect?.error;
+				const statusCode = Number(err?.output?.statusCode || err?.data?.reason || 0);
 				const kind = classifyBaileysDisconnect(update, DisconnectReason, {
 					sessionHadOpened: this.socketOpened,
 				});
+				this.logger.warn(
+					`Baileys connection closed for ${this.accountId} (${kind}, code=${statusCode || 'n/a'})`,
+				);
 				if (kind === 'logged_out') {
 					this.setState('error', {
 						error: 'WhatsApp logged out this linked device. Scan the QR again.',
@@ -743,6 +767,11 @@ export class BaileysProvider implements WhatsAppProvider {
 					this.scheduleReconnect(8_000);
 					return;
 				}
+				if (statusCode === 515) {
+					this.setState('connecting');
+					this.scheduleReconnect(1_500);
+					return;
+				}
 				this.setState('disconnected', {
 					reason: kind === 'phone_closed' ? 'phone_closed' : 'connection_lost',
 					error:
@@ -750,7 +779,8 @@ export class BaileysProvider implements WhatsAppProvider {
 							? 'WhatsApp on the phone looks closed or offline. Open WhatsApp and keep it in the foreground.'
 							: undefined,
 				});
-				this.scheduleReconnect();
+				const handshakeFailure = /connection failure/i.test(String(err?.message || ''));
+				this.scheduleReconnect(handshakeFailure ? 5_000 : 0);
 			}
 		});
 

@@ -45,6 +45,8 @@ import { WhatsAppStatusService } from './services/whatsapp-status.service';
 import { WhatsAppReportsService } from './services/whatsapp-reports.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
+import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
+import { TranscriptionModule } from '../transcription/transcription.module';
 
 export const WHATSAPP_ENTITIES = [
 	WhatsAppAccount,
@@ -78,6 +80,8 @@ export const WHATSAPP_ENTITIES = [
 		}),
 		NotificationModule,
 		RedisModule,
+		AiContentStudioModule,
+		TranscriptionModule,
 	],
 	controllers: [
 		WhatsAppAccountsController,

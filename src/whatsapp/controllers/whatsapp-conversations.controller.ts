@@ -345,7 +345,7 @@ export class WhatsAppConversationsController {
 					);
 				},
 			}),
-			limits: { fileSize: 25 * 1024 * 1024 },
+			limits: { fileSize: 64 * 1024 * 1024 },
 			fileFilter: (_req, file, callback) => {
 				const mime = String(file.mimetype || '')
 					.toLowerCase()

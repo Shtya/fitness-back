@@ -16,5 +16,6 @@ import { TranscriptionService } from './transcription.service';
 	],
 	controllers: [TranscriptionController],
 	providers: [TranscriptionService],
+	exports: [TranscriptionService],
 })
 export class TranscriptionModule {}
