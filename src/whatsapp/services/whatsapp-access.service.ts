@@ -28,10 +28,6 @@ export class WhatsAppAccessService {
 		private readonly conversationRepo: Repository<WhatsAppConversation>,
 	) {}
 
-	private isSuperAdmin(user?: User | null) {
-		return user?.role === UserRole.SUPER_ADMIN;
-	}
-
 	private isEligibleStaff(user?: User | null) {
 		return (
 			user?.role === UserRole.ADMIN ||
@@ -60,7 +56,6 @@ export class WhatsAppAccessService {
 		},
 	) {
 		return (
-			this.isSuperAdmin(user) ||
 			access.account.ownerAdminId === user.id ||
 			Boolean(access.canManage) ||
 			Boolean(access.canAssign)
@@ -73,7 +68,7 @@ export class WhatsAppAccessService {
 			where: { id: accountId },
 		});
 		if (!account) throw new NotFoundException('WhatsApp account not found');
-		if (this.isSuperAdmin(user) || account.ownerAdminId === user.id) {
+		if (account.ownerAdminId === user.id) {
 			return this.fullAccess(account);
 		}
 		if (!this.isEligibleStaff(user)) {
@@ -88,11 +83,6 @@ export class WhatsAppAccessService {
 
 	async listAccessibleAccounts(user: User) {
 		if (!this.isEligibleStaff(user)) return [];
-		if (this.isSuperAdmin(user)) {
-			return this.accountRepo.find({
-				order: { created_at: 'DESC' },
-			});
-		}
 
 		const [owned, rows] = await Promise.all([
 			this.accountRepo.find({

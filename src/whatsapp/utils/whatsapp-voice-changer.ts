@@ -106,8 +106,10 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		descriptionAr:
 			'ارفع عدة تسجيلات لصوت مصرّح لك به. ElevenLabs يحلل النبرة، وبعدها الرسائل الصوتية على واتساب بتتحول لصوت الشخص ده.',
 		keyUrl: 'https://elevenlabs.io/app/settings/api-keys',
-		keyHint: 'Uses the same ElevenLabs API key. Instant Voice Cloning needs a plan that allows custom clones.',
-		keyHintAr: 'يستخدم نفس مفتاح ElevenLabs. استنساخ الصوت الفوري يحتاج خطة تسمح بالـ custom clones.',
+		keyHint:
+			'Use an ElevenLabs API key with Voices / Instant Voice Cloning enabled (Starter or higher). Restricted keys cannot create clones. About 60 seconds of clean audio is required. You can also clone the voice on elevenlabs.io, then pick it here.',
+		keyHintAr:
+			'استخدم مفتاح ElevenLabs مع تفعيل Voices / Instant Voice Cloning (خطة Starter أو أعلى). المفتاح المحدود لا ينشئ استنساخاً. محتاج حوالي 60 ثانية صوت واضح. تقدر كمان تستنسخ من موقع ElevenLabs وبعدين تختاره هنا.',
 		envFallback: 'ELEVENLABS_API_KEY',
 		voices: [],
 	},
@@ -126,8 +128,10 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		keyHintAr: 'سجّل في console.groq.com → API Keys → إنشاء مفتاح. الخطة المجانية تكفي للتجربة.',
 		envFallback: 'GROQ_API_KEY',
 		voices: [
-			{ id: 'Ahmad-PlayAI', label: 'Ahmad (Arabic)', labelAr: 'أحمد (عربي)' },
-			{ id: 'Nasser-PlayAI', label: 'Nasser (Arabic)', labelAr: 'ناصر (عربي)' },
+			{ id: 'Ahmad-PlayAI', label: 'Ahmad (Arabic)', labelAr: 'أحمد (عربي)', category: 'arabic' },
+			{ id: 'Nasser-PlayAI', label: 'Nasser (Arabic)', labelAr: 'ناصر (عربي)', category: 'arabic' },
+			{ id: 'Amira-PlayAI', label: 'Amira (Arabic)', labelAr: 'أميرة (عربي)', category: 'arabic' },
+			{ id: 'Khalid-PlayAI', label: 'Khalid (Arabic)', labelAr: 'خالد (عربي)', category: 'arabic' },
 			{ id: 'Fritz-PlayAI', label: 'Fritz (English)', labelAr: 'فريتز (إنجليزي)' },
 			{ id: 'Arista-PlayAI', label: 'Arista (English)', labelAr: 'أريستا (إنجليزي)' },
 		],
@@ -158,11 +162,11 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		kind: 'trial',
 		label: 'Hugging Face (Whisper + MMS TTS)',
 		labelAr: 'Hugging Face (تفريغ ثم نطق)',
-		description: 'Free Inference token. Transcribe then facebook/mms TTS. Slower, useful to compare.',
-		descriptionAr: 'توكن مجاني. تفريغ ثم نطق MMS. أبطأ، مفيد للمقارنة.',
+		description: 'Free Inference token. Transcribe then facebook/mms TTS. Needs an Inference Providers token, not a read-only Hub token.',
+		descriptionAr: 'توكن مجاني. تفريغ ثم نطق MMS. يحتاج توكن بصلاحية Inference Providers مش توكن قراءة فقط.',
 		keyUrl: 'https://huggingface.co/settings/tokens',
-		keyHint: 'huggingface.co → Settings → Access Tokens → Create new token with Inference permission.',
-		keyHintAr: 'huggingface.co → Settings → Access Tokens → أنشئ توكن بصلاحية Inference.',
+		keyHint: 'huggingface.co → Settings → Access Tokens → Create a token with Inference Providers permission.',
+		keyHintAr: 'huggingface.co → Settings → Access Tokens → أنشئ توكن بصلاحية Inference Providers.',
 		envFallback: 'HUGGINGFACE_API_KEY',
 		voices: [
 			{ id: 'facebook/mms-tts-ara', label: 'Arabic TTS', labelAr: 'نطق عربي' },
@@ -175,8 +179,10 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		kind: 'trial',
 		label: 'Cartesia Voice Changer',
 		labelAr: 'Cartesia تغيير الصوت',
-		description: 'Speech-to-speech with intonation preserved. Has a free trial. Their bytes API sunsets 20 Aug 2026.',
-		descriptionAr: 'يحافظ على التنغيم مع صوت جديد. فيه تجربة مجانية. واجهة bytes تتوقف 20 أغسطس 2026.',
+		description:
+			'Speech-to-speech with intonation preserved. Cartesia discontinued this API on 20 Aug 2026 — keep a key saved if your plan still works, otherwise use ElevenLabs or the free pitch changer.',
+		descriptionAr:
+			'يحافظ على التنغيم مع صوت جديد. Cartesia أوقفت واجهة Voice Changer في 20 أغسطس 2026. لو المفتاح لسه شغال استخدمه، وإلا ElevenLabs أو تغيير الدرجة المجاني.',
 		keyUrl: 'https://play.cartesia.ai/keys',
 		keyHint: 'play.cartesia.ai → sign up → API keys. Paste a cartesia voice ID if you cloned one.',
 		keyHintAr: 'play.cartesia.ai → حساب → API keys. الصق voice ID لو عملت clone.',
@@ -194,6 +200,34 @@ export function isVoiceChangerProviderId(value: string): value is VoiceChangerPr
 export function findVoiceChangerProvider(id: string) {
 	return VOICE_CHANGER_CATALOG.find((item) => item.id === id) || null;
 }
+
+export function isArabicVoiceText(text: string) {
+	return /[\u0600-\u06FF]/.test(String(text || ''));
+}
+
+const GROQ_ARABIC_VOICES = new Set([
+	'Ahmad-PlayAI',
+	'Nasser-PlayAI',
+	'Amira-PlayAI',
+	'Khalid-PlayAI',
+]);
+
+export function resolveGroqSpeech(voiceId: string | null | undefined, text: string) {
+	const arabic = isArabicVoiceText(text);
+	const requested = String(voiceId || '').trim();
+	if (arabic) {
+		return {
+			model: 'playai-tts-arabic',
+			voice: GROQ_ARABIC_VOICES.has(requested) ? requested : 'Ahmad-PlayAI',
+		};
+	}
+	return {
+		model: 'playai-tts',
+		voice: !requested || GROQ_ARABIC_VOICES.has(requested) ? 'Fritz-PlayAI' : requested,
+	};
+}
+
+export const HUGGINGFACE_INFERENCE_URL = 'https://router.huggingface.co/hf-inference/models';
 
 export function atempoChain(rate: number): string[] {
 	const filters: string[] = [];

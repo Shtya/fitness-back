@@ -31,6 +31,17 @@ export class WhatsAppReportsController {
 		return this.reports.summary(req.user, accountId, from, to);
 	}
 
+	@Get('reports/staff/:userId')
+	staffDetail(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('userId') userId: string,
+		@Query('from') from?: string,
+		@Query('to') to?: string,
+	) {
+		return this.reports.staffDetail(req.user, accountId, userId, from, to);
+	}
+
 	@Get('audit-logs')
 	async auditLogs(
 		@Req() req: any,

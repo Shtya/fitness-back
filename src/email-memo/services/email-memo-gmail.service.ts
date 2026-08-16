@@ -345,7 +345,7 @@ export class EmailMemoGmailService {
 		row.connectedAt = new Date();
 		row.status = 'connected';
 		row.lastError = null;
-		row.lastSyncedAt = new Date();
+		row.lastSyncedAt = null;
 		await this.connections.save(row);
 		await this.startWatch(row.id).catch((error) => {
 			this.logger.warn(`Gmail watch not started: ${error instanceof Error ? error.message : error}`);

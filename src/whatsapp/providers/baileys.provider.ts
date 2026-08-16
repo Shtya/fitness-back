@@ -38,6 +38,51 @@ function normalizeInboxJid(jid: string): string {
 	return raw;
 }
 
+const LIVE_FROM_ME_WINDOW_MS = 30 * 60 * 1000;
+
+/** Phone opened/read the chat → unreadCount 0. Marked unread is -1. Missing stays prev. */
+export function applyLiveChatUnread(
+	prev: number,
+	incoming: unknown,
+): { next: number; phoneRead: boolean } {
+	if (incoming === null || incoming === undefined || incoming === '') {
+		return { next: prev, phoneRead: false };
+	}
+	const value = Math.floor(Number(incoming));
+	if (!Number.isFinite(value)) return { next: prev, phoneRead: false };
+	if (value === 0) return { next: 0, phoneRead: true };
+	if (value < 0) return { next: prev, phoneRead: false };
+	return { next: value, phoneRead: false };
+}
+
+/** Phone-sent echoes often arrive as `append`, not `notify`. Treat recent fromMe as live. */
+export function isHistoryMessageUpsert(type: string, raw: any): boolean {
+	const kind = String(type || 'notify').toLowerCase();
+	if (kind === 'notify') return false;
+	if (!raw?.key?.fromMe) return true;
+	if (kind !== 'append') return true;
+	const ts = Number(raw.messageTimestamp) || 0;
+	const tsMs = ts > 1e12 ? ts : ts * 1000;
+	if (!Number.isFinite(tsMs) || tsMs <= 0) return true;
+	return Date.now() - tsMs > LIVE_FROM_ME_WINDOW_MS;
+}
+
+/** proto.WebMessageInfo.Status: 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ, 5=PLAYED */
+export function mapBaileysMessageStatus(status: unknown): string | null {
+	if (status === 0 || status === 'ERROR' || status === 'failed') return 'failed';
+	if (status === 1 || status === 'PENDING' || status === 'pending') return 'pending';
+	if (status === 2 || status === 'SERVER_ACK' || status === 'sent') return 'sent';
+	if (status === 3 || status === 'DELIVERY_ACK' || status === 'delivered') return 'delivered';
+	if (status === 4 || status === 'READ' || status === 'read') return 'read';
+	if (status === 5 || status === 'PLAYED' || status === 'played') return 'played';
+	return null;
+}
+
+function isStatusBroadcastJid(jid: string | null | undefined): boolean {
+	const id = String(jid || '').toLowerCase();
+	return Boolean(id) && (id.includes('status@') || id.endsWith('@broadcast'));
+}
+
 function toBaileysJid(jid: string): string {
 	const raw = String(jid || '').trim();
 	if (!raw) return '';
@@ -66,6 +111,90 @@ function isWeakDisplayName(
 	if (user && n === user) return true;
 	if (/^\d{8,32}$/.test(n)) return true;
 	return false;
+}
+
+function extractChatDisplayName(chat: any): string | null {
+	const chatId = jidOf(chat?.id) || jidOf(chat);
+	const candidates = [
+		chat?.name,
+		chat?.verifiedName,
+		chat?.displayName,
+		chat?.notify,
+		chat?.notifyName,
+		chat?.pushName,
+		chat?.pushname,
+		chat?.username,
+		chat?.formattedTitle,
+		chat?.formattedName,
+		chat?.contact?.name,
+		chat?.contact?.verifiedName,
+		chat?.contact?.pushname,
+		chat?.contact?.formattedName,
+		chat?.threadMetadata?.name,
+		chat?.thread_metadata?.name,
+	];
+	for (const value of candidates) {
+		if (!value) continue;
+		if (typeof value === 'object') {
+			const nested = String(value.text || value.name || '').trim();
+			if (nested && !isWeakDisplayName(nested, chatId)) return nested;
+			continue;
+		}
+		const text = String(value).trim();
+		if (text && text !== '[object Object]' && !isWeakDisplayName(text, chatId)) return text;
+	}
+	return null;
+}
+
+function newsletterDisplayName(meta: any): string | null {
+	const candidates = [
+		meta?.name,
+		meta?.thread_metadata?.name,
+		meta?.threadMetadata?.name,
+		meta?.result?.thread_metadata?.name,
+		meta?.result?.name,
+	];
+	for (const value of candidates) {
+		if (typeof value === 'string' && value.trim()) return value.trim();
+		const text = String(value?.text || '').trim();
+		if (text) return text;
+	}
+	return null;
+}
+
+function resolveWhatsAppPictureUrl(value: any): string | null {
+	if (!value) return null;
+	if (typeof value === 'string') {
+		const text = value.trim();
+		if (text.startsWith('http')) return text;
+		if (text.startsWith('/')) return `https://pps.whatsapp.net${text}`;
+		return null;
+	}
+	const url = String(value.url || value.eurl || '').trim();
+	if (url.startsWith('http')) return url;
+	const path = String(value.directPath || value.direct_path || '').trim();
+	if (path.startsWith('http')) return path;
+	if (path.startsWith('/')) return `https://pps.whatsapp.net${path}`;
+	return null;
+}
+
+function newsletterPictureUrl(meta: any): string | null {
+	const candidates = [
+		meta?.picture,
+		meta?.preview,
+		meta?.thread_metadata?.picture,
+		meta?.thread_metadata?.preview,
+		meta?.threadMetadata?.picture,
+		meta?.threadMetadata?.preview,
+		meta?.result?.picture,
+		meta?.result?.thread_metadata?.picture,
+		meta?.result?.thread_metadata?.preview,
+	];
+	for (const value of candidates) {
+		const url = resolveWhatsAppPictureUrl(value);
+		if (url) return url;
+	}
+	return null;
 }
 
 function unwrapMessageContent(message: any): any {
@@ -226,9 +355,9 @@ export class BaileysProvider implements WhatsAppProvider {
 		groups: true,
 		groupParticipants: false,
 		mediaDownload: true,
-		statusFetch: false,
+		statusFetch: true,
 		statusPublish: false,
-		statusView: false,
+		statusView: true,
 		reactions: true,
 		messageActions: false,
 	};
@@ -254,11 +383,15 @@ export class BaileysProvider implements WhatsAppProvider {
 	/** LID chat id → phone digits (no @domain). */
 	private readonly lidToPn = new Map<string, string>();
 	private readonly groupSubjectCache = new Map<string, string | null>();
+	private readonly newsletterNameCache = new Map<string, string | null>();
 	private readonly avatarUrlCache = new Map<string, { url: string | null; at: number }>();
 	private readonly messagesByChat = new Map<string, Map<string, NormalizedWhatsAppMessage>>();
 	/** Original WAMessage by provider id — required for Baileys media download. */
 	private readonly rawByMessageId = new Map<string, any>();
 	private readonly reactionsByMessageId = new Map<string, NormalizedWhatsAppReaction[]>();
+	private readonly statusesById = new Map<string, any>();
+	private readonly statusRawById = new Map<string, any>();
+	private statusChangeTimer: NodeJS.Timeout | null = null;
 	private connectedAtMs = 0;
 	private historySyncChunks = 0;
 
@@ -334,7 +467,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	private rememberChat(chatId: string, patch: Record<string, unknown> = {}) {
-		if (!chatId || chatId.includes('status@') || chatId.endsWith('@broadcast')) return;
+		if (!chatId || isStatusBroadcastJid(chatId)) return;
 		const prev = this.chats.get(chatId) || {
 			id: { _serialized: chatId },
 			name: null,
@@ -371,7 +504,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private rememberContact(contact: any) {
 		if (!contact) return;
 		const id = jidOf(contact.id) || jidOf(contact);
-		if (!id || id.includes('status@') || id.endsWith('@broadcast')) return;
+		if (!id || isStatusBroadcastJid(id)) return;
 		const lid = contact.lid ? jidOf(contact.lid) : id.endsWith('@lid') || id.endsWith('@hosted.lid') ? id : null;
 		const phoneJid = contact.phoneNumber
 			? jidOf(contact.phoneNumber)
@@ -448,6 +581,68 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
+	private attachChatPicture(chatId: string, url: string | null) {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id || !url) return;
+		if (!this.chats.has(id)) this.rememberChat(id);
+		const chat = this.chats.get(id);
+		if (!chat) return;
+		chat.imgUrl = url;
+		chat.profilePicThumbObj = { ...(chat.profilePicThumbObj || {}), eurl: url };
+	}
+
+	private async fetchNewsletterName(newsletterId: string): Promise<string | null> {
+		const meta = await this.fetchNewsletterMetadata(newsletterId);
+		return meta.name;
+	}
+
+	private async fetchNewsletterMetadata(
+		newsletterId: string,
+	): Promise<{ name: string | null; pictureUrl: string | null }> {
+		const id = jidOf(newsletterId) || String(newsletterId || '').trim();
+		if (!id.endsWith('@newsletter')) return { name: null, pictureUrl: null };
+		const cachedName = this.newsletterNameCache.has(id)
+			? this.newsletterNameCache.get(id) || null
+			: undefined;
+		const cachedPicture = this.avatarUrlCache.get(id);
+		if (cachedName !== undefined && cachedPicture) {
+			return {
+				name: cachedName,
+				pictureUrl: cachedPicture.url || null,
+			};
+		}
+		if (!this.socket || this.state !== 'connected') {
+			return { name: cachedName || null, pictureUrl: cachedPicture?.url || null };
+		}
+		let name = cachedName || null;
+		let pictureUrl = cachedPicture?.url || null;
+		if (typeof this.socket.newsletterMetadata === 'function' && cachedName === undefined) {
+			try {
+				const meta = await this.socket.newsletterMetadata('jid', id);
+				name = newsletterDisplayName(meta) || name;
+				pictureUrl = newsletterPictureUrl(meta) || pictureUrl;
+			} catch {
+				/* keep fallbacks below */
+			}
+			this.newsletterNameCache.set(id, name);
+			if (name) {
+				this.rememberChat(id, { name });
+				this.rememberContact({ id, name, verifiedName: name });
+			}
+		}
+		if (!pictureUrl && typeof this.socket.profilePictureUrl === 'function') {
+			try {
+				const jid = toBaileysJid(id) || id;
+				pictureUrl = String((await this.socket.profilePictureUrl(jid, 'preview')) || '').trim() || null;
+			} catch {
+				pictureUrl = pictureUrl || null;
+			}
+		}
+		this.avatarUrlCache.set(id, { url: pictureUrl, at: Date.now() });
+		this.attachChatPicture(id, pictureUrl);
+		return { name, pictureUrl };
+	}
+
 	private rememberMessage(normalized: NormalizedWhatsAppMessage, rawMessage?: any) {
 		if (!normalized.chatId || !normalized.providerMessageId) return;
 		let bucket = this.messagesByChat.get(normalized.chatId);
@@ -512,6 +707,137 @@ export class BaileysProvider implements WhatsAppProvider {
 				type: normalized.type,
 			},
 		});
+		if (
+			normalized.chatId.endsWith('@newsletter') &&
+			isWeakDisplayName(nextName, normalized.chatId) &&
+			!this.newsletterNameCache.has(normalized.chatId)
+		) {
+			void this.fetchNewsletterName(normalized.chatId);
+		}
+	}
+
+	private ownUserJid(): string {
+		const full = String(this.socket?.user?.id || this.socket?.user?.lid || '').trim();
+		if (!full) return '';
+		const bare = full.includes(':') ? full.split(':')[0] : full.split('@')[0];
+		const domain = full.includes('@') ? full.split('@')[1] : 's.whatsapp.net';
+		return jidOf(`${bare}@${domain}`) || jidOf(full);
+	}
+
+	private statusSerializedId(raw: any): string {
+		const id = String(raw?.key?.id || '').trim();
+		const fromMe = Boolean(raw?.key?.fromMe);
+		const participant =
+			jidOf(raw?.key?.participant) ||
+			jidOf(raw?.key?.participantAlt) ||
+			jidOf(raw?.key?.remoteJidAlt) ||
+			(fromMe ? this.ownUserJid() : '');
+		if (!id) return '';
+		return `${fromMe ? 'true' : 'false'}_status@broadcast_${id}${
+			participant ? `_${participant}` : ''
+		}`;
+	}
+
+	private emitStatusChanged() {
+		if (this.statusChangeTimer) clearTimeout(this.statusChangeTimer);
+		this.statusChangeTimer = setTimeout(() => {
+			this.statusChangeTimer = null;
+			this.emit({ type: 'status_changed' });
+		}, 750);
+	}
+
+	private pruneExpiredStatuses() {
+		const cutoff = Date.now() / 1000 - 24 * 60 * 60;
+		for (const [id, item] of this.statusesById) {
+			if (Number(item?.timestamp) > 0 && Number(item.timestamp) < cutoff) {
+				this.statusesById.delete(id);
+				this.statusRawById.delete(id);
+				const messageId = String(item?.messageId || '').trim();
+				if (messageId) this.statusRawById.delete(messageId);
+			}
+		}
+		if (this.statusesById.size > 400) {
+			const extra = [...this.statusesById.keys()].slice(0, this.statusesById.size - 400);
+			for (const id of extra) {
+				const item = this.statusesById.get(id);
+				this.statusesById.delete(id);
+				this.statusRawById.delete(id);
+				const messageId = String(item?.messageId || '').trim();
+				if (messageId) this.statusRawById.delete(messageId);
+			}
+		}
+	}
+
+	private rememberStatus(raw: any): boolean {
+		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
+		if (!isStatusBroadcastJid(remoteJid) || !raw?.message) return false;
+		const content = unwrapMessageContent(raw.message);
+		if (!content || isControlOnlyContent(content)) return false;
+		const serialized = this.statusSerializedId(raw);
+		if (!serialized) return false;
+		const fromMe = Boolean(raw?.key?.fromMe);
+		const senderWaId =
+			jidOf(raw?.key?.participant) ||
+			jidOf(raw?.key?.participantAlt) ||
+			jidOf(raw?.key?.remoteJidAlt) ||
+			(fromMe ? this.ownUserJid() : '') ||
+			null;
+		const type = detectType(content);
+		const caption = messageText(content) || null;
+		const published = toDate(raw.messageTimestamp);
+		const timestamp = Math.floor(published.getTime() / 1000) || Math.floor(Date.now() / 1000);
+		const contactName =
+			(!fromMe && String(raw.pushName || '').trim()) ||
+			(senderWaId ? this.contactDisplayName(senderWaId) : '') ||
+			null;
+		const item = {
+			id: { _serialized: serialized, id: String(raw?.key?.id || ''), remote: 'status@broadcast' },
+			messageId: String(raw?.key?.id || ''),
+			author: { _serialized: senderWaId },
+			from: { _serialized: senderWaId },
+			sender: senderWaId,
+			notifyName: contactName,
+			contactName,
+			timestamp,
+			type,
+			caption,
+			body: type === 'text' ? caption : caption,
+			fromMe,
+			isOwn: fromMe,
+		};
+		this.statusesById.set(serialized, item);
+		this.statusRawById.set(serialized, raw);
+		if (item.messageId) this.statusRawById.set(item.messageId, raw);
+		if (senderWaId && contactName) {
+			this.rememberContact({
+				id: senderWaId,
+				notify: contactName,
+				name: contactName,
+			});
+		}
+		this.pruneExpiredStatuses();
+		this.emitStatusChanged();
+		return true;
+	}
+
+	private resolveStatusRaw(statusId: string, senderWaId?: string | null) {
+		const id = String(statusId || '').trim();
+		if (!id) return null;
+		const direct = this.statusRawById.get(id);
+		if (direct?.message) return direct;
+		const hex = id.match(/status@broadcast_([^_]+)/i)?.[1] || '';
+		const sender = jidOf(senderWaId) || '';
+		for (const [key, raw] of this.statusRawById) {
+			const messageId = String(raw?.key?.id || '');
+			if (messageId === id || (hex && (messageId === hex || key.includes(hex)))) {
+				if (sender) {
+					const participant = jidOf(raw?.key?.participant);
+					if (participant && participant !== sender && !key.includes(sender)) continue;
+				}
+				if (raw?.message) return raw;
+			}
+		}
+		return null;
 	}
 
 	/** Ensure every chat that has messages is visible in getChats. */
@@ -572,7 +898,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		const remoteJidAlt = jidOf(raw?.key?.remoteJidAlt);
 		const id = String(raw?.key?.id || '').trim();
 		if (!remoteJid || !id || !raw?.message) return null;
-		if (remoteJid.includes('status@') || remoteJid.endsWith('@broadcast')) return null;
+		if (isStatusBroadcastJid(remoteJid)) return null;
 
 		const content = unwrapMessageContent(raw.message);
 		if (isControlOnlyContent(content)) return null;
@@ -787,14 +1113,14 @@ export class BaileysProvider implements WhatsAppProvider {
 		socket.ev.on('messages.upsert', async (upsert: any) => {
 			const type = String(upsert?.type || 'notify');
 			const list = Array.isArray(upsert?.messages) ? upsert.messages : [];
-			// notify = live while online. append / other types are store / history
-			// dumps and must still be remembered, or only the first live chat appears.
-			const fromHistory = type !== 'notify';
+			// notify = live while online. append / other types are usually store /
+			// history dumps, except a recent fromMe echo from the phone app.
 			for (const raw of list) {
+				if (this.rememberStatus(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
-				if (fromHistory) {
+				if (isHistoryMessageUpsert(type, raw)) {
 					(normalized as any).__fromHistory = true;
 					if (normalized.raw && typeof normalized.raw === 'object') {
 						normalized.raw = { ...normalized.raw, __fromHistory: true };
@@ -810,14 +1136,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const item of updates) {
 				const providerMessageId = String(item?.key?.id || '').trim();
 				if (!providerMessageId) continue;
-				const status =
-					item?.update?.status === 3 || item?.update?.status === 'READ'
-						? 'read'
-						: item?.update?.status === 2 || item?.update?.status === 'DELIVERY_ACK'
-							? 'delivered'
-							: item?.update?.status === 4 || item?.update?.status === 'PLAYED'
-								? 'played'
-								: null;
+				const status = mapBaileysMessageStatus(item?.update?.status);
 				if (status) {
 					this.emit({ type: 'message_status', providerMessageId, status });
 				}
@@ -831,7 +1150,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				const incoming = Number(chat.unreadCount);
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
 				this.rememberChat(id, {
-					name: chat.name || chat.verifiedName || null,
+					name: extractChatDisplayName(chat),
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || 0,
 					unreadCount: Number.isFinite(incoming) && incoming > 0 ? incoming : prev,
 				});
@@ -843,19 +1162,17 @@ export class BaileysProvider implements WhatsAppProvider {
 				const id = jidOf(chat?.id);
 				if (!id) continue;
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
-				const incoming =
-					chat.unreadCount != null ? Math.floor(Number(chat.unreadCount)) : NaN;
-				const nextUnread = Number.isFinite(incoming) && incoming > 0 ? incoming : prev;
+				const applied = applyLiveChatUnread(prev, chat.unreadCount);
 				this.rememberChat(id, {
-					name: chat.name || this.chats.get(id)?.name || null,
+					name: extractChatDisplayName(chat) || this.chats.get(id)?.name || null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
-					unreadCount: nextUnread,
+					unreadCount: applied.next,
 				});
-				if (Number.isFinite(incoming) && incoming > 0) {
+				if (applied.phoneRead) {
 					this.emit({
 						type: 'chat_unread',
 						chatId: id,
-						unreadCount: nextUnread,
+						unreadCount: 0,
 					});
 				}
 			}
@@ -888,12 +1205,13 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (!id) continue;
 				const contactName = this.contactDisplayName(id);
 				this.rememberChat(id, {
-					name: chat.name || contactName || null,
+					name: extractChatDisplayName(chat) || contactName || null,
 					t: Number(chat.conversationTimestamp) || 0,
 					unreadCount: Number(chat.unreadCount) || 0,
 				});
 			}
 			for (const raw of messages) {
+				if (this.rememberStatus(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
@@ -999,6 +1317,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.contacts.clear();
 		this.lidToPn.clear();
 		this.groupSubjectCache.clear();
+		this.newsletterNameCache.clear();
 		this.avatarUrlCache.clear();
 		this.messagesByChat.clear();
 		this.rawByMessageId.clear();
@@ -1016,21 +1335,29 @@ export class BaileysProvider implements WhatsAppProvider {
 		const list = [...this.chats.values()]
 			.sort((a, b) => Number(b.t || 0) - Number(a.t || 0))
 			.slice(0, count);
-		// Fill missing titles from contacts / group metadata before CRM sync.
+		// Fill missing titles / channel pictures before CRM sync.
+		let newsletterFetches = 0;
 		for (const chat of list) {
 			const id = String(chat?.id?._serialized || '');
 			if (!id) continue;
 			const current = String(chat.name || '').trim();
-			if (!current || isWeakDisplayName(current, id)) {
-				const fromContact = this.contactDisplayName(id);
-				if (fromContact) {
-					chat.name = fromContact;
-					continue;
-				}
-				if (id.endsWith('@g.us')) {
-					const subject = await this.fetchGroupSubject(id);
-					if (subject) chat.name = subject;
-				}
+			const fromContact = this.contactDisplayName(id);
+			if ((!current || isWeakDisplayName(current, id)) && fromContact) {
+				chat.name = fromContact;
+			}
+			if (id.endsWith('@g.us') && (!chat.name || isWeakDisplayName(chat.name, id))) {
+				const subject = await this.fetchGroupSubject(id);
+				if (subject) chat.name = subject;
+			}
+			if (id.endsWith('@newsletter')) {
+				const missingName = !chat.name || isWeakDisplayName(String(chat.name), id);
+				const missingPicture = !String(chat.imgUrl || chat?.profilePicThumbObj?.eurl || '').trim();
+				if (!missingName && !missingPicture) continue;
+				if (!this.newsletterNameCache.has(id) && newsletterFetches >= 20) continue;
+				if (!this.newsletterNameCache.has(id)) newsletterFetches += 1;
+				const meta = await this.fetchNewsletterMetadata(id);
+				if (meta.name) chat.name = meta.name;
+				if (meta.pictureUrl) this.attachChatPicture(id, meta.pictureUrl);
 			}
 		}
 		return list;
@@ -1112,6 +1439,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!this.socket || this.state !== 'connected') {
 			return cached?.url || null;
 		}
+		if (id.endsWith('@newsletter')) {
+			const meta = await this.fetchNewsletterMetadata(id);
+			return meta.pictureUrl;
+		}
 		try {
 			const jid = toBaileysJid(id) || id;
 			const url = await this.socket.profilePictureUrl(jid, 'preview');
@@ -1127,6 +1458,18 @@ export class BaileysProvider implements WhatsAppProvider {
 	async resolveContactIdentity(chatId: string) {
 		const id = jidOf(chatId) || String(chatId || '').trim();
 		if (!id) return null;
+
+		if (id.endsWith('@newsletter')) {
+			const existing =
+				this.contactDisplayName(id) ||
+				(() => {
+					const chatName = String(this.chats.get(id)?.name || '').trim();
+					return chatName && !isWeakDisplayName(chatName, id) ? chatName : null;
+				})();
+			if (existing) return { phoneNumber: null, name: existing };
+			const fetched = await this.fetchNewsletterName(id);
+			return fetched ? { phoneNumber: null, name: fetched } : null;
+		}
 
 		let phoneNumber: string | null = this.lidToPn.get(id) || this.contacts.get(id)?.phoneNumber || null;
 
@@ -1372,19 +1715,23 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!id) throw new Error('Media message id is required');
 
 		let raw = this.rawByMessageId.get(id);
-		if (!raw?.message && options.rawHint) {
-			const hint = options.rawHint;
-			if (hint?.protocol === 'baileys' || (hint?.key && hint?.message)) {
-				raw =
-					reviveBaileysWaMessage(hint) ||
+		const hint = options.rawHint;
+		const hintedRaw =
+			hint && (hint.protocol === 'baileys' || (hint.key && hint.message))
+				? reviveBaileysWaMessage(hint) ||
 					(hint.key && hint.message
 						? {
 								key: hint.key,
 								message: hint.message,
 								messageTimestamp: hint.messageTimestamp,
 							}
-						: null);
-			}
+						: null)
+				: null;
+		if (isStatusBroadcastJid(jidOf(hintedRaw?.key?.remoteJid)) && hintedRaw?.message) {
+			raw = hintedRaw;
+		}
+		if (!raw?.message && hintedRaw?.message) {
+			raw = hintedRaw;
 		}
 		if (!raw?.message) {
 			// Last resort: scan in-memory chat buckets for this id.
@@ -1482,15 +1829,39 @@ export class BaileysProvider implements WhatsAppProvider {
 		return { data: Buffer.from(buffer) };
 	}
 
+	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {
+		const raw = this.resolveStatusRaw(providerStatusId, senderWaId);
+		if (!raw?.message) {
+			throw new Error('Status media is not available in the current session cache');
+		}
+		const id = String(raw?.key?.id || providerStatusId || '').trim();
+		return this.downloadMedia(id, { rawHint: raw });
+	}
+
 	async getStatuses() {
-		return [];
+		this.pruneExpiredStatuses();
+		return [...this.statusesById.values()];
 	}
 
 	async publishStatus() {
 		throw new Error('Status publish is not enabled for the Baileys provider yet');
 	}
 
-	async viewStatus() {
-		return { ok: false };
+	async viewStatus(statusId: string, senderWaId?: string) {
+		if (!this.socket || this.state !== 'connected' || typeof this.socket.readMessages !== 'function') {
+			return { ok: false };
+		}
+		const raw = this.resolveStatusRaw(statusId, senderWaId);
+		const key = raw?.key;
+		if (!key?.id) return { ok: false };
+		await this.socket.readMessages([
+			{
+				remoteJid: 'status@broadcast',
+				id: key.id,
+				participant: key.participant || senderWaId || undefined,
+				fromMe: Boolean(key.fromMe),
+			},
+		]);
+		return { ok: true };
 	}
 }

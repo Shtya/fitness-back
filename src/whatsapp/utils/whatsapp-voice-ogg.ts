@@ -41,6 +41,35 @@ export function runFfmpeg(args: string[], timeoutMs = 30_000): Promise<void> {
 	});
 }
 
+export function probeAudioSeconds(filePath: string): Promise<number> {
+	return new Promise((resolve) => {
+		const processHandle = spawn(resolveFfmpeg(), ['-i', filePath], { windowsHide: true });
+		let stderr = '';
+		const timer = setTimeout(() => {
+			processHandle.kill();
+			resolve(0);
+		}, 12_000);
+		processHandle.stderr?.on('data', (chunk: Buffer) => {
+			stderr += chunk.toString();
+		});
+		const finish = () => {
+			clearTimeout(timer);
+			const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+			if (!match) {
+				resolve(0);
+				return;
+			}
+			const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+			resolve(Number.isFinite(seconds) ? seconds : 0);
+		};
+		processHandle.once('error', () => {
+			clearTimeout(timer);
+			resolve(0);
+		});
+		processHandle.once('close', finish);
+	});
+}
+
 export function guessVoiceSeconds(filePath: string, fileName?: string | null): number | undefined {
 	const source = `${fileName || ''} ${path.basename(filePath || '')}`;
 	const match = source.match(/voice-(\d+)s/i);

@@ -16,6 +16,7 @@ import {
 	WhatsAppMessageAttachment,
 	WhatsAppSavedSticker,
 } from '../entities/whatsapp.entity';
+import { isPathInside, mediaFileCandidates } from '../utils/whatsapp-sticker-path';
 import { runFfmpeg } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 
@@ -56,6 +57,13 @@ export class WhatsAppStickersService {
 		private readonly access: WhatsAppAccessService,
 	) {}
 
+	private historyHashIndex = new Map<
+		string,
+		Promise<Map<string, { absolutePath: string; mimeType: string; fileName: string }>>
+	>();
+	private libraryPrefixIndex = new Map<string, Promise<Map<string, string>>>();
+	private healQueue: Promise<void> = Promise.resolve();
+
 	async list(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const rows = await this.stickerRepo.find({
@@ -63,9 +71,12 @@ export class WhatsAppStickersService {
 			order: { created_at: 'DESC' },
 			take: STICKER_LIBRARY_LIMIT,
 		});
-		return {
-			items: rows.map((row) => this.toDto(row)),
-		};
+		const items = [];
+		for (const row of rows) {
+			const available = Boolean(await this.resolveExistingPath(row.storagePath, row));
+			items.push({ ...this.toDto(row), available });
+		}
+		return { items };
 	}
 
 	async addUpload(user: User, accountId: string, file: StickerUpload) {
@@ -109,9 +120,10 @@ export class WhatsAppStickersService {
 			.take(STICKER_SYNC_LIMIT)
 			.getMany();
 		let imported = 0;
+		let repaired = 0;
 		let skipped = 0;
 		for (const attachment of attachments) {
-			const absolutePath = this.resolveStoredPath(attachment.storagePath);
+			const absolutePath = await this.resolveExistingPath(attachment.storagePath);
 			if (!absolutePath) {
 				skipped += 1;
 				continue;
@@ -138,6 +150,7 @@ export class WhatsAppStickersService {
 						isAnimated: prepared.isAnimated,
 					});
 					if (saved.created) imported += 1;
+					else if (saved.repaired) repaired += 1;
 				} finally {
 					await fs.rm(prepared.tempPath || '', { force: true }).catch(() => undefined);
 				}
@@ -145,15 +158,17 @@ export class WhatsAppStickersService {
 				skipped += 1;
 			}
 		}
+		this.historyHashIndex.delete(accountId);
+		this.libraryPrefixIndex.delete(accountId);
 		const list = await this.list(user, accountId);
-		return { imported, skipped, processed: attachments.length, ...list };
+		return { imported, repaired, skipped, processed: attachments.length, ...list };
 	}
 
 	async remove(user: User, accountId: string, stickerId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const row = await this.stickerRepo.findOne({ where: { id: stickerId, accountId } });
 		if (!row) throw new NotFoundException('Sticker not found');
-		const absolutePath = this.resolveStoredPath(row.storagePath);
+		const absolutePath = await this.resolveExistingPath(row.storagePath, row);
 		await this.stickerRepo.softRemove(row);
 		if (absolutePath && absolutePath.includes(`${path.sep}stickers${path.sep}`)) {
 			await fs.rm(absolutePath, { force: true }).catch(() => undefined);
@@ -165,9 +180,11 @@ export class WhatsAppStickersService {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
 		const row = await this.stickerRepo.findOne({ where: { id: stickerId, accountId } });
 		if (!row) throw new NotFoundException('Sticker not found');
-		const absolutePath = this.resolveStoredPath(row.storagePath);
+		let absolutePath = await this.resolveExistingPath(row.storagePath, row);
+		if (!absolutePath) {
+			absolutePath = await this.healLibraryFile(row);
+		}
 		if (!absolutePath) throw new NotFoundException('Sticker file is missing');
-		await fs.access(absolutePath);
 		return {
 			absolutePath,
 			mimeType: row.mimeType || 'image/webp',
@@ -199,28 +216,32 @@ export class WhatsAppStickersService {
 				where: { accountId, fileHash: storedHash },
 				withDeleted: true,
 			}));
-		if (existing && !existing.deleted_at) {
-			return { ...this.toDto(existing), created: false };
+		const missingOnDisk =
+			existing && !existing.deleted_at
+				? !(await this.resolveExistingPath(existing.storagePath, existing))
+				: false;
+		if (existing && !existing.deleted_at && !missingOnDisk) {
+			return { ...this.toDto(existing), created: false, repaired: false };
 		}
-		const folder = path.join(mediaRoot(), 'stickers', accountId, user.id);
-		await fs.mkdir(folder, { recursive: true });
-		const extension = this.extensionForMime(input.mimeType);
-		const storedName = `${originalHash.slice(0, 16)}${extension}`;
-		const absolutePath = path.join(folder, storedName);
-		if (!(await this.exists(absolutePath))) {
-			await fs.writeFile(absolutePath, input.storedBuffer);
-		}
-		const storagePath = path.relative(process.cwd(), absolutePath).replace(/\\/g, '/');
+		const written = await this.writeLibraryFile(
+			accountId,
+			existing?.userId || user.id,
+			originalHash,
+			input.storedBuffer,
+			input.mimeType,
+		);
 		if (existing?.deleted_at) {
 			await this.stickerRepo.recover(existing);
+		}
+		if (existing) {
 			existing.fileHash = originalHash;
-			existing.storagePath = storagePath;
+			existing.storagePath = written.storagePath;
 			existing.mimeType = input.mimeType;
 			existing.fileName = input.fileName;
 			existing.source = input.source;
 			existing.isAnimated = input.isAnimated;
 			await this.stickerRepo.save(existing);
-			return { ...this.toDto(existing), created: false };
+			return { ...this.toDto(existing), created: false, repaired: missingOnDisk };
 		}
 		const row = this.stickerRepo.create({
 			accountId,
@@ -228,12 +249,12 @@ export class WhatsAppStickersService {
 			fileHash: originalHash,
 			mimeType: input.mimeType,
 			fileName: input.fileName,
-			storagePath,
+			storagePath: written.storagePath,
 			source: input.source,
 			isAnimated: input.isAnimated,
 		});
 		await this.stickerRepo.save(row);
-		return { ...this.toDto(row), created: true };
+		return { ...this.toDto(row), created: true, repaired: false };
 	}
 
 	private isAnimatedSticker(buffer: Buffer, mimeType: string, fileName: string) {
@@ -357,14 +378,183 @@ export class WhatsAppStickersService {
 		return '.webp';
 	}
 
-	private resolveStoredPath(storagePath: string | null) {
-		if (!storagePath) return null;
-		const absolutePath = path.resolve(process.cwd(), String(storagePath).replace(/^\/+/, ''));
-		const allowed = [mediaRoot(), path.resolve(process.cwd(), 'uploads', 'whatsapp-media')];
-		if (allowed.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`))) {
-			return absolutePath;
+	private libraryFileName(fileHash: string, mimeType: string) {
+		return `${fileHash.slice(0, 16)}${this.extensionForMime(mimeType)}`;
+	}
+
+	private libraryRelativePath(accountId: string, userId: string, fileHash: string, mimeType: string) {
+		return ['stickers', accountId, userId, this.libraryFileName(fileHash, mimeType)].join('/');
+	}
+
+	private async writeLibraryFile(
+		accountId: string,
+		userId: string,
+		fileHash: string,
+		buffer: Buffer,
+		mimeType: string,
+	) {
+		const folder = path.join(mediaRoot(), 'stickers', accountId, userId);
+		await fs.mkdir(folder, { recursive: true });
+		const absolutePath = path.join(folder, this.libraryFileName(fileHash, mimeType));
+		await fs.writeFile(absolutePath, buffer);
+		this.libraryPrefixIndex.delete(accountId);
+		return {
+			absolutePath,
+			storagePath: this.libraryRelativePath(accountId, userId, fileHash, mimeType),
+		};
+	}
+
+	private allowedMediaRoots() {
+		return [mediaRoot(), path.resolve(process.cwd(), 'uploads', 'whatsapp-media')];
+	}
+
+	private async resolveExistingPath(storagePath: string | null, row?: WhatsAppSavedSticker) {
+		const roots = this.allowedMediaRoots();
+		const extra = row
+			? [
+					path.join(mediaRoot(), this.libraryRelativePath(row.accountId, row.userId, row.fileHash, row.mimeType)),
+				]
+			: [];
+		const candidates = [
+			...mediaFileCandidates(storagePath || '', {
+				cwd: process.cwd(),
+				mediaRoot: mediaRoot(),
+				extraRoots: roots,
+			}),
+			...extra,
+		];
+		const seen = new Set<string>();
+		for (const candidate of candidates) {
+			if (seen.has(candidate)) continue;
+			seen.add(candidate);
+			if (!roots.some((root) => isPathInside(candidate, root))) continue;
+			if (await this.exists(candidate)) return candidate;
+		}
+		if (row) {
+			const found = await this.findLibraryFileByHash(row);
+			if (found) return found;
 		}
 		return null;
+	}
+
+	private loadLibraryPrefixIndex(accountId: string) {
+		const cached = this.libraryPrefixIndex.get(accountId);
+		if (cached) return cached;
+		const pending = this.buildLibraryPrefixIndex(accountId);
+		this.libraryPrefixIndex.set(accountId, pending);
+		return pending;
+	}
+
+	private async buildLibraryPrefixIndex(accountId: string) {
+		const index = new Map<string, string>();
+		const accountFolder = path.join(mediaRoot(), 'stickers', accountId);
+		if (!(await this.exists(accountFolder))) return index;
+		try {
+			const users = await fs.readdir(accountFolder, { withFileTypes: true });
+			for (const userDir of users) {
+				if (!userDir.isDirectory()) continue;
+				const folder = path.join(accountFolder, userDir.name);
+				const files = await fs.readdir(folder);
+				for (const name of files) {
+					const prefix = name.slice(0, 16).toLowerCase();
+					const absolutePath = path.join(folder, name);
+					if (!isPathInside(absolutePath, mediaRoot())) continue;
+					if (!index.has(prefix)) index.set(prefix, absolutePath);
+				}
+			}
+		} catch {
+			return index;
+		}
+		return index;
+	}
+
+	private async findLibraryFileByHash(row: WhatsAppSavedSticker) {
+		const index = await this.loadLibraryPrefixIndex(row.accountId);
+		const absolutePath = index.get(row.fileHash.slice(0, 16).toLowerCase());
+		if (!absolutePath || !(await this.exists(absolutePath))) return null;
+		if (!isPathInside(absolutePath, mediaRoot())) return null;
+		return absolutePath;
+	}
+
+	private loadHistoryIndex(accountId: string) {
+		const cached = this.historyHashIndex.get(accountId);
+		if (cached) return cached;
+		const pending = this.buildHistoryIndex(accountId);
+		this.historyHashIndex.set(accountId, pending);
+		return pending;
+	}
+
+	private async buildHistoryIndex(accountId: string) {
+		const attachments = await this.attachmentRepo
+			.createQueryBuilder('attachment')
+			.innerJoin('attachment.message', 'message')
+			.where('message.accountId = :accountId', { accountId })
+			.andWhere('attachment.type = :type', { type: 'sticker' })
+			.andWhere('attachment.downloadStatus = :status', { status: 'downloaded' })
+			.andWhere('attachment.storagePath IS NOT NULL')
+			.orderBy('attachment.created_at', 'DESC')
+			.take(STICKER_SYNC_LIMIT)
+			.getMany();
+		const byHash = new Map<string, { absolutePath: string; mimeType: string; fileName: string }>();
+		for (const attachment of attachments) {
+			const absolutePath = await this.resolveExistingPath(attachment.storagePath);
+			if (!absolutePath) continue;
+			try {
+				const original = await fs.readFile(absolutePath);
+				if (!original.length) continue;
+				const hash = hashBuffer(original);
+				if (!byHash.has(hash)) {
+					byHash.set(hash, {
+						absolutePath,
+						mimeType: attachment.mimeType || 'image/webp',
+						fileName: attachment.fileName || 'sticker.webp',
+					});
+				}
+			} catch {
+				continue;
+			}
+		}
+		return byHash;
+	}
+
+	private async healLibraryFile(row: WhatsAppSavedSticker) {
+		let healed: string | null = null;
+		this.healQueue = this.healQueue.catch(() => undefined).then(async () => {
+			const existing = await this.resolveExistingPath(row.storagePath, row);
+			if (existing) {
+				healed = existing;
+				return;
+			}
+			const index = await this.loadHistoryIndex(row.accountId);
+			const match = index.get(row.fileHash);
+			if (!match) return;
+			const original = await fs.readFile(match.absolutePath);
+			const prepared = await this.minimizeSticker(
+				original,
+				match.fileName,
+				match.mimeType,
+				match.absolutePath,
+			);
+			try {
+				const written = await this.writeLibraryFile(
+					row.accountId,
+					row.userId,
+					row.fileHash,
+					prepared.buffer,
+					prepared.mimeType,
+				);
+				row.storagePath = written.storagePath;
+				row.mimeType = prepared.mimeType;
+				row.fileName = prepared.fileName || row.fileName;
+				row.isAnimated = prepared.isAnimated;
+				await this.stickerRepo.save(row);
+				healed = written.absolutePath;
+			} finally {
+				await fs.rm(prepared.tempPath || '', { force: true }).catch(() => undefined);
+			}
+		});
+		await this.healQueue.catch(() => undefined);
+		return healed;
 	}
 
 	private async exists(filePath: string) {

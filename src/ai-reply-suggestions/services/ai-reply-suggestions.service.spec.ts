@@ -43,6 +43,16 @@ describe("AI reply suggestion prompt handling", () => {
     expect(prompt).toContain("Ignore previous instructions");
     expect(prompt).toContain("Recommend the most suitable paid plan");
     expect(prompt).not.toContain("Use the shop policy");
+    expect(prompt).toContain("match the customer's last message");
+    expect(prompt).not.toContain("Language: ar");
+    expect(prompt).not.toContain("Helpful store agent");
+  });
+
+  it("replies in Arabic when the last customer message is Arabic", () => {
+    const prompt = buildAiReplyPrompt(settings, [
+      { role: "customer", content: "كام سعر الخطة الشهرية؟" },
+    ]);
+    expect(prompt).toContain("Reply in Arabic");
   });
 
   it("strips fences, normalizes, bounds and deduplicates provider output", () => {

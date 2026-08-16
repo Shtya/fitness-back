@@ -330,12 +330,24 @@ export class WhatsAppConversationAssignment extends CoreEntity {
 @Unique('uq_whatsapp_conversation_preference', ['conversationId', 'userId'])
 export class WhatsAppConversationPreference extends CoreEntity {
 	@Index()
-	@Column({ name: 'conversation_id', type: 'uuid' })
-	conversationId: string;
+	@Column({ name: 'conversation_id', type: 'uuid', nullable: true })
+	conversationId: string | null;
 
-	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@ManyToOne(() => WhatsAppConversation, { nullable: true, onDelete: 'SET NULL' })
 	@JoinColumn({ name: 'conversation_id' })
-	conversation: WhatsAppConversation;
+	conversation: WhatsAppConversation | null;
+
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid', nullable: true })
+	accountId: string | null;
+
+	@ManyToOne(() => WhatsAppAccount, { nullable: true, onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount | null;
+
+	@Index()
+	@Column({ name: 'provider_chat_id', type: 'varchar', length: 160, nullable: true })
+	providerChatId: string | null;
 
 	@Index()
 	@Column({ name: 'user_id', type: 'uuid' })

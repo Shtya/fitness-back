@@ -373,17 +373,17 @@ export class EmailMemoProcessorService {
 				row.sendAfter =
 					cfg.notificationMode === 'batch30'
 						? new Date(Date.now() + 30 * 60 * 1000)
-						: this.nextDigestTime();
+						: this.nextDigestTime(cfg.pollIntervalHours);
 				await this.messages.save(row);
 				return;
 			}
 
 			await this.deliver(row, memo, cfg);
 		} catch (error) {
-			const wait = Math.min(15 * 60 * 1000, 2000 * 2 ** Math.min(row.attemptCount, 6));
+			const message = error instanceof Error ? error.message : String(error);
 			row.status = EmailMemoMessageStatus.FAILED;
-			row.errorMessage = error instanceof Error ? error.message : String(error);
-			row.nextRetryAt = new Date(Date.now() + wait);
+			row.errorMessage = message;
+			row.nextRetryAt = new Date(Date.now() + this.retryWaitMs(message, row.attemptCount));
 			await this.messages.save(row);
 			await this.log(row.userId, row.id, 'pipeline', 'error', row.errorMessage);
 			this.gateway.emitToUser(row.userId, 'email-memo:message', {
@@ -448,6 +448,9 @@ export class EmailMemoProcessorService {
 			if (row.nextRetryAt && row.nextRetryAt.getTime() > Date.now()) continue;
 			if (row.sendAfter && row.sendAfter.getTime() > Date.now()) continue;
 			const settings = await this.settings.getOrCreate(row.userId);
+			if (row.status === EmailMemoMessageStatus.AI_COMPLETED && settings.notificationMode !== 'immediate') {
+				continue;
+			}
 			try {
 				if (row.status === EmailMemoMessageStatus.AI_COMPLETED) {
 					const memo = await this.memos.findOne({ where: { gmailMessageId: row.id } });
@@ -458,7 +461,9 @@ export class EmailMemoProcessorService {
 			} catch (error) {
 				row.attemptCount += 1;
 				row.errorMessage = error instanceof Error ? error.message : String(error);
-				row.nextRetryAt = new Date(Date.now() + Math.min(15 * 60 * 1000, 2000 * 2 ** row.attemptCount));
+				row.nextRetryAt = new Date(
+					Date.now() + this.retryWaitMs(row.errorMessage, row.attemptCount),
+				);
 				await this.messages.save(row);
 			}
 		}
@@ -467,12 +472,23 @@ export class EmailMemoProcessorService {
 	async sendDueBatches() {
 		const due = await this.messages.find({
 			where: { status: EmailMemoMessageStatus.AI_COMPLETED },
-			take: 50,
+			take: 200,
 		});
 		const now = Date.now();
 		const grouped = new Map<string, EmailMemoGmailMessage[]>();
+		const horizonByUser = new Map<string, number>();
 		for (const row of due) {
-			if (!row.sendAfter || row.sendAfter.getTime() > now) continue;
+			if (row.sendAfter && row.sendAfter.getTime() > now) {
+				if (!horizonByUser.has(row.userId)) {
+					const settings = await this.settings.getOrCreate(row.userId);
+					const hours = Math.min(24, Math.max(1, Number(settings.pollIntervalHours) || 1));
+					horizonByUser.set(
+						row.userId,
+						settings.notificationMode === 'batch30' ? 30 * 60 * 1000 : hours * 60 * 60 * 1000,
+					);
+				}
+				if (row.sendAfter.getTime() - now <= (horizonByUser.get(row.userId) || 0)) continue;
+			}
 			const list = grouped.get(row.userId) || [];
 			list.push(row);
 			grouped.set(row.userId, list);
@@ -486,17 +502,31 @@ export class EmailMemoProcessorService {
 				if (!memo) continue;
 				memoLines.push(memo.formattedMessage, '');
 			}
+			if (memoLines.length <= 2) continue;
 			try {
 				const chatId = await this.whatsapp.resolveTargetChat(userId, settings.targetChatId);
+				const linked = await this.whatsapp.getConnection(userId);
+				if (!linked.connected || !chatId) {
+					throw new Error('WhatsApp is not connected');
+				}
 				await this.whatsapp.sendText(userId, chatId, memoLines.join('\n').trim());
 				for (const row of rows) {
 					row.status = EmailMemoMessageStatus.SENT;
 					row.processedAt = new Date();
+					row.sendAfter = null;
+					row.errorMessage = null;
 					await this.messages.save(row);
 				}
 				await this.bumpUsage(userId, 'whatsapp_sent');
 			} catch (error) {
-				this.logger.warn(`Digest send failed: ${error instanceof Error ? error.message : error}`);
+				const message = error instanceof Error ? error.message : String(error);
+				this.logger.warn(`Digest send failed: ${message}`);
+				const wait = this.retryWaitMs(message, 1);
+				for (const row of rows) {
+					row.sendAfter = new Date(Date.now() + wait);
+					row.errorMessage = message;
+					await this.messages.save(row);
+				}
 			}
 		}
 	}
@@ -510,11 +540,16 @@ export class EmailMemoProcessorService {
 		};
 	}
 
-	private nextDigestTime() {
-		const now = new Date();
-		const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 8, 0, 0));
-		if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
-		return next;
+	private nextDigestTime(pollIntervalHours?: number) {
+		const hours = Math.min(24, Math.max(1, Number(pollIntervalHours) || 1));
+		return new Date(Date.now() + hours * 60 * 60 * 1000);
+	}
+
+	private retryWaitMs(message: string, attempt: number) {
+		if (/whatsapp is not connected/i.test(String(message || ''))) {
+			return 60 * 1000;
+		}
+		return Math.min(15 * 60 * 1000, 2000 * 2 ** Math.min(Math.max(attempt, 1), 6));
 	}
 
 	private async bumpUsage(userId: string, field: 'emails_processed' | 'ai_requests' | 'whatsapp_sent') {

@@ -91,6 +91,28 @@ describe('WhatsAppAccessService', () => {
 		expect(accessRepo.find).not.toHaveBeenCalled();
 	});
 
+	it('does not let a super admin browse WhatsApp lines they do not own or share', async () => {
+		const { service, accountRepo, accessRepo } = createService();
+		await expect(
+			service.getAccountAccess(
+				{ id: 'super-1', role: UserRole.SUPER_ADMIN } as any,
+				'account-1',
+			),
+		).rejects.toBeInstanceOf(ForbiddenException);
+
+		accountRepo.find.mockResolvedValue([]);
+		accessRepo.find.mockResolvedValue([]);
+		await expect(
+			service.listAccessibleAccounts({
+				id: 'super-1',
+				role: UserRole.SUPER_ADMIN,
+			} as any),
+		).resolves.toEqual([]);
+		expect(accountRepo.find).toHaveBeenCalledWith(
+			expect.objectContaining({ where: { ownerAdminId: 'super-1' } }),
+		);
+	});
+
 	it('enforces assignment visibility for scoped staff', async () => {
 		const { service, conversationRepo } = createService({
 			accountId: 'account-1',

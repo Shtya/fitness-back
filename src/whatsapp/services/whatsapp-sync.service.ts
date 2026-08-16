@@ -285,7 +285,12 @@ export function isSupportedInboxChatId(id: string): boolean {
 function phoneFromWaId(id: string): string | null {
 	if (!id) return null;
 	const lower = id.toLowerCase();
-	if (lower.includes('@lid') || lower.includes('@broadcast') || lower.includes('status@')) {
+	if (
+		lower.includes('@lid') ||
+		lower.includes('@broadcast') ||
+		lower.includes('status@') ||
+		lower.includes('@newsletter')
+	) {
 		return null;
 	}
 	const user = id.split('@')[0] || '';
@@ -336,6 +341,29 @@ export function shouldCopyProviderUnread(
 	if (providerUnread <= 0) return false;
 	if (current > 0) return false;
 	return !lastMessageAt;
+}
+
+const WHATSAPP_ACK_RANK: Record<string, number> = {
+	pending: 0,
+	sent: 1,
+	delivered: 2,
+	read: 3,
+	played: 4,
+};
+
+export function preferWhatsAppAckStatus(
+	current?: string | null,
+	incoming?: string | null,
+): string {
+	const next = String(incoming || '').toLowerCase();
+	const prev = String(current || '').toLowerCase();
+	if (next === 'failed') return 'failed';
+	if (!next) return prev || 'sent';
+	if (prev === 'failed') return next;
+	const prevRank = WHATSAPP_ACK_RANK[prev] ?? -1;
+	const nextRank = WHATSAPP_ACK_RANK[next] ?? -1;
+	if (nextRank < 0) return prev || next;
+	return nextRank >= prevRank ? next : prev;
 }
 
 export function providerChatActivityMs(chat: any): number {
@@ -550,7 +578,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return;
 		}
 		if (event.type === 'chat_unread') {
-			// Companion unreadCount is untrusted (often 0). CRM unread is local.
+			// ChatStore dumps often report 0. Trust only a live phone-read (explicit 0)
+			// after bootstrap — opening/replying in the WhatsApp app.
+			if (event.unreadCount !== 0 || this.bootstrapping.has(accountId)) return;
+			if (!isSupportedInboxChatId(event.chatId)) return;
+			this.enqueuePersist(async () => {
+				const conversation = await this.findInboxConversation(accountId, event.chatId);
+				if (!conversation) return;
+				await this.clearUnreadFromPhone(accountId, conversation.id);
+			}, `chat_read:${accountId}:${event.chatId}`);
 			return;
 		}
 		if (event.type === 'history_sync') {
@@ -660,18 +696,37 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				const message = await this.messageRepo.findOne({
 					where: { accountId, providerMessageId: event.providerMessageId },
 				});
-				if (message) {
-					this.gateway.emitConversationEvent(
-						message.conversationId,
-						'message_status',
-						{
-							messageId: message.id,
-							providerMessageId: event.providerMessageId,
-							status: event.status,
-						},
-						accountId,
-					);
+				if (!message) return;
+				const nextStatus = preferWhatsAppAckStatus(message.status, event.status);
+				if (nextStatus && nextStatus !== message.status) {
+					await this.messageRepo.update(message.id, {
+						status: nextStatus as WhatsAppMessageStatus,
+						statusUpdatedAt: new Date(),
+					});
+					message.status = nextStatus as WhatsAppMessageStatus;
 				}
+				this.gateway.emitConversationEvent(
+					message.conversationId,
+					'message_status',
+					{
+						messageId: message.id,
+						providerMessageId: event.providerMessageId,
+						status: message.status,
+					},
+					accountId,
+				);
+				this.scheduleConversationUpdated(accountId, {
+					conversationId: message.conversationId,
+					preview: {
+						id: message.id,
+						status: message.status,
+						providerMessageId: message.providerMessageId,
+						providerTimestamp: message.providerTimestamp,
+						type: message.type,
+						text: message.text,
+						direction: message.direction,
+					},
+				});
 			}, `message_status:${accountId}:${event.providerMessageId}`);
 			return;
 		}
@@ -1049,10 +1104,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private async hydrateConversation(id: string) {
-		return this.conversationRepo.findOneOrFail({
+		const conversation = await this.conversationRepo.findOneOrFail({
 			where: { id },
 			relations: [...this.conversationRelations()],
 		});
+		await this.rebindConversationPreferences(conversation);
+		return conversation;
 	}
 
 	/** Resolve phone digits for a chat id (LID → PN via provider when needed). */
@@ -1073,6 +1130,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return digits || null;
 	}
 
+	private async findInboxConversation(accountId: string, chatId: string) {
+		const existing = await this.conversationRepo.findOne({
+			where: { accountId, providerChatId: chatId },
+		});
+		if (existing) return existing;
+		return this.findDirectConversationAlias(accountId, chatId, null);
+	}
+
 	/**
 	 * Find an existing DIRECT conversation for the same person under an alias
 	 * (@lid ↔ @c.us / same phone), including the account owner's self-chat.
@@ -1082,7 +1147,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		chatId: string,
 		phoneHint?: string | null,
 	): Promise<WhatsAppConversation | null> {
-		if (!chatId || chatId.endsWith('@g.us')) return null;
+		if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@newsletter')) return null;
 		const digits = await this.resolveChatPhoneDigits(accountId, chatId, phoneHint);
 		const aliasIds = new Set<string>([chatId, ...phoneAliasChatIds(digits || '')]);
 		for (const id of [...aliasIds]) {
@@ -1304,6 +1369,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			updates.lastMessageAt = duplicate.lastMessageAt;
 		}
 		await this.conversationRepo.update(keeper.id, updates);
+		await this.mergeConversationPreferences(keeper, duplicate);
 		await this.conversationRepo.delete(duplicate.id);
 		if (duplicate.contactId && duplicate.contactId !== keeper.contactId) {
 			const stillUsed = await this.conversationRepo.count({
@@ -1325,7 +1391,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			relations: [...this.conversationRelations()],
 		});
 		if (existing) {
-			return this.applyConversationIdentityPatch(existing, chatId, options);
+			const patched = await this.applyConversationIdentityPatch(existing, chatId, options);
+			await this.rebindConversationPreferences(patched);
+			return patched;
 		}
 
 		// Reuse twin row for same phone / LID↔PN / self-chat instead of creating a duplicate.
@@ -1338,10 +1406,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const phone =
 				options.phone ||
 				(await this.resolveChatPhoneDigits(accountId, chatId, options.phone));
-			return this.applyConversationIdentityPatch(aliased, chatId, {
+			const patched = await this.applyConversationIdentityPatch(aliased, chatId, {
 				...options,
 				phone: phone || options.phone,
 			});
+			await this.rebindConversationPreferences(patched);
+			return patched;
 		}
 
 		try {
@@ -1442,7 +1512,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					chatId,
 					options.phone,
 				);
-				if (aliasedRetry) return aliasedRetry;
+				if (aliasedRetry) {
+					await this.rebindConversationPreferences(aliasedRetry);
+					return aliasedRetry;
+				}
 			}
 			throw error;
 		}
@@ -1507,9 +1580,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		normalized: NormalizedWhatsAppMessage,
 		senderUserId?: string | null,
 		notifyAssignedUser = false,
-		options: { emitEvents?: boolean } = {},
+		options: { emitEvents?: boolean; clientMessageId?: string } = {},
 	) {
 		const emitEvents = options.emitEvents !== false;
+		const clientMessageId = String(
+			options.clientMessageId || (normalized as any)?.clientMessageId || '',
+		).trim();
 		const fromHistory = Boolean(
 			(normalized as any)?.__fromHistory || (normalized as any)?.raw?.__fromHistory,
 		);
@@ -1524,14 +1600,28 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 		const ownDigits = String(account.phoneNumber || '').replace(/\D/g, '');
 		const isSelfChat = Boolean(ownDigits && phoneHint && phonesMatch(ownDigits, phoneHint));
+		const isChannel = String(normalized.chatId || '').endsWith('@newsletter');
 		// fromMe pushName is usually YOUR WhatsApp name — never use it to rename the peer chat.
-		const title = normalized.fromMe
+		let title = normalized.fromMe
 			? isSelfChat
 				? 'You'
 				: null
 			: isSelfChat
 				? 'You'
 				: normalized.contactName || null;
+		if (
+			isChannel &&
+			isWeakContactDisplayName(title, normalized.chatId, phoneHint)
+		) {
+			const provider = this.providers.getProvider(accountId);
+			const identity =
+				typeof provider?.resolveContactIdentity === 'function'
+					? await provider.resolveContactIdentity(normalized.chatId).catch(() => null)
+					: null;
+			if (identity?.name && !isWeakContactDisplayName(identity.name, normalized.chatId)) {
+				title = identity.name;
+			}
+		}
 		const conversation = await this.ensureConversation(accountId, normalized.chatId, {
 			title,
 			phone: phoneHint,
@@ -1603,6 +1693,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (emitEvents && !fromHistory && normalized.fromMe && !this.bootstrapping.has(accountId)) {
 				await this.clearUnreadFromPhone(accountId, conversation.id);
 			}
+			if (clientMessageId) (existing as any).clientMessageId = clientMessageId;
 			return existing;
 		}
 
@@ -1765,6 +1856,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		if (emitEvents) {
+			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			this.gateway.emitConversationEvent(conversation.id, 'message', hydrated, accountId);
 			this.scheduleConversationUpdated(accountId, {
 				conversationId: conversation.id,
@@ -1773,12 +1865,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				unreadCount: nextUnreadCount,
 				preview: {
 					id: hydrated.id,
+					providerMessageId: hydrated.providerMessageId,
 					text: hydrated.text,
 					type: hydrated.type,
 					direction: hydrated.direction,
 					status: hydrated.status,
 					providerTimestamp: hydrated.providerTimestamp,
 					hasAttachments: Boolean(hydrated.attachments?.length),
+					...(clientMessageId ? { clientMessageId } : {}),
 				},
 			});
 		}
@@ -1970,6 +2064,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const total = list.length || 1;
 		for (const { chat, id, activityMs } of list) {
 			const isGroup = id.endsWith('@g.us');
+			const isChannel = id.endsWith('@newsletter');
 			const isLidChat = id.endsWith('@lid') || id.endsWith('@hosted.lid');
 			const provisionalTitle =
 				chat?.name ||
@@ -1983,6 +2078,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				!isGroup &&
 				typeof provider.resolveContactIdentity === 'function' &&
 				(isLidChat ||
+					isChannel ||
 					isWeakContactDisplayName(provisionalTitle, id, phoneFromWaId(id)));
 			const identity = needsIdentity
 				? await provider.resolveContactIdentity(id).catch(() => null)
@@ -2001,16 +2097,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				phone,
 			});
 			let avatarUrl =
-				chat?.contact?.profilePicThumbObj?.eurl || chat?.profilePicThumbObj?.eurl || null;
+				chat?.imgUrl ||
+				chat?.contact?.profilePicThumbObj?.eurl ||
+				chat?.profilePicThumbObj?.eurl ||
+				null;
 			const existingAvatar = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
 			if (
 				!avatarUrl &&
 				!existingAvatar &&
 				typeof provider.getProfilePictureUrl === 'function' &&
-				avatarFetches < 20
+				(id.endsWith('@newsletter') || avatarFetches < 20)
 			) {
 				avatarUrl = await provider.getProfilePictureUrl(id).catch(() => null);
-				avatarFetches += 1;
+				if (!id.endsWith('@newsletter')) avatarFetches += 1;
 			}
 			avatarUrl = avatarUrl || existingAvatar || null;
 			if (conversation.contact) {
@@ -2166,10 +2265,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			.leftJoinAndSelect('conversation.contact', 'contact')
 			.leftJoinAndSelect('conversation.group', 'group')
 			.leftJoinAndSelect('conversation.assignedUser', 'assignedUser')
-			.leftJoinAndSelect(
+			.leftJoin(
 				WhatsAppConversationPreference,
 				'conversationPreference',
-				'conversationPreference.conversationId = conversation.id AND conversationPreference.userId = :preferenceUserId',
+				`
+				"conversationPreference"."user_id" = :preferenceUserId
+				AND "conversationPreference"."deleted_at" IS NULL
+				AND (
+					"conversationPreference"."conversation_id" = "conversation"."id"
+					OR (
+						"conversationPreference"."account_id" = "conversation"."account_id"
+						AND "conversationPreference"."provider_chat_id" = "conversation"."provider_chat_id"
+					)
+				)
+				`,
 				{ preferenceUserId: user.id },
 			)
 			.where('conversation.accountId = :accountId', { accountId })
@@ -2188,7 +2297,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			query.andWhere('conversation.unreadCount > 0');
 		}
 		if (filter === 'favorites') {
-			query.andWhere('conversationPreference.isFavorite = true');
+			query.andWhere('conversationPreference.isFavorite = :isFavorite', {
+				isFavorite: true,
+			});
 		}
 		if (assignedUserId === 'unassigned') {
 			query.andWhere('conversation.assignedUserId IS NULL');
@@ -2215,22 +2326,43 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 		}
 		const [items, total] = await query
+			.addSelect('conversationPreference.isPinned')
 			.orderBy('conversationPreference.isPinned', 'DESC', 'NULLS LAST')
 			.addOrderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
 			.addOrderBy('conversation.created_at', 'DESC')
 			.take(take)
 			.skip((pageNumber - 1) * take)
 			.getManyAndCount();
+		const conversationIds = items.map((item) => item.id);
+		const chatIds = items.map((item) => item.providerChatId).filter(Boolean);
 		const preferences = items.length
 			? await this.preferenceRepo.find({
-					where: {
-						userId: user.id,
-						conversationId: In(items.map((item) => item.id)),
-					},
+					where: [
+						{
+							userId: user.id,
+							conversationId: In(conversationIds),
+						},
+						...(chatIds.length
+							? [
+									{
+										userId: user.id,
+										accountId,
+										providerChatId: In(chatIds),
+									},
+								]
+							: []),
+					],
 				})
 			: [];
 		const preferenceByConversationId = new Map(
-			preferences.map((item) => [item.conversationId, item]),
+			preferences
+				.filter((item) => item.conversationId)
+				.map((item) => [item.conversationId as string, item]),
+		);
+		const preferenceByChatId = new Map(
+			preferences
+				.filter((item) => item.accountId && item.providerChatId)
+				.map((item) => [`${item.accountId}:${item.providerChatId}`, item]),
 		);
 		const lastMessages = items.length
 			? await this.messageRepo
@@ -2271,22 +2403,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			lastMessages.map((message) => [message.conversationId, message]),
 		);
 		return {
-			items: items.map((item) => ({
-				...item,
-				isFavorite: Boolean(preferenceByConversationId.get(item.id)?.isFavorite),
-				isPinned: Boolean(preferenceByConversationId.get(item.id)?.isPinned),
-				lastMessage: (() => {
-					const message = lastMessageByConversationId.get(item.id);
-					return message
-						? {
-								text: message.text,
-								type: message.type,
-								direction: message.direction,
-								providerTimestamp: message.providerTimestamp,
-							}
-						: null;
-				})(),
-			})),
+			items: items.map((item) => {
+				const preference =
+					preferenceByConversationId.get(item.id) ||
+					preferenceByChatId.get(`${item.accountId}:${item.providerChatId}`);
+				return {
+					...item,
+					isFavorite: Boolean(preference?.isFavorite),
+					isPinned: Boolean(preference?.isPinned),
+					lastMessage: (() => {
+						const message = lastMessageByConversationId.get(item.id);
+						return message
+							? {
+									id: message.id,
+									providerMessageId: message.providerMessageId,
+									text: message.text,
+									type: message.type,
+									direction: message.direction,
+									status: message.status,
+									providerTimestamp: message.providerTimestamp,
+								}
+							: null;
+					})(),
+				};
+			}),
 			total,
 			page: pageNumber,
 			limit: take,
@@ -2296,20 +2436,106 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async setConversationFavorite(user: User, conversationId: string, isFavorite: boolean) {
 		await this.assertConversationVisible(user, conversationId);
-		await this.preferenceRepo.upsert(
-			{ conversationId, userId: user.id, isFavorite: Boolean(isFavorite) },
-			['conversationId', 'userId'],
-		);
+		await this.saveConversationPreference(user.id, conversationId, {
+			isFavorite: Boolean(isFavorite),
+		});
 		return { ok: true, conversationId, isFavorite: Boolean(isFavorite) };
 	}
 
 	async setConversationPinned(user: User, conversationId: string, isPinned: boolean) {
 		await this.assertConversationVisible(user, conversationId);
-		await this.preferenceRepo.upsert(
-			{ conversationId, userId: user.id, isPinned: Boolean(isPinned) },
-			['conversationId', 'userId'],
-		);
+		await this.saveConversationPreference(user.id, conversationId, {
+			isPinned: Boolean(isPinned),
+		});
 		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
+	}
+
+	private async saveConversationPreference(
+		userId: string,
+		conversationId: string,
+		patch: { isPinned?: boolean; isFavorite?: boolean },
+	) {
+		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
+		const row = (await this.findConversationPreference(userId, conversation)) ||
+			this.preferenceRepo.create({
+				userId,
+				isPinned: false,
+				isFavorite: false,
+			});
+		row.deleted_at = null;
+		row.userId = userId;
+		row.conversationId = conversation.id;
+		row.accountId = conversation.accountId;
+		row.providerChatId = conversation.providerChatId;
+		if (patch.isPinned != null) row.isPinned = patch.isPinned;
+		if (patch.isFavorite != null) row.isFavorite = patch.isFavorite;
+		await this.preferenceRepo.save(row);
+	}
+
+	private async findConversationPreference(
+		userId: string,
+		conversation: WhatsAppConversation,
+	) {
+		const byConversation = await this.preferenceRepo.findOne({
+			where: { userId, conversationId: conversation.id },
+			withDeleted: true,
+		});
+		if (byConversation) return byConversation;
+		if (!conversation.accountId || !conversation.providerChatId) return null;
+		return this.preferenceRepo.findOne({
+			where: {
+				userId,
+				accountId: conversation.accountId,
+				providerChatId: conversation.providerChatId,
+			},
+			withDeleted: true,
+		});
+	}
+
+	private async rebindConversationPreferences(conversation: WhatsAppConversation) {
+		if (!conversation?.id || !conversation.accountId || !conversation.providerChatId) return;
+		await this.preferenceRepo
+			.createQueryBuilder()
+			.update()
+			.set({ conversationId: conversation.id })
+			.where('account_id = :accountId', { accountId: conversation.accountId })
+			.andWhere('provider_chat_id = :providerChatId', {
+				providerChatId: conversation.providerChatId,
+			})
+			.andWhere('(conversation_id IS NULL OR conversation_id != :conversationId)', {
+				conversationId: conversation.id,
+			})
+			.execute()
+			.catch(() => undefined);
+	}
+
+	private async mergeConversationPreferences(
+		keeper: WhatsAppConversation,
+		duplicate: WhatsAppConversation,
+	) {
+		const rows = await this.preferenceRepo.find({
+			where: { conversationId: duplicate.id },
+			withDeleted: true,
+		});
+		for (const row of rows) {
+			const existing = await this.findConversationPreference(row.userId, keeper);
+			if (existing && existing.id !== row.id) {
+				existing.deleted_at = null;
+				existing.conversationId = keeper.id;
+				existing.accountId = keeper.accountId;
+				existing.providerChatId = keeper.providerChatId;
+				existing.isPinned = Boolean(existing.isPinned || row.isPinned);
+				existing.isFavorite = Boolean(existing.isFavorite || row.isFavorite);
+				await this.preferenceRepo.save(existing);
+				await this.preferenceRepo.delete(row.id);
+				continue;
+			}
+			row.deleted_at = null;
+			row.conversationId = keeper.id;
+			row.accountId = keeper.accountId;
+			row.providerChatId = keeper.providerChatId;
+			await this.preferenceRepo.save(row);
+		}
 	}
 
 	async assertConversationVisible(user: User, conversationId: string) {
@@ -3169,10 +3395,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		text: string,
 		quotedProviderMessageId?: string,
 		clientMessageId?: string,
+		persistClientMessageId?: string,
 	) {
 		if (clientMessageId) {
 			return this.runIdempotentSend(user.id, conversationId, clientMessageId, () =>
-				this.sendText(user, conversationId, text, quotedProviderMessageId),
+				this.sendText(
+					user,
+					conversationId,
+					text,
+					quotedProviderMessageId,
+					undefined,
+					clientMessageId,
+				),
 			);
 		}
 		const { conversation, accountAccess } = await this.assertConversationVisible(
@@ -3209,7 +3443,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				raw: result,
 			},
 			user.id,
+			false,
+			{ clientMessageId: persistClientMessageId },
 		);
+		if (persistClientMessageId) (saved as any).clientMessageId = persistClientMessageId;
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId: conversation.accountId,
@@ -3230,12 +3467,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			caption?: string;
 			quotedProviderMessageId?: string;
 			clientMessageId?: string;
+			persistClientMessageId?: string;
 		},
 	) {
 		if (input.clientMessageId) {
-			const { clientMessageId, ...singleSendInput } = input;
+			const { clientMessageId, persistClientMessageId: _ignored, ...singleSendInput } = input as any;
 			return this.runIdempotentSend(user.id, conversationId, clientMessageId, () =>
-				this.sendMedia(user, conversationId, singleSendInput),
+				this.sendMedia(user, conversationId, {
+					...singleSendInput,
+					persistClientMessageId: clientMessageId,
+				}),
 			);
 		}
 		const { conversation, accountAccess } = await this.assertConversationVisible(
@@ -3299,7 +3540,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				raw: result,
 			},
 			user.id,
+			false,
+			{ clientMessageId: input.persistClientMessageId },
 		);
+		if (input.persistClientMessageId) {
+			(saved as any).clientMessageId = input.persistClientMessageId;
+		}
 		// Always bind a durable copy — upsert may have created the row first, and the
 		// outgoing upload path must not be the only copy (FE / cleanup can remove it).
 		await this.bindOutboundLocalAttachment({

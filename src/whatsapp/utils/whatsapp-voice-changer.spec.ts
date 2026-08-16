@@ -1,4 +1,28 @@
-import { atempoChain, ffmpegPitchFilter, resolveFfmpegPreset } from './whatsapp-voice-changer';
+import { atempoChain, ffmpegPitchFilter, resolveFfmpegPreset, resolveGroqSpeech } from './whatsapp-voice-changer';
+
+describe('resolveGroqSpeech', () => {
+	it('keeps Arabic text on an Arabic PlayAI voice and model', () => {
+		expect(resolveGroqSpeech('Fritz-PlayAI', 'مرحبا أحمد')).toEqual({
+			model: 'playai-tts-arabic',
+			voice: 'Ahmad-PlayAI',
+		});
+		expect(resolveGroqSpeech('Amira-PlayAI', 'أهلا')).toEqual({
+			model: 'playai-tts-arabic',
+			voice: 'Amira-PlayAI',
+		});
+	});
+
+	it('keeps English text on an English PlayAI voice and model', () => {
+		expect(resolveGroqSpeech('Ahmad-PlayAI', 'hello there')).toEqual({
+			model: 'playai-tts',
+			voice: 'Fritz-PlayAI',
+		});
+		expect(resolveGroqSpeech('Arista-PlayAI', 'hello there')).toEqual({
+			model: 'playai-tts',
+			voice: 'Arista-PlayAI',
+		});
+	});
+});
 
 describe('ffmpegPitchFilter', () => {
 	it('keeps duration with complementary atempo', () => {

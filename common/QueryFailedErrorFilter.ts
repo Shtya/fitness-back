@@ -1,40 +1,48 @@
-import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus } from '@nestjs/common';
+import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus, Logger } from '@nestjs/common';
 import { QueryFailedError } from 'typeorm';
 import { Response } from 'express';
 
 @Catch(QueryFailedError)
 export class QueryFailedErrorFilter implements ExceptionFilter {
+  private readonly logger = new Logger(QueryFailedErrorFilter.name);
 
   catch(exception: any, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
+    const code = exception.driverError?.code || exception.code;
+    const driverMessage = String(exception.driverError?.message || exception.message || '');
 
-    // Foreign key constraint violation (e.g., trying to delete a record that is still referenced)
-    if (exception.driverError?.code === '23503') {
+    if (code === '23503') {
       response.status(HttpStatus.BAD_REQUEST).json({
         statusCode: HttpStatus.BAD_REQUEST,
         message: "This record cannot be deleted or modified because it is referenced by other data.",
         error: exception.driverError?.error || 'Foreign Key Constraint Violation',
-        details: exception.driverError?.detail,
+        details: exception.driverError?.detail || driverMessage,
       });
-    } 
-    // Missing table error
-    else if (exception.code === '42P01') {
+      return;
+    }
+
+    if (code === '42P01') {
+      this.logger.error(driverMessage);
+      const missing = driverMessage.match(/relation "([^"]+)" does not exist/i)?.[1]
+        || driverMessage.match(/FROM-clause entry for table "([^"]+)"/i)?.[1];
       response.status(HttpStatus.BAD_REQUEST).json({
         statusCode: HttpStatus.BAD_REQUEST,
-        message: "The referenced table does not exist in the database.",
-        error: 'Missing FROM Clause Entry Error',
-        details: exception.driverError?.detail,
+        message: missing
+          ? `Database is missing "${missing}". Restart the backend so schema updates can apply, then refresh.`
+          : driverMessage || "The referenced table does not exist in the database.",
+        error: 'Missing table',
+        details: driverMessage,
       });
+      return;
     }
-    // General database error
-    else {
-      response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-        statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-        message: "An unexpected database error has occurred.",
-        error: 'Database Error',
-        details: exception?.message,
-      });
-    }
+
+    this.logger.error(driverMessage);
+    response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+      statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+      message: "An unexpected database error has occurred.",
+      error: 'Database Error',
+      details: driverMessage,
+    });
   }
 }

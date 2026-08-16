@@ -20,13 +20,15 @@ import {
 import { StudioSecretsService } from '../../ai-content-studio/services/studio-secrets.service';
 import type { StudioSecretsPayload } from '../../ai-content-studio/services/studio-crypto.service';
 import { TranscriptionService } from '../../transcription/transcription.service';
-import { runFfmpeg } from '../utils/whatsapp-voice-ogg';
+import { runFfmpeg, probeAudioSeconds } from '../utils/whatsapp-voice-ogg';
 import {
 	VOICE_CHANGER_CATALOG,
 	ffmpegPitchFilter,
 	findVoiceChangerProvider,
+	HUGGINGFACE_INFERENCE_URL,
 	isVoiceChangerProviderId,
 	resolveFfmpegPreset,
+	resolveGroqSpeech,
 } from '../utils/whatsapp-voice-changer';
 
 export type VoiceChangerUpload = {
@@ -80,6 +82,10 @@ const ELEVENLABS_LEGACY_LIBRARY_VOICE_IDS = new Set([
 ]);
 const ELEVENLABS_PAID_VOICE_MESSAGE =
 	'Free ElevenLabs accounts cannot use Voice Library voices via the API. Pick a premade or cloned voice in settings, or switch to the free pitch changer.';
+const ELEVENLABS_CLONE_PERMISSION_MESSAGE =
+	'This ElevenLabs API key cannot clone voices. Restricted key limits and Instant Voice Cloning are different: at elevenlabs.io → Settings → API Keys open THIS key, turn Restricted off, and enable Voices / Instant Voice Cloning. Starter (or higher) is required. You can also clone the voice on the ElevenLabs website, then pick it here.';
+const ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE =
+	'ElevenLabs Instant Voice Cloning needs about 60 seconds of clean speech in total. Upload more clips or record longer samples, then try again.';
 
 type ElevenLabsVoice = {
 	id: string;
@@ -117,10 +123,7 @@ export class WhatsAppVoiceChangerService {
 			});
 		const credentials = await this.credentialRepo.find({ where: { userId } });
 		const studioSecrets = await this.studioSecrets.getDbSecrets(userId).catch(() => ({} as StudioSecretsPayload));
-		const groqTranscript = await this.transcription
-			.credentialStatus('groq')
-			.then((status) => (status.source === 'database' ? { lastFour: status.lastFour || '****' } : null))
-			.catch(() => null);
+		const groqTranscript = await this.readGroqTranscriptStatus();
 		const credentialStatus: Record<string, CredentialStatus> = Object.fromEntries(
 			KEY_PROVIDERS.map((provider) => [
 				provider,
@@ -154,6 +157,14 @@ export class WhatsAppVoiceChangerService {
 		row.preset = preset.id;
 		row.pitchSemitones = preset.pitchSemitones;
 		row.voiceId = String(dto.voiceId || '').trim() || null;
+		if (findVoiceChangerProvider(provider)?.needsKey) {
+			const apiKey = await this.resolveApiKey(userId, provider, dto.apiKey);
+			if (!apiKey) {
+				throw new BadRequestException(
+					`Save an API key for ${provider} first. Opening the model is allowed; using it requires a saved key.`,
+				);
+			}
+		}
 		await this.settingsRepo.save(row);
 		return this.getSettings(userId);
 	}
@@ -163,11 +174,16 @@ export class WhatsAppVoiceChangerService {
 		this.assertKeyProvider(keyProvider);
 		const normalized = apiKey.trim();
 		if (normalized.length < 8) throw new BadRequestException('API key is too short');
-		let row = await this.credentialRepo.findOne({ where: { userId, provider: keyProvider } });
-		if (!row) row = this.credentialRepo.create({ userId, provider: keyProvider });
-		row.encryptedApiKey = this.encryptCredential(normalized);
-		row.keyLastFour = normalized.slice(-4);
-		await this.credentialRepo.save(row);
+		await this.syncSharedApiKey(userId, keyProvider, normalized);
+		if (keyProvider === 'elevenlabs' || keyProvider === 'cartesia' || !(await this.hasSharedApiKey(userId, keyProvider))) {
+			let row = await this.credentialRepo.findOne({ where: { userId, provider: keyProvider } });
+			if (!row) row = this.credentialRepo.create({ userId, provider: keyProvider });
+			row.encryptedApiKey = this.encryptCredential(normalized);
+			row.keyLastFour = normalized.slice(-4);
+			await this.credentialRepo.save(row);
+		} else {
+			await this.credentialRepo.delete({ userId, provider: keyProvider });
+		}
 		return this.getSettings(userId);
 	}
 
@@ -192,21 +208,29 @@ export class WhatsAppVoiceChangerService {
 		if (!apiKey) {
 			throw new BadRequestException('Add an ElevenLabs API key first, then clone a voice');
 		}
-		const form = new FormData();
-		form.append('name', trimmed);
-		form.append(
-			'description',
-			'So7baFit WhatsApp reference clone. The account owner confirmed permission to use this voice.',
-		);
-		form.append('labels', JSON.stringify({ product: 'so7bafit', kind: 'reference' }));
+		const prepared: Array<{ path: string; originalname: string; mime: string; temp?: string; seconds: number }> = [];
 		for (const file of samples) {
-			form.append('files', createReadStream(file.path), {
-				filename: file.originalname || 'sample.webm',
-				contentType: file.mimetype || 'audio/webm',
-			});
+			prepared.push(await this.prepareCloneSample(file));
+		}
+		const totalSeconds = prepared.reduce((sum, sample) => sum + (sample.seconds || 0), 0);
+		if (totalSeconds > 0 && totalSeconds < 20) {
+			throw new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
 		}
 		let voiceId = '';
 		try {
+			const form = new FormData();
+			form.append('name', trimmed);
+			form.append(
+				'description',
+				'So7baFit WhatsApp reference clone. The account owner confirmed permission to use this voice.',
+			);
+			form.append('labels', JSON.stringify({ language: 'ar', source: 'so7bafit' }));
+			for (const sample of prepared) {
+				form.append('files', createReadStream(sample.path), {
+					filename: sample.originalname,
+					contentType: sample.mime,
+				});
+			}
 			const response = await axios.post('https://api.elevenlabs.io/v1/voices/add', form, {
 				headers: { ...form.getHeaders(), 'xi-api-key': apiKey },
 				timeout: 120_000,
@@ -216,9 +240,18 @@ export class WhatsAppVoiceChangerService {
 			});
 			voiceId = String(response.data?.voice_id || '').trim();
 		} catch (error) {
-			throw this.providerError(
-				error,
-				'Voice clone failed. Instant Voice Cloning must be enabled on the ElevenLabs plan.',
+			if (this.isElevenLabsCloneShortAudioError(error)) {
+				throw new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
+			}
+			if (this.isElevenLabsClonePermissionError(error)) {
+				throw new BadRequestException(await this.explainElevenLabsClonePermission(apiKey, error));
+			}
+			throw this.providerError(error, 'Voice clone failed');
+		} finally {
+			await Promise.all(
+				prepared.map((sample) =>
+					sample.temp ? fs.rm(sample.temp, { force: true }).catch(() => undefined) : Promise.resolve(),
+				),
 			);
 		}
 		if (!voiceId) throw new BadGatewayException('ElevenLabs did not return a cloned voice');
@@ -413,6 +446,45 @@ export class WhatsAppVoiceChangerService {
 		return catalog;
 	}
 
+	private async prepareCloneSample(file: VoiceChangerUpload) {
+		const wavPath = await this.tempPath('wav');
+		try {
+			await runFfmpeg(
+				[
+					'-y',
+					'-i',
+					file.path,
+					'-vn',
+					'-ac',
+					'1',
+					'-ar',
+					'44100',
+					'-sample_fmt',
+					's16',
+					'-f',
+					'wav',
+					wavPath,
+				],
+				45_000,
+			);
+			return {
+				path: wavPath,
+				originalname: this.renamed(file.originalname, 'wav'),
+				mime: 'audio/wav',
+				temp: wavPath,
+				seconds: await probeAudioSeconds(wavPath),
+			};
+		} catch {
+			await fs.rm(wavPath, { force: true }).catch(() => undefined);
+			return {
+				path: file.path,
+				originalname: file.originalname || 'sample.webm',
+				mime: file.mimetype || 'audio/webm',
+				seconds: await probeAudioSeconds(file.path),
+			};
+		}
+	}
+
 	private async listElevenLabsUsableVoices(apiKey: string): Promise<ElevenLabsVoice[]> {
 		const response = await axios.get('https://api.elevenlabs.io/v1/voices', {
 			headers: { 'xi-api-key': apiKey },
@@ -453,6 +525,19 @@ export class WhatsAppVoiceChangerService {
 		);
 	}
 
+	private isElevenLabsClonePermissionError(error: unknown) {
+		const payload = this.decodeAxiosErrorBody(error);
+		const snippet = typeof payload === 'string' ? payload : JSON.stringify(payload || {});
+		const haystack = [
+			snippet,
+			this.extractProviderMessage(payload),
+			this.readErrorField(payload, 'code'),
+			this.readErrorField(payload, 'status'),
+			error instanceof Error ? error.message : '',
+		].join(' ');
+		return /create_instant_voice_clone|instant voice cloning must be enabled/i.test(haystack);
+	}
+
 	private readErrorField(payload: unknown, key: string): string | null {
 		if (!payload || typeof payload !== 'object') return null;
 		const root = payload as Record<string, any>;
@@ -491,16 +576,20 @@ export class WhatsAppVoiceChangerService {
 				fileName: this.renamed(file.originalname, 'mp3'),
 			};
 		} catch (error: any) {
+			const status = Number(error?.response?.status) || 0;
+			const detail = String(this.extractProviderMessage(this.decodeAxiosErrorBody(error)) || '');
+			if (status === 404 || status === 410 || /sunset|deprecated|discontinued/i.test(detail)) {
+				throw new BadGatewayException(
+					'Cartesia Voice Changer was discontinued on 20 Aug 2026. Use ElevenLabs or the free pitch changer.',
+				);
+			}
 			throw this.providerError(error, 'Cartesia voice changer failed');
 		}
 	}
 
 	private async transformGroq(file: VoiceChangerUpload, apiKey: string, voiceId?: string | null) {
 		const text = await this.transcribeGroq(file, apiKey);
-		const arabic = this.isArabic(text);
-		const catalog = findVoiceChangerProvider('groq');
-		const voice = String(voiceId || '').trim() || (arabic ? 'Ahmad-PlayAI' : catalog?.voices?.[2]?.id || 'Fritz-PlayAI');
-		const model = /arabic|ahmad|nasser/i.test(voice) || arabic ? 'playai-tts-arabic' : 'playai-tts';
+		const { model, voice } = resolveGroqSpeech(voiceId, text);
 		try {
 			const response = await axios.post(
 				'https://api.groq.com/openai/v1/audio/speech',
@@ -552,24 +641,30 @@ export class WhatsAppVoiceChangerService {
 	private async transformOpenAi(file: VoiceChangerUpload, apiKey: string, voiceId?: string | null) {
 		const text = await this.transcribeOpenAi(file, apiKey);
 		const voice = String(voiceId || '').trim() || 'alloy';
-		try {
-			const response = await axios.post(
-				'https://api.openai.com/v1/audio/speech',
-				{ model: 'gpt-4o-mini-tts', voice, input: text.slice(0, 4000) },
-				{
-					headers: { Authorization: `Bearer ${apiKey}` },
-					responseType: 'arraybuffer',
-					timeout: 60_000,
-				},
-			);
-			return {
-				buffer: Buffer.from(response.data),
-				mimeType: 'audio/mpeg',
-				fileName: this.renamed(file.originalname, 'mp3'),
-			};
-		} catch (error: any) {
-			throw this.providerError(error, 'OpenAI text-to-speech failed');
+		const models = ['gpt-4o-mini-tts', 'tts-1'] as const;
+		let lastError: unknown;
+		for (const model of models) {
+			try {
+				const response = await axios.post(
+					'https://api.openai.com/v1/audio/speech',
+					{ model, voice, input: text.slice(0, 4000) },
+					{
+						headers: { Authorization: `Bearer ${apiKey}` },
+						responseType: 'arraybuffer',
+						timeout: 60_000,
+						validateStatus: (status) => status >= 200 && status < 300,
+					},
+				);
+				return {
+					buffer: Buffer.from(response.data),
+					mimeType: 'audio/mpeg',
+					fileName: this.renamed(file.originalname, 'mp3'),
+				};
+			} catch (error: any) {
+				lastError = error;
+			}
 		}
+		throw this.providerError(lastError, 'OpenAI text-to-speech failed');
 	}
 
 	private async transcribeOpenAi(file: VoiceChangerUpload, apiKey: string) {
@@ -602,7 +697,7 @@ export class WhatsAppVoiceChangerService {
 			(this.isArabic(text) ? 'facebook/mms-tts-ara' : 'facebook/mms-tts-eng');
 		try {
 			const response = await axios.post(
-				`https://api-inference.huggingface.co/models/${model}`,
+				`${HUGGINGFACE_INFERENCE_URL}/${model}`,
 				{ inputs: text.slice(0, 1500) },
 				{
 					headers: { Authorization: `Bearer ${apiKey}` },
@@ -610,9 +705,16 @@ export class WhatsAppVoiceChangerService {
 					timeout: 120_000,
 				},
 			);
+			const mime = String(response.headers['content-type'] || '');
+			if (mime.includes('application/json')) {
+				throw this.providerError(
+					{ response: { data: Buffer.from(response.data).toString('utf8') } },
+					'Hugging Face TTS failed',
+				);
+			}
 			return {
 				buffer: Buffer.from(response.data),
-				mimeType: String(response.headers['content-type'] || 'audio/wav'),
+				mimeType: mime || 'audio/wav',
 				fileName: this.renamed(file.originalname, 'wav'),
 			};
 		} catch (error: any) {
@@ -624,7 +726,7 @@ export class WhatsAppVoiceChangerService {
 		const buffer = await fs.readFile(file.path);
 		try {
 			const response = await axios.post(
-				'https://api-inference.huggingface.co/models/openai/whisper-large-v3',
+				`${HUGGINGFACE_INFERENCE_URL}/openai/whisper-large-v3`,
 				buffer,
 				{
 					headers: {
@@ -645,6 +747,80 @@ export class WhatsAppVoiceChangerService {
 		}
 	}
 
+	private isElevenLabsCloneShortAudioError(error: unknown) {
+		const payload = this.decodeAxiosErrorBody(error);
+		const snippet = typeof payload === 'string' ? payload : JSON.stringify(payload || {});
+		return /too_short|too short|at least (1 minute|60 seconds)|minimum of 60|duration.*(?:low|short)|not enough audio/i.test(
+			snippet,
+		);
+	}
+
+	private async explainElevenLabsClonePermission(apiKey: string, error: unknown) {
+		const payload = this.decodeAxiosErrorBody(error);
+		const detail = this.extractProviderMessage(payload);
+		try {
+			const response = await axios.get('https://api.elevenlabs.io/v1/user/subscription', {
+				headers: { 'xi-api-key': apiKey },
+				timeout: 12_000,
+				validateStatus: (status) => status >= 200 && status < 300,
+			});
+			const tier = String(response.data?.tier || response.data?.plan || '').trim();
+			if (tier && /free|starter|trial/i.test(tier) === false) {
+				return `${ELEVENLABS_CLONE_PERMISSION_MESSAGE} Current plan: ${tier}. ${detail}`.trim();
+			}
+			if (tier) {
+				return `${ELEVENLABS_CLONE_PERMISSION_MESSAGE} Current plan: ${tier}. Instant Voice Cloning is not included on this plan.`;
+			}
+		} catch {
+			/* keep the default clone permission copy */
+		}
+		return detail || ELEVENLABS_CLONE_PERMISSION_MESSAGE;
+	}
+
+	private async readGroqTranscriptStatus(): Promise<{ lastFour: string; source: CredentialSource } | null> {
+		try {
+			const status = await this.transcription.credentialStatus('groq');
+			if (!status?.configured) return null;
+			return {
+				lastFour: status.lastFour || '****',
+				source: status.source === 'database' ? 'transcription' : 'environment',
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	private async syncSharedApiKey(userId: string, provider: string, apiKey: string) {
+		if (provider === 'groq') {
+			await this.transcription.saveCredential(userId, 'groq', apiKey);
+			await this.studioSecrets.upsertSecrets(userId, { groq: { apiKey } }).catch(() => undefined);
+			return;
+		}
+		if (provider === 'openai') {
+			await this.studioSecrets.upsertSecrets(userId, { openai_compatible: { apiKey } });
+			return;
+		}
+		if (provider === 'huggingface') {
+			await this.studioSecrets.upsertSecrets(userId, { huggingface: { apiKey } });
+		}
+	}
+
+	private async hasSharedApiKey(userId: string, provider: string) {
+		if (provider === 'groq') {
+			const stored = await this.transcription.tryReadStoredApiKey('groq');
+			if (stored?.key) return true;
+		}
+		const studio = await this.studioSecrets.getDbSecrets(userId).catch(() => ({} as StudioSecretsPayload));
+		return Boolean(this.studioApiKey(provider, studio));
+	}
+
+	private envApiKey(provider: string) {
+		const id = this.credentialProvider(provider);
+		const envName =
+			findVoiceChangerProvider(id)?.envFallback || findVoiceChangerProvider(provider)?.envFallback;
+		return envName ? String(process.env[envName] || '').trim() : '';
+	}
+
 	private credentialProvider(provider: string) {
 		return provider === 'clone' ? 'elevenlabs' : provider;
 	}
@@ -653,18 +829,18 @@ export class WhatsAppVoiceChangerService {
 		provider: KeyProvider,
 		credentials: WhatsAppVoiceChangerCredential[],
 		studioSecrets: StudioSecretsPayload,
-		groqTranscript: { lastFour: string } | null,
+		groqTranscript: { lastFour: string; source: CredentialSource } | null,
 	): CredentialStatus {
-		const stored = credentials.find((item) => item.provider === provider);
-		if (stored?.encryptedApiKey) {
-			return { configured: true, source: 'saved', lastFour: stored.keyLastFour || null };
+		if (provider === 'groq' && groqTranscript) {
+			return { configured: true, source: groqTranscript.source, lastFour: groqTranscript.lastFour };
 		}
 		const studioKey = this.studioApiKey(provider, studioSecrets);
 		if (studioKey) {
 			return { configured: true, source: 'studio', lastFour: this.keyLastFour(studioKey) };
 		}
-		if (provider === 'groq' && groqTranscript) {
-			return { configured: true, source: 'transcription', lastFour: groqTranscript.lastFour };
+		const stored = credentials.find((item) => item.provider === provider);
+		if (stored?.encryptedApiKey) {
+			return { configured: true, source: 'saved', lastFour: stored.keyLastFour || null };
 		}
 		const envKey = this.envApiKey(provider);
 		if (envKey) {
@@ -678,11 +854,6 @@ export class WhatsAppVoiceChangerService {
 		return reader?.(secrets)?.trim() || null;
 	}
 
-	private envApiKey(provider: string) {
-		const envName = findVoiceChangerProvider(this.credentialProvider(provider))?.envFallback;
-		return envName ? process.env[envName]?.trim() || null : null;
-	}
-
 	private keyLastFour(value: string) {
 		if (value.length <= 4) return '****';
 		return value.slice(-4);
@@ -691,16 +862,16 @@ export class WhatsAppVoiceChangerService {
 	private async resolveApiKey(userId: string, provider: string, override?: string | null) {
 		if (override?.trim()) return override.trim();
 		const keyProvider = this.credentialProvider(provider);
-		const stored = await this.credentialRepo.findOne({ where: { userId, provider: keyProvider } });
-		if (stored?.encryptedApiKey) return this.decryptCredential(stored.encryptedApiKey);
-		const studioSecrets = await this.studioSecrets.getDbSecrets(userId).catch(() => ({} as StudioSecretsPayload));
-		const studioKey = this.studioApiKey(keyProvider, studioSecrets);
-		if (studioKey) return studioKey;
 		if (keyProvider === 'groq') {
 			const transcript = await this.transcription.tryReadStoredApiKey('groq');
 			if (transcript?.key) return transcript.key;
 		}
-		return this.envApiKey(keyProvider);
+		const studioSecrets = await this.studioSecrets.getDbSecrets(userId).catch(() => ({} as StudioSecretsPayload));
+		const studioKey = this.studioApiKey(keyProvider, studioSecrets);
+		if (studioKey) return studioKey;
+		const stored = await this.credentialRepo.findOne({ where: { userId, provider: keyProvider } });
+		if (stored?.encryptedApiKey) return this.decryptCredential(stored.encryptedApiKey);
+		return this.envApiKey(keyProvider) || null;
 	}
 
 	private assertKeyProvider(provider: string) {
@@ -730,16 +901,28 @@ export class WhatsAppVoiceChangerService {
 	}
 
 	private decryptCredential(value: string) {
-		const payload = Buffer.from(value, 'base64');
-		const iv = payload.subarray(0, 12);
-		const tag = payload.subarray(12, 28);
-		const ciphertext = payload.subarray(28);
-		const decipher = crypto.createDecipheriv('aes-256-gcm', this.encryptionKey(), iv);
-		decipher.setAuthTag(tag);
-		return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+		try {
+			const payload = Buffer.from(value, 'base64');
+			const iv = payload.subarray(0, 12);
+			const tag = payload.subarray(12, 28);
+			const ciphertext = payload.subarray(28);
+			const decipher = crypto.createDecipheriv('aes-256-gcm', this.encryptionKey(), iv);
+			decipher.setAuthTag(tag);
+			return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+		} catch {
+			throw new BadRequestException(
+				'This saved API key cannot be decrypted. Save the key again from voice changer settings.',
+			);
+		}
 	}
 
 	private providerError(error: unknown, fallback: string) {
+		if (fallback === ELEVENLABS_CLONE_PERMISSION_MESSAGE || this.isElevenLabsClonePermissionError(error)) {
+			return new BadRequestException(ELEVENLABS_CLONE_PERMISSION_MESSAGE);
+		}
+		if (this.isElevenLabsCloneShortAudioError(error)) {
+			return new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
+		}
 		if (fallback === ELEVENLABS_PAID_VOICE_MESSAGE) {
 			return new BadGatewayException(ELEVENLABS_PAID_VOICE_MESSAGE);
 		}

@@ -324,9 +324,16 @@ export class WhatsAppProviderManagerService
 			) {
 				await this.waitForLinkMaterial(accountId, 20_000);
 			}
+			let ready = this.providers.get(accountId) || provider;
+			if (!phoneNumber && this.needsFreshQr(ready)) {
+				this.logger.warn(
+					`WhatsApp restore for ${accountId} produced no QR — starting a fresh scan session`,
+				);
+				ready = await this.restartWithFreshQr(accountId, account);
+			}
 			this.startLockRenewal(accountId);
 			await this.log(accountId, 'connect_started', 'WhatsApp provider started');
-			return provider;
+			return ready;
 		} catch (error) {
 			this.providers.delete(accountId);
 			this.connectStartedAt.delete(accountId);
@@ -754,6 +761,40 @@ export class WhatsAppProviderManagerService
 			await new Promise(resolve => setTimeout(resolve, 1500));
 		}
 		return this.providers.get(accountId)?.getState() === 'connected';
+	}
+
+	private needsFreshQr(provider: WhatsAppProvider | null | undefined) {
+		if (!provider) return false;
+		if (provider.getState?.() === 'connected') return false;
+		const qr = typeof provider.getQr === 'function' ? provider.getQr() : null;
+		const code =
+			typeof provider.getPairingCode === 'function' ? provider.getPairingCode() : null;
+		return !qr && !code;
+	}
+
+	/** Session files exist but WhatsApp did not restore or emit a QR — wipe and scan again. */
+	private async restartWithFreshQr(accountId: string, account: WhatsAppAccount) {
+		const existing = this.providers.get(accountId);
+		this.providers.delete(accountId);
+		this.connectStartedAt.delete(accountId);
+		if (existing) {
+			await existing.disconnect().catch(() => undefined);
+		}
+		await this.purgeBaileysSessionFiles(accountId);
+		await this.sessions.remove(accountId, 'baileys').catch(() =>
+			this.sessions.clear(accountId, 'baileys'),
+		);
+		await this.accountRepo.update(accountId, {
+			status: WhatsAppAccountStatus.CONNECTING,
+			lastError: null,
+		});
+		const provider = this.createProvider(account);
+		provider.onEvent((event) => this.handleEvent(accountId, event));
+		this.providers.set(accountId, provider);
+		this.connectStartedAt.set(accountId, Date.now());
+		await provider.connect();
+		await this.waitForLinkMaterial(accountId, 25_000);
+		return provider;
 	}
 
 	/** Give catchQR / catchLinkCode time to populate before /connect responds. */
