@@ -445,7 +445,7 @@ export class EmailMemoGmailService {
 		connection: EmailMemoGmailConnection,
 		opts: { max?: number; pageToken?: string; q?: string } = {},
 	) {
-		const max = Math.min(Math.max(Number(opts.max) || 50, 1), 100);
+		const max = Math.min(Math.max(Number(opts.max) || 50, 1), 500);
 		const qs = new URLSearchParams({
 			maxResults: String(max),
 			q: String(opts.q || 'in:inbox'),
@@ -507,9 +507,16 @@ export class EmailMemoGmailService {
 	}
 
 	async persistHistoryId(connection: EmailMemoGmailConnection, historyId: string) {
-		if (!historyId || historyId === connection.historyId) return;
-		connection.historyId = historyId;
+		if (historyId && historyId !== connection.historyId) {
+			connection.historyId = historyId;
+		}
 		connection.lastSyncedAt = new Date();
+		await this.connections.save(connection);
+	}
+
+	async touchSynced(connection: EmailMemoGmailConnection) {
+		connection.lastSyncedAt = new Date();
+		connection.lastError = null;
 		await this.connections.save(connection);
 	}
 

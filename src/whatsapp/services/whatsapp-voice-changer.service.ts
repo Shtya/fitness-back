@@ -23,10 +23,15 @@ import { TranscriptionService } from '../../transcription/transcription.service'
 import { runFfmpeg, probeAudioSeconds } from '../utils/whatsapp-voice-ogg';
 import {
 	VOICE_CHANGER_CATALOG,
+	FISH_AUDIO_API,
+	FISH_AUDIO_TTS_MODEL,
+	MINIMAX_API,
+	MINIMAX_TTS_MODEL,
 	ffmpegPitchFilter,
 	findVoiceChangerProvider,
 	HUGGINGFACE_INFERENCE_URL,
 	isVoiceChangerProviderId,
+	minimaxVoiceIdFromName,
 	resolveFfmpegPreset,
 	resolveGroqSpeech,
 } from '../utils/whatsapp-voice-changer';
@@ -52,7 +57,7 @@ type AudioResult = {
 	fileName: string;
 };
 
-const KEY_PROVIDERS = ['elevenlabs', 'groq', 'openai', 'huggingface', 'cartesia'] as const;
+const KEY_PROVIDERS = ['elevenlabs', 'fishaudio', 'minimax', 'groq', 'openai', 'huggingface', 'cartesia'] as const;
 type KeyProvider = (typeof KEY_PROVIDERS)[number];
 type CredentialSource = 'saved' | 'studio' | 'transcription' | 'environment';
 type CredentialStatus = {
@@ -63,6 +68,8 @@ type CredentialStatus = {
 
 const STUDIO_KEY_PATH: Record<KeyProvider, (secrets: StudioSecretsPayload) => string | undefined> = {
 	elevenlabs: () => undefined,
+	fishaudio: () => undefined,
+	minimax: () => undefined,
 	cartesia: () => undefined,
 	groq: (secrets) => secrets.groq?.apiKey,
 	huggingface: (secrets) => secrets.huggingface?.apiKey,
@@ -121,20 +128,21 @@ export class WhatsAppVoiceChangerService {
 				pitchSemitones: -6,
 				voiceId: null,
 			});
+		const storedProvider = row.provider || 'off';
+		const provider = storedProvider === 'clone' ? 'off' : storedProvider;
 		const credentials = await this.credentialRepo.find({ where: { userId } });
 		const studioSecrets = await this.studioSecrets.getDbSecrets(userId).catch(() => ({} as StudioSecretsPayload));
 		const groqTranscript = await this.readGroqTranscriptStatus();
 		const credentialStatus: Record<string, CredentialStatus> = Object.fromEntries(
-			KEY_PROVIDERS.map((provider) => [
-				provider,
-				this.buildCredentialStatus(provider, credentials, studioSecrets, groqTranscript),
+			KEY_PROVIDERS.map((providerId) => [
+				providerId,
+				this.buildCredentialStatus(providerId, credentials, studioSecrets, groqTranscript),
 			]),
 		);
-		credentialStatus.clone = credentialStatus.elevenlabs;
 		return {
 			configured: Boolean(row.configured),
-			enabled: Boolean(row.enabled),
-			provider: row.provider || 'off',
+			enabled: Boolean(row.enabled) && provider !== 'off',
+			provider,
 			preset: row.preset || 'deeper',
 			pitchSemitones: Number(row.pitchSemitones) || -6,
 			voiceId: row.voiceId || null,
@@ -144,7 +152,8 @@ export class WhatsAppVoiceChangerService {
 	}
 
 	async saveSettings(userId: string, dto: TransformOptions & { configured?: boolean; enabled?: boolean }) {
-		const provider = String(dto.provider || 'off').trim();
+		const provider =
+			String(dto.provider || 'off').trim() === 'clone' ? 'off' : String(dto.provider || 'off').trim();
 		if (!isVoiceChangerProviderId(provider)) {
 			throw new BadRequestException('Unsupported voice changer provider');
 		}
@@ -194,7 +203,13 @@ export class WhatsAppVoiceChangerService {
 		return this.getSettings(userId);
 	}
 
-	async cloneVoice(userId: string, files: VoiceChangerUpload[], name: string, consent: boolean) {
+	async cloneVoice(
+		userId: string,
+		files: VoiceChangerUpload[],
+		name: string,
+		consent: boolean,
+		cloneProvider = '',
+	) {
 		if (!consent) {
 			throw new BadRequestException('Confirm you have permission to clone this voice');
 		}
@@ -204,49 +219,34 @@ export class WhatsAppVoiceChangerService {
 		const samples = (files || []).filter((file) => file?.path);
 		if (!samples.length) throw new BadRequestException('Upload at least one voice sample');
 		if (samples.length > 10) throw new BadRequestException('Use up to 10 voice samples');
-		const apiKey = await this.resolveApiKey(userId, 'elevenlabs');
+		const engine = this.cloneEngine(cloneProvider);
+		const apiKey = await this.resolveApiKey(userId, engine);
 		if (!apiKey) {
-			throw new BadRequestException('Add an ElevenLabs API key first, then clone a voice');
+			throw new BadRequestException(
+				engine === 'fishaudio'
+					? 'Add a Fish Audio API key first, then clone a voice'
+					: 'Add a MiniMax API key first, then clone a voice',
+			);
 		}
 		const prepared: Array<{ path: string; originalname: string; mime: string; temp?: string; seconds: number }> = [];
 		for (const file of samples) {
 			prepared.push(await this.prepareCloneSample(file));
 		}
 		const totalSeconds = prepared.reduce((sum, sample) => sum + (sample.seconds || 0), 0);
-		if (totalSeconds > 0 && totalSeconds < 20) {
-			throw new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
+		const minimumSeconds = engine === 'minimax' ? 10 : 8;
+		if (totalSeconds > 0 && totalSeconds < minimumSeconds) {
+			throw new BadRequestException(
+				engine === 'minimax'
+					? 'MiniMax cloning needs at least 10 seconds of clean speech. Upload a longer sample, then try again.'
+					: 'Fish Audio cloning needs at least 8 seconds of clean speech. Upload a longer sample, then try again.',
+			);
 		}
 		let voiceId = '';
 		try {
-			const form = new FormData();
-			form.append('name', trimmed);
-			form.append(
-				'description',
-				'So7baFit WhatsApp reference clone. The account owner confirmed permission to use this voice.',
-			);
-			form.append('labels', JSON.stringify({ language: 'ar', source: 'so7bafit' }));
-			for (const sample of prepared) {
-				form.append('files', createReadStream(sample.path), {
-					filename: sample.originalname,
-					contentType: sample.mime,
-				});
-			}
-			const response = await axios.post('https://api.elevenlabs.io/v1/voices/add', form, {
-				headers: { ...form.getHeaders(), 'xi-api-key': apiKey },
-				timeout: 120_000,
-				maxBodyLength: Infinity,
-				maxContentLength: Infinity,
-				validateStatus: (status) => status >= 200 && status < 300,
-			});
-			voiceId = String(response.data?.voice_id || '').trim();
-		} catch (error) {
-			if (this.isElevenLabsCloneShortAudioError(error)) {
-				throw new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
-			}
-			if (this.isElevenLabsClonePermissionError(error)) {
-				throw new BadRequestException(await this.explainElevenLabsClonePermission(apiKey, error));
-			}
-			throw this.providerError(error, 'Voice clone failed');
+			voiceId =
+				engine === 'minimax'
+					? await this.cloneMiniMax(apiKey, trimmed, prepared)
+					: await this.cloneFishAudio(apiKey, trimmed, prepared);
 		} finally {
 			await Promise.all(
 				prepared.map((sample) =>
@@ -254,11 +254,11 @@ export class WhatsAppVoiceChangerService {
 				),
 			);
 		}
-		if (!voiceId) throw new BadGatewayException('ElevenLabs did not return a cloned voice');
+		if (!voiceId) throw new BadGatewayException('Voice clone did not return an id');
 		await this.saveSettings(userId, {
 			configured: true,
 			enabled: true,
-			provider: 'clone',
+			provider: engine,
 			voiceId,
 		});
 		const settings = await this.getSettings(userId);
@@ -283,6 +283,12 @@ export class WhatsAppVoiceChangerService {
 		}
 		if (provider === 'elevenlabs' || provider === 'clone') {
 			return this.transformElevenLabs(file, apiKey, options.voiceId || settings.voiceId);
+		}
+		if (provider === 'fishaudio') {
+			return this.transformFishAudio(userId, file, apiKey, options.voiceId || settings.voiceId);
+		}
+		if (provider === 'minimax') {
+			return this.transformMiniMax(userId, file, apiKey, options.voiceId || settings.voiceId);
 		}
 		if (provider === 'cartesia') {
 			return this.transformCartesia(file, apiKey, options.voiceId || settings.voiceId);
@@ -415,6 +421,313 @@ export class WhatsAppVoiceChangerService {
 		};
 	}
 
+	private cloneEngine(value: string | undefined) {
+		const raw = String(value || '').trim().toLowerCase();
+		if (raw === 'fishaudio' || raw === 'minimax') return raw;
+		throw new BadRequestException(
+			'Clone a voice with Fish Audio or MiniMax. Instant Voice Cloning from ElevenLabs is not available in this panel.',
+		);
+	}
+
+	private async cloneElevenLabs(
+		apiKey: string,
+		name: string,
+		prepared: Array<{ path: string; originalname: string; mime: string }>,
+	) {
+		try {
+			const form = new FormData();
+			form.append('name', name);
+			form.append(
+				'description',
+				'So7baFit WhatsApp reference clone. The account owner confirmed permission to use this voice.',
+			);
+			form.append('labels', JSON.stringify({ language: 'ar', source: 'so7bafit' }));
+			for (const sample of prepared) {
+				form.append('files', createReadStream(sample.path), {
+					filename: sample.originalname,
+					contentType: sample.mime,
+				});
+			}
+			const response = await axios.post('https://api.elevenlabs.io/v1/voices/add', form, {
+				headers: { ...form.getHeaders(), 'xi-api-key': apiKey },
+				timeout: 120_000,
+				maxBodyLength: Infinity,
+				maxContentLength: Infinity,
+				validateStatus: (status) => status >= 200 && status < 300,
+			});
+			return String(response.data?.voice_id || '').trim();
+		} catch (error) {
+			if (this.isElevenLabsCloneShortAudioError(error)) {
+				throw new BadRequestException(ELEVENLABS_CLONE_SHORT_AUDIO_MESSAGE);
+			}
+			if (this.isElevenLabsClonePermissionError(error)) {
+				throw new BadRequestException(await this.explainElevenLabsClonePermission(apiKey, error));
+			}
+			throw this.providerError(error, 'Voice clone failed');
+		}
+	}
+
+	private async cloneFishAudio(
+		apiKey: string,
+		name: string,
+		prepared: Array<{ path: string; originalname: string; mime: string }>,
+	) {
+		const form = new FormData();
+		form.append('type', 'tts');
+		form.append('title', name);
+		form.append('train_mode', 'fast');
+		form.append('visibility', 'private');
+		form.append('enhance_audio_quality', 'true');
+		form.append(
+			'description',
+			'So7baFit WhatsApp reference clone. The account owner confirmed permission to use this voice.',
+		);
+		for (const sample of prepared) {
+			form.append('voices', createReadStream(sample.path), {
+				filename: sample.originalname,
+				contentType: sample.mime,
+			});
+		}
+		try {
+			const response = await axios.post(`${FISH_AUDIO_API}/model`, form, {
+				headers: { ...form.getHeaders(), Authorization: `Bearer ${apiKey}` },
+				timeout: 120_000,
+				maxBodyLength: Infinity,
+				maxContentLength: Infinity,
+				validateStatus: (status) => status >= 200 && status < 300,
+			});
+			return String(response.data?._id || response.data?.id || '').trim();
+		} catch (error) {
+			throw this.providerError(error, 'Fish Audio voice clone failed');
+		}
+	}
+
+	private async cloneMiniMax(
+		apiKey: string,
+		name: string,
+		prepared: Array<{ path: string; originalname: string; mime: string; seconds: number }>,
+	) {
+		const samplePath = await this.pickOrConcatCloneSamples(prepared);
+		const temps = samplePath !== prepared[0]?.path ? [samplePath] : [];
+		try {
+			const upload = new FormData();
+			upload.append('purpose', 'voice_clone');
+			upload.append('file', createReadStream(samplePath), {
+				filename: 'clone.wav',
+				contentType: 'audio/wav',
+			});
+			const uploaded = await axios.post(`${MINIMAX_API}/v1/files/upload`, upload, {
+				headers: { ...upload.getHeaders(), Authorization: `Bearer ${apiKey}` },
+				timeout: 90_000,
+				maxBodyLength: Infinity,
+				maxContentLength: Infinity,
+			});
+			this.assertMiniMaxOk(uploaded.data, 'MiniMax sample upload failed');
+			const fileId = uploaded.data?.file?.file_id;
+			if (fileId == null) throw new BadGatewayException('MiniMax did not return a file id');
+			const voiceId = minimaxVoiceIdFromName(name);
+			const cloned = await axios.post(
+				`${MINIMAX_API}/v1/voice_clone`,
+				{
+					file_id: fileId,
+					voice_id: voiceId,
+					model: MINIMAX_TTS_MODEL,
+					need_noise_reduction: true,
+					need_volumn_normalization: true,
+				},
+				{
+					headers: { Authorization: `Bearer ${apiKey}` },
+					timeout: 120_000,
+				},
+			);
+			this.assertMiniMaxOk(cloned.data, 'MiniMax voice clone failed');
+			return String(cloned.data?.voice_id || voiceId).trim();
+		} catch (error) {
+			if (error instanceof BadRequestException || error instanceof BadGatewayException) throw error;
+			throw this.providerError(error, 'MiniMax voice clone failed');
+		} finally {
+			await Promise.all(temps.map((item) => fs.rm(item, { force: true }).catch(() => undefined)));
+		}
+	}
+
+	private async pickOrConcatCloneSamples(
+		prepared: Array<{ path: string; seconds: number }>,
+	) {
+		if (prepared.length === 1) return prepared[0].path;
+		const longest = [...prepared].sort((a, b) => (b.seconds || 0) - (a.seconds || 0))[0];
+		if ((longest?.seconds || 0) >= 10) return longest.path;
+		const outputPath = await this.tempPath('wav');
+		const args = ['-y'];
+		for (const sample of prepared) args.push('-i', sample.path);
+		args.push(
+			'-filter_complex',
+			`concat=n=${prepared.length}:v=0:a=1`,
+			'-ac',
+			'1',
+			'-ar',
+			'44100',
+			outputPath,
+		);
+		try {
+			await runFfmpeg(args, 45_000);
+			return outputPath;
+		} catch {
+			await fs.rm(outputPath, { force: true }).catch(() => undefined);
+			return longest.path;
+		}
+	}
+
+	private async transformFishAudio(
+		userId: string,
+		file: VoiceChangerUpload,
+		apiKey: string,
+		voiceId?: string | null,
+	) {
+		const reference = String(voiceId || '').trim();
+		if (!reference) {
+			throw new BadRequestException('Clone a Fish Audio voice first, then convert a note.');
+		}
+		const text = await this.transcribeSpeech(userId, file);
+		try {
+			const response = await axios.post(
+				`${FISH_AUDIO_API}/v1/tts`,
+				{
+					text: text.slice(0, 4000),
+					reference_id: reference,
+					format: 'mp3',
+					mp3_bitrate: 128,
+					latency: 'normal',
+					normalize: true,
+				},
+				{
+					headers: {
+						Authorization: `Bearer ${apiKey}`,
+						model: FISH_AUDIO_TTS_MODEL,
+						'Content-Type': 'application/json',
+					},
+					responseType: 'arraybuffer',
+					timeout: 90_000,
+					validateStatus: (status) => status >= 200 && status < 300,
+				},
+			);
+			return {
+				buffer: Buffer.from(response.data),
+				mimeType: 'audio/mpeg',
+				fileName: this.renamed(file.originalname, 'mp3'),
+			};
+		} catch (error) {
+			throw this.providerError(error, 'Fish Audio speech failed');
+		}
+	}
+
+	private async transformMiniMax(
+		userId: string,
+		file: VoiceChangerUpload,
+		apiKey: string,
+		voiceId?: string | null,
+	) {
+		const voice = String(voiceId || '').trim();
+		if (!voice) {
+			throw new BadRequestException('Clone a MiniMax voice first, then convert a note.');
+		}
+		const text = await this.transcribeSpeech(userId, file);
+		try {
+			const response = await axios.post(
+				`${MINIMAX_API}/v1/t2a_v2`,
+				{
+					model: MINIMAX_TTS_MODEL,
+					text: text.slice(0, 4000),
+					stream: false,
+					language_boost: 'auto',
+					output_format: 'hex',
+					voice_setting: { voice_id: voice, speed: 1, vol: 1, pitch: 0 },
+					audio_setting: { sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 1 },
+				},
+				{
+					headers: { Authorization: `Bearer ${apiKey}` },
+					timeout: 90_000,
+				},
+			);
+			this.assertMiniMaxOk(response.data, 'MiniMax speech failed');
+			const hex = String(response.data?.data?.audio || '').trim();
+			if (!hex) throw new BadGatewayException('MiniMax did not return audio');
+			return {
+				buffer: Buffer.from(hex, 'hex'),
+				mimeType: 'audio/mpeg',
+				fileName: this.renamed(file.originalname, 'mp3'),
+			};
+		} catch (error) {
+			if (error instanceof BadRequestException || error instanceof BadGatewayException) throw error;
+			throw this.providerError(error, 'MiniMax speech failed');
+		}
+	}
+
+	private async transcribeSpeech(userId: string, file: VoiceChangerUpload) {
+		const groq = await this.resolveApiKey(userId, 'groq');
+		if (groq) return this.transcribeGroq(file, groq);
+		const openai = await this.resolveApiKey(userId, 'openai');
+		if (openai) return this.transcribeOpenAi(file, openai);
+		const huggingface = await this.resolveApiKey(userId, 'huggingface');
+		if (huggingface) return this.transcribeHuggingFace(file, huggingface);
+		throw new BadRequestException(
+			'Fish Audio and MiniMax clone the voice then respeak the words. Save a free Groq key first so the WhatsApp note can be transcribed.',
+		);
+	}
+
+	private async listFishAudioVoices(apiKey: string) {
+		const response = await axios.get(`${FISH_AUDIO_API}/model`, {
+			params: { self: true, page_size: 50 },
+			headers: { Authorization: `Bearer ${apiKey}` },
+			timeout: 20_000,
+			validateStatus: (status) => status >= 200 && status < 300,
+		});
+		const items = Array.isArray(response.data)
+			? response.data
+			: response.data?.items || response.data?.models || [];
+		return (items as Array<{ _id?: string; id?: string; title?: string; name?: string; type?: string }>)
+			.map((item) => {
+				if (item.type && item.type !== 'tts') return null;
+				const id = String(item._id || item.id || '').trim();
+				const label = String(item.title || item.name || id).trim();
+				if (!id) return null;
+				return { id, label, labelAr: label, category: 'cloned' };
+			})
+			.filter(Boolean) as Array<{ id: string; label: string; labelAr: string; category: string }>;
+	}
+
+	private async listMiniMaxVoices(apiKey: string) {
+		const response = await axios.post(
+			`${MINIMAX_API}/v1/get_voice`,
+			{ voice_type: 'voice_cloning' },
+			{
+				headers: { Authorization: `Bearer ${apiKey}` },
+				timeout: 20_000,
+			},
+		);
+		this.assertMiniMaxOk(response.data, 'MiniMax voice list failed');
+		const items =
+			response.data?.voice_cloning ||
+			response.data?.cloned_voices ||
+			response.data?.voices ||
+			[];
+		return (items as Array<{ voice_id?: string; voice_name?: string; name?: string }>)
+			.map((item) => {
+				const id = String(item.voice_id || '').trim();
+				const label = String(item.voice_name || item.name || id).trim();
+				if (!id) return null;
+				return { id, label, labelAr: label, category: 'cloned' };
+			})
+			.filter(Boolean) as Array<{ id: string; label: string; labelAr: string; category: string }>;
+	}
+
+	private assertMiniMaxOk(payload: unknown, fallback: string) {
+		const code = Number((payload as any)?.base_resp?.status_code);
+		if (Number.isFinite(code) && code !== 0) {
+			const message = String((payload as any)?.base_resp?.status_msg || fallback).trim();
+			throw new BadGatewayException(`${fallback}: ${message.slice(0, 220)}`);
+		}
+	}
+
 	private cloneCatalog() {
 		return VOICE_CHANGER_CATALOG.map((item) => ({
 			...item,
@@ -425,23 +738,47 @@ export class WhatsAppVoiceChangerService {
 	private async catalogForUser(userId: string) {
 		const catalog = this.cloneCatalog();
 		const elevenlabs = catalog.find((item) => item.id === 'elevenlabs');
-		const clone = catalog.find((item) => item.id === 'clone');
-		const apiKey = await this.resolveApiKey(userId, 'elevenlabs');
-		if (!apiKey) return catalog;
-		try {
-			const voices = await this.listElevenLabsUsableVoices(apiKey);
-			const mapped = voices.slice(0, 48).map((voice) => ({
-				id: voice.id,
-				label: voice.category === 'cloned' ? `${voice.name} (clone)` : voice.name,
-				labelAr: voice.category === 'cloned' ? `${voice.name} (استنساخ)` : voice.name,
-				category: voice.category,
-			}));
-			if (elevenlabs && mapped.length) elevenlabs.voices = mapped;
-			if (clone) {
-				clone.voices = mapped.filter((voice) => voice.category === 'cloned');
+		const fish = catalog.find((item) => item.id === 'fishaudio');
+		const minimax = catalog.find((item) => item.id === 'minimax');
+		const elevenKey = await this.resolveApiKey(userId, 'elevenlabs');
+		if (elevenKey) {
+			try {
+				const voices = await this.listElevenLabsUsableVoices(elevenKey);
+				const mapped = voices.slice(0, 48).map((voice) => ({
+					id: voice.id,
+					label: voice.category === 'cloned' ? `${voice.name} (clone)` : voice.name,
+					labelAr: voice.category === 'cloned' ? `${voice.name} (استنساخ)` : voice.name,
+					category: voice.category,
+				}));
+				if (elevenlabs && mapped.length) elevenlabs.voices = mapped;
+			} catch {
+				/* keep the static premade list when ElevenLabs is unreachable */
 			}
-		} catch {
-			/* keep the static premade list when ElevenLabs is unreachable */
+		}
+		const fishKey = await this.resolveApiKey(userId, 'fishaudio');
+		if (fish && fishKey) {
+			try {
+				const voices = await this.listFishAudioVoices(fishKey);
+				if (voices.length) fish.voices = voices;
+			} catch {
+				/* keep empty until a clone succeeds */
+			}
+		}
+		const miniKey = await this.resolveApiKey(userId, 'minimax');
+		if (minimax && miniKey) {
+			try {
+				const voices = await this.listMiniMaxVoices(miniKey);
+				if (voices.length) minimax.voices = voices;
+			} catch {
+				/* keep empty until a clone succeeds */
+			}
+		}
+		const settings = await this.settingsRepo.findOne({ where: { userId } });
+		if (settings?.voiceId && settings.provider === 'fishaudio' && fish && !(fish.voices || []).some((voice) => voice.id === settings.voiceId)) {
+			fish.voices = [{ id: settings.voiceId, label: 'Cloned voice', labelAr: 'صوت مستنسخ', category: 'cloned' }, ...(fish.voices || [])];
+		}
+		if (settings?.voiceId && settings.provider === 'minimax' && minimax && !(minimax.voices || []).some((voice) => voice.id === settings.voiceId)) {
+			minimax.voices = [{ id: settings.voiceId, label: 'Cloned voice', labelAr: 'صوت مستنسخ', category: 'cloned' }, ...(minimax.voices || [])];
 		}
 		return catalog;
 	}
@@ -974,6 +1311,7 @@ export class WhatsAppVoiceChangerService {
 		if (typeof detail?.message === 'string') return detail.message;
 		if (typeof root.error?.message === 'string') return root.error.message;
 		if (typeof root.message === 'string') return root.message;
+		if (typeof root.base_resp?.status_msg === 'string') return root.base_resp.status_msg;
 		return '';
 	}
 

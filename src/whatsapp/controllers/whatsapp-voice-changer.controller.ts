@@ -85,7 +85,7 @@ export class WhatsAppVoiceChangerController {
 	async cloneVoice(
 		@Req() req: any,
 		@UploadedFiles() files: VoiceChangerUpload[],
-		@Body() body: { name?: string; consent?: string },
+		@Body() body: { name?: string; consent?: string; cloneProvider?: string },
 	) {
 		const samples = files || [];
 		try {
@@ -94,6 +94,7 @@ export class WhatsAppVoiceChangerController {
 				samples,
 				String(body?.name || ''),
 				String(body?.consent || '').toLowerCase() === 'true',
+				String(body?.cloneProvider || ''),
 			);
 		} finally {
 			await Promise.all(samples.map((file) => unlink(file.path).catch(() => undefined)));

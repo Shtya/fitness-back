@@ -353,6 +353,19 @@ export function normalizeWhatsAppChatId(value?: string | null) {
 	return '';
 }
 
+export function cairoDateTimeLabel(date?: Date | null) {
+	if (!date) return '';
+	return date.toLocaleString('ar-EG', {
+		timeZone: 'Africa/Cairo',
+		weekday: 'long',
+		day: 'numeric',
+		month: 'long',
+		hour: 'numeric',
+		minute: '2-digit',
+		hour12: true,
+	});
+}
+
 export function cairoCalendarDay(now = new Date()) {
 	return now.toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
 }
@@ -369,4 +382,12 @@ export function startOfZonedDay(timeZone = 'Africa/Cairo', now = new Date()) {
 export function gmailAfterDate(now = new Date()) {
 	const [year, month, day] = cairoCalendarDay(now).split('-');
 	return `${year}/${Number(month)}/${Number(day)}`;
+}
+
+export function gmailAfterUnix(now = new Date()) {
+	return Math.floor(startOfZonedDay(undefined, now).getTime() / 1000);
+}
+
+export function todaysInboxQuery(now = new Date()) {
+	return `in:inbox after:${gmailAfterUnix(now)}`;
 }

@@ -206,6 +206,9 @@ export class EmailMemoAiMemo {
 	@Column({ name: 'formatted_message', type: 'text' })
 	formattedMessage: string;
 
+	@Column({ name: 'arabic_summary', type: 'text', nullable: true })
+	arabicSummary: string | null;
+
 	@Column({ name: 'prompt_version', type: 'varchar', length: 32, nullable: true })
 	promptVersion: string | null;
 

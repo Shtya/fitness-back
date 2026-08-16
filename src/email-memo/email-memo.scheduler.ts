@@ -31,7 +31,7 @@ export class EmailMemoScheduler {
 					) {
 						continue;
 					}
-					await this.processor.processConnection(row);
+					await this.processor.flushToday(row);
 				} catch (error) {
 					this.logger.warn(
 						`Gmail poll failed for ${row.gmailAddress}: ${

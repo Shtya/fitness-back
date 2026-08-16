@@ -92,6 +92,9 @@ export class EmailMemoService {
 					deadline: 'none',
 					gmailUrl: 'https://mail.google.com',
 					inboxLabel: connected[0]?.email || 'you@gmail.com',
+					arabicSummary:
+						'الميل من العميل عن تأكيد جلسة الغد، وبيطلب فاتورة. المطلوب تبعت الفاتورة اليوم.',
+					receivedAt: new Date(),
 				}),
 			},
 			googleOAuth: oauth,

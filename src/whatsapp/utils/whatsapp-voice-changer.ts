@@ -3,11 +3,20 @@ export const VOICE_CHANGER_PROVIDER_IDS = [
 	'ffmpeg',
 	'elevenlabs',
 	'clone',
+	'fishaudio',
+	'minimax',
 	'groq',
 	'openai',
 	'huggingface',
 	'cartesia',
 ] as const;
+
+export const VOICE_CLONE_ENGINES = ['elevenlabs', 'fishaudio', 'minimax'] as const;
+export type VoiceCloneEngineId = (typeof VOICE_CLONE_ENGINES)[number];
+
+export function isVoiceCloneEngineId(value: string): value is VoiceCloneEngineId {
+	return (VOICE_CLONE_ENGINES as readonly string[]).includes(value);
+}
 
 export type VoiceChangerProviderId = (typeof VOICE_CHANGER_PROVIDER_IDS)[number];
 
@@ -30,6 +39,7 @@ export type VoiceChangerProviderCatalog = {
 	keyHint?: string;
 	keyHintAr?: string;
 	envFallback?: string;
+	isClone?: boolean;
 	voices?: VoiceChangerVoiceOption[];
 };
 
@@ -51,15 +61,6 @@ export const FFMPEG_PRESETS = [
 ] as const;
 
 export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
-	{
-		id: 'off',
-		needsKey: false,
-		kind: 'free',
-		label: 'Keep my real voice',
-		labelAr: 'صوتي الحقيقي',
-		description: 'Send the recording as-is. No conversion.',
-		descriptionAr: 'إرسال التسجيل كما هو بدون أي تحويل.',
-	},
 	{
 		id: 'ffmpeg',
 		needsKey: false,
@@ -96,21 +97,41 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		],
 	},
 	{
-		id: 'clone',
+		id: 'fishaudio',
 		needsKey: true,
-		kind: 'trial',
-		label: 'Clone a reference voice',
-		labelAr: 'استنساخ صوت مرجعي',
+		kind: 'free',
+		isClone: true,
+		label: 'Fish Audio',
+		labelAr: 'Fish Audio',
 		description:
-			'Upload several samples of a voice you have permission to use. ElevenLabs learns the tone, then your WhatsApp notes are converted into that voice.',
+			'Hosted voice clone from ~10–30 seconds of audio. Free developer TTS uses s2.1-pro-free. Playback transcribes the note then speaks it in the cloned voice, so a Groq key helps.',
 		descriptionAr:
-			'ارفع عدة تسجيلات لصوت مصرّح لك به. ElevenLabs يحلل النبرة، وبعدها الرسائل الصوتية على واتساب بتتحول لصوت الشخص ده.',
-		keyUrl: 'https://elevenlabs.io/app/settings/api-keys',
+			'استنساخ مستضاف من حوالي 10–30 ثانية. مجاني للمطورين بـ s2.1-pro-free. التشغيل بيفرغ الرسالة وبعدين ينطقها بالصوت المستنسخ، فمفتاح Groq بيساعد.',
+		keyUrl: 'https://fish.audio/developers/',
 		keyHint:
-			'Use an ElevenLabs API key with Voices / Instant Voice Cloning enabled (Starter or higher). Restricted keys cannot create clones. About 60 seconds of clean audio is required. You can also clone the voice on elevenlabs.io, then pick it here.',
+			'fish.audio → Developers → API key. Use model s2.1-pro-free. Cloning is included. A Groq key (free) is used to transcribe the WhatsApp note before speaking it.',
 		keyHintAr:
-			'استخدم مفتاح ElevenLabs مع تفعيل Voices / Instant Voice Cloning (خطة Starter أو أعلى). المفتاح المحدود لا ينشئ استنساخاً. محتاج حوالي 60 ثانية صوت واضح. تقدر كمان تستنسخ من موقع ElevenLabs وبعدين تختاره هنا.',
-		envFallback: 'ELEVENLABS_API_KEY',
+			'fish.audio → Developers → API key. استخدم s2.1-pro-free. الاستنساخ مضمّن. مفتاح Groq المجاني بيستخدم لتفريغ رسالة واتساب قبل نطقها.',
+		envFallback: 'FISH_AUDIO_API_KEY',
+		voices: [],
+	},
+	{
+		id: 'minimax',
+		needsKey: true,
+		kind: 'free',
+		isClone: true,
+		label: 'MiniMax',
+		labelAr: 'MiniMax',
+		description:
+			'Clone from about 10 seconds of audio. Free plan includes clone slots and monthly credits. Playback transcribes then speaks; save Groq for Arabic notes.',
+		descriptionAr:
+			'استنساخ من حوالي 10 ثواني. الخطة المجانية فيها خانات clone ورصيد شهري. التشغيل بيفرغ ثم ينطق؛ احفظ Groq للعربي.',
+		keyUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key',
+		keyHint:
+			'platform.minimax.io → API Keys. About 10 seconds of clean speech. A Groq key transcribes the WhatsApp note first.',
+		keyHintAr:
+			'platform.minimax.io → API Keys. حوالي 10 ثواني كلام واضح. مفتاح Groq بيفرغ رسالة واتساب أولاً.',
+		envFallback: 'MINIMAX_API_KEY',
 		voices: [],
 	},
 	{
@@ -261,4 +282,19 @@ export function ffmpegPitchFilter(semitones: number, extraFilters: string[] = []
 		...atempoChain(1 / ratio),
 		...extraFilters,
 	].join(',');
+}
+
+export const FISH_AUDIO_API = 'https://api.fish.audio';
+export const FISH_AUDIO_TTS_MODEL = 's2.1-pro-free';
+export const MINIMAX_API = 'https://api.minimax.io';
+export const MINIMAX_TTS_MODEL = 'speech-2.6-hd';
+
+export function minimaxVoiceIdFromName(name: string) {
+	const slug = String(name || 'voice')
+		.normalize('NFKD')
+		.replace(/[^\w]+/g, '_')
+		.replace(/^_+|_+$/g, '')
+		.slice(0, 32);
+	const base = /^[A-Za-z]/.test(slug) ? slug : `V${slug || 'oice'}`;
+	return `${base}_${Date.now().toString(36)}`.slice(0, 64);
 }

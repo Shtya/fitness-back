@@ -189,18 +189,18 @@ export class SendNowEmailMemoDto {
 	@IsOptional()
 	@IsArray()
 	@Transform(({ value }) =>
-		(Array.isArray(value) ? value : []).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 40),
+		(Array.isArray(value) ? value : []).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 150),
 	)
 	ids?: string[];
 
 	@IsOptional()
 	@IsInt()
 	@Min(1)
-	@Max(40)
+	@Max(150)
 	@Transform(({ value }) => {
 		const n = Number(value);
-		if (!Number.isFinite(n)) return 30;
-		return Math.min(40, Math.max(1, Math.round(n)));
+		if (!Number.isFinite(n)) return 100;
+		return Math.min(150, Math.max(1, Math.round(n)));
 	})
 	limit?: number;
 }
