@@ -10,6 +10,8 @@ import { WhatsAppConnectionController } from './controllers/whatsapp-connection.
 import { WhatsAppConversationsController } from './controllers/whatsapp-conversations.controller';
 import { WhatsAppReportsController } from './controllers/whatsapp-reports.controller';
 import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
+import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
+import { WhatsAppStickersController } from './controllers/whatsapp-stickers.controller';
 import {
 	WhatsAppAccount,
 	WhatsAppAccountAccess,
@@ -27,6 +29,9 @@ import {
 	WhatsAppMessageReaction,
 	WhatsAppProviderSession,
 	WhatsAppStatus,
+	WhatsAppVoiceChangerCredential,
+	WhatsAppVoiceChangerSettings,
+	WhatsAppSavedSticker,
 } from './entities/whatsapp.entity';
 import { WhatsAppAccessService } from './services/whatsapp-access.service';
 import { WhatsAppAccountsService } from './services/whatsapp-accounts.service';
@@ -38,6 +43,8 @@ import { WhatsAppAssignmentService } from './services/whatsapp-assignment.servic
 import { WhatsAppSyncService } from './services/whatsapp-sync.service';
 import { WhatsAppStatusService } from './services/whatsapp-status.service';
 import { WhatsAppReportsService } from './services/whatsapp-reports.service';
+import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
+import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 
 export const WHATSAPP_ENTITIES = [
 	WhatsAppAccount,
@@ -56,6 +63,9 @@ export const WHATSAPP_ENTITIES = [
 	WhatsAppStatus,
 	WhatsAppConnectionLog,
 	WhatsAppAuditLog,
+	WhatsAppVoiceChangerSettings,
+	WhatsAppVoiceChangerCredential,
+	WhatsAppSavedSticker,
 ];
 
 @Module({
@@ -76,6 +86,8 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppConversationsController,
 		WhatsAppReportsController,
 		WhatsAppStatusController,
+		WhatsAppVoiceChangerController,
+		WhatsAppStickersController,
 	],
 	providers: [
 		WhatsAppAccessService,
@@ -88,6 +100,8 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAssignmentService,
 		WhatsAppStatusService,
 		WhatsAppReportsService,
+		WhatsAppVoiceChangerService,
+		WhatsAppStickersService,
 	],
 	exports: [
 		TypeOrmModule,

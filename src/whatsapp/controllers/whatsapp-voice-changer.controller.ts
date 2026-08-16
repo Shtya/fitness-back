@@ -1,0 +1,111 @@
+import {
+	BadRequestException,
+	Body,
+	Controller,
+	Delete,
+	Get,
+	Param,
+	Post,
+	Put,
+	Req,
+	StreamableFile,
+	UploadedFile,
+	UseGuards,
+	UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { randomUUID } from 'crypto';
+import { unlink } from 'fs/promises';
+import { diskStorage } from 'multer';
+import { tmpdir } from 'os';
+import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guard/roles.guard';
+import {
+	SaveWhatsAppVoiceChangerCredentialDto,
+	SaveWhatsAppVoiceChangerSettingsDto,
+} from '../dto/whatsapp.dto';
+import {
+	VoiceChangerUpload,
+	WhatsAppVoiceChangerService,
+} from '../services/whatsapp-voice-changer.service';
+
+@Controller('whatsapp/voice-changer')
+@UseGuards(JwtAuthGuard, RolesGuard)
+export class WhatsAppVoiceChangerController {
+	constructor(private readonly voiceChanger: WhatsAppVoiceChangerService) {}
+
+	@Get()
+	getSettings(@Req() req: any) {
+		return this.voiceChanger.getSettings(req.user.id);
+	}
+
+	@Put()
+	saveSettings(@Req() req: any, @Body() dto: SaveWhatsAppVoiceChangerSettingsDto) {
+		return this.voiceChanger.saveSettings(req.user.id, dto);
+	}
+
+	@Put('providers/:provider/credential')
+	saveCredential(
+		@Req() req: any,
+		@Param('provider') provider: string,
+		@Body() dto: SaveWhatsAppVoiceChangerCredentialDto,
+	) {
+		return this.voiceChanger.saveCredential(req.user.id, provider, dto.apiKey);
+	}
+
+	@Delete('providers/:provider/credential')
+	removeCredential(@Req() req: any, @Param('provider') provider: string) {
+		return this.voiceChanger.removeCredential(req.user.id, provider);
+	}
+
+	@Post('transform')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			storage: diskStorage({
+				destination: tmpdir(),
+				filename: (_req, _file, callback) => callback(null, `wa-voice-changer-${randomUUID()}`),
+			}),
+			limits: { fileSize: 12 * 1024 * 1024, files: 1 },
+			fileFilter: (_req, file, callback) => {
+				const mime = String(file.mimetype || '').toLowerCase();
+				const allowed =
+					mime.startsWith('audio/') ||
+					mime.includes('webm') ||
+					mime.includes('ogg') ||
+					mime.includes('mpeg') ||
+					mime.includes('wav') ||
+					mime.includes('mp4');
+				callback(allowed ? null : new BadRequestException('Unsupported audio format'), allowed);
+			},
+		}),
+	)
+	async transform(
+		@Req() req: any,
+		@UploadedFile() file: VoiceChangerUpload,
+		@Body()
+		body: {
+			provider?: string;
+			preset?: string;
+			pitchSemitones?: string;
+			voiceId?: string;
+			apiKey?: string;
+		},
+	) {
+		if (!file) throw new BadRequestException('Audio file is required');
+		try {
+			const result = await this.voiceChanger.transform(req.user.id, file, {
+				provider: body?.provider,
+				preset: body?.preset,
+				pitchSemitones: body?.pitchSemitones == null ? undefined : Number(body.pitchSemitones),
+				voiceId: body?.voiceId,
+				apiKey: body?.apiKey,
+			});
+			return new StreamableFile(result.buffer, {
+				type: result.mimeType,
+				disposition: `attachment; filename="${result.fileName.replace(/"/g, '')}"`,
+			});
+		} finally {
+			await unlink(file.path).catch(() => undefined);
+		}
+	}
+}

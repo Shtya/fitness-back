@@ -149,6 +149,7 @@ function guessMimeFromPath(filePath: string, fallbackType?: string | null): stri
 	if (lower.endsWith('.pdf')) return 'application/pdf';
 	const kind = String(fallbackType || '').toLowerCase();
 	if (kind === 'image') return 'image/jpeg';
+	if (kind === 'sticker') return 'image/webp';
 	if (kind === 'video') return 'video/mp4';
 	if (kind === 'voice' || kind === 'audio' || kind === 'ptt') return 'audio/ogg; codecs=opus';
 	return null;
@@ -322,11 +323,9 @@ export function providerUnreadCount(chat: any): number | null {
 	return null;
 }
 
-/** Phone unread can clear an existing CRM badge, but must not resurrect one.
- *  persistMessage increments live inbound; markConversationRead zeros local
- *  unread. Copying a positive WhatsApp count after the CRM already opened the
- *  thread used to bring "unread" badges back. A phone-side read/reply reports
- *  unread 0 and that must follow into the CRM. */
+/** Provider unread can seed a brand-new CRM thread. It must never wipe a
+ *  live CRM badge: Baileys/linked-device ChatStore almost always reports 0
+ *  after a companion receives the message, even if the operator never opened it. */
 export function shouldCopyProviderUnread(
 	currentUnread: number,
 	lastMessageAt: Date | string | null | undefined,
@@ -334,7 +333,7 @@ export function shouldCopyProviderUnread(
 ): boolean {
 	if (providerUnread == null) return false;
 	const current = Math.max(0, Number(currentUnread) || 0);
-	if (providerUnread === 0) return current > 0;
+	if (providerUnread <= 0) return false;
 	if (current > 0) return false;
 	return !lastMessageAt;
 }
@@ -551,13 +550,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return;
 		}
 		if (event.type === 'chat_unread') {
-			if (this.bootstrapping.has(accountId) || event.unreadCount !== 0) return;
-			const chatId = String(event.chatId || '');
-			if (!isSupportedInboxChatId(chatId)) return;
-			this.enqueuePersist(
-				() => this.clearUnreadFromPhoneByChatId(accountId, chatId),
-				`chat-read:${accountId}:${chatId}`,
-			);
+			// Companion unreadCount is untrusted (often 0). CRM unread is local.
 			return;
 		}
 		if (event.type === 'history_sync') {
@@ -1509,17 +1502,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
-	private async clearUnreadFromPhoneByChatId(accountId: string, chatId: string) {
-		const conversation =
-			(await this.conversationRepo.findOne({
-				where: { accountId, providerChatId: chatId },
-				select: ['id', 'unreadCount'],
-			})) ||
-			(await this.findDirectConversationAlias(accountId, chatId, null));
-		if (!conversation?.id) return;
-		await this.clearUnreadFromPhone(accountId, conversation.id);
-	}
-
 	async persistMessage(
 		accountId: string,
 		normalized: NormalizedWhatsAppMessage,
@@ -2094,12 +2076,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (Object.keys(updates).length) {
 				await this.conversationRepo.update(conversation.id, updates);
 				changed = true;
-				if (updates.unreadCount === 0 && Number(conversation.unreadCount) > 0) {
-					this.gateway.emitAccountEvent(accountId, 'conversation_read', {
-						conversationId: conversation.id,
-						reason: 'provider_unread_zero',
-					});
-				}
 			}
 			if (
 				options.syncGroupParticipants &&
@@ -3284,6 +3260,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			caption: input.caption,
 			fileName: path.basename(absolutePath),
 			isVoice: input.type === 'voice',
+			isSticker: input.type === 'sticker',
 			mimeType: mimeGuess,
 			quotedProviderMessageId: input.quotedProviderMessageId,
 		});

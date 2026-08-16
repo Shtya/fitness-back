@@ -28,9 +28,9 @@ describe('shouldCopyProviderUnread', () => {
 		expect(shouldCopyProviderUnread(0, null, 0)).toBe(false);
 	});
 
-	it('clears CRM unread when WhatsApp reports the chat was read on the phone', () => {
-		expect(shouldCopyProviderUnread(5, new Date(), 0)).toBe(true);
-		expect(shouldCopyProviderUnread(1, null, 0)).toBe(true);
+	it('does not treat a companion unread 0 as a CRM read', () => {
+		expect(shouldCopyProviderUnread(5, new Date(), 0)).toBe(false);
+		expect(shouldCopyProviderUnread(1, null, 0)).toBe(false);
 		expect(shouldCopyProviderUnread(0, new Date(), 0)).toBe(false);
 	});
 });

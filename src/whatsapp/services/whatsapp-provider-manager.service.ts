@@ -403,11 +403,23 @@ export class WhatsAppProviderManagerService
 		let purgeFailed = false;
 		try {
 			this.logger.error(`Wiping WhatsApp session for ${accountId}: ${reason}`);
+			const provider = this.providers.get(accountId);
 			this.providers.delete(accountId);
 			this.connectStartedAt.delete(accountId);
 			this.connecting.delete(accountId);
 			this.stopLockRenewal(accountId);
 			await this.releaseLock(accountId).catch(() => undefined);
+			if (provider) {
+				try {
+					await provider.disconnect();
+				} catch {
+					/* discarded */
+				}
+			}
+			await this.purgeBaileysSessionFiles(accountId);
+			await this.sessions.remove(accountId, 'baileys').catch(() =>
+				this.sessions.clear(accountId, 'baileys'),
+			);
 			await purgeWppBrowserProfile(accountId).catch(error => {
 				purgeFailed = true;
 				this.logger.error(
@@ -480,6 +492,15 @@ export class WhatsAppProviderManagerService
 			return;
 		}
 		setTimeout(relaunch, delayMs).unref?.();
+	}
+
+	private async purgeBaileysSessionFiles(accountId: string) {
+		const baileysRoot = path.resolve(
+			process.env.WHATSAPP_BAILEYS_DIR ||
+				process.env.WHATSAPP_TOKEN_FOLDER ||
+				path.join(process.cwd(), 'tokens', 'baileys'),
+		);
+		await fs.rm(path.join(baileysRoot, accountId), { recursive: true, force: true }).catch(() => undefined);
 	}
 
 	private async handleEvent(accountId: string, event: WhatsAppProviderEvent) {
@@ -703,12 +724,7 @@ export class WhatsAppProviderManagerService
 					}`,
 				),
 			);
-			const baileysRoot = path.resolve(
-				process.env.WHATSAPP_BAILEYS_DIR ||
-					process.env.WHATSAPP_TOKEN_FOLDER ||
-					path.join(process.cwd(), 'tokens', 'baileys'),
-			);
-			await fs.rm(path.join(baileysRoot, accountId), { recursive: true, force: true }).catch(() => undefined);
+			await this.purgeBaileysSessionFiles(accountId);
 			await this.sessions.remove(accountId, providerName).catch(() =>
 				this.sessions.clear(accountId, providerName),
 			);

@@ -1908,6 +1908,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			caption?: string;
 			fileName?: string;
 			isVoice?: boolean;
+			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
 		} = {},
@@ -1917,6 +1918,34 @@ export class WppConnectProvider implements WhatsAppProvider {
 		let lastError: unknown;
 
 		const sendToTarget = async (target: string) => {
+			if (options.isSticker) {
+				const isGif =
+					String(options.mimeType || '').includes('gif') ||
+					filename.toLowerCase().endsWith('.gif');
+				if (typeof this.client?.sendImageAsStickerGif === 'function' && isGif) {
+					return this.withTimeout(
+						this.client.sendImageAsStickerGif(target, filePath),
+						60000,
+						`sendStickerGif(${target})`,
+					);
+				}
+				if (typeof this.client?.sendImageAsSticker === 'function') {
+					return this.withTimeout(
+						this.client.sendImageAsSticker(target, filePath),
+						60000,
+						`sendSticker(${target})`,
+					);
+				}
+				return this.withTimeout(
+					this.client.sendFile(target, filePath, {
+						filename,
+						type: 'sticker',
+						waitForAck: true,
+					}),
+					60000,
+					`sendStickerFile(${target})`,
+				);
+			}
 			if (options.isVoice) {
 				const fs = require('fs');
 				const lower = filename.toLowerCase();

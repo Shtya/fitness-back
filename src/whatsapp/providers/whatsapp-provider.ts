@@ -117,6 +117,7 @@ export interface WhatsAppProvider {
 			caption?: string;
 			fileName?: string;
 			isVoice?: boolean;
+			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
 		},

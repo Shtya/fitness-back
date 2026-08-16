@@ -11,6 +11,7 @@ import {
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
 import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
+import { ensureWhatsAppVoiceOgg, guessVoiceSeconds } from '../utils/whatsapp-voice-ogg';
 
 type BaileysSocket = any;
 
@@ -143,9 +144,10 @@ export type BaileysDisconnectKind = 'logged_out' | 'replaced' | 'phone_closed' |
 export function classifyBaileysDisconnect(
 	update: any,
 	DisconnectReason?: { loggedOut?: number; connectionReplaced?: number; connectionClosed?: number; connectionLost?: number; timedOut?: number },
+	context: { sessionHadOpened?: boolean } = {},
 ): BaileysDisconnectKind {
 	const err = update?.lastDisconnect?.error;
-	const statusCode = Number(err?.output?.statusCode || 0);
+	const statusCode = Number(err?.output?.statusCode || err?.data?.reason || 0);
 	const msg = String(err?.message || err?.output?.payload?.message || err?.data || '');
 	const node = err?.data?.content?.[0] || err?.data || err?.reasonNode || {};
 	const inner = Array.isArray(err?.data?.content) ? err.data.content[0] : null;
@@ -157,10 +159,19 @@ export function classifyBaileysDisconnect(
 		node?.attrs?.type === 'replaced' ||
 		inner?.tag === 'conflict' ||
 		inner?.attrs?.type === 'replaced';
-	if (statusCode === DisconnectReason?.loggedOut || statusCode === 401) {
+	const handshakeFailure = /connection failure/i.test(msg);
+	// CB:failure during login often carries WhatsApp's 401 even when the
+	// companion keys are still valid. Treating that as logout wiped nothing on
+	// disk (Baileys creds stayed) and immediately logged in with the same
+	// identity — an infinite "scan QR" loop without a QR.
+	if (
+		(statusCode === DisconnectReason?.loggedOut || statusCode === 401) &&
+		!(handshakeFailure && !context.sessionHadOpened)
+	) {
 		return 'logged_out';
 	}
 	if (replaced) return 'replaced';
+	if (handshakeFailure) return 'connection_lost';
 	const phoneLikelyClosed =
 		statusCode === DisconnectReason?.connectionClosed ||
 		statusCode === DisconnectReason?.connectionLost ||
@@ -202,7 +213,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		statusFetch: false,
 		statusPublish: false,
 		statusView: false,
-		reactions: false,
+		reactions: true,
 		messageActions: false,
 	};
 
@@ -216,6 +227,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private closing = false;
 	private reconnectTimer: NodeJS.Timeout | null = null;
 	private reconnectAttempt = 0;
+	private socketOpened = false;
 	private phoneNumberHint: string | null = null;
 	private readonly listeners = new Set<(event: WhatsAppProviderEvent) => void | Promise<void>>();
 	private readonly chats = new Map<string, any>();
@@ -230,6 +242,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private readonly messagesByChat = new Map<string, Map<string, NormalizedWhatsAppMessage>>();
 	/** Original WAMessage by provider id — required for Baileys media download. */
 	private readonly rawByMessageId = new Map<string, any>();
+	private readonly reactionsByMessageId = new Map<string, NormalizedWhatsAppReaction[]>();
 	private connectedAtMs = 0;
 	private historySyncChunks = 0;
 
@@ -436,11 +449,19 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const key of keys) {
 				bucket.delete(key);
 				this.rawByMessageId.delete(key);
+				this.reactionsByMessageId.delete(key);
 			}
 		}
 		if (this.rawByMessageId.size > 4000) {
 			const keys = [...this.rawByMessageId.keys()].slice(0, this.rawByMessageId.size - 4000);
 			for (const key of keys) this.rawByMessageId.delete(key);
+		}
+		if (this.reactionsByMessageId.size > 4000) {
+			const keys = [...this.reactionsByMessageId.keys()].slice(
+				0,
+				this.reactionsByMessageId.size - 4000,
+			);
+			for (const key of keys) this.reactionsByMessageId.delete(key);
 		}
 		if (normalized.contactName && !normalized.fromMe && !normalized.chatId.endsWith('@g.us')) {
 			this.rememberContact({
@@ -458,9 +479,15 @@ export class BaileysProvider implements WhatsAppProvider {
 				? normalized.contactName
 				: null) ||
 			existingName;
+		const fromHistory = Boolean((normalized as any).__fromHistory);
+		const prevUnread = Number(this.chats.get(normalized.chatId)?.unreadCount) || 0;
+		let nextUnread = prevUnread;
+		if (!fromHistory && !normalized.fromMe) nextUnread = prevUnread + 1;
+		if (!fromHistory && normalized.fromMe) nextUnread = 0;
 		this.rememberChat(normalized.chatId, {
 			t: Math.floor(ts / 1000),
 			name: nextName,
+			unreadCount: nextUnread,
 			lastMessage: {
 				id: { _serialized: normalized.providerMessageId },
 				body: normalized.text,
@@ -476,6 +503,52 @@ export class BaileysProvider implements WhatsAppProvider {
 		for (const chatId of this.messagesByChat.keys()) {
 			if (!this.chats.has(chatId)) this.rememberChat(chatId);
 		}
+	}
+
+	private findRememberedMessage(providerMessageId: string): NormalizedWhatsAppMessage | null {
+		for (const bucket of this.messagesByChat.values()) {
+			const found = bucket.get(providerMessageId);
+			if (found) return found;
+		}
+		return null;
+	}
+
+	private ingestReaction(raw: any): boolean {
+		const content = unwrapMessageContent(raw?.message);
+		const reaction = content?.reactionMessage;
+		const targetId = String(reaction?.key?.id || '').trim();
+		if (!targetId) return false;
+		const emoji = String(reaction.text || '').trim();
+		const actorKey = raw?.key?.fromMe
+			? 'me'
+			: String(raw?.key?.participant || raw?.key?.remoteJid || 'unknown');
+		const current = this.reactionsByMessageId.get(targetId) || [];
+		const withoutActor = current.filter((item) => item.actorKey !== actorKey);
+		const next = emoji
+			? [...withoutActor, { actorKey, emoji, timestamp: toDate(raw.messageTimestamp) }]
+			: withoutActor;
+		this.reactionsByMessageId.set(targetId, next);
+		this.emit({
+			type: 'message_reactions',
+			providerMessageId: targetId,
+			reactions: next,
+		});
+		return true;
+	}
+
+	private setOwnReaction(providerMessageId: string, emoji: string) {
+		const current = this.reactionsByMessageId.get(providerMessageId) || [];
+		const withoutMe = current.filter((item) => item.actorKey !== 'me');
+		const next = emoji
+			? [...withoutMe, { actorKey: 'me', emoji, timestamp: new Date() }]
+			: withoutMe;
+		this.reactionsByMessageId.set(providerMessageId, next);
+		this.emit({
+			type: 'message_reactions',
+			providerMessageId,
+			reactions: next,
+		});
+		return next;
 	}
 
 	private normalizeWaMessage(raw: any): NormalizedWhatsAppMessage | null {
@@ -593,6 +666,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
 		const { version } = await fetchLatestBaileysVersion();
 
+		this.socketOpened = false;
 		const generation = ++this.socketGeneration;
 		const previous = this.socket;
 		this.socket = null;
@@ -632,6 +706,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 			if (update.connection === 'open') {
 				this.reconnectAttempt = 0;
+				this.socketOpened = true;
 				this.qr = null;
 				this.pairingCode = null;
 				this.connectedAtMs = Date.now();
@@ -644,7 +719,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			if (update.connection === 'close') {
 				if (this.socket === socket) this.socket = null;
 				if (this.closing) return;
-				const kind = classifyBaileysDisconnect(update, DisconnectReason);
+				const kind = classifyBaileysDisconnect(update, DisconnectReason, {
+					sessionHadOpened: this.socketOpened,
+				});
 				if (kind === 'logged_out') {
 					this.setState('error', {
 						error: 'WhatsApp logged out this linked device. Scan the QR again.',
@@ -684,6 +761,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			// dumps and must still be remembered, or only the first live chat appears.
 			const fromHistory = type !== 'notify';
 			for (const raw of list) {
+				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
 				if (fromHistory) {
@@ -720,10 +798,12 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const chat of chats || []) {
 				const id = jidOf(chat?.id);
 				if (!id) continue;
+				const incoming = Number(chat.unreadCount);
+				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
 				this.rememberChat(id, {
 					name: chat.name || chat.verifiedName || null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || 0,
-					unreadCount: Number(chat.unreadCount) || 0,
+					unreadCount: Number.isFinite(incoming) && incoming > 0 ? incoming : prev,
 				});
 			}
 		});
@@ -732,16 +812,16 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const chat of chats || []) {
 				const id = jidOf(chat?.id);
 				if (!id) continue;
-				const nextUnread =
-					chat.unreadCount != null
-						? Math.max(0, Math.floor(Number(chat.unreadCount) || 0))
-						: this.chats.get(id)?.unreadCount || 0;
+				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
+				const incoming =
+					chat.unreadCount != null ? Math.floor(Number(chat.unreadCount)) : NaN;
+				const nextUnread = Number.isFinite(incoming) && incoming > 0 ? incoming : prev;
 				this.rememberChat(id, {
 					name: chat.name || this.chats.get(id)?.name || null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
 					unreadCount: nextUnread,
 				});
-				if (chat.unreadCount != null && Number.isFinite(Number(chat.unreadCount))) {
+				if (Number.isFinite(incoming) && incoming > 0) {
 					this.emit({
 						type: 'chat_unread',
 						chatId: id,
@@ -784,6 +864,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				});
 			}
 			for (const raw of messages) {
+				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
 				// Mark history so sync persists without unread spam / push flood.
@@ -866,6 +947,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.qr = null;
 		this.pairingCode = null;
 		this.connectedAtMs = 0;
+		this.socketOpened = false;
 		this.setState('disconnected');
 	}
 
@@ -893,6 +975,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.qr = null;
 		this.pairingCode = null;
 		this.connectedAtMs = 0;
+		this.socketOpened = false;
 		this.historySyncChunks = 0;
 		this.setState('disconnected');
 	}
@@ -1088,6 +1171,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			caption?: string;
 			fileName?: string;
 			isVoice?: boolean;
+			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
 		} = {},
@@ -1096,9 +1180,8 @@ export class BaileysProvider implements WhatsAppProvider {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const jid = toBaileysJid(chatId);
-		const buffer = await fs.readFile(filePath);
-		const lower = String(filePath || '').toLowerCase();
-		const mime =
+		const lower = String(filePath || options.fileName || '').toLowerCase();
+		let mime =
 			String(options.mimeType || '').trim() ||
 			(lower.endsWith('.jpg') || lower.endsWith('.jpeg')
 				? 'image/jpeg'
@@ -1119,37 +1202,83 @@ export class BaileysProvider implements WhatsAppProvider {
 											: lower.endsWith('.m4a')
 												? 'audio/mp4'
 												: '');
-		let content: any;
-		if (options.isVoice || mime.startsWith('audio/')) {
-			content = {
-				audio: buffer,
-				mimetype: mime || 'audio/ogg; codecs=opus',
-				ptt: Boolean(options.isVoice),
-			};
-		} else if (mime.startsWith('image/')) {
-			content = { image: buffer, caption: options.caption || undefined, mimetype: mime };
-		} else if (mime.startsWith('video/')) {
-			content = { video: buffer, caption: options.caption || undefined, mimetype: mime };
-		} else {
-			content = {
-				document: buffer,
-				mimetype: mime || 'application/octet-stream',
-				fileName: options.fileName || path.basename(filePath),
-				caption: options.caption || undefined,
-			};
+		let sendPath = filePath;
+		let convertedVoice: Awaited<ReturnType<typeof ensureWhatsAppVoiceOgg>> | null = null;
+		try {
+			if (options.isVoice) {
+				convertedVoice = await ensureWhatsAppVoiceOgg(filePath, {
+					mimeType: mime,
+					fileName: options.fileName,
+				});
+				sendPath = convertedVoice.filePath;
+				mime = convertedVoice.mimeType;
+			}
+			const buffer = await fs.readFile(sendPath);
+			let content: any;
+			if (options.isSticker) {
+				content = { sticker: buffer };
+			} else if (options.isVoice || mime.startsWith('audio/')) {
+				content = {
+					audio: buffer,
+					mimetype: mime || 'audio/ogg; codecs=opus',
+					ptt: Boolean(options.isVoice),
+					seconds: options.isVoice
+						? guessVoiceSeconds(filePath, options.fileName)
+						: undefined,
+				};
+			} else if (mime.startsWith('image/')) {
+				content = { image: buffer, caption: options.caption || undefined, mimetype: mime };
+			} else if (mime.startsWith('video/')) {
+				content = { video: buffer, caption: options.caption || undefined, mimetype: mime };
+			} else {
+				content = {
+					document: buffer,
+					mimetype: mime || 'application/octet-stream',
+					fileName: options.fileName || path.basename(filePath),
+					caption: options.caption || undefined,
+				};
+			}
+			const result = await this.socket.sendMessage(jid, content);
+			const normalized = this.normalizeWaMessage(result);
+			if (normalized) this.rememberMessage(normalized, result);
+			return result;
+		} finally {
+			await convertedVoice?.cleanup?.();
 		}
-		const result = await this.socket.sendMessage(jid, content);
-		const normalized = this.normalizeWaMessage(result);
-		if (normalized) this.rememberMessage(normalized, result);
-		return result;
 	}
 
-	async sendReaction() {
-		throw new Error('Reactions are not enabled for the Baileys provider yet');
+	async sendReaction(providerMessageId: string, emoji: string | false) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const id = String(providerMessageId || '').trim();
+		if (!id) throw new Error('Message is unavailable for reactions');
+		const raw = this.rawByMessageId.get(id);
+		const remembered = this.findRememberedMessage(id);
+		const remoteJid = toBaileysJid(
+			jidOf(raw?.key?.remoteJid) || remembered?.chatId || '',
+		);
+		if (!remoteJid) {
+			throw new Error('Cannot react: message chat is unknown');
+		}
+		const text = emoji ? String(emoji) : '';
+		await this.socket.sendMessage(remoteJid, {
+			react: {
+				text,
+				key: {
+					remoteJid: remoteJid,
+					fromMe: Boolean(raw?.key?.fromMe ?? remembered?.fromMe),
+					id: raw?.key?.id || id,
+					participant: raw?.key?.participant || remembered?.senderWaId || undefined,
+				},
+			},
+		});
+		this.setOwnReaction(id, text);
+		return { ok: true };
 	}
 
-	async getReactions(): Promise<NormalizedWhatsAppReaction[]> {
-		return [];
+	async getReactions(providerMessageId: string): Promise<NormalizedWhatsAppReaction[]> {
+		return this.reactionsByMessageId.get(String(providerMessageId || '').trim()) || [];
 	}
 
 	async forwardMessage() {

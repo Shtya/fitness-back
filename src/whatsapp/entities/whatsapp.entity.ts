@@ -605,3 +605,91 @@ export class WhatsAppConversationNote extends CoreEntity {
 	@Column({ type: 'text' })
 	text: string;
 }
+
+@Entity('whatsapp_voice_changer_settings')
+export class WhatsAppVoiceChangerSettings extends CoreEntity {
+	@Index({ unique: true })
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ type: 'boolean', default: false })
+	configured: boolean;
+
+	@Column({ type: 'boolean', default: false })
+	enabled: boolean;
+
+	@Column({ type: 'varchar', length: 32, default: 'off' })
+	provider: string;
+
+	@Column({ type: 'varchar', length: 40, default: 'deeper' })
+	preset: string;
+
+	@Column({ name: 'pitch_semitones', type: 'int', default: -5 })
+	pitchSemitones: number;
+
+	@Column({ name: 'voice_id', type: 'varchar', length: 120, nullable: true })
+	voiceId: string | null;
+}
+
+@Entity('whatsapp_voice_changer_credentials')
+@Unique('uq_wa_voice_changer_user_provider', ['userId', 'provider'])
+export class WhatsAppVoiceChangerCredential extends CoreEntity {
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ type: 'varchar', length: 32 })
+	provider: string;
+
+	@Column({ name: 'encrypted_api_key', type: 'text' })
+	encryptedApiKey: string;
+
+	@Column({ name: 'key_last_four', type: 'varchar', length: 8 })
+	keyLastFour: string;
+}
+
+@Entity('whatsapp_saved_stickers')
+@Unique('uq_whatsapp_saved_sticker_hash', ['accountId', 'fileHash'])
+export class WhatsAppSavedSticker extends CoreEntity {
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@ManyToOne(() => WhatsAppAccount, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount;
+
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ name: 'file_hash', type: 'varchar', length: 64 })
+	fileHash: string;
+
+	@Column({ name: 'mime_type', type: 'varchar', length: 160 })
+	mimeType: string;
+
+	@Column({ name: 'file_name', type: 'varchar', length: 300, nullable: true })
+	fileName: string | null;
+
+	@Column({ name: 'storage_path', type: 'varchar', length: 1024 })
+	storagePath: string;
+
+	@Column({ type: 'varchar', length: 20, default: 'upload' })
+	source: 'upload' | 'history';
+
+	@Column({ name: 'is_animated', type: 'boolean', default: false })
+	isAnimated: boolean;
+}

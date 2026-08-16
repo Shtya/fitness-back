@@ -68,5 +68,32 @@ describe('classifyBaileysDisconnect', () => {
 				lastDisconnect: { error: { output: { statusCode: 401 } } },
 			}),
 		).toBe('logged_out');
+		expect(
+			classifyBaileysDisconnect(
+				{
+					lastDisconnect: {
+						error: {
+							message: 'Connection Failure',
+							output: { statusCode: 401 },
+						},
+					},
+				},
+				{ loggedOut: 401 },
+			),
+		).toBe('connection_lost');
+		expect(
+			classifyBaileysDisconnect(
+				{
+					lastDisconnect: {
+						error: {
+							message: 'Connection Failure',
+							output: { statusCode: 401 },
+						},
+					},
+				},
+				{ loggedOut: 401 },
+				{ sessionHadOpened: true },
+			),
+		).toBe('logged_out');
 	});
 });

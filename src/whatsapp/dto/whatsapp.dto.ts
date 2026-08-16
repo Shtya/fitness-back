@@ -69,7 +69,7 @@ export class UpdateWhatsAppPrivacySettingsDto {
 }
 
 export class SendWhatsAppMessageDto {
-	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document'])
+	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document', 'sticker'])
 	type: string;
 
 	@IsOptional()
@@ -143,4 +143,40 @@ export class PublishWhatsAppStatusDto {
 	@IsOptional()
 	@IsString()
 	caption?: string;
+}
+
+export class SaveWhatsAppVoiceChangerSettingsDto {
+	@IsOptional()
+	@IsBoolean()
+	configured?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	enabled?: boolean;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(32)
+	provider?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(40)
+	preset?: string;
+
+	@IsOptional()
+	@Type(() => Number)
+	pitchSemitones?: number;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	voiceId?: string;
+}
+
+export class SaveWhatsAppVoiceChangerCredentialDto {
+	@IsString()
+	@MinLength(8)
+	@MaxLength(500)
+	apiKey: string;
 }

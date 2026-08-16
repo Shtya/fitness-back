@@ -44,6 +44,7 @@ const allowedMediaTypes = new Set([
 	'image/jpeg',
 	'image/png',
 	'image/webp',
+	'image/gif',
 	'video/mp4',
 	'audio/mpeg',
 	'audio/ogg',
