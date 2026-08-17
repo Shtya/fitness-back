@@ -82,6 +82,7 @@ export class WhatsAppConversationsController {
 		@Query('search') search = '',
 		@Query('filter') filter = 'all',
 		@Query('assignedUserId') assignedUserId = '',
+		@Query('kind') kind = '',
 	) {
 		return this.sync.listConversations(
 			req.user,
@@ -91,6 +92,7 @@ export class WhatsAppConversationsController {
 			search,
 			filter,
 			assignedUserId,
+			kind,
 		);
 	}
 
@@ -132,6 +134,19 @@ export class WhatsAppConversationsController {
 			req.user,
 			conversationId,
 			Boolean(body.isPinned),
+		);
+	}
+
+	@Put('conversations/:conversationId/archive')
+	setArchived(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: { isArchived?: boolean },
+	) {
+		return this.sync.setConversationArchived(
+			req.user,
+			conversationId,
+			Boolean(body.isArchived),
 		);
 	}
 

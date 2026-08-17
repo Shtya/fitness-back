@@ -8,6 +8,7 @@ import {
 	OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { In, Repository } from 'typeorm';
@@ -35,6 +36,7 @@ import {
 	WhatsAppProviderEvent,
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
+import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -45,29 +47,6 @@ import {
 	whatsAppTimestampToMs,
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
-
-function decodeProviderMedia(data: any): Buffer {
-	const value = data?.data ?? data?.base64 ?? data;
-	if (Buffer.isBuffer(value)) return value;
-	if (value instanceof Uint8Array) return Buffer.from(value);
-	if (Array.isArray(value)) return Buffer.from(value);
-	if (value?.type === 'Buffer' && Array.isArray(value.data)) {
-		return Buffer.from(value.data);
-	}
-	if (typeof value !== 'string') {
-		throw new Error('Provider returned an unsupported media payload');
-	}
-	// WhatsApp commonly returns `audio/ogg; codecs=opus`; allow MIME
-	// parameters before the final `;base64,` marker.
-	const raw = value
-		.replace(/^data:[^,]*;base64,/i, '')
-		.replace(/\s+/g, '')
-		.trim();
-	if (!raw || !/^[a-z0-9+/]+={0,2}$/i.test(raw)) {
-		throw new Error('Provider returned invalid base64 media');
-	}
-	return Buffer.from(raw, 'base64');
-}
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -220,9 +199,7 @@ function baileysRawMediaScore(raw: any): number {
 	return score;
 }
 
-function mediaPreviewDataUrlFromRaw(raw: any): string | null {
-	const node = baileysRawMediaNode(raw);
-	const thumb = node?.jpegThumbnail;
+function jpegThumbnailToDataUrl(thumb: any): string | null {
 	if (thumb == null) return null;
 	if (typeof thumb === 'string' && thumb.length) {
 		if (thumb.startsWith('data:')) return thumb;
@@ -235,6 +212,54 @@ function mediaPreviewDataUrlFromRaw(raw: any): string | null {
 		return `data:image/jpeg;base64,${Buffer.from(thumb.data).toString('base64')}`;
 	}
 	return null;
+}
+
+function mediaPreviewDataUrlFromRaw(raw: any): string | null {
+	return jpegThumbnailToDataUrl(baileysRawMediaNode(raw)?.jpegThumbnail);
+}
+
+function baileysContextInfo(raw: any): any {
+	const content = baileysRawMediaContent(raw);
+	if (!content || typeof content !== 'object') return null;
+	return (
+		content.extendedTextMessage?.contextInfo ||
+		content.imageMessage?.contextInfo ||
+		content.videoMessage?.contextInfo ||
+		content.audioMessage?.contextInfo ||
+		content.documentMessage?.contextInfo ||
+		content.stickerMessage?.contextInfo ||
+		null
+	);
+}
+
+function quotedPreviewFromRaw(raw: any): string | null {
+	const quoted = baileysContextInfo(raw)?.quotedMessage;
+	if (!quoted) return null;
+	return mediaPreviewDataUrlFromRaw({ message: quoted, protocol: 'baileys' });
+}
+
+function quotedTypeFromRaw(raw: any): string | null {
+	const quoted = baileysContextInfo(raw)?.quotedMessage;
+	if (!quoted || typeof quoted !== 'object') return null;
+	if (quoted.imageMessage) return 'image';
+	if (quoted.videoMessage) return 'video';
+	if (quoted.stickerMessage) return 'sticker';
+	if (quoted.documentMessage) return 'document';
+	if (quoted.audioMessage) return quoted.audioMessage.ptt ? 'ptt' : 'audio';
+	return 'text';
+}
+
+function quotedTextFromRaw(raw: any): string | null {
+	const quoted = baileysContextInfo(raw)?.quotedMessage;
+	if (!quoted || typeof quoted !== 'object') return null;
+	const text =
+		quoted.conversation ||
+		quoted.extendedTextMessage?.text ||
+		quoted.imageMessage?.caption ||
+		quoted.videoMessage?.caption ||
+		quoted.documentMessage?.caption ||
+		'';
+	return String(text || '').trim() || null;
 }
 
 function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -415,6 +440,7 @@ function safeProviderMetadata(raw: any) {
 		mimetype: raw.mimetype || undefined,
 		filename: raw.filename || undefined,
 		size: raw.size || undefined,
+		pushName: raw.pushName || raw.notifyName || raw.contactName || undefined,
 		duration: Number.isFinite(Number(raw.duration ?? raw.mediaData?.duration))
 			? Number(raw.duration ?? raw.mediaData?.duration)
 			: undefined,
@@ -438,6 +464,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private sendOperations = new Map<string, Promise<unknown>>();
 	private inboxReconcileTimers = new Map<string, NodeJS.Timeout>();
 	private inboxReconcileInFlight = new Set<string>();
+	private inboxSyncTail = new Map<string, Promise<unknown>>();
+	private conversationHotCache = new Map<string, { conversation: WhatsAppConversation; at: number }>();
+	private lastInboxSyncAt = new Map<string, number>();
+	private historyPersistQueue: Promise<void> = Promise.resolve();
+	private historyPersistPending = 0;
+	private historyInboxDebounceTimers = new Map<string, NodeJS.Timeout>();
+	private historyInboxTotals = new Map<string, { chats: number; messages: number }>();
+	private readonly historyInboxDebounceMs = 8_000;
 
 	constructor(
 		@InjectRepository(WhatsAppAccount)
@@ -477,6 +511,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.unsubscribe?.();
 		for (const timer of this.inboxReconcileTimers.values()) clearInterval(timer);
 		this.inboxReconcileTimers.clear();
+		for (const timer of this.historyInboxDebounceTimers.values()) clearTimeout(timer);
+		this.historyInboxDebounceTimers.clear();
+		this.historyInboxTotals.clear();
+		this.conversationHotCache.clear();
+		this.lastInboxSyncAt.clear();
 	}
 
 	private stopInboxReconciliation(accountId: string) {
@@ -489,7 +528,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private startInboxReconciliation(accountId: string) {
 		if (this.inboxReconcileTimers.has(accountId)) return;
 		const timer = setInterval(() => {
-			if (this.inboxReconcileInFlight.has(accountId) || this.bootstrapping.has(accountId)) {
+			if (
+				this.inboxReconcileInFlight.has(accountId) ||
+				this.bootstrapping.has(accountId) ||
+				this.inboxSyncTail.has(accountId)
+			) {
+				this.logger.debug(
+					`Inbox reconcile skipped for ${accountId}: skipped-because-locked`,
+				);
+				return;
+			}
+			const lastSync = this.lastInboxSyncAt.get(accountId) || 0;
+			if (lastSync && Date.now() - lastSync < 90_000) {
+				this.logger.debug(
+					`Inbox reconcile skipped for ${accountId}: recent sync ${Date.now() - lastSync}ms ago`,
+				);
 				return;
 			}
 			const provider = this.providers.getProvider(accountId);
@@ -523,7 +576,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					),
 				)
 				.finally(() => this.inboxReconcileInFlight.delete(accountId));
-		}, 30_000);
+		}, 120_000);
 		timer.unref?.();
 		this.inboxReconcileTimers.set(accountId, timer);
 	}
@@ -568,10 +621,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const fromHistory = Boolean(
 				(event.message as any)?.__fromHistory || (event.message as any)?.raw?.__fromHistory,
 			);
+			if (fromHistory) {
+				this.enqueueHistoryPersist(
+					() =>
+						this.persistMessage(accountId, event.message, null, false, {
+							emitEvents: false,
+						}),
+					`history-message:${accountId}:${event.message?.providerMessageId || 'unknown'}`,
+				);
+				return;
+			}
 			this.enqueuePersist(
 				() =>
-					this.persistMessage(accountId, event.message, null, !fromHistory, {
-						emitEvents: !fromHistory,
+					this.persistMessage(accountId, event.message, null, true, {
+						emitEvents: true,
 					}),
 				`message:${accountId}:${event.message?.providerMessageId || 'unknown'}`,
 			);
@@ -593,31 +656,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.logger.log(
 				`Baileys history sync for ${accountId}: ${event.chats} chats, ${event.messages} messages`,
 			);
-			const provider = this.providers.getProvider(accountId);
-			if (provider?.getState() === 'connected') {
-				void this.syncChatsInternal(accountId, provider, 500, {
-					syncGroupParticipants: false,
-					emitProgress: false,
-				})
-					.then(async (result) => {
-						const warmed = await this.prefetchTopChatHistories(accountId, 8, 40).catch(
-							() => ({ warmed: 0 }),
-						);
-						this.gateway.emitAccountEvent(accountId, 'sync_completed', {
-							...result,
-							warmed: warmed?.warmed || 0,
-							progress: 100,
-							source: 'history_sync',
-						});
-					})
-					.catch((error) =>
-						this.logger.warn(
-							`Post-history inbox sync failed for ${accountId}: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						),
-					);
+			const historyMessages = Array.isArray(event.payload) ? event.payload : [];
+			if (historyMessages.length) {
+				this.enqueueHistoryPersist(
+					() => this.persistHistoryBatch(accountId, historyMessages),
+					`history-batch:${accountId}:${historyMessages.length}`,
+				);
 			}
+			this.scheduleHistoryInboxReconcile(accountId, {
+				chats: Number(event.chats) || 0,
+				messages: Number(event.messages) || historyMessages.length,
+			});
 			return;
 		}
 		if (event.type === 'status_changed') {
@@ -867,6 +916,276 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 	}
 
+	private enqueueInboxSync<T>(accountId: string, task: () => Promise<T>): Promise<T> {
+		if (this.inboxSyncTail.has(accountId)) {
+			this.logger.debug(
+				`Inbox sync joined existing job for ${accountId} (skipped-because-locked)`,
+			);
+		}
+		const previous = this.inboxSyncTail.get(accountId) || Promise.resolve();
+		const next = previous.catch(() => undefined).then(task);
+		this.inboxSyncTail.set(accountId, next);
+		void next.finally(() => {
+			if (this.inboxSyncTail.get(accountId) === next) {
+				this.inboxSyncTail.delete(accountId);
+			}
+		});
+		return next;
+	}
+
+	private enqueueHistoryPersist(task: () => Promise<unknown>, context = 'history') {
+		this.historyPersistPending += 1;
+		this.logger.debug(
+			`History persist queued (${context}) depth=${this.historyPersistPending}`,
+		);
+		this.historyPersistQueue = this.historyPersistQueue
+			.then(async () => {
+				try {
+					await task();
+				} catch (error) {
+					this.logger.warn(
+						`WhatsApp history persist failed (${context}): ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				} finally {
+					this.historyPersistPending = Math.max(0, this.historyPersistPending - 1);
+				}
+			})
+			.catch((error) => {
+				this.historyPersistPending = Math.max(0, this.historyPersistPending - 1);
+				this.logger.error(
+					`WhatsApp history persist queue failed (${context})`,
+					error instanceof Error ? error.stack : String(error),
+				);
+			});
+	}
+
+	private scheduleHistoryInboxReconcile(
+		accountId: string,
+		totals: { chats: number; messages: number },
+	) {
+		const previous = this.historyInboxTotals.get(accountId) || { chats: 0, messages: 0 };
+		this.historyInboxTotals.set(accountId, {
+			chats: previous.chats + (Number(totals.chats) || 0),
+			messages: previous.messages + (Number(totals.messages) || 0),
+		});
+		const existing = this.historyInboxDebounceTimers.get(accountId);
+		if (existing) clearTimeout(existing);
+		this.gateway.emitAccountEvent(accountId, 'sync_progress', {
+			accountId,
+			progress: 55,
+			stage: 'hydrating',
+			source: 'history_sync',
+			background: true,
+			chats: this.historyInboxTotals.get(accountId)?.chats || 0,
+			messages: this.historyInboxTotals.get(accountId)?.messages || 0,
+		});
+		const timer = setTimeout(() => {
+			this.historyInboxDebounceTimers.delete(accountId);
+			const aggregated = this.historyInboxTotals.get(accountId);
+			this.historyInboxTotals.delete(accountId);
+			void this.finishHistoryInboxReconcile(accountId, aggregated);
+		}, this.historyInboxDebounceMs);
+		timer.unref?.();
+		this.historyInboxDebounceTimers.set(accountId, timer);
+	}
+
+	private async finishHistoryInboxReconcile(
+		accountId: string,
+		totals?: { chats: number; messages: number },
+	) {
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected') return;
+		try {
+			const result = await this.syncChatsInternal(accountId, provider, 500, {
+				syncGroupParticipants: false,
+				emitProgress: false,
+			});
+			await this.markAccountHydrated(accountId, { history: true });
+			this.logger.log(
+				`History hydrate complete for ${accountId}: chats=${totals?.chats || result?.count || 0} messages=${totals?.messages || 0}`,
+			);
+			this.gateway.emitAccountEvent(accountId, 'sync_completed', {
+				...result,
+				progress: 100,
+				source: 'history_sync',
+				background: true,
+				chats: totals?.chats || result?.count || 0,
+				messages: totals?.messages || 0,
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Post-history inbox sync failed for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	private async persistHistoryBatch(
+		accountId: string,
+		messages: NormalizedWhatsAppMessage[],
+	) {
+		const incoming = (Array.isArray(messages) ? messages : []).filter(
+			(item) =>
+				item?.providerMessageId &&
+				isSupportedInboxChatId(item.chatId) &&
+				hasChatVisibleContent(item),
+		);
+		if (!incoming.length) return { inserted: 0 };
+		const started = Date.now();
+		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
+		const byChat = new Map<string, NormalizedWhatsAppMessage[]>();
+		for (const message of incoming) {
+			const list = byChat.get(message.chatId) || [];
+			list.push(message);
+			byChat.set(message.chatId, list);
+		}
+		const conversationByChatId = new Map<string, WhatsAppConversation>();
+		for (const chatId of byChat.keys()) {
+			const sample = byChat.get(chatId)?.[0];
+			const conversation = await this.ensureConversation(accountId, chatId, {
+				title: sample?.fromMe ? null : sample?.contactName || null,
+			});
+			conversationByChatId.set(chatId, conversation);
+		}
+
+		const providerIds = incoming.map((item) => item.providerMessageId);
+		const existingIds = new Set<string>();
+		for (let index = 0; index < providerIds.length; index += 200) {
+			const slice = providerIds.slice(index, index + 200);
+			const rows = await this.messageRepo.find({
+				where: { accountId, providerMessageId: In(slice) },
+				select: ['providerMessageId'],
+			});
+			for (const row of rows) existingIds.add(row.providerMessageId);
+		}
+
+		const fresh = incoming.filter((item) => !existingIds.has(item.providerMessageId));
+		if (!fresh.length) return { inserted: 0 };
+
+		const now = new Date();
+		const rows = fresh.map((item) => {
+			const conversation = conversationByChatId.get(item.chatId);
+			const timestamp =
+				item.timestampReliable !== false && item.timestamp?.getTime?.() > 0
+					? item.timestamp
+					: conversation?.lastMessageAt || item.timestamp || now;
+			return {
+				id: randomUUID(),
+				accountId,
+				conversationId: conversation!.id,
+				providerMessageId: item.providerMessageId,
+				providerName: account.providerName,
+				direction: item.fromMe
+					? WhatsAppMessageDirection.OUTBOUND
+					: WhatsAppMessageDirection.INBOUND,
+				senderWaId: item.senderWaId || null,
+				senderUserId: null,
+				type: item.type || 'text',
+				text: item.text || null,
+				status: item.fromMe ? WhatsAppMessageStatus.SENT : WhatsAppMessageStatus.DELIVERED,
+				statusUpdatedAt: now,
+				quotedProviderMessageId: item.quotedProviderMessageId || null,
+				isStarred: Boolean(item.isStarred),
+				isForwarded: Boolean(item.isForwarded),
+				providerTimestamp: timestamp,
+				raw: safeProviderMetadata(item.raw),
+				created_at: now,
+				updated_at: now,
+			};
+		});
+
+		try {
+			await this.messageRepo
+				.createQueryBuilder()
+				.insert()
+				.into(WhatsAppMessage)
+				.values(rows as any)
+				.orIgnore()
+				.execute();
+		} catch (error) {
+			this.logger.warn(
+				`Bulk history insert failed for ${accountId}, falling back per message: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			for (const item of fresh) {
+				await this.persistMessage(accountId, item, null, false, {
+					emitEvents: false,
+				}).catch(() => null);
+			}
+			return { inserted: fresh.length };
+		}
+
+		const inserted = await this.messageRepo.find({
+			where: {
+				accountId,
+				providerMessageId: In(fresh.map((item) => item.providerMessageId)),
+			},
+			select: ['id', 'providerMessageId'],
+		});
+		const idByProviderId = new Map(
+			inserted.map((row) => [row.providerMessageId, row.id]),
+		);
+		const attachments = [];
+		for (const item of fresh) {
+			if (!item.attachments?.length) continue;
+			const messageId = idByProviderId.get(item.providerMessageId);
+			if (!messageId) continue;
+			for (const attachment of item.attachments) {
+				attachments.push({
+					id: randomUUID(),
+					messageId,
+					type: attachment.type,
+					mimeType: attachment.mimeType || null,
+					fileName: attachment.fileName || null,
+					fileSizeBytes: attachment.fileSizeBytes
+						? String(attachment.fileSizeBytes)
+						: null,
+					providerMediaId: attachment.providerMediaId || item.providerMessageId,
+					storagePath: null,
+					downloadStatus: 'pending',
+					created_at: now,
+					updated_at: now,
+				});
+			}
+		}
+		if (attachments.length) {
+			await this.attachmentRepo
+				.createQueryBuilder()
+				.insert()
+				.into(WhatsAppMessageAttachment)
+				.values(attachments as any)
+				.orIgnore()
+				.execute()
+				.catch(() => undefined);
+		}
+
+		for (const [chatId, chatMessages] of byChat) {
+			const conversation = conversationByChatId.get(chatId);
+			if (!conversation) continue;
+			let latest = conversation.lastMessageAt
+				? new Date(conversation.lastMessageAt).getTime()
+				: 0;
+			for (const item of chatMessages) {
+				if (item.timestampReliable === false) continue;
+				const at = item.timestamp?.getTime?.() || 0;
+				if (at > latest) latest = at;
+			}
+			if (latest && latest !== (conversation.lastMessageAt?.getTime?.() || 0)) {
+				await this.conversationRepo.update(conversation.id, {
+					lastMessageAt: new Date(latest),
+				} as any);
+			}
+		}
+		this.logger.log(
+			`History persist account=${accountId} chats=${byChat.size} incoming=${incoming.length} inserted=${fresh.length} durationMs=${Date.now() - started} queueDepth=${this.historyPersistPending}`,
+		);
+		return { inserted: fresh.length };
+	}
+
 	private clearBootstrapUnlock(accountId: string) {
 		const timer = this.bootstrapUnlockTimers.get(accountId);
 		if (timer) clearTimeout(timer);
@@ -893,8 +1212,63 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
+	private async markAccountHydrated(
+		accountId: string,
+		options: { history?: boolean } = {},
+	) {
+		const account = await this.accountRepo.findOne({
+			where: { id: accountId },
+			select: ['id', 'initialHydratedAt'],
+		});
+		if (!account) return;
+		const now = new Date();
+		const updates: Partial<WhatsAppAccount> = {};
+		if (!account.initialHydratedAt) updates.initialHydratedAt = now;
+		if (options.history !== false) updates.lastHistorySyncAt = now;
+		if (!Object.keys(updates).length) return;
+		await this.accountRepo.update(accountId, updates);
+	}
+
+	private async runIncrementalReconnect(accountId: string) {
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected') return;
+		try {
+			await this.syncChatsInternal(accountId, provider, 500, {
+				syncGroupParticipants: false,
+				emitProgress: false,
+			});
+			await this.markAccountHydrated(accountId, { history: true });
+		} catch (error) {
+			this.logger.debug(
+				`Incremental WhatsApp reconnect sync skipped for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
 	private scheduleBootstrap(accountId: string) {
 		if (this.bootstrapping.has(accountId)) return;
+		void this.startBootstrap(accountId);
+	}
+
+	private async startBootstrap(accountId: string) {
+		if (this.bootstrapping.has(accountId)) return;
+		const account = await this.accountRepo.findOne({
+			where: { id: accountId },
+			select: ['id', 'initialHydratedAt'],
+		});
+		const existingCount = account?.initialHydratedAt
+			? 1
+			: await this.conversationRepo.count({ where: { accountId } });
+		if (account?.initialHydratedAt || existingCount > 0) {
+			if (!account?.initialHydratedAt && existingCount > 0) {
+				await this.markAccountHydrated(accountId, { history: true });
+			}
+			void this.runIncrementalReconnect(accountId);
+			return;
+		}
+
 		this.bootstrapping.add(accountId);
 		this.clearBootstrapUnlock(accountId);
 		// Baileys history can take several minutes on first link; unlock soft.
@@ -905,7 +1279,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				this.clearBootstrapUnlock(accountId);
 				this.bootstrapping.delete(accountId);
 				if (count > 0) {
-					// Data already landed (often via history sync) — don't scare the user.
+					await this.markAccountHydrated(accountId, { history: true });
 					this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 						progress: 100,
 						count,
@@ -935,10 +1309,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					}
 					return this.bootstrapAccount(accountId);
 				})
-				.then((result) => {
+				.then(async (result) => {
 					if (!result || !this.bootstrapping.has(accountId)) return;
 					this.clearBootstrapUnlock(accountId);
 					this.bootstrapping.delete(accountId);
+					await this.markAccountHydrated(accountId, { history: true });
 					this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 						...result,
 						progress: 100,
@@ -1099,8 +1474,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { warmed };
 	}
 
+	private rememberConversation(
+		accountId: string,
+		chatId: string,
+		conversation: WhatsAppConversation,
+	) {
+		if (!conversation) return conversation;
+		const entry = { conversation, at: Date.now() };
+		this.conversationHotCache.set(`${accountId}:${chatId}`, entry);
+		if (conversation.providerChatId && conversation.providerChatId !== chatId) {
+			this.conversationHotCache.set(
+				`${accountId}:${conversation.providerChatId}`,
+				entry,
+			);
+		}
+		return conversation;
+	}
+
+	private forgetConversation(accountId: string, chatId?: string | null) {
+		if (!chatId) return;
+		this.conversationHotCache.delete(`${accountId}:${chatId}`);
+	}
+
 	private conversationRelations() {
-		return ['contact', 'group', 'group.participants', 'assignedUser'] as const;
+		return ['contact', 'group', 'assignedUser'] as const;
 	}
 
 	private async hydrateConversation(id: string) {
@@ -1371,6 +1768,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await this.conversationRepo.update(keeper.id, updates);
 		await this.mergeConversationPreferences(keeper, duplicate);
 		await this.conversationRepo.delete(duplicate.id);
+		this.forgetConversation(keeper.accountId, duplicate.providerChatId);
+		this.forgetConversation(keeper.accountId, keeper.providerChatId);
 		if (duplicate.contactId && duplicate.contactId !== keeper.contactId) {
 			const stillUsed = await this.conversationRepo.count({
 				where: { contactId: duplicate.contactId },
@@ -1386,6 +1785,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		chatId: string,
 		options: { title?: string | null; phone?: string | null } = {},
 	) {
+		const cacheKey = `${accountId}:${chatId}`;
+		const cached = this.conversationHotCache.get(cacheKey);
+		if (cached && Date.now() - cached.at < 60_000) {
+			if (!options.title && !options.phone) {
+				return cached.conversation;
+			}
+			const patched = await this.applyConversationIdentityPatch(
+				cached.conversation,
+				chatId,
+				options,
+			);
+			await this.rebindConversationPreferences(patched);
+			return this.rememberConversation(accountId, chatId, patched);
+		}
 		const existing = await this.conversationRepo.findOne({
 			where: { accountId, providerChatId: chatId },
 			relations: [...this.conversationRelations()],
@@ -1393,7 +1806,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (existing) {
 			const patched = await this.applyConversationIdentityPatch(existing, chatId, options);
 			await this.rebindConversationPreferences(patched);
-			return patched;
+			return this.rememberConversation(accountId, chatId, patched);
 		}
 
 		// Reuse twin row for same phone / LID↔PN / self-chat instead of creating a duplicate.
@@ -1411,7 +1824,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				phone: phone || options.phone,
 			});
 			await this.rebindConversationPreferences(patched);
-			return patched;
+			return this.rememberConversation(accountId, chatId, patched);
 		}
 
 		try {
@@ -1449,7 +1862,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						assignedUserId: null,
 					}),
 				);
-				return this.hydrateConversation(conversation.id);
+				return this.rememberConversation(
+					accountId,
+					chatId,
+					await this.hydrateConversation(conversation.id),
+				);
 			}
 
 			const phone =
@@ -1500,13 +1917,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					assignedUserId: null,
 				}),
 			);
-			return this.hydrateConversation(conversation.id);
+			return this.rememberConversation(
+				accountId,
+				chatId,
+				await this.hydrateConversation(conversation.id),
+			);
 		} catch (error: any) {
 			if (error?.code === '23505') {
 				const conversation = await this.conversationRepo.findOne({
 					where: { accountId, providerChatId: chatId },
 				});
-				if (conversation) return this.hydrateConversation(conversation.id);
+				if (conversation) {
+					return this.rememberConversation(
+						accountId,
+						chatId,
+						await this.hydrateConversation(conversation.id),
+					);
+				}
 				const aliasedRetry = await this.findDirectConversationAlias(
 					accountId,
 					chatId,
@@ -1514,7 +1941,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 				if (aliasedRetry) {
 					await this.rebindConversationPreferences(aliasedRetry);
-					return aliasedRetry;
+					return this.rememberConversation(accountId, chatId, aliasedRetry);
 				}
 			}
 			throw error;
@@ -1626,6 +2053,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			title,
 			phone: phoneHint,
 		});
+		void this.rememberGroupSender(accountId, conversation, normalized).catch(() => undefined);
 		const existing = await this.messageRepo.findOne({
 			where: { accountId, providerMessageId: normalized.providerMessageId },
 			relations: ['attachments', 'senderUser'],
@@ -1846,17 +2274,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				},
 			});
 			if (quoted) {
-				(hydrated as any).replyTo = {
-					id: quoted.id,
-					providerMessageId: quoted.providerMessageId,
-					text: quoted.text,
-					type: quoted.type,
-					direction: quoted.direction,
-				};
+				(hydrated as any).replyTo = this.buildReplyToPayload(quoted, (hydrated as any).raw);
 			}
 		}
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
+			await this.decorateGroupMessages(conversation, [hydrated]);
 			this.gateway.emitConversationEvent(conversation.id, 'message', hydrated, accountId);
 			this.scheduleConversationUpdated(accountId, {
 				conversationId: conversation.id,
@@ -1987,6 +2410,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const result = await this.syncChatsInternal(accountId, provider, limit, {
 				syncGroupParticipants: false,
 			});
+			await this.markAccountHydrated(accountId, { history: true });
 			this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 				...result,
 				progress: 100,
@@ -2007,7 +2431,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		limit = 500,
 		options: { syncGroupParticipants?: boolean; emitProgress?: boolean } = {},
 	) {
+		return this.enqueueInboxSync(accountId, () =>
+			this.syncChatsUnlocked(accountId, provider, limit, options),
+		);
+	}
+
+	private async syncChatsUnlocked(
+		accountId: string,
+		provider: WhatsAppProvider,
+		limit = 500,
+		options: { syncGroupParticipants?: boolean; emitProgress?: boolean } = {},
+	) {
 		if (!provider.capabilities.history) return { supported: false, count: 0 };
+		const started = Date.now();
 		const emitProgress = options.emitProgress !== false;
 		if (emitProgress) {
 			this.gateway.emitAccountEvent(accountId, 'sync_progress', {
@@ -2207,6 +2643,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 			return 0;
 		});
+		this.lastInboxSyncAt.set(accountId, Date.now());
+		this.logger.log(
+			`Inbox sync finished for ${accountId}: chats=${count} changed=${changed || Boolean(merged)} durationMs=${Date.now() - started}`,
+		);
 		return { supported: true, count, changed: changed || Boolean(merged) };
 	}
 
@@ -2251,6 +2691,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		search = '',
 		filter = 'all',
 		assignedUserId = '',
+		kind = '',
 	) {
 		const accountAccess = await this.access.getAccountAccess(user, accountId);
 		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
@@ -2288,6 +2729,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :status', {
 				status: '%status@%',
 			});
+		const inboxKind = String(kind || '').trim().toLowerCase();
+		if (inboxKind === 'channel') {
+			query.andWhere('LOWER(conversation.providerChatId) LIKE :newsletter', {
+				newsletter: '%@newsletter',
+			});
+		} else if (inboxKind === 'chat') {
+			query.andWhere('LOWER(conversation.providerChatId) NOT LIKE :newsletter', {
+				newsletter: '%@newsletter',
+			});
+		}
 		if (!canSeeAll) {
 			query.andWhere('conversation.assignedUserId = :userId', {
 				userId: user.id,
@@ -2300,6 +2751,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			query.andWhere('conversationPreference.isFavorite = :isFavorite', {
 				isFavorite: true,
 			});
+		}
+		if (filter === 'archived') {
+			query.andWhere('conversationPreference.isArchived = :isArchived', {
+				isArchived: true,
+			});
+		} else {
+			query.andWhere(
+				'(conversationPreference.isArchived IS NULL OR conversationPreference.isArchived = false)',
+			);
 		}
 		if (assignedUserId === 'unassigned') {
 			query.andWhere('conversation.assignedUserId IS NULL');
@@ -2316,11 +2776,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					OR contact.phoneNumber ILIKE :search
 					OR group.subject ILIKE :search
 					OR conversation.providerChatId ILIKE :search
-					OR EXISTS (
-						SELECT 1 FROM whatsapp_messages message_search
-						WHERE message_search.conversation_id = conversation.id
-							AND message_search.text ILIKE :search
-					)
 				)`,
 				{ search: `%${normalizedSearch}%` },
 			);
@@ -2411,6 +2866,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					...item,
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
+					isArchived: Boolean(preference?.isArchived),
 					lastMessage: (() => {
 						const message = lastMessageByConversationId.get(item.id);
 						return message
@@ -2431,6 +2887,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			page: pageNumber,
 			limit: take,
 			scope: canSeeAll ? 'all' : 'assigned',
+			archivedCount: await this.countArchivedConversations(user.id, accountId, inboxKind),
 		};
 	}
 
@@ -2450,10 +2907,66 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
 	}
 
+	async setConversationArchived(user: User, conversationId: string, isArchived: boolean) {
+		await this.assertConversationVisible(user, conversationId);
+		await this.saveConversationPreference(user.id, conversationId, {
+			isArchived: Boolean(isArchived),
+			...(isArchived ? { isPinned: false } : {}),
+		});
+		return { ok: true, conversationId, isArchived: Boolean(isArchived) };
+	}
+
+	private async countArchivedConversations(
+		userId: string,
+		accountId: string,
+		inboxKind: string,
+	) {
+		const query = this.preferenceRepo
+			.createQueryBuilder('pref')
+			.innerJoin(
+				WhatsAppConversation,
+				'conversation',
+				`
+				conversation.account_id = :accountId
+				AND conversation.deleted_at IS NULL
+				AND (
+					pref.conversation_id = conversation.id
+					OR (
+						pref.account_id = conversation.account_id
+						AND pref.provider_chat_id = conversation.provider_chat_id
+					)
+				)
+				`,
+				{ accountId },
+			)
+			.where('pref.user_id = :userId', { userId })
+			.andWhere('pref.deleted_at IS NULL')
+			.andWhere('pref.is_archived = true')
+			.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :broadcast', {
+				broadcast: '%@broadcast%',
+			})
+			.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :status', {
+				status: '%status@%',
+			});
+		if (inboxKind === 'channel') {
+			query.andWhere('LOWER(conversation.provider_chat_id) LIKE :newsletter', {
+				newsletter: '%@newsletter',
+			});
+		} else if (inboxKind === 'chat') {
+			query.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :newsletter', {
+				newsletter: '%@newsletter',
+			});
+		}
+		const row = await query
+			.select('COUNT(DISTINCT conversation.id)', 'count')
+			.getRawOne();
+		return Number(row?.count || 0);
+	}
+
 	private async saveConversationPreference(
 		userId: string,
 		conversationId: string,
-		patch: { isPinned?: boolean; isFavorite?: boolean },
+		patch: { isPinned?: boolean; isFavorite?: boolean; isArchived?: boolean },
 	) {
 		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
 		const row = (await this.findConversationPreference(userId, conversation)) ||
@@ -2461,6 +2974,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				userId,
 				isPinned: false,
 				isFavorite: false,
+				isArchived: false,
 			});
 		row.deleted_at = null;
 		row.userId = userId;
@@ -2469,6 +2983,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		row.providerChatId = conversation.providerChatId;
 		if (patch.isPinned != null) row.isPinned = patch.isPinned;
 		if (patch.isFavorite != null) row.isFavorite = patch.isFavorite;
+		if (patch.isArchived != null) row.isArchived = patch.isArchived;
 		await this.preferenceRepo.save(row);
 	}
 
@@ -2526,6 +3041,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				existing.providerChatId = keeper.providerChatId;
 				existing.isPinned = Boolean(existing.isPinned || row.isPinned);
 				existing.isFavorite = Boolean(existing.isFavorite || row.isFavorite);
+				existing.isArchived = Boolean(existing.isArchived || row.isArchived);
 				await this.preferenceRepo.save(existing);
 				await this.preferenceRepo.delete(row.id);
 				continue;
@@ -2644,22 +3160,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						? quotedByProviderId.get(message.quotedProviderMessageId)
 						: null;
 					if (!quoted) continue;
-					(message as any).replyTo = {
-						id: quoted.id,
-						providerMessageId: quoted.providerMessageId,
-						text: quoted.text,
-						type: quoted.type,
-						direction: quoted.direction,
-					};
+					(message as any).replyTo = this.buildReplyToPayload(quoted, (message as any).raw);
 				}
 			}
 			return rows.reverse();
 		};
 
 		const local = await loadLocal(before);
-		// Soft-hydrate media keys from the live Baileys session for pending/failed attachments
-		// even when the UI opened the chat with live=0.
 		if (
+			allowLivePull &&
 			local.length &&
 			!before &&
 			accountAccess.canUse &&
@@ -2684,7 +3193,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					).catch(() => undefined);
 				}
 				const refreshed = await loadLocal(before);
-				this.attachMediaPreviews(refreshed);
+				await this.prepareMessagesForApi(conversation, refreshed);
 				this.queuePendingAttachmentDownloads(refreshed);
 				return refreshed;
 			}
@@ -2692,7 +3201,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// Pagination cursor stays DB-only. First page with empty DB must come from
 		// the linked WhatsApp Web session on the phone.
 		if (local.length || before || !accountAccess.canUse || !allowLivePull) {
-			this.attachMediaPreviews(local);
+			await this.prepareMessagesForApi(conversation, local);
 			if (local.length && !before && accountAccess.canUse) {
 				this.queuePendingAttachmentDownloads(local);
 			}
@@ -2701,7 +3210,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 		const live = await this.pullLiveMessagesFromLinkedDevice(conversation, take);
 		if (!live.length) {
-			this.attachMediaPreviews(local);
+			await this.prepareMessagesForApi(conversation, local);
 			return local;
 		}
 
@@ -2725,13 +3234,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		const saved = await loadLocal();
 		if (saved.length) {
-			this.attachMediaPreviews(saved);
+			await this.prepareMessagesForApi(conversation, saved);
 			this.queuePendingAttachmentDownloads(saved);
 			return saved;
 		}
 		// Persist may fail (unique/db) — still return linked-device messages to the UI.
 		const mapped = this.mapLiveMessagesForApi(conversation.id, live);
-		this.attachMediaPreviews(mapped as any);
+		await this.prepareMessagesForApi(conversation, mapped as any);
 		return mapped;
 	}
 
@@ -2745,6 +3254,280 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				(attachment as any).previewDataUrl = preview;
 			}
 		}
+	}
+
+	private buildReplyToPayload(quoted: WhatsAppMessage, parentRaw?: any) {
+		return {
+			id: quoted.id,
+			providerMessageId: quoted.providerMessageId,
+			text: quoted.text,
+			type: quoted.type,
+			direction: quoted.direction,
+			previewDataUrl:
+				mediaPreviewDataUrlFromRaw((quoted as any)?.raw) ||
+				quotedPreviewFromRaw(parentRaw) ||
+				null,
+		};
+	}
+
+	private attachReplyPreviews(messages: WhatsAppMessage[]) {
+		for (const message of messages || []) {
+			const raw = (message as any)?.raw;
+			const replyTo = (message as any).replyTo;
+			if (replyTo) {
+				if (!replyTo.previewDataUrl) {
+					replyTo.previewDataUrl = quotedPreviewFromRaw(raw) || null;
+				}
+				continue;
+			}
+			const preview = quotedPreviewFromRaw(raw);
+			const type = quotedTypeFromRaw(raw);
+			const text = quotedTextFromRaw(raw);
+			if (!preview && !type && !text) continue;
+			(message as any).replyTo = {
+				id: null,
+				providerMessageId: message.quotedProviderMessageId || null,
+				text,
+				type: type || 'text',
+				direction: null,
+				previewDataUrl: preview,
+			};
+		}
+	}
+
+	private async rememberGroupSender(
+		accountId: string,
+		conversation: WhatsAppConversation,
+		normalized: NormalizedWhatsAppMessage,
+	) {
+		if (conversation.type !== WhatsAppConversationType.GROUP) return;
+		const senderWaId = String(normalized.senderWaId || '').trim();
+		if (!senderWaId || normalized.fromMe) return;
+		if (senderWaId.endsWith('@g.us') || senderWaId.endsWith('@newsletter')) return;
+		const name = String(normalized.contactName || '').trim();
+		const strongName = isWeakContactDisplayName(name, senderWaId) ? null : name;
+		let contact = await this.contactRepo.findOne({
+			where: { accountId, waId: senderWaId },
+		});
+		if (!contact) {
+			try {
+				contact = await this.contactRepo.save(
+					this.contactRepo.create({
+						accountId,
+						waId: senderWaId,
+						phoneNumber: phoneFromWaId(senderWaId),
+						name: strongName,
+						avatarUrl: null,
+						isBusiness: false,
+					}),
+				);
+			} catch (error: any) {
+				if (error?.code !== '23505') throw error;
+				contact = await this.contactRepo.findOne({
+					where: { accountId, waId: senderWaId },
+				});
+			}
+		} else if (
+			strongName &&
+			isWeakContactDisplayName(contact.name, contact.waId, contact.phoneNumber)
+		) {
+			await this.contactRepo.update(contact.id, { name: strongName });
+			contact.name = strongName;
+		}
+		if (conversation.groupId) {
+			try {
+				await this.participantRepo.upsert(
+					{
+						groupId: conversation.groupId,
+						waId: senderWaId,
+						displayName: strongName || contact?.name || null,
+						isAdmin: false,
+						isSuperAdmin: false,
+					},
+					['groupId', 'waId'],
+				);
+			} catch {
+				// Participant rows are optional identity cache, not required for chat.
+			}
+		}
+	}
+
+	private async decorateGroupMessages(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+	) {
+		this.attachReplyPreviews(messages);
+		if (conversation.type !== WhatsAppConversationType.GROUP || !messages?.length) return;
+		const senderIds = [
+			...new Set(
+				messages.map((item) => String(item.senderWaId || '').trim()).filter(Boolean),
+			),
+		];
+		const names = new Map<string, string>();
+		const avatars = new Map<string, string>();
+		if (senderIds.length) {
+			const contacts = await this.contactRepo.find({
+				where: { accountId: conversation.accountId, waId: In(senderIds) },
+			});
+			for (const contact of contacts) {
+				if (
+					contact.name &&
+					!isWeakContactDisplayName(contact.name, contact.waId, contact.phoneNumber)
+				) {
+					names.set(contact.waId, contact.name);
+				}
+				if (contact.avatarUrl) avatars.set(contact.waId, contact.avatarUrl);
+			}
+			if (conversation.groupId) {
+				const participants = await this.participantRepo.find({
+					where: { groupId: conversation.groupId, waId: In(senderIds) },
+				});
+				for (const participant of participants) {
+					if (
+						participant.displayName &&
+						!names.has(participant.waId) &&
+						!isWeakContactDisplayName(participant.displayName, participant.waId)
+					) {
+						names.set(participant.waId, participant.displayName);
+					}
+				}
+			}
+		}
+		for (const message of messages) {
+			const senderWaId = String(message.senderWaId || '').trim();
+			const pushName = String((message as any)?.raw?.pushName || '').trim();
+			if (
+				senderWaId &&
+				pushName &&
+				!names.has(senderWaId) &&
+				!isWeakContactDisplayName(pushName, senderWaId)
+			) {
+				names.set(senderWaId, pushName);
+			}
+		}
+		for (const message of messages) {
+			const senderWaId = String(message.senderWaId || '').trim();
+			(message as any).senderName = (senderWaId && names.get(senderWaId)) || null;
+			(message as any).senderAvatarUrl = (senderWaId && avatars.get(senderWaId)) || null;
+		}
+	}
+
+	private collectMentionIds(message: WhatsAppMessage): string[] {
+		const ids = new Set<string>();
+		const text = String(message?.text || '');
+		const mentionPattern = /@(\d{8,32})\b/g;
+		let match: RegExpExecArray | null;
+		while ((match = mentionPattern.exec(text)) !== null) {
+			ids.add(match[1]);
+		}
+		const raw = (message as any)?.raw;
+		const mentionedJid =
+			raw?.message?.extendedTextMessage?.contextInfo?.mentionedJid ||
+			raw?.message?.imageMessage?.contextInfo?.mentionedJid ||
+			raw?.message?.videoMessage?.contextInfo?.mentionedJid ||
+			raw?.extendedTextMessage?.contextInfo?.mentionedJid ||
+			raw?.contextInfo?.mentionedJid ||
+			[];
+		if (Array.isArray(mentionedJid)) {
+			for (const jid of mentionedJid) {
+				const id = String(jid || '')
+					.split('@')[0]
+					.replace(/\D/g, '');
+				if (id) ids.add(id);
+			}
+		}
+		return [...ids];
+	}
+
+	private mentionLabelForIdentity(
+		name: string | null | undefined,
+		waId: string | null | undefined,
+		phone: string | null | undefined,
+	): string | null {
+		if (name && !isWeakContactDisplayName(name, waId, phone)) return String(name).trim();
+		const phoneDigits = String(phone || '').replace(/\D/g, '');
+		const idDigits = String(waId || '')
+			.split('@')[0]
+			.replace(/\D/g, '');
+		if (
+			phoneDigits &&
+			phoneDigits !== idDigits &&
+			phoneDigits.length >= 8 &&
+			phoneDigits.length <= 15
+		) {
+			return `+${phoneDigits}`;
+		}
+		return null;
+	}
+
+	private async decorateMessageMentions(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+	) {
+		const mentionIds = [
+			...new Set(messages.flatMap((message) => this.collectMentionIds(message))),
+		];
+		if (!mentionIds.length) return;
+		const labels = new Map<string, string>();
+		const remember = (
+			waId: string | null | undefined,
+			name?: string | null,
+			phone?: string | null,
+		) => {
+			const digits = String(waId || '')
+				.split('@')[0]
+				.replace(/\D/g, '');
+			if (!digits) return;
+			const label = this.mentionLabelForIdentity(name, waId, phone);
+			if (!label) return;
+			const existing = labels.get(digits);
+			if (existing && !/^\+?\d[\d\s-]*$/.test(existing)) return;
+			labels.set(digits, label);
+		};
+		const waIds = mentionIds.flatMap((id) => [
+			id,
+			`${id}@lid`,
+			`${id}@hosted.lid`,
+			`${id}@c.us`,
+			`${id}@s.whatsapp.net`,
+		]);
+		const contacts = await this.contactRepo.find({
+			where: { accountId: conversation.accountId, waId: In(waIds) },
+		});
+		for (const contact of contacts) {
+			remember(contact.waId, contact.name, contact.phoneNumber);
+		}
+		if (conversation.groupId) {
+			const participants = await this.participantRepo.find({
+				where: { groupId: conversation.groupId },
+			});
+			for (const participant of participants) {
+				remember(participant.waId, participant.displayName, null);
+			}
+		}
+		for (const message of messages) {
+			remember(
+				message.senderWaId,
+				(message as any).senderName || (message as any)?.raw?.pushName,
+				null,
+			);
+			const map: Record<string, string> = {};
+			for (const id of this.collectMentionIds(message)) {
+				const label = labels.get(id);
+				if (label) map[id] = label;
+			}
+			if (Object.keys(map).length) (message as any).mentionLabels = map;
+		}
+	}
+
+	private async prepareMessagesForApi(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+	) {
+		this.attachMediaPreviews(messages);
+		await this.decorateGroupMessages(conversation, messages);
+		await this.decorateMessageMentions(conversation, messages);
+		return messages;
 	}
 
 	/** Kick off durable downloads for pending/failed media once the chat is open
@@ -2854,6 +3637,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			status: item.fromMe ? WhatsAppMessageStatus.SENT : WhatsAppMessageStatus.DELIVERED,
 			providerTimestamp: item.timestamp,
 			quotedProviderMessageId: item.quotedProviderMessageId || null,
+			senderWaId: item.senderWaId || null,
+			senderName: item.contactName || null,
 			isStarred: Boolean(item.isStarred),
 			isForwarded: Boolean(item.isForwarded),
 			attachments: (item.attachments || [])
@@ -2957,6 +3742,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await source.provider.forwardMessage(
 			target.conversation.providerChatId,
 			source.message.providerMessageId,
+			{ rawHint: source.message.raw },
 		);
 		return { ok: true, messageId, targetConversationId };
 	}
@@ -3254,10 +4040,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				: localCount < requestedLimit
 					? messages.length >= requestedLimit
 					: conversation.hasMoreProviderHistory;
+		const oldestStoredTs = oldestStored?.providerTimestamp
+			? new Date(oldestStored.providerTimestamp).getTime()
+			: 0;
+		const oldestFromProviderTs = (messages || []).reduce((min, item) => {
+			const at = item?.timestamp?.getTime?.() || 0;
+			return at && (min === 0 || at < min) ? at : min;
+		}, 0);
+		const olderPageDidExtend =
+			!oldestStoredTs ||
+			(oldestFromProviderTs > 0 && oldestFromProviderTs < oldestStoredTs - 500);
+		const nextHasMore =
+			mode === 'older'
+				? Boolean(hasMoreProviderHistory && olderPageDidExtend)
+				: hasMoreProviderHistory;
 		await this.conversationRepo.update(conversation.id, {
 			lastProviderSyncAt: new Date(),
 			oldestProviderCursor: oldest,
-			hasMoreProviderHistory,
+			hasMoreProviderHistory: nextHasMore,
 		});
 		const items = await this.listMessages(
 			user,
@@ -3270,14 +4070,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return {
 				supported: true,
 				items,
-				hasMore: hasMoreProviderHistory,
+				hasMore: nextHasMore,
 			};
 		}
 		// If DB still empty after persist attempts, serve linked-device payload directly.
 		return {
 			supported: true,
 			items: this.mapLiveMessagesForApi(conversationId, messages),
-			hasMore: hasMoreProviderHistory,
+			hasMore: nextHasMore,
 			source: 'linked_device',
 		};
 	}

@@ -1,32 +1,34 @@
 # Sobha Fit WhatsApp module
 
+Default runtime provider is **Baileys** (WhatsApp Web multi-device). WPPConnect remains an optional fallback, not the production default.
+
 ## Runtime requirements
 
-- PostgreSQL migration: `migrations/20260719_add_whatsapp_module.sql`
+- PostgreSQL. Core schema: `migrations/20260719_add_whatsapp_module.sql`
+- Sync watermarks: `migrations/20260817_whatsapp_account_sync_watermarks.sql`
+  (`whatsapp_accounts.initial_hydrated_at`, `whatsapp_accounts.last_history_sync_at`)
 - A 32-byte Base64 key in `WHATSAPP_SESSION_ENCRYPTION_KEY`
-- `@wppconnect-team/wppconnect@2.2.3` and `qrcode@1.5.4`
-- Chrome/Chromium available to Puppeteer (`CHROME_EXECUTABLE_PATH` is optional)
-- Do **not** set `CHROME_EXECUTABLE_PATH` to a Windows path on Linux/VPS
-- Do **not** run WhatsApp/wppconnect on Vercel serverless (needs a persistent VPS/PM2 process)
+- Baileys session files under `WHATSAPP_BAILEYS_DIR` (or `tokens/baileys`)
+- Do **not** run the WhatsApp process on Vercel serverless (needs a persistent VPS/PM2 process)
 
-Install the provider packages after the npm registry certificate is trusted:
+New schema changes should go through SQL migrations. `WhatsAppSchemaService` only applies a small `IF NOT EXISTS` safety net for already-deployed databases.
 
-```bash
-npm install @wppconnect-team/wppconnect@2.2.3 qrcode@1.5.4
+## Sync model
+
+```
+Initial Load (Postgres) → Cached UI → Background hydrate → Incremental reconnect → Realtime socket
 ```
 
-Provider tokens are encrypted with AES-256-GCM and stored in
-`whatsapp_provider_sessions`; they are loaded through WPPConnect's custom token
-store during application bootstrap. Incoming media is metadata-only until the
-download endpoint is requested.
+- First paint comes from Postgres. The workspace must not wait for a full provider dump.
+- `syncFullHistory` is **off** unless `WHATSAPP_SYNC_FULL_HISTORY=1|true|yes`.
+- After `initialHydratedAt` is set, reconnect/restart runs an incremental inbox pass, not another full bootstrap.
+- History chunks are persisted in bulk and debounced into a single inbox reconcile.
+- Live inbound messages use a separate persist queue so they are not blocked by history dumps.
 
 ## API and realtime
 
-HTTP endpoints are under `/api/v1/whatsapp`. The Socket.IO namespace is
-`/whatsapp`. Clients must explicitly watch an account or conversation; each
-watch request is authorized against the account ACL and assignment policy.
+HTTP endpoints are under `/api/v1/whatsapp`. The Socket.IO namespace is `/whatsapp`. Clients must explicitly watch an account or conversation; each watch request is authorized against the account ACL and assignment policy.
 
-WPPConnect currently supplies QR, chat history, groups, participants, media and
-status capabilities. The provider contract is intentionally capability-based so
-a Meta Cloud adapter can use webhooks/history-sync without pretending arbitrary
-history retrieval exists.
+Baileys supplies QR/pairing, recent chat history, groups, media metadata, and status. Full archive history is opt-in. Incoming media stays metadata-only until the download endpoint is requested.
+
+Provider tokens/sessions are encrypted with AES-256-GCM in `whatsapp_provider_sessions`.

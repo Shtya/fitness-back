@@ -40,6 +40,13 @@ function normalizeInboxJid(jid: string): string {
 
 const LIVE_FROM_ME_WINDOW_MS = 30 * 60 * 1000;
 
+export function shouldSyncFullHistory() {
+	const value = String(process.env.WHATSAPP_SYNC_FULL_HISTORY || '')
+		.trim()
+		.toLowerCase();
+	return value === '1' || value === 'true' || value === 'yes';
+}
+
 /** Phone opened/read the chat → unreadCount 0. Marked unread is -1. Missing stays prev. */
 export function applyLiveChatUnread(
 	prev: number,
@@ -81,6 +88,36 @@ export function mapBaileysMessageStatus(status: unknown): string | null {
 function isStatusBroadcastJid(jid: string | null | undefined): boolean {
 	const id = String(jid || '').toLowerCase();
 	return Boolean(id) && (id.includes('status@') || id.endsWith('@broadcast'));
+}
+
+export function shouldSkipMediaReupload(raw: any): boolean {
+	return isStatusBroadcastJid(jidOf(raw?.key?.remoteJid));
+}
+
+export function attachFullMediaUrls(
+	content: any,
+	getUrlFromDirectPath?: ((directPath: string, host?: string) => string) | null,
+) {
+	if (!content || typeof content !== 'object' || typeof getUrlFromDirectPath !== 'function') {
+		return content;
+	}
+	for (const key of [
+		'imageMessage',
+		'videoMessage',
+		'audioMessage',
+		'documentMessage',
+		'stickerMessage',
+	]) {
+		const node = content[key];
+		if (node?.directPath && !node.url) {
+			try {
+				node.url = getUrlFromDirectPath(node.directPath);
+			} catch {
+				/* keep directPath-only node */
+			}
+		}
+	}
+	return content;
 }
 
 function toBaileysJid(jid: string): string {
@@ -207,6 +244,19 @@ function unwrapMessageContent(message: any): any {
 		message.documentWithCaptionMessage?.message ||
 		message.editedMessage?.message ||
 		message
+	);
+}
+
+function contextInfoOf(content: any) {
+	if (!content || typeof content !== 'object') return null;
+	return (
+		content.extendedTextMessage?.contextInfo ||
+		content.imageMessage?.contextInfo ||
+		content.videoMessage?.contextInfo ||
+		content.audioMessage?.contextInfo ||
+		content.documentMessage?.contextInfo ||
+		content.stickerMessage?.contextInfo ||
+		null
 	);
 }
 
@@ -359,7 +409,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		statusPublish: false,
 		statusView: true,
 		reactions: true,
-		messageActions: false,
+		messageActions: true,
 	};
 
 	private readonly logger = new Logger(BaileysProvider.name);
@@ -394,6 +444,8 @@ export class BaileysProvider implements WhatsAppProvider {
 	private statusChangeTimer: NodeJS.Timeout | null = null;
 	private connectedAtMs = 0;
 	private historySyncChunks = 0;
+	/** Provider ids already included in a messaging-history.set batch. */
+	private readonly recentHistoryMessageIds = new Set<string>();
 
 	constructor(private readonly accountId: string) {}
 
@@ -464,6 +516,16 @@ export class BaileysProvider implements WhatsAppProvider {
 	private setState(status: string, extra: Partial<Extract<WhatsAppProviderEvent, { type: 'connection' }>> = {}) {
 		this.state = status;
 		this.emit({ type: 'connection', status, ...extra });
+	}
+
+	private rememberHistoryMessageId(id: string) {
+		const key = String(id || '').trim();
+		if (!key) return;
+		this.recentHistoryMessageIds.add(key);
+		if (this.recentHistoryMessageIds.size > 20_000) {
+			this.recentHistoryMessageIds.clear();
+			this.recentHistoryMessageIds.add(key);
+		}
 	}
 
 	private rememberChat(chatId: string, patch: Record<string, unknown> = {}) {
@@ -674,12 +736,17 @@ export class BaileysProvider implements WhatsAppProvider {
 			);
 			for (const key of keys) this.reactionsByMessageId.delete(key);
 		}
-		if (normalized.contactName && !normalized.fromMe && !normalized.chatId.endsWith('@g.us')) {
-			this.rememberContact({
-				id: normalized.chatId,
-				notify: normalized.contactName,
-				name: normalized.contactName,
-			});
+		if (normalized.contactName && !normalized.fromMe) {
+			const contactId = normalized.chatId.endsWith('@g.us')
+				? normalized.senderWaId || normalized.chatId
+				: normalized.chatId;
+			if (contactId) {
+				this.rememberContact({
+					id: contactId,
+					notify: normalized.contactName,
+					name: normalized.contactName,
+				});
+			}
 		}
 		const ts = normalized.timestamp?.getTime?.() || Date.now();
 		const existingName = this.chats.get(normalized.chatId)?.name || null;
@@ -904,10 +971,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (isControlOnlyContent(content)) return null;
 		const type = detectType(content);
 		const text = messageText(content) || null;
-		const quoted =
-			content?.extendedTextMessage?.contextInfo?.stanzaId ||
-			content?.imageMessage?.contextInfo?.stanzaId ||
-			null;
+		const contextInfo = contextInfoOf(content);
+		const quoted = contextInfo?.stanzaId || null;
 		const attachments = [];
 		if (['image', 'video', 'audio', 'ptt', 'document', 'sticker'].includes(type)) {
 			const media =
@@ -962,8 +1027,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			timestampReliable: Boolean(raw.messageTimestamp),
 			quotedProviderMessageId: quoted,
 			isForwarded: Boolean(
-				content?.extendedTextMessage?.contextInfo?.isForwarded ||
-					content?.imageMessage?.contextInfo?.isForwarded,
+				contextInfo?.isForwarded || Number(contextInfo?.forwardingScore) > 0,
 			),
 			// Never use your own pushName to title the peer conversation.
 			contactName: fromMe ? null : raw.pushName || null,
@@ -1027,7 +1091,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			version,
 			printQRInTerminal: false,
 			markOnlineOnConnect: false,
-			syncFullHistory: true,
+			syncFullHistory: shouldSyncFullHistory(),
 			connectTimeoutMs: 60_000,
 			browser: Browsers?.ubuntu?.('Chrome') || Browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'],
 		});
@@ -1120,13 +1184,20 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
-				if (isHistoryMessageUpsert(type, raw)) {
+				const fromHistory = isHistoryMessageUpsert(type, raw);
+				if (fromHistory) {
 					(normalized as any).__fromHistory = true;
 					if (normalized.raw && typeof normalized.raw === 'object') {
 						normalized.raw = { ...normalized.raw, __fromHistory: true };
 					}
 				}
 				this.rememberMessage(normalized, raw);
+				if (
+					fromHistory &&
+					this.recentHistoryMessageIds.has(normalized.providerMessageId)
+				) {
+					continue;
+				}
 				this.emit({ type: 'message', message: normalized });
 			}
 		});
@@ -1210,6 +1281,7 @@ export class BaileysProvider implements WhatsAppProvider {
 					unreadCount: Number(chat.unreadCount) || 0,
 				});
 			}
+			const historyMessages: NormalizedWhatsAppMessage[] = [];
 			for (const raw of messages) {
 				if (this.rememberStatus(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
@@ -1221,17 +1293,19 @@ export class BaileysProvider implements WhatsAppProvider {
 					normalized.raw = { ...normalized.raw, __fromHistory: true };
 				}
 				this.rememberMessage(normalized, raw);
-				this.emit({ type: 'message', message: normalized });
+				this.rememberHistoryMessageId(normalized.providerMessageId);
+				historyMessages.push(normalized);
 			}
 			this.ensureChatsFromMessages();
 			this.historySyncChunks += 1;
 			this.logger.log(
-				`Baileys history set for ${this.accountId}: ${chats.length} chats, ${messages.length} messages, ${contacts.length} contacts`,
+				`Baileys history set for ${this.accountId}: chunk=${this.historySyncChunks} chats=${chats.length} messages=${messages.length} contacts=${contacts.length}`,
 			);
 			this.emit({
 				type: 'history_sync',
 				chats: chats.length,
-				messages: messages.length,
+				messages: historyMessages.length,
+				payload: historyMessages,
 			});
 		});
 
@@ -1326,6 +1400,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.connectedAtMs = 0;
 		this.socketOpened = false;
 		this.historySyncChunks = 0;
+		this.recentHistoryMessageIds.clear();
 		this.setState('disconnected');
 	}
 
@@ -1375,9 +1450,30 @@ export class BaileysProvider implements WhatsAppProvider {
 			if (!bucket) continue;
 			for (const [key, value] of bucket) merged.set(key, value);
 		}
-		return [...merged.values()]
-			.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-			.slice(-limit);
+		let list = [...merged.values()].sort(
+			(a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+		);
+		const beforeId = String(options.before || '').trim();
+		if (beforeId) {
+			const beforeMsg = list.find((item) => item.providerMessageId === beforeId);
+			if (!beforeMsg) return [];
+			const beforeTs = beforeMsg.timestamp.getTime();
+			list = list.filter(
+				(item) =>
+					item.timestamp.getTime() < beforeTs ||
+					(item.timestamp.getTime() === beforeTs &&
+						item.providerMessageId !== beforeId),
+			);
+		}
+		const afterId = String(options.after || '').trim();
+		if (afterId) {
+			const afterMsg = list.find((item) => item.providerMessageId === afterId);
+			if (afterMsg) {
+				const afterTs = afterMsg.timestamp.getTime();
+				list = list.filter((item) => item.timestamp.getTime() > afterTs);
+			}
+		}
+		return list.slice(-limit);
 	}
 
 	/** LID and @c.us are often stored in different memory buckets for the same person. */
@@ -1654,19 +1750,67 @@ export class BaileysProvider implements WhatsAppProvider {
 		return this.reactionsByMessageId.get(String(providerMessageId || '').trim()) || [];
 	}
 
-	async forwardMessage() {
-		throw new Error('Forward is not enabled for the Baileys provider yet');
+	async forwardMessage(chatId: string, providerMessageId: string, options: { rawHint?: any } = {}) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const id = String(providerMessageId || '').trim();
+		if (!id) throw new Error('Message id is required');
+		const stored = this.rawByMessageId.get(id);
+		const hint = options.rawHint?.key && options.rawHint?.message ? options.rawHint : null;
+		const raw =
+			(stored?.key && stored?.message ? stored : null) ||
+			reviveBaileysWaMessage(hint) ||
+			(hint
+				? {
+						key: hint.key,
+						message: hint.message,
+						messageTimestamp: hint.messageTimestamp,
+					}
+				: null);
+		if (!raw?.key || !raw?.message) {
+			throw new Error('Original message is not available to forward');
+		}
+		const jid = toBaileysJid(chatId);
+		const result = await this.socket.sendMessage(jid, { forward: raw });
+		const normalized = this.normalizeWaMessage(result);
+		if (normalized) this.rememberMessage(normalized, result);
+		return result;
 	}
 
 	async deleteMessage(chatId: string, providerMessageId: string, mode: 'local' | 'everyone') {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
+		const id = String(providerMessageId || '').trim();
+		const jid = toBaileysJid(chatId);
+		const raw = this.rawByMessageId.get(id);
+		const key = raw?.key || {
+			remoteJid: jid,
+			id,
+			fromMe: mode === 'everyone',
+		};
 		if (mode === 'everyone') {
-			await this.socket.sendMessage(chatId, { delete: { remoteJid: chatId, id: providerMessageId, fromMe: true } });
+			await this.socket.sendMessage(jid, { delete: key });
+		} else if (typeof this.socket.chatModify === 'function' && raw?.key) {
+			try {
+				await this.socket.chatModify(
+					{
+						deleteForMe: {
+							deleteMedia: true,
+							key: raw.key,
+							timestamp: Number(raw.messageTimestamp || Date.now() / 1000),
+						},
+					},
+					jid,
+				);
+			} catch {
+				/* Local CRM hide still proceeds below. */
+			}
 		}
-		const bucket = this.messagesByChat.get(chatId);
-		bucket?.delete(providerMessageId);
+		const bucket = this.messagesByChat.get(chatId) || this.messagesByChat.get(jid);
+		bucket?.delete(id);
+		this.rawByMessageId.delete(id);
 		return { ok: true };
 	}
 
@@ -1747,8 +1891,17 @@ export class BaileysProvider implements WhatsAppProvider {
 			throw new Error('Media message is not available in the current session cache');
 		}
 
-		// Refresh media URLs/keys for outbound (and stale) messages before download.
-		if (typeof this.socket.updateMediaMessage === 'function' && raw.key) {
+		const baileys = await loadBaileysModule();
+		const { downloadMediaMessage, downloadContentFromMessage, getUrlFromDirectPath } =
+			baileys as any;
+
+		// Stories cannot be re-uploaded by the phone for linked devices (NOT_FOUND),
+		// and Baileys waitForMsgMediaUpdate can emit TimeoutNegativeWarning (-1).
+		if (
+			!shouldSkipMediaReupload(raw) &&
+			typeof this.socket.updateMediaMessage === 'function' &&
+			raw.key
+		) {
 			try {
 				const refreshed = await this.socket.updateMediaMessage(raw);
 				if (refreshed?.message) {
@@ -1764,47 +1917,31 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 		}
 
-		const baileys = await loadBaileysModule();
-		const { downloadMediaMessage, downloadContentFromMessage } = baileys as any;
+		const content = unwrapMessageContent(raw.message);
+		attachFullMediaUrls(content, getUrlFromDirectPath);
+
 		let buffer: Buffer | Uint8Array | null = null;
+		const mediaNodes: Array<{ node: any; type: string }> = [
+			{ node: content?.imageMessage, type: 'image' },
+			{ node: content?.videoMessage, type: 'video' },
+			{ node: content?.audioMessage, type: 'audio' },
+			{ node: content?.documentMessage, type: 'document' },
+			{ node: content?.stickerMessage, type: 'sticker' },
+		].filter((item) => item.node?.directPath || item.node?.url);
 
-		if (typeof downloadMediaMessage === 'function') {
-			try {
-				buffer = await downloadMediaMessage(
-					raw,
-					'buffer',
-					{},
-					{
-						reuploadRequest: this.socket.updateMediaMessage?.bind(this.socket),
-					},
-				);
-			} catch (error) {
-				this.logger.warn(
-					`downloadMediaMessage failed for ${id}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			}
-		}
-
-		if ((!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array)) &&
-			typeof downloadContentFromMessage === 'function') {
-			const content =
-				raw.message.ephemeralMessage?.message ||
-				raw.message.viewOnceMessage?.message ||
-				raw.message.viewOnceMessageV2?.message ||
-				raw.message.viewOnceMessageV2Extension?.message ||
-				raw.message;
-			const candidates: Array<{ node: any; type: string }> = [
-				{ node: content?.imageMessage, type: 'image' },
-				{ node: content?.videoMessage, type: 'video' },
-				{ node: content?.audioMessage, type: 'audio' },
-				{ node: content?.documentMessage, type: 'document' },
-				{ node: content?.stickerMessage, type: 'sticker' },
-			].filter((item) => item.node);
-			for (const candidate of candidates) {
+		// Prefer the full media directPath. Baileys downloadMediaMessage treats
+		// `thumbnailDirectPath` without `url` as a thumbnail-only download.
+		if (typeof downloadContentFromMessage === 'function') {
+			for (const candidate of mediaNodes) {
 				try {
-					const stream = await downloadContentFromMessage(candidate.node, candidate.type);
+					const stream = await downloadContentFromMessage(
+						{
+							mediaKey: candidate.node.mediaKey,
+							directPath: candidate.node.directPath,
+							url: candidate.node.url,
+						},
+						candidate.type,
+					);
 					const chunks: Buffer[] = [];
 					for await (const chunk of stream) {
 						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -1818,6 +1955,30 @@ export class BaileysProvider implements WhatsAppProvider {
 						}`,
 					);
 				}
+			}
+		}
+
+		if (
+			(!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) &&
+			typeof downloadMediaMessage === 'function'
+		) {
+			try {
+				buffer = await downloadMediaMessage(
+					raw,
+					'buffer',
+					{},
+					shouldSkipMediaReupload(raw)
+						? {}
+						: {
+								reuploadRequest: this.socket.updateMediaMessage?.bind(this.socket),
+							},
+				);
+			} catch (error) {
+				this.logger.warn(
+					`downloadMediaMessage failed for ${id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
 			}
 		}
 

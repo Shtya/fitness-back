@@ -21,7 +21,12 @@ export type WhatsAppProviderEvent =
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
 	| { type: 'presence'; payload: any }
-	| { type: 'history_sync'; chats: number; messages: number }
+	| {
+			type: 'history_sync';
+			chats: number;
+			messages: number;
+			payload?: NormalizedWhatsAppMessage[];
+	  }
 	| { type: 'chat_unread'; chatId: string; unreadCount: number };
 
 export interface NormalizedWhatsAppAttachment {
@@ -124,7 +129,7 @@ export interface WhatsAppProvider {
 	): Promise<any>;
 	sendReaction(providerMessageId: string, emoji: string | false): Promise<any>;
 	getReactions(providerMessageId: string): Promise<NormalizedWhatsAppReaction[]>;
-	forwardMessage(chatId: string, providerMessageId: string): Promise<any>;
+	forwardMessage(chatId: string, providerMessageId: string, options?: { rawHint?: any }): Promise<any>;
 	deleteMessage(
 		chatId: string,
 		providerMessageId: string,

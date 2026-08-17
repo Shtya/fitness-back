@@ -45,6 +45,8 @@ export class WhatsAppProviderManagerService
 	private readonly sessionInvalidationCooldownMs = 10 * 60 * 1000;
 	/** Space out relaunches after a repeat wipe without stranding the account. */
 	private readonly sessionRelaunchBackoffMs = 30 * 1000;
+	private readonly lastConnectionNotifyAt = new Map<string, number>();
+	private readonly connectionNotifyCooldownMs = 60_000;
 	private readonly connecting = new Map<string, Promise<WhatsAppProvider>>();
 	private readonly connectStartedAt = new Map<string, number>();
 	private readonly listeners = new Set<
@@ -561,21 +563,31 @@ export class WhatsAppProviderManagerService
 					WhatsAppAccountStatus.ERROR,
 				].includes(status)
 			) {
-				const recipients = await this.accessRepo.find({
-					where: { accountId, canManage: true },
-				});
-				await Promise.allSettled(
-					recipients.map(recipient =>
-						this.notifications.create({
-							type: NotificationType.WHATSAPP_CONNECTION,
-							title: 'WhatsApp connection changed',
-							message: `WhatsApp account is now ${status}`,
-							data: { accountId, status, type: 'whatsapp_connection' },
-							audience: NotificationAudience.USER,
-							userId: recipient.userId,
-						}),
-					),
-				);
+				const now = Date.now();
+				const lastAt = this.lastConnectionNotifyAt.get(accountId) || 0;
+				const isError = status === WhatsAppAccountStatus.ERROR;
+				if (!isError && lastAt && now - lastAt < this.connectionNotifyCooldownMs) {
+					this.logger.debug(
+						`Skipped WhatsApp connection notification for ${accountId} (${status}) — cooldown`,
+					);
+				} else {
+					this.lastConnectionNotifyAt.set(accountId, now);
+					const recipients = await this.accessRepo.find({
+						where: { accountId, canManage: true },
+					});
+					await Promise.allSettled(
+						recipients.map(recipient =>
+							this.notifications.create({
+								type: NotificationType.WHATSAPP_CONNECTION,
+								title: 'WhatsApp connection changed',
+								message: `WhatsApp account is now ${status}`,
+								data: { accountId, status, type: 'whatsapp_connection' },
+								audience: NotificationAudience.USER,
+								userId: recipient.userId,
+							}),
+						),
+					);
+				}
 			}
 		}
 		if (event.type === 'qr') {
@@ -777,7 +789,7 @@ export class WhatsAppProviderManagerService
 		const existing = this.providers.get(accountId);
 		this.providers.delete(accountId);
 		this.connectStartedAt.delete(accountId);
-		if (existing) {
+		if (existing && typeof existing.disconnect === 'function') {
 			await existing.disconnect().catch(() => undefined);
 		}
 		await this.purgeBaileysSessionFiles(accountId);

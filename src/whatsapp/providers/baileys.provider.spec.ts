@@ -1,9 +1,12 @@
 import {
 	BaileysProvider,
 	applyLiveChatUnread,
+	attachFullMediaUrls,
 	classifyBaileysDisconnect,
 	isHistoryMessageUpsert,
 	mapBaileysMessageStatus,
+	shouldSkipMediaReupload,
+	shouldSyncFullHistory,
 } from './baileys.provider';
 
 describe('BaileysProvider inbox lookup', () => {
@@ -26,6 +29,44 @@ describe('BaileysProvider inbox lookup', () => {
 
 		expect(messages).toHaveLength(1);
 		expect(messages[0].providerMessageId).toBe('msg-1');
+	});
+
+	it('honors before cursor instead of always returning the latest page', async () => {
+		const provider = new BaileysProvider('account-test');
+		const chatId = '201000000000@c.us';
+		(provider as any).messagesByChat.set(
+			chatId,
+			new Map([
+				[
+					'msg-old',
+					{
+						providerMessageId: 'msg-old',
+						chatId,
+						timestamp: new Date('2026-08-15T12:00:00Z'),
+					},
+				],
+				[
+					'msg-mid',
+					{
+						providerMessageId: 'msg-mid',
+						chatId,
+						timestamp: new Date('2026-08-15T12:10:00Z'),
+					},
+				],
+				[
+					'msg-new',
+					{
+						providerMessageId: 'msg-new',
+						chatId,
+						timestamp: new Date('2026-08-15T12:20:00Z'),
+					},
+				],
+			]),
+		);
+
+		const older = await provider.getMessages(chatId, { before: 'msg-new', limit: 50 });
+		expect(older.map((item) => item.providerMessageId)).toEqual(['msg-old', 'msg-mid']);
+		await expect(provider.getMessages(chatId, { before: 'missing' })).resolves.toEqual([]);
 	});
 
 	it('does not mark history ready on socket-open before WhatsApp sends chats', async () => {
@@ -166,6 +207,22 @@ describe('Baileys phone-read unread signals', () => {
 		).toBe(true);
 	});
 
+	it('remembers history.set ids so duplicate append upserts can be skipped', () => {
+		const provider = new BaileysProvider('account-history-dedupe');
+		(provider as any).rememberHistoryMessageId('MSG-HISTORY-1');
+		expect((provider as any).recentHistoryMessageIds.has('MSG-HISTORY-1')).toBe(true);
+	});
+
+	it('keeps full history opt-in', () => {
+		const previous = process.env.WHATSAPP_SYNC_FULL_HISTORY;
+		delete process.env.WHATSAPP_SYNC_FULL_HISTORY;
+		expect(shouldSyncFullHistory()).toBe(false);
+		process.env.WHATSAPP_SYNC_FULL_HISTORY = 'true';
+		expect(shouldSyncFullHistory()).toBe(true);
+		if (previous == null) delete process.env.WHATSAPP_SYNC_FULL_HISTORY;
+		else process.env.WHATSAPP_SYNC_FULL_HISTORY = previous;
+	});
+
 	it('maps proto ack numbers to WhatsApp ticks, not the swapped statuses', () => {
 		expect(mapBaileysMessageStatus(2)).toBe('sent');
 		expect(mapBaileysMessageStatus(3)).toBe('delivered');
@@ -203,6 +260,120 @@ describe('BaileysProvider WhatsApp channels', () => {
 		expect(chats[0].imgUrl).toBe('https://pps.whatsapp.net/v/t61.24694-24/channel.jpg');
 		expect((provider as any).socket.newsletterMetadata).toHaveBeenCalledTimes(1);
 		expect((provider as any).socket.profilePictureUrl).not.toHaveBeenCalled();
+	});
+});
+
+describe('BaileysProvider media download helpers', () => {
+	it('skips phone re-upload for status@broadcast media', () => {
+		expect(
+			shouldSkipMediaReupload({
+				key: { remoteJid: 'status@broadcast', id: '3EB0ABC' },
+			}),
+		).toBe(true);
+		expect(
+			shouldSkipMediaReupload({
+				key: { remoteJid: '201551495772@s.whatsapp.net', id: 'CHAT1' },
+			}),
+		).toBe(false);
+	});
+
+	it('fills url from directPath so Baileys does not download thumbnailDirectPath', () => {
+		const content: any = {
+			imageMessage: {
+				directPath: '/v/t62.7118-24/full.jpg',
+				thumbnailDirectPath: '/v/t62.7118-24/thumb.jpg',
+				mediaKey: Buffer.from('key'),
+			},
+		};
+		attachFullMediaUrls(content, (directPath) => `https://mmg.whatsapp.net${directPath}`);
+		expect(content.imageMessage.url).toBe('https://mmg.whatsapp.net/v/t62.7118-24/full.jpg');
+	});
+});
+
+describe('BaileysProvider message actions', () => {
+	it('forwards from in-memory raw and remembers the new message', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockResolvedValue({
+			key: { remoteJid: '201000000001@s.whatsapp.net', id: 'fwd-1', fromMe: true },
+			message: { conversation: 'hello' },
+			messageTimestamp: Math.floor(Date.now() / 1000),
+		});
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage };
+		(provider as any).rawByMessageId.set('src-1', {
+			key: { remoteJid: '201000000000@s.whatsapp.net', id: 'src-1', fromMe: false },
+			message: { conversation: 'hello' },
+		});
+		(provider as any).normalizeWaMessage = () => ({
+			providerMessageId: 'fwd-1',
+			chatId: '201000000001@c.us',
+			fromMe: true,
+			type: 'chat',
+			text: 'hello',
+			timestamp: new Date(),
+		});
+		(provider as any).rememberMessage = jest.fn();
+
+		await provider.forwardMessage('201000000001@c.us', 'src-1');
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			'201000000001@s.whatsapp.net',
+			expect.objectContaining({
+				forward: expect.objectContaining({
+					key: expect.objectContaining({ id: 'src-1' }),
+				}),
+			}),
+		);
+	});
+
+	it('forwards from a stored raw hint when the live cache is empty', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockResolvedValue({ key: { id: 'fwd-2' } });
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage };
+		(provider as any).normalizeWaMessage = () => null;
+
+		await provider.forwardMessage('201000000001@c.us', 'src-2', {
+			rawHint: {
+				key: { remoteJid: '201000000000@s.whatsapp.net', id: 'src-2', fromMe: false },
+				message: { conversation: 'saved' },
+			},
+		});
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			'201000000001@s.whatsapp.net',
+			expect.objectContaining({
+				forward: expect.objectContaining({
+					message: { conversation: 'saved' },
+				}),
+			}),
+		);
+	});
+
+	it('revokes outbound messages for everyone and hides them locally', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockResolvedValue({ ok: true });
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage };
+		const bucket = new Map([['msg-del', { providerMessageId: 'msg-del' }]]);
+		(provider as any).messagesByChat.set('201000000000@c.us', bucket);
+		(provider as any).rawByMessageId.set('msg-del', {
+			key: {
+				remoteJid: '201000000000@s.whatsapp.net',
+				id: 'msg-del',
+				fromMe: true,
+			},
+		});
+
+		await provider.deleteMessage('201000000000@c.us', 'msg-del', 'everyone');
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			'201000000000@s.whatsapp.net',
+			expect.objectContaining({
+				delete: expect.objectContaining({ id: 'msg-del', fromMe: true }),
+			}),
+		);
+		expect(bucket.has('msg-del')).toBe(false);
 	});
 });
 

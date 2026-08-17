@@ -71,6 +71,12 @@ export class WhatsAppAccount extends CoreEntity {
 	@Column({ name: 'last_error', type: 'text', nullable: true })
 	lastError: string | null;
 
+	@Column({ name: 'initial_hydrated_at', type: 'timestamptz', nullable: true })
+	initialHydratedAt: Date | null;
+
+	@Column({ name: 'last_history_sync_at', type: 'timestamptz', nullable: true })
+	lastHistorySyncAt: Date | null;
+
 	@Column({ name: 'provider_capabilities', type: 'jsonb', default: () => "'{}'::jsonb" })
 	providerCapabilities: Record<string, boolean | string>;
 
@@ -362,6 +368,9 @@ export class WhatsAppConversationPreference extends CoreEntity {
 
 	@Column({ name: 'is_pinned', type: 'boolean', default: false })
 	isPinned: boolean;
+
+	@Column({ name: 'is_archived', type: 'boolean', default: false })
+	isArchived: boolean;
 }
 
 @Entity('whatsapp_messages')

@@ -7,6 +7,10 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			findOne: jest.fn(),
 			update: jest.fn().mockResolvedValue(undefined),
 		};
+		const accountRepo = {
+			findOne: jest.fn().mockResolvedValue({ id: 'account-1', initialHydratedAt: null }),
+			update: jest.fn().mockResolvedValue(undefined),
+		};
 		const access: any = {
 			getAccountAccess: jest.fn(),
 			canSeeAllConversations: jest.fn().mockReturnValue(true),
@@ -35,7 +39,7 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			emitConversationEvent: jest.fn(),
 		};
 		const service = new WhatsAppSyncService(
-			{} as any,
+			accountRepo as any,
 			{} as any,
 			conversationRepo as any,
 			{} as any, // noteRepo
@@ -197,5 +201,98 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 		expect(conversationRepo.update).toHaveBeenCalledWith('conversation-1', {
 			unreadCount: 0,
 		});
+	});
+
+	it('serializes inbox sync jobs for the same account', async () => {
+		const { service } = createService();
+		const order: string[] = [];
+		let releaseFirst: (() => void) | undefined;
+		const first = (service as any).enqueueInboxSync(
+			'account-1',
+			() =>
+				new Promise((resolve) => {
+					order.push('start-1');
+					releaseFirst = () => {
+						order.push('end-1');
+						resolve('one');
+					};
+				}),
+		);
+		const second = (service as any).enqueueInboxSync('account-1', async () => {
+			order.push('start-2');
+			order.push('end-2');
+			return 'two';
+		});
+
+		for (let i = 0; i < 10 && !releaseFirst; i += 1) {
+			await Promise.resolve();
+		}
+		expect(order).toEqual(['start-1']);
+		releaseFirst?.();
+		await expect(first).resolves.toBe('one');
+		await expect(second).resolves.toBe('two');
+		expect(order).toEqual(['start-1', 'end-1', 'start-2', 'end-2']);
+	});
+
+	it('debounces history_sync inbox reconcile into a single background completion', async () => {
+		jest.useFakeTimers();
+		const { service, providers, gateway } = createService();
+		providers.getProvider.mockReturnValue({ getState: () => 'connected' });
+		const unlocked = jest.fn().mockResolvedValue({ supported: true, count: 4 });
+		(service as any).syncChatsUnlocked = unlocked;
+
+		(service as any).scheduleHistoryInboxReconcile('account-1', {
+			chats: 10,
+			messages: 40,
+		});
+		(service as any).scheduleHistoryInboxReconcile('account-1', {
+			chats: 8,
+			messages: 25,
+		});
+		expect(unlocked).not.toHaveBeenCalled();
+
+		const completed = new Promise<void>((resolve) => {
+			gateway.emitAccountEvent.mockImplementation((...args: any[]) => {
+				if (args[1] === 'sync_completed') resolve();
+			});
+		});
+		jest.advanceTimersByTime(8000);
+		await completed;
+
+		expect(unlocked).toHaveBeenCalledTimes(1);
+		expect(gateway.emitAccountEvent).toHaveBeenCalledWith(
+			'account-1',
+			'sync_completed',
+			expect.objectContaining({
+				source: 'history_sync',
+				background: true,
+			}),
+		);
+		jest.useRealTimers();
+	});
+
+	it('routes history_sync payloads to the history persist queue', async () => {
+		const { service } = createService();
+		const history = jest.fn();
+		const live = jest.fn();
+		(service as any).enqueueHistoryPersist = (task: () => Promise<unknown>) => {
+			history();
+			return task();
+		};
+		(service as any).enqueuePersist = () => live();
+		(service as any).persistHistoryBatch = jest.fn().mockResolvedValue({ inserted: 1 });
+		(service as any).scheduleHistoryInboxReconcile = jest.fn();
+
+		await (service as any).handleProviderEvent('account-1', {
+			type: 'history_sync',
+			chats: 2,
+			messages: 1,
+			payload: [{ providerMessageId: 'm1', chatId: '201000000000@c.us' }],
+		});
+
+		expect(history).toHaveBeenCalled();
+		expect(live).not.toHaveBeenCalled();
+		expect((service as any).persistHistoryBatch).toHaveBeenCalled();
+		expect((service as any).scheduleHistoryInboxReconcile).toHaveBeenCalled();
 	});
 });

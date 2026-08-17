@@ -25,6 +25,18 @@ import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 
+export function resolveWhatsAppSyncPhase(account: {
+	status?: string | null;
+	initialHydratedAt?: Date | string | null;
+}): 'disconnected' | 'connecting' | 'hydrating' | 'ready' | 'error' {
+	const status = String(account?.status || '');
+	if (status === 'error') return 'error';
+	if (status === 'connecting' || status === 'qr_pending') return 'connecting';
+	if (status !== 'connected') return 'disconnected';
+	if (!account.initialHydratedAt) return 'hydrating';
+	return 'ready';
+}
+
 const whatsappMediaRoot = () =>
 	path.resolve(
 		process.env.WHATSAPP_MEDIA_ROOT ||
@@ -71,6 +83,9 @@ export class WhatsAppAccountsService {
 					phoneNumber: account.phoneNumber,
 					providerName: account.providerName,
 					status: account.status,
+					syncPhase: resolveWhatsAppSyncPhase(account),
+					initialHydratedAt: account.initialHydratedAt || null,
+					lastHistorySyncAt: account.lastHistorySyncAt || null,
 					lastConnectedAt: account.lastConnectedAt,
 					lastError: account.lastError,
 					providerCapabilities: account.providerCapabilities || {},
@@ -199,6 +214,8 @@ export class WhatsAppAccountsService {
 			await manager.delete(WhatsAppConnectionLog, { accountId });
 			await manager.update(WhatsAppAccount, accountId, {
 				lastError: null,
+				initialHydratedAt: null,
+				lastHistorySyncAt: null,
 			});
 		});
 		await this.audit.write({

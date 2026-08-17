@@ -10,7 +10,7 @@ import {
 	WhatsAppStatus,
 } from '../entities/whatsapp.entity';
 import * as browserProfile from '../utils/whatsapp-browser-profile';
-import { WhatsAppAccountsService } from './whatsapp-accounts.service';
+import { WhatsAppAccountsService, resolveWhatsAppSyncPhase } from './whatsapp-accounts.service';
 
 describe('WhatsAppAccountsService resetData', () => {
 	beforeEach(() => {
@@ -147,5 +147,22 @@ describe('WhatsAppAccountsService resetData', () => {
 		expect(connect).toHaveBeenCalledWith('account-1');
 		expect(waitUntilConnected).toHaveBeenCalled();
 		expect(providers.destroySession).not.toHaveBeenCalled();
+	});
+});
+
+describe('resolveWhatsAppSyncPhase', () => {
+	it('treats a connected hydrated account as ready', () => {
+		expect(
+			resolveWhatsAppSyncPhase({
+				status: 'connected',
+				initialHydratedAt: new Date(),
+			}),
+		).toBe('ready');
+	});
+
+	it('keeps a connected but empty account in hydrating', () => {
+		expect(resolveWhatsAppSyncPhase({ status: 'connected' })).toBe('hydrating');
+		expect(resolveWhatsAppSyncPhase({ status: 'qr_pending' })).toBe('connecting');
+		expect(resolveWhatsAppSyncPhase({ status: 'error' })).toBe('error');
 	});
 });

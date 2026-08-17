@@ -60,7 +60,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			notifications as any,
 			redis as any,
 		);
-		return { service, accountRepo, logRepo, gateway, sessions, redis, redisClient };
+		return { service, accountRepo, accessRepo, logRepo, gateway, sessions, redis, redisClient, notifications };
 	}
 
 	it('never broadcasts message content to the account room', async () => {
@@ -234,6 +234,8 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			getState: jest.fn().mockReturnValue('connecting'),
 			onEvent: jest.fn(),
 			connect: jest.fn().mockResolvedValue(undefined),
+			disconnect: jest.fn().mockResolvedValue(undefined),
+			getQr: jest.fn().mockReturnValue('data:image/png;base64,qr'),
 		};
 		jest
 			.spyOn(service as any, 'createProvider')
@@ -289,6 +291,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			onEvent: jest.fn(),
 			connect: jest.fn().mockResolvedValue(undefined),
 			disconnect: jest.fn().mockResolvedValue(undefined),
+			getQr: jest.fn().mockReturnValue('data:image/png;base64,qr'),
 		};
 		jest.spyOn(service as any, 'createProvider').mockReturnValue(fresh);
 
@@ -298,5 +301,32 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 
 		await expect(service.disconnect('account-1', false)).resolves.toEqual({ ok: true });
 		expect(redisClient.del).not.toHaveBeenCalled();
+	});
+
+	it('does not spam connection notifications on a reconnect flap', async () => {
+		const { service, accessRepo, notifications } = createService();
+		accessRepo.find.mockResolvedValue([{ userId: 'manager-1', canManage: true }]);
+
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.DISCONNECTED,
+		});
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
+
+		expect(notifications.create).toHaveBeenCalledTimes(1);
+
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.ERROR,
+			error: 'boom',
+		});
+		expect(notifications.create).toHaveBeenCalledTimes(2);
 	});
 });

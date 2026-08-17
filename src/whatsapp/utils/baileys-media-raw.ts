@@ -34,6 +34,75 @@ const BAILEYS_MEDIA_BYTE_KEYS = [
 	'mediaKeyTimestamp',
 ] as const;
 
+function unwrapBaileysContent(message: any): any {
+	if (!message || typeof message !== 'object') return message;
+	return (
+		message.ephemeralMessage?.message ||
+		message.viewOnceMessage?.message ||
+		message.viewOnceMessageV2?.message ||
+		message.viewOnceMessageV2Extension?.message ||
+		message.documentWithCaptionMessage?.message ||
+		message.editedMessage?.message ||
+		message
+	);
+}
+
+function contextInfoOf(content: any) {
+	if (!content || typeof content !== 'object') return null;
+	return (
+		content.extendedTextMessage?.contextInfo ||
+		content.imageMessage?.contextInfo ||
+		content.videoMessage?.contextInfo ||
+		content.audioMessage?.contextInfo ||
+		content.documentMessage?.contextInfo ||
+		content.stickerMessage?.contextInfo ||
+		null
+	);
+}
+
+function sanitizeQuotedMessage(quoted: any) {
+	const content = unwrapBaileysContent(quoted);
+	if (!content || typeof content !== 'object') return undefined;
+	const out: Record<string, unknown> = {};
+	if (typeof content.conversation === 'string') out.conversation = content.conversation;
+	if (typeof content.extendedTextMessage?.text === 'string') {
+		out.extendedTextMessage = { text: content.extendedTextMessage.text };
+	}
+	const mediaKeys = [
+		'imageMessage',
+		'videoMessage',
+		'stickerMessage',
+		'documentMessage',
+	] as const;
+	for (const key of mediaKeys) {
+		const node = content[key];
+		if (!node || typeof node !== 'object') continue;
+		const jpegThumbnail = bytesToBase64(node.jpegThumbnail);
+		out[key] = {
+			...(typeof node.caption === 'string' ? { caption: node.caption } : {}),
+			...(typeof node.mimetype === 'string' ? { mimetype: node.mimetype } : {}),
+			...(jpegThumbnail ? { jpegThumbnail } : {}),
+		};
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeContextInfo(info: any) {
+	if (!info || typeof info !== 'object') return undefined;
+	const quotedMessage = sanitizeQuotedMessage(info.quotedMessage);
+	const mentionedJid = Array.isArray(info.mentionedJid)
+		? info.mentionedJid.filter((item: unknown) => typeof item === 'string' && item)
+		: undefined;
+	const out: Record<string, unknown> = {};
+	if (info.stanzaId) out.stanzaId = info.stanzaId;
+	if (info.participant) out.participant = info.participant;
+	if (mentionedJid?.length) out.mentionedJid = mentionedJid;
+	if (info.isForwarded) out.isForwarded = true;
+	if (Number(info.forwardingScore) > 0) out.forwardingScore = Number(info.forwardingScore);
+	if (quotedMessage) out.quotedMessage = quotedMessage;
+	return Object.keys(out).length ? out : undefined;
+}
+
 function sanitizeBaileysMediaNode(node: any) {
 	if (!node || typeof node !== 'object') return null;
 	const out: Record<string, unknown> = { ...node };
@@ -42,6 +111,11 @@ function sanitizeBaileysMediaNode(node: any) {
 			const encoded = bytesToBase64(out[key]);
 			if (encoded) out[key] = encoded;
 		}
+	}
+	if (out.contextInfo) {
+		const contextInfo = sanitizeContextInfo(out.contextInfo);
+		if (contextInfo) out.contextInfo = contextInfo;
+		else delete out.contextInfo;
 	}
 	return out;
 }
@@ -58,16 +132,26 @@ function reviveBaileysMediaNode(node: any) {
 	return out;
 }
 
+function baileysEnvelope(source: any, message?: Record<string, unknown>) {
+	return {
+		protocol: 'baileys',
+		key: {
+			remoteJid: source.key.remoteJid,
+			id: source.key.id,
+			fromMe: source.key.fromMe,
+			participant: source.key.participant,
+		},
+		messageTimestamp: source.messageTimestamp,
+		...(source.pushName ? { pushName: source.pushName } : {}),
+		...(message && Object.keys(message).length ? { message } : {}),
+	};
+}
+
 /** Persist enough Baileys media fields to re-download after restart. */
 export function sanitizeBaileysWaMessage(raw: any) {
 	const source = raw?.protocol === 'baileys' ? raw : raw;
 	if (!source?.key || !source?.message) return null;
-	const content =
-		source.message.ephemeralMessage?.message ||
-		source.message.viewOnceMessage?.message ||
-		source.message.viewOnceMessageV2?.message ||
-		source.message.viewOnceMessageV2Extension?.message ||
-		source.message;
+	const content = unwrapBaileysContent(source.message);
 	const hasMedia = Boolean(
 		content.imageMessage ||
 			content.videoMessage ||
@@ -76,16 +160,27 @@ export function sanitizeBaileysWaMessage(raw: any) {
 			content.stickerMessage,
 	);
 	if (!hasMedia) {
-		return {
-			protocol: 'baileys',
-			key: {
-				remoteJid: source.key.remoteJid,
-				id: source.key.id,
-				fromMe: source.key.fromMe,
-				participant: source.key.participant,
-			},
-			messageTimestamp: source.messageTimestamp,
-		};
+		const contextInfo = sanitizeContextInfo(contextInfoOf(content));
+		const message: Record<string, unknown> = {};
+		if (content.extendedTextMessage) {
+			message.extendedTextMessage = {
+				...(typeof content.extendedTextMessage.text === 'string'
+					? { text: content.extendedTextMessage.text }
+					: {}),
+				...(contextInfo ? { contextInfo } : {}),
+			};
+		} else if (typeof content.conversation === 'string') {
+			message.conversation = content.conversation;
+			if (contextInfo) {
+				message.extendedTextMessage = {
+					text: content.conversation,
+					contextInfo,
+				};
+			}
+		} else if (contextInfo) {
+			message.extendedTextMessage = { contextInfo };
+		}
+		return baileysEnvelope(source, message);
 	}
 	const message: Record<string, unknown> = {};
 	if (content.imageMessage) message.imageMessage = sanitizeBaileysMediaNode(content.imageMessage);
@@ -98,40 +193,15 @@ export function sanitizeBaileysWaMessage(raw: any) {
 		message.stickerMessage = sanitizeBaileysMediaNode(content.stickerMessage);
 	}
 	if (source.message.ephemeralMessage) {
-		return {
-			protocol: 'baileys',
-			key: {
-				remoteJid: source.key.remoteJid,
-				id: source.key.id,
-				fromMe: source.key.fromMe,
-				participant: source.key.participant,
-			},
-			messageTimestamp: source.messageTimestamp,
-			message: { ephemeralMessage: { message } },
-		};
+		return baileysEnvelope(source, { ephemeralMessage: { message } });
 	}
-	return {
-		protocol: 'baileys',
-		key: {
-			remoteJid: source.key.remoteJid,
-			id: source.key.id,
-			fromMe: source.key.fromMe,
-			participant: source.key.participant,
-		},
-		messageTimestamp: source.messageTimestamp,
-		message,
-	};
+	return baileysEnvelope(source, message);
 }
 
 export function reviveBaileysWaMessage(raw: any) {
 	if (!raw?.message || !raw?.key) return null;
 	if (raw.protocol && raw.protocol !== 'baileys') return null;
-	const content =
-		raw.message.ephemeralMessage?.message ||
-		raw.message.viewOnceMessage?.message ||
-		raw.message.viewOnceMessageV2?.message ||
-		raw.message.viewOnceMessageV2Extension?.message ||
-		raw.message;
+	const content = unwrapBaileysContent(raw.message);
 	const revived: Record<string, unknown> = {};
 	if (content.imageMessage) revived.imageMessage = reviveBaileysMediaNode(content.imageMessage);
 	if (content.videoMessage) revived.videoMessage = reviveBaileysMediaNode(content.videoMessage);
@@ -148,5 +218,6 @@ export function reviveBaileysWaMessage(raw: any) {
 		key: raw.key,
 		messageTimestamp: raw.messageTimestamp,
 		message,
+		...(raw.pushName ? { pushName: raw.pushName } : {}),
 	};
 }

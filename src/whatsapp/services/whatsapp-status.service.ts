@@ -17,6 +17,10 @@ import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { whatsAppTimestampToDate } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
+import {
+	decodeProviderMedia,
+	isIncompleteStatusMedia,
+} from '../utils/whatsapp-media-decode';
 
 function statusId(item: any) {
 	return String(
@@ -450,13 +454,10 @@ export class WhatsAppStatusService {
 			const cached = path.resolve(process.cwd(), status.mediaPath);
 			if (cached.startsWith(`${folder}${path.sep}`)) {
 				try {
-					const stats = await fs.stat(cached);
 					const cachedBuffer = await fs.readFile(cached);
 					const detectedMime =
 						this.detectMediaMime(cachedBuffer) || this.statusMimeType(status.type);
-					const minBytes = detectedMime.startsWith('video/') ? 20_000 : 3_000;
-					// Tiny files are almost always WhatsApp thumbnails saved by an older bug.
-					if (stats.size >= minBytes || this.detectMediaMime(cachedBuffer)) {
+					if (!isIncompleteStatusMedia(cachedBuffer, detectedMime, status.type)) {
 						return {
 							absolutePath: cached,
 							mimeType: detectedMime,
@@ -493,20 +494,28 @@ export class WhatsAppStatusService {
 					: 'Status media is unavailable from WhatsApp. Refresh stories and try again.',
 			);
 		}
-		const dataUri = String(data?.data || data || '');
-		const mimeFromData = dataUri.match(/^data:([^;]+);base64,/)?.[1];
-		const raw = dataUri.replace(/^data:[^;]+;base64,/, '');
-		const buffer = Buffer.from(raw, 'base64');
+		let buffer: Buffer;
+		try {
+			buffer = decodeProviderMedia(data);
+		} catch {
+			throw new BadRequestException(
+				'Status media is unavailable from WhatsApp. Refresh stories and try again.',
+			);
+		}
 		if (!buffer.length) {
 			throw new BadRequestException(
 				'Status media is unavailable from WhatsApp. Refresh stories and try again.',
 			);
 		}
+		const mimeFromData =
+			typeof data?.data === 'string'
+				? data.data.match(/^data:([^;]+);base64,/)?.[1]
+				: typeof data === 'string'
+					? data.match(/^data:([^;]+);base64,/)?.[1]
+					: undefined;
 		const detectedMime =
 			this.detectMediaMime(buffer) || mimeFromData || this.statusMimeType(status.type);
-		const isVideo = detectedMime.startsWith('video/');
-		const minBytes = isVideo ? 20_000 : 3_000;
-		if (buffer.length < minBytes && !this.detectMediaMime(buffer)) {
+		if (isIncompleteStatusMedia(buffer, detectedMime, status.type)) {
 			throw new BadRequestException(
 				'Full status media is unavailable from WhatsApp (got thumbnail only). Refresh stories and try again.',
 			);

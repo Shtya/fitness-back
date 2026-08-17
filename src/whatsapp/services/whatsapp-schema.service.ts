@@ -2,6 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+// Safety net for already-deployed databases. New WhatsApp schema belongs in
+// `backend/migrations/` (see 20260817_whatsapp_account_sync_watermarks.sql).
 const OPTIONAL_TABLES = [
 	`CREATE TABLE IF NOT EXISTS whatsapp_conversation_preferences (
 		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -13,11 +15,13 @@ const OPTIONAL_TABLES = [
 		provider_chat_id varchar(160),
 		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		is_favorite boolean NOT NULL DEFAULT false,
-		is_pinned boolean NOT NULL DEFAULT false
+		is_pinned boolean NOT NULL DEFAULT false,
+		is_archived boolean NOT NULL DEFAULT false
 	)`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS account_id uuid`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS provider_chat_id varchar(160)`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_pinned boolean NOT NULL DEFAULT false`,
+	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity
 		ON whatsapp_conversation_preferences (account_id, provider_chat_id)`,
 	`CREATE TABLE IF NOT EXISTS whatsapp_voice_changer_credentials (
@@ -62,6 +66,8 @@ const OPTIONAL_TABLES = [
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_saved_stickers_account ON whatsapp_saved_stickers(account_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_saved_stickers_user ON whatsapp_saved_stickers(user_id)`,
+	`ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS initial_hydrated_at timestamptz`,
+	`ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS last_history_sync_at timestamptz`,
 ];
 
 @Injectable()
