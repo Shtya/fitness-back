@@ -1,6 +1,7 @@
 import {
 	BadGatewayException,
 	BadRequestException,
+	HttpException,
 	Injectable,
 	NotFoundException,
 	ServiceUnavailableException,
@@ -15,7 +16,7 @@ import {
 import FormData = require('form-data');
 import * as crypto from 'crypto';
 import { createReadStream } from 'fs';
-import { unlink } from 'fs/promises';
+import { readFile, unlink } from 'fs/promises';
 import { Repository } from 'typeorm';
 import { AiFreeService } from '../ai-free/ai-free.service';
 import {
@@ -69,12 +70,17 @@ export class TranscriptionService {
 	}
 
 	private serviceError(error: any, fallback: string) {
-		return (
-			error?.response?.data?.error?.message ||
-			error?.response?.data?.detail ||
-			error?.response?.data?.message ||
-			(error instanceof Error ? error.message : fallback)
-		);
+		const data = error?.response?.data;
+		const nested = data?.error;
+		if (typeof nested === 'string' && nested.trim()) return nested;
+		if (nested?.message) return nested.message;
+		if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail;
+		if (typeof data?.message === 'string' && data.message.trim()) return data.message;
+		if (Array.isArray(data?.message) && data.message.length) {
+			return data.message.map(String).join(', ');
+		}
+		if (error instanceof Error && error.message) return error.message;
+		return fallback;
 	}
 
 	private credentialEncryptionKey() {
@@ -332,7 +338,10 @@ export class TranscriptionService {
 		}
 	}
 
-	private async transcribeAssemblyAI(file: AudioUpload): Promise<WhisperResponse> {
+	private async transcribeAssemblyAI(
+		file: AudioUpload,
+		language = 'auto',
+	): Promise<WhisperResponse> {
 		const apiKey = await this.resolveProviderApiKey('assemblyai');
 		if (!apiKey) {
 			throw new ServiceUnavailableException(
@@ -342,35 +351,59 @@ export class TranscriptionService {
 		const startedAt = Date.now();
 		const headers = { authorization: apiKey };
 		try {
+			const bytes = await readFile(file.path);
+			if (!bytes.length) {
+				throw new BadRequestException('Audio file is empty');
+			}
 			const upload = await axios.post(
 				'https://api.assemblyai.com/v2/upload',
-				createReadStream(file.path),
+				bytes,
 				{
-					headers: { ...headers, 'Content-Type': 'application/octet-stream' },
+					headers: {
+						...headers,
+						'Content-Type': 'application/octet-stream',
+						'Content-Length': String(bytes.length),
+					},
 					timeout: 600_000,
 					maxBodyLength: Infinity,
 					maxContentLength: Infinity,
 				},
 			);
-			const created = await axios.post(
-				'https://api.assemblyai.com/v2/transcript',
-				{
-					audio_url: upload.data.upload_url,
-					language_detection: true,
-					speech_models: ['universal-3-5-pro', 'universal-2'],
-				},
-				{ headers, timeout: 30_000 },
-			);
-			const transcriptId = created.data?.id;
-			if (!transcriptId) throw new Error('AssemblyAI did not return a transcript id');
+			const uploadUrl = upload.data?.upload_url;
+			if (!uploadUrl) throw new Error('AssemblyAI did not return an upload URL');
 
+			const createTranscript = async (payload: Record<string, unknown>) => {
+				const created = await axios.post(
+					'https://api.assemblyai.com/v2/transcript',
+					payload,
+					{ headers, timeout: 30_000 },
+				);
+				const transcriptId = created.data?.id;
+				if (!transcriptId) throw new Error('AssemblyAI did not return a transcript id');
+				return transcriptId as string;
+			};
+
+			const basePayload: Record<string, unknown> = {
+				audio_url: uploadUrl,
+				speech_models: ['universal-3-5-pro', 'universal-2'],
+			};
+			if (language === 'ar' || language === 'en') {
+				basePayload.language_code = language;
+			} else {
+				basePayload.language_detection = true;
+			}
+
+			let transcriptId = await createTranscript(basePayload);
 			const deadline = Date.now() + 1_800_000;
+			let retriedWithoutDetection = false;
+
 			while (Date.now() < deadline) {
 				const response = await axios.get(
 					`https://api.assemblyai.com/v2/transcript/${transcriptId}`,
 					{ headers, timeout: 30_000 },
 				);
-				if (response.data?.status === 'completed') {
+				const status = response.data?.status;
+				if (status === 'completed') {
 					return {
 						text: response.data.text || '',
 						language: response.data.language_code,
@@ -378,13 +411,28 @@ export class TranscriptionService {
 						processing_time_seconds: (Date.now() - startedAt) / 1000,
 					};
 				}
-				if (response.data?.status === 'error') {
-					throw new Error(response.data.error || 'AssemblyAI transcription failed');
+				if (status === 'error') {
+					const errText = String(response.data?.error || 'AssemblyAI transcription failed');
+					const detectionFailed =
+						!retriedWithoutDetection &&
+						/language_detection/i.test(errText) &&
+						language === 'auto';
+					if (detectionFailed) {
+						retriedWithoutDetection = true;
+						transcriptId = await createTranscript({
+							audio_url: uploadUrl,
+							speech_models: ['universal-3-5-pro', 'universal-2'],
+							language_code: 'ar',
+						});
+						continue;
+					}
+					throw new Error(errText);
 				}
 				await new Promise(resolve => setTimeout(resolve, 2000));
 			}
 			throw new Error('AssemblyAI transcription timed out');
 		} catch (error: any) {
+			if (error instanceof HttpException) throw error;
 			throw new BadGatewayException(
 				`AssemblyAI transcription failed: ${String(this.serviceError(error, 'unknown error')).slice(0, 500)}`,
 			);
@@ -420,7 +468,7 @@ export class TranscriptionService {
 					result = await this.transcribeDeepgram(file);
 					break;
 				case 'assemblyai':
-					result = await this.transcribeAssemblyAI(file);
+					result = await this.transcribeAssemblyAI(file, language);
 					break;
 				default:
 					result = await this.transcribeLocal(file, language, customVocabulary);
