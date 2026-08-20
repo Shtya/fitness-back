@@ -36,6 +36,7 @@ import {
 	WhatsAppProviderEvent,
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
+import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -64,6 +65,7 @@ function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | 
 		'document',
 		'sticker',
 		'location',
+		'live_location',
 		'contact',
 		'poll',
 	].includes(type);
@@ -191,11 +193,22 @@ function baileysRawMediaScore(raw: any): number {
 	if (!raw || typeof raw !== 'object') return 0;
 	if (!raw.message) return 0;
 	const node = baileysRawMediaNode(raw);
-	if (!node) return 1;
-	let score = 2;
-	if (node.mediaKey) score += 3;
-	if (node.directPath || node.url) score += 2;
-	if (node.fileSha256 || node.fileEncSha256) score += 1;
+	let score = node ? 2 : 1;
+	if (node) {
+		if (node.mediaKey) score += 3;
+		if (node.directPath || node.url) score += 2;
+		if (node.fileSha256 || node.fileEncSha256) score += 1;
+	}
+	const content = baileysRawMediaContent(raw);
+	const location = content?.locationMessage || content?.liveLocationMessage;
+	if (
+		location &&
+		(location.degreesLatitude != null ||
+			location.degreesLongitude != null ||
+			location.latitude != null)
+	) {
+		score += 4;
+	}
 	return score;
 }
 
@@ -215,7 +228,12 @@ function jpegThumbnailToDataUrl(thumb: any): string | null {
 }
 
 function mediaPreviewDataUrlFromRaw(raw: any): string | null {
-	return jpegThumbnailToDataUrl(baileysRawMediaNode(raw)?.jpegThumbnail);
+	const mediaThumb = jpegThumbnailToDataUrl(baileysRawMediaNode(raw)?.jpegThumbnail);
+	if (mediaThumb) return mediaThumb;
+	const content = baileysRawMediaContent(raw);
+	return jpegThumbnailToDataUrl(
+		(content?.locationMessage || content?.liveLocationMessage)?.jpegThumbnail,
+	);
 }
 
 function baileysContextInfo(raw: any): any {
@@ -228,6 +246,8 @@ function baileysContextInfo(raw: any): any {
 		content.audioMessage?.contextInfo ||
 		content.documentMessage?.contextInfo ||
 		content.stickerMessage?.contextInfo ||
+		content.locationMessage?.contextInfo ||
+		content.liveLocationMessage?.contextInfo ||
 		null
 	);
 }
@@ -246,6 +266,8 @@ function quotedTypeFromRaw(raw: any): string | null {
 	if (quoted.stickerMessage) return 'sticker';
 	if (quoted.documentMessage) return 'document';
 	if (quoted.audioMessage) return quoted.audioMessage.ptt ? 'ptt' : 'audio';
+	if (quoted.liveLocationMessage) return 'live_location';
+	if (quoted.locationMessage) return 'location';
 	return 'text';
 }
 
@@ -258,8 +280,25 @@ function quotedTextFromRaw(raw: any): string | null {
 		quoted.imageMessage?.caption ||
 		quoted.videoMessage?.caption ||
 		quoted.documentMessage?.caption ||
+		quoted.locationMessage?.name ||
+		quoted.locationMessage?.address ||
+		quoted.liveLocationMessage?.caption ||
 		'';
 	return String(text || '').trim() || null;
+}
+
+function needsLocationHydration(message: WhatsAppMessage | null | undefined) {
+	const type = String(message?.type || '').toLowerCase();
+	if (type !== 'location' && type !== 'live_location' && type !== 'livelocation') {
+		return false;
+	}
+	return !extractWhatsAppLocation(message);
+}
+
+function persistableMessageRaw(normalized: NormalizedWhatsAppMessage, currentRaw?: any) {
+	const location = normalized.location || extractWhatsAppLocation(normalized);
+	const base = safeProviderMetadata(normalized.raw) || currentRaw || null;
+	return mergeLocationIntoRaw(base, location);
 }
 
 function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -444,6 +483,10 @@ function safeProviderMetadata(raw: any) {
 		duration: Number.isFinite(Number(raw.duration ?? raw.mediaData?.duration))
 			? Number(raw.duration ?? raw.mediaData?.duration)
 			: undefined,
+		lat: raw.lat ?? raw.latitude ?? undefined,
+		lng: raw.lng ?? raw.longitude ?? undefined,
+		loc: raw.loc || undefined,
+		comment: raw.comment || undefined,
 	};
 }
 
@@ -2077,10 +2120,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		if (existing) {
 			// Upgrade stripped/partial Baileys media envelope when a richer live copy arrives.
-			const nextRaw = safeProviderMetadata(normalized.raw);
+			const nextRaw = persistableMessageRaw(normalized, (existing as any).raw);
 			const existingScore = baileysRawMediaScore((existing as any).raw);
 			const nextScore = baileysRawMediaScore(nextRaw);
-			if (nextRaw && nextScore > existingScore) {
+			const shouldWriteLocation =
+				Boolean(normalized.location || extractWhatsAppLocation(normalized)) &&
+				needsLocationHydration(existing);
+			if (nextRaw && (nextScore > existingScore || shouldWriteLocation)) {
 				await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
 				(existing as any).raw = nextRaw;
 				await this.attachmentRepo
@@ -2149,7 +2195,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						normalized.timestampReliable !== false && normalized.timestamp?.getTime?.() > 0
 							? normalized.timestamp
 							: conversation.lastMessageAt || normalized.timestamp,
-					raw: safeProviderMetadata(normalized.raw),
+					raw: persistableMessageRaw(normalized),
 				}),
 			);
 		} catch (error: any) {
@@ -2158,10 +2204,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					where: { accountId, providerMessageId: normalized.providerMessageId },
 					relations: ['attachments', 'senderUser'],
 				});
-				const nextRaw = safeProviderMetadata(normalized.raw);
+				const nextRaw = persistableMessageRaw(normalized, (existing as any).raw);
 				const existingScore = baileysRawMediaScore((existing as any).raw);
 				const nextScore = baileysRawMediaScore(nextRaw);
-				if (nextRaw && nextScore > existingScore) {
+				const shouldWriteLocation =
+					Boolean(normalized.location || extractWhatsAppLocation(normalized)) &&
+					needsLocationHydration(existing);
+				if (nextRaw && (nextScore > existingScore || shouldWriteLocation)) {
 					await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
 					(existing as any).raw = nextRaw;
 					await this.attachmentRepo
@@ -2277,6 +2326,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				(hydrated as any).replyTo = this.buildReplyToPayload(quoted, (hydrated as any).raw);
 			}
 		}
+		this.attachMessageLocations([hydrated]);
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			await this.decorateGroupMessages(conversation, [hydrated]);
@@ -2752,6 +2802,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				isFavorite: true,
 			});
 		}
+		if (filter === 'important' || filter === 'starred') {
+			query.andWhere((qb) => {
+				const subQuery = qb
+					.subQuery()
+					.select('1')
+					.from(WhatsAppMessage, 'starredMessage')
+					.where('starredMessage.conversationId = conversation.id')
+					.andWhere('starredMessage.isStarred = true')
+					.getQuery();
+				return `EXISTS ${subQuery}`;
+			});
+		}
 		if (filter === 'archived') {
 			query.andWhere('conversationPreference.isArchived = :isArchived', {
 				isArchived: true,
@@ -3090,9 +3152,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		conversationId: string,
 		before?: string,
 		limit = 30,
-		options: { allowLivePull?: boolean } = {},
+		options: { allowLivePull?: boolean; starredOnly?: boolean } = {},
 	) {
-		const allowLivePull = options.allowLivePull !== false;
+		const starredOnly = Boolean(options.starredOnly);
+		const allowLivePull = options.allowLivePull !== false && !starredOnly;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -3107,6 +3170,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.leftJoinAndSelect('message.reactions', 'reactions')
 				.leftJoinAndSelect('message.senderUser', 'senderUser')
 				.where('message.conversationId = :conversationId', { conversationId });
+			if (starredOnly) {
+				query.andWhere('message.isStarred = true');
+			}
 			if (cursorId) {
 				const cursor = await this.messageRepo.findOne({
 					where: { id: cursorId, conversationId },
@@ -3172,11 +3238,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			local.length &&
 			!before &&
 			accountAccess.canUse &&
-			local.some((message) =>
-				(message.attachments || []).some(
-					(attachment) =>
-						attachment.downloadStatus !== 'downloaded' || !attachment.storagePath,
-				),
+			local.some(
+				(message) =>
+					(message.attachments || []).some(
+						(attachment) =>
+							attachment.downloadStatus !== 'downloaded' || !attachment.storagePath,
+					) || needsLocationHydration(message),
 			)
 		) {
 			const live = await this.pullLiveMessagesFromLinkedDevice(conversation, take).catch(
@@ -3242,6 +3309,58 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const mapped = this.mapLiveMessagesForApi(conversation.id, live);
 		await this.prepareMessagesForApi(conversation, mapped as any);
 		return mapped;
+	}
+
+	private async hydrateLocationsFromProvider(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+		options: { fetchLive?: boolean } = {},
+	) {
+		const missing = (messages || []).filter((message) => needsLocationHydration(message));
+		if (!missing.length) return;
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider) return;
+		const conversationChatId = String(conversation.providerChatId || '').trim();
+		for (const message of missing) {
+			try {
+				let live =
+					typeof provider.findMessage === 'function'
+						? provider.findMessage(message.providerMessageId)
+						: null;
+				let location = live?.location || extractWhatsAppLocation(live);
+				if (!location && options.fetchLive && typeof provider.fetchMessage === 'function') {
+					const chatId =
+						String((message as any)?.raw?.key?.remoteJid || '').trim() ||
+						conversationChatId;
+					if (chatId && message.providerMessageId) {
+						live = await provider.fetchMessage(chatId, message.providerMessageId);
+						location = live?.location || extractWhatsAppLocation(live);
+					}
+				}
+				if (!location) continue;
+				const nextRaw = mergeLocationIntoRaw((message as any).raw, location);
+				await this.messageRepo.update(message.id, { raw: nextRaw } as any).catch(() => undefined);
+				(message as any).raw = nextRaw;
+				(message as any).location = location;
+			} catch (error) {
+				this.logger.warn(
+					`Could not hydrate WhatsApp location ${message.providerMessageId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
+	private attachMessageLocations(messages: WhatsAppMessage[]) {
+		for (const message of messages || []) {
+			const location = extractWhatsAppLocation({
+				type: message.type,
+				location: (message as any).location,
+				raw: (message as any).raw,
+			});
+			if (location) (message as any).location = location;
+		}
 	}
 
 	private attachMediaPreviews(messages: WhatsAppMessage[]) {
@@ -3525,6 +3644,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		messages: WhatsAppMessage[],
 	) {
 		this.attachMediaPreviews(messages);
+		await this.hydrateLocationsFromProvider(conversation, messages);
+		this.attachMessageLocations(messages);
 		await this.decorateGroupMessages(conversation, messages);
 		await this.decorateMessageMentions(conversation, messages);
 		return messages;
@@ -3654,6 +3775,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					key: `live-att:${item.providerMessageId}:${index}`,
 				})),
 			reactions: [],
+			location: item.location || extractWhatsAppLocation(item),
 			raw: item.raw || null,
 			source: 'linked_device',
 		}));
@@ -3749,7 +3871,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async starMessage(user: User, conversationId: string, messageId: string, isStarred: boolean) {
 		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
-		await provider.starMessage(message.providerMessageId, isStarred);
+		try {
+			await provider.starMessage?.(message.providerMessageId, isStarred);
+		} catch (error) {
+			this.logger.warn(
+				`Provider starMessage failed for ${messageId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
 		await this.messageRepo.update(message.id, { isStarred });
 		const result = { messageId, changes: { isStarred } };
 		this.gateway.emitConversationEvent(
@@ -3808,6 +3938,28 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversation.accountId,
 		);
 		return result;
+	}
+
+	async getMessageLocation(user: User, conversationId: string, messageId: string) {
+		const { conversation } = await this.assertConversationVisible(user, conversationId);
+		const message = await this.messageRepo.findOne({
+			where: { id: messageId, conversationId },
+		});
+		if (!message) throw new NotFoundException('WhatsApp message not found');
+		await this.hydrateLocationsFromProvider(conversation, [message], { fetchLive: true });
+		this.attachMessageLocations([message]);
+		const location = (message as any).location || extractWhatsAppLocation(message);
+		if (!location) {
+			const provider = this.providers.getProvider(conversation.accountId);
+			const connected = String(provider?.getState?.() || '').toLowerCase() === 'connected';
+			if (!connected) {
+				throw new BadRequestException(
+					'WhatsApp is not connected. Link the account, then open this location again.',
+				);
+			}
+			throw new NotFoundException('Location coordinates are not available for this message');
+		}
+		return { location };
 	}
 
 	async getMessageInfo(user: User, conversationId: string, messageId: string) {
@@ -4534,6 +4686,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		const conversation = await conversationQuery.getOne();
 		return { ...group, conversationId: conversation?.id || null };
+	}
+
+	async tryDownloadAttachmentQuiet(user: User, attachmentId: string) {
+		try {
+			return await this.downloadAttachment(user, attachmentId);
+		} catch {
+			return null;
+		}
 	}
 
 	/** Media that is not on disk is pulled through the single linked WhatsApp Web

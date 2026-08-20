@@ -43,6 +43,7 @@ import { LearningModule } from './learning/learning.module';
 import { AiContentStudioModule } from './ai-content-studio/ai-content-studio.module';
 import { EmailMemoModule } from './email-memo/email-memo.module';
 import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
 	imports: [
@@ -108,6 +109,7 @@ import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.mo
 		AiContentStudioModule,
 		EmailMemoModule,
 		GoldIntelligenceModule,
+		AiModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

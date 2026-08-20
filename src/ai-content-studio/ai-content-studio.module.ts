@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AiFreeModule } from '../ai-free/ai-free.module';
+import { AiModule } from '../ai/ai.module';
 import { AiContentStudioController } from './ai-content-studio.controller';
 import { AiContentStudioScheduler } from './ai-content-studio.scheduler';
 import {
@@ -42,6 +43,7 @@ import { BrowserInstagramPublisher } from './services/browser-instagram.publishe
   imports: [
     ConfigModule,
     AiFreeModule,
+    AiModule,
     TypeOrmModule.forFeature([
       AiContentStudioSecretsEntity,
       AiContentStudioConfigEntity,

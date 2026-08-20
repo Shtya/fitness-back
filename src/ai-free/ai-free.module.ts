@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { AiModule } from "../ai/ai.module";
 import { AiFreeKnowledgeService } from "./ai-free-knowledge.service";
 import { AiFreeController } from "./ai-free.controller";
 import { AiFreeService } from "./ai-free.service";
@@ -9,7 +10,7 @@ import { Llm7FreeProvider } from "./providers/llm7-free.provider";
 import { PollinationsFreeProvider } from "./providers/pollinations-free.provider";
 
 @Module({
-  imports: [ConfigModule],
+  imports: [ConfigModule, AiModule],
   controllers: [AiFreeController],
   providers: [
     AiFreeKnowledgeService,

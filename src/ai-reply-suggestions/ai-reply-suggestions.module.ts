@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { AiFreeModule } from "../ai-free/ai-free.module";
+import { AiModule } from "../ai/ai.module";
 import {
   WhatsAppConversation,
   WhatsAppMessage,
@@ -25,6 +26,7 @@ import { AiReplySuggestionsService } from "./services/ai-reply-suggestions.servi
   imports: [
     ConfigModule,
     AiFreeModule,
+    AiModule,
     WhatsAppModule,
     TypeOrmModule.forFeature([
       WhatsAppAiSettings,

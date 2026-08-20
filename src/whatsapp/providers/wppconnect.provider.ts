@@ -19,6 +19,7 @@ import {
 	providerChatActivityRank,
 	whatsAppTimestampToDate,
 } from '../utils/whatsapp-time';
+import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 
 declare const require: any;
 
@@ -145,6 +146,7 @@ function normalizeMessage(message: any): NormalizedWhatsAppMessage {
 					},
 				]
 			: [],
+		location: extractWhatsAppLocation({ type: normalizedType, raw: message }),
 		raw: message,
 	};
 }
@@ -1461,6 +1463,83 @@ export class WppConnectProvider implements WhatsAppProvider {
 			() => undefined,
 		);
 		return next;
+	}
+
+	async fetchMessage(
+		chatId: string,
+		providerMessageId: string,
+	): Promise<NormalizedWhatsAppMessage | null> {
+		const id = String(providerMessageId || '').trim();
+		if (!id || this.state !== 'connected' || !this.client) return null;
+
+		const asNormalized = (raw: any): NormalizedWhatsAppMessage | null => {
+			if (!raw) return null;
+			const message = Array.isArray(raw) ? raw[0] : raw;
+			if (!message) return null;
+			try {
+				return normalizeMessage(message);
+			} catch {
+				return null;
+			}
+		};
+
+		const chat = String(chatId || '').trim();
+		const candidates = [id];
+		if (chat && !/^true_/i.test(id) && !/^false_/i.test(id)) {
+			candidates.push(`false_${chat}_${id}`, `true_${chat}_${id}`);
+		}
+
+		let fallback: NormalizedWhatsAppMessage | null = null;
+		const keep = (normalized: NormalizedWhatsAppMessage | null) => {
+			if (!normalized) return null;
+			if (extractWhatsAppLocation(normalized)) return normalized;
+			if (!fallback) fallback = normalized;
+			return null;
+		};
+
+		if (typeof this.client.getMessageById === 'function') {
+			for (const candidate of candidates) {
+				try {
+					const located = keep(asNormalized(await this.client.getMessageById(candidate)));
+					if (located) return located;
+				} catch {
+					/* next candidate */
+				}
+			}
+		}
+
+		if (typeof this.client.getMessage === 'function') {
+			for (const candidate of candidates) {
+				try {
+					const located = keep(
+						asNormalized(await this.client.getMessage(chat || candidate, candidate)),
+					);
+					if (located) return located;
+				} catch {
+					try {
+						const located = keep(asNormalized(await this.client.getMessage(candidate)));
+						if (located) return located;
+					} catch {
+						/* next candidate */
+					}
+				}
+			}
+		}
+
+		try {
+			const recent = await this.getMessages(chatId, { limit: 200 });
+			const found =
+				recent.find(
+					(item) =>
+						item.providerMessageId === id || candidates.includes(item.providerMessageId),
+				) || null;
+			const located = keep(found);
+			if (located) return located;
+		} catch {
+			/* ChatStore may still be hydrating */
+		}
+
+		return fallback;
 	}
 
 	private async getMessagesExclusive(

@@ -5,11 +5,13 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import { User } from "../../../entities/global.entity";
+import { AiService } from "../../ai/ai.service";
 import { WhatsAppAccessService } from "../../whatsapp/services/whatsapp-access.service";
 import {
   GenerateAiReplySuggestionsDto,
@@ -155,6 +157,7 @@ export class AiReplySuggestionsService {
     private readonly context: AiReplyContextService,
     private readonly providers: AiReplyProviderRegistry,
     private readonly config: ConfigService,
+    @Optional() private readonly ai?: AiService,
   ) {}
 
   async getSettings(user: User, accountId: string) {
@@ -240,8 +243,20 @@ export class AiReplySuggestionsService {
         "Conversation has no usable local message context",
       );
     }
+    let providerName = settings.provider;
+    let model = settings.model;
+    if (this.ai) {
+      try {
+        const choice = await this.ai.resolveFeatureChoice(user, "whatsapp");
+        const mapped = this.providers.tryGet(choice.provider as AiReplyProviderName);
+        if (mapped) providerName = mapped.name;
+        if (choice.modelKey) model = choice.modelKey;
+      } catch {
+        // Keep per-account WhatsApp settings if workspace defaults are unavailable.
+      }
+    }
     const provider =
-      this.providers.tryGet(settings.provider) ||
+      this.providers.tryGet(providerName) ||
       this.providers.tryGet("ai-free");
     if (!provider) {
       throw new BadRequestException(
@@ -250,7 +265,7 @@ export class AiReplySuggestionsService {
     }
     const result = await provider.generate({
       prompt: buildAiReplyPrompt(settings, context.messages),
-      model: settings.model,
+      model,
     });
     return {
       suggestions: parseAiReplySuggestions(
@@ -258,7 +273,7 @@ export class AiReplySuggestionsService {
         settings.suggestionCount,
       ),
       provider: provider.name,
-      requestedModel: settings.model,
+      requestedModel: model,
       actualModel: result.actualModel ?? null,
       activePromptId: settings.activePromptId,
       contextThroughMessageId: context.contextThroughMessageId,

@@ -12,6 +12,12 @@ import { WhatsAppReportsController } from './controllers/whatsapp-reports.contro
 import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
 import { WhatsAppStickersController } from './controllers/whatsapp-stickers.controller';
+import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
+import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
+import { WHATSAPP_AI_IMAGE_PROVIDERS } from './ai-media/whatsapp-ai-image.provider';
+import { PollinationsWhatsAppImageProvider } from './ai-media/pollinations-whatsapp-image.provider';
+import { GeminiWhatsAppImageProvider } from './ai-media/gemini-whatsapp-image.provider';
+import { HuggingFaceWhatsAppImageProvider } from './ai-media/huggingface-whatsapp-image.provider';
 import {
 	WhatsAppAccount,
 	WhatsAppAccountAccess,
@@ -48,6 +54,7 @@ import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.s
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
 import { TranscriptionModule } from '../transcription/transcription.module';
+import { AiModule } from '../ai/ai.module';
 
 export const WHATSAPP_ENTITIES = [
 	WhatsAppAccount,
@@ -81,6 +88,7 @@ export const WHATSAPP_ENTITIES = [
 		}),
 		NotificationModule,
 		RedisModule,
+		AiModule,
 		AiContentStudioModule,
 		TranscriptionModule,
 	],
@@ -93,6 +101,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppStatusController,
 		WhatsAppVoiceChangerController,
 		WhatsAppStickersController,
+		WhatsAppAiMediaController,
 	],
 	providers: [
 		WhatsAppAccessService,
@@ -108,6 +117,23 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppSchemaService,
 		WhatsAppVoiceChangerService,
 		WhatsAppStickersService,
+		PollinationsWhatsAppImageProvider,
+		GeminiWhatsAppImageProvider,
+		HuggingFaceWhatsAppImageProvider,
+		WhatsAppAiMediaService,
+		{
+			provide: WHATSAPP_AI_IMAGE_PROVIDERS,
+			inject: [
+				PollinationsWhatsAppImageProvider,
+				GeminiWhatsAppImageProvider,
+				HuggingFaceWhatsAppImageProvider,
+			],
+			useFactory: (
+				pollinations: PollinationsWhatsAppImageProvider,
+				gemini: GeminiWhatsAppImageProvider,
+				huggingface: HuggingFaceWhatsAppImageProvider,
+			) => [pollinations, gemini, huggingface],
+		},
 	],
 	exports: [
 		TypeOrmModule,

@@ -42,7 +42,7 @@ describe('sanitizeBaileysWaMessage', () => {
 		).toBe(Buffer.from('thumb').toString('base64'));
 	});
 
-	it('marks forwarded video messages from contextInfo', () => {
+		it('marks forwarded video messages from contextInfo', () => {
 		const sanitized = sanitizeBaileysWaMessage({
 			key: {
 				remoteJid: '120363@g.us',
@@ -69,5 +69,56 @@ describe('sanitizeBaileysWaMessage', () => {
 		expect(sanitized?.message?.videoMessage?.jpegThumbnail).toBe(
 			Buffer.from('vthumb').toString('base64'),
 		);
+	});
+
+	it('keeps location coordinates and map thumbnail', () => {
+		const sanitized = sanitizeBaileysWaMessage({
+			key: {
+				remoteJid: '201000000000@s.whatsapp.net',
+				id: 'loc-1',
+				fromMe: false,
+			},
+			pushName: 'My Bro',
+			messageTimestamp: 1710000002,
+			message: {
+				locationMessage: {
+					degreesLatitude: 30.0444,
+					degreesLongitude: 31.2357,
+					name: 'Cairo',
+					address: 'Tahrir Square',
+					jpegThumbnail: Buffer.from('mapthumb'),
+				},
+			},
+		}) as any;
+
+		expect(sanitized?.message?.locationMessage?.degreesLatitude).toBe(30.0444);
+		expect(sanitized?.message?.locationMessage?.degreesLongitude).toBe(31.2357);
+		expect(sanitized?.message?.locationMessage?.name).toBe('Cairo');
+		expect(sanitized?.message?.locationMessage?.jpegThumbnail).toBe(
+			Buffer.from('mapthumb').toString('base64'),
+		);
+	});
+
+	it('converts protobuf Long coordinates and does not store NaN', () => {
+		const sanitized = sanitizeBaileysWaMessage({
+			key: {
+				remoteJid: '201000000000@s.whatsapp.net',
+				id: 'loc-2',
+				fromMe: false,
+			},
+			messageTimestamp: 1710000003,
+			message: {
+				locationMessage: {
+					degreesLatitude: { value: 30.0444 },
+					degreesLongitude: { nested: true },
+					name: 'Cairo',
+				},
+			},
+		}) as any;
+
+		expect(sanitized?.message?.locationMessage?.degreesLatitude).toBe(30.0444);
+		expect(sanitized?.message?.locationMessage?.degreesLongitude).toBeUndefined();
+		expect(Number.isNaN(sanitized?.message?.locationMessage?.degreesLongitude)).toBe(false);
+		expect(sanitized?.message?.locationMessage?.name).toBe('Cairo');
 	});
 });

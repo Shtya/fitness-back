@@ -213,8 +213,8 @@ export class AiContentStudioController {
   @Get('defaults')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(...ROLES)
-  defaults() {
-    return this.pipeline.defaults();
+  defaults(@Req() req: any) {
+    return this.pipeline.defaultsFor(req.user);
   }
 
   @Post('trending')

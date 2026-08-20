@@ -58,6 +58,16 @@ export interface NormalizedWhatsAppMessage {
 	isStarred?: boolean;
 	contactName?: string | null;
 	attachments?: NormalizedWhatsAppAttachment[];
+	location?: {
+		latitude: number;
+		longitude: number;
+		name?: string | null;
+		address?: string | null;
+		comment?: string | null;
+		url?: string | null;
+		isLive?: boolean;
+		previewDataUrl?: string | null;
+	} | null;
 	raw?: any;
 }
 
@@ -107,6 +117,9 @@ export interface WhatsAppProvider {
 			aliases?: string[];
 		},
 	): Promise<NormalizedWhatsAppMessage[]>;
+	findMessage?(providerMessageId: string): NormalizedWhatsAppMessage | null;
+	/** Fetch a chat message from the live provider (RAM first, then WhatsApp). */
+	fetchMessage?(chatId: string, providerMessageId: string): Promise<NormalizedWhatsAppMessage | null>;
 	getContacts(): Promise<any[]>;
 	resolveContactIdentity?(
 		chatId: string,

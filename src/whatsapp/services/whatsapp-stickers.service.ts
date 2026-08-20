@@ -19,6 +19,7 @@ import {
 import { isPathInside, mediaFileCandidates } from '../utils/whatsapp-sticker-path';
 import { runFfmpeg } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
+import { WhatsAppSyncService } from './whatsapp-sync.service';
 
 export type StickerUpload = {
 	mimetype: string;
@@ -30,8 +31,10 @@ export type StickerUpload = {
 const STICKER_EDGE = 512;
 const STICKER_TARGET_BYTES = 480 * 1024;
 const STICKER_UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
-const STICKER_LIBRARY_LIMIT = 400;
-const STICKER_SYNC_LIMIT = 500;
+const STICKER_LIBRARY_LIMIT = 2000;
+const STICKER_SYNC_PAGE = 250;
+const STICKER_SYNC_MAX = 2500;
+const STICKER_SYNC_DOWNLOADS = 40;
 
 function mediaRoot() {
 	return path.resolve(
@@ -55,6 +58,7 @@ export class WhatsAppStickersService {
 		@InjectRepository(WhatsAppMessageAttachment)
 		private readonly attachmentRepo: Repository<WhatsAppMessageAttachment>,
 		private readonly access: WhatsAppAccessService,
+		private readonly sync: WhatsAppSyncService,
 	) {}
 
 	private historyHashIndex = new Map<
@@ -109,23 +113,27 @@ export class WhatsAppStickersService {
 
 	async syncFromHistory(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
-		const attachments = await this.attachmentRepo
-			.createQueryBuilder('attachment')
-			.innerJoin('attachment.message', 'message')
-			.where('message.accountId = :accountId', { accountId })
-			.andWhere('attachment.type = :type', { type: 'sticker' })
-			.andWhere('attachment.downloadStatus = :status', { status: 'downloaded' })
-			.andWhere('attachment.storagePath IS NOT NULL')
-			.orderBy('attachment.created_at', 'DESC')
-			.take(STICKER_SYNC_LIMIT)
-			.getMany();
+		const attachments = await this.listStickerAttachments(accountId, STICKER_SYNC_MAX);
 		let imported = 0;
 		let repaired = 0;
 		let skipped = 0;
+		let downloaded = 0;
+		let pending = 0;
+		let downloadsLeft = STICKER_SYNC_DOWNLOADS;
 		for (const attachment of attachments) {
-			const absolutePath = await this.resolveExistingPath(attachment.storagePath);
+			let storagePath = attachment.storagePath;
+			let absolutePath = await this.resolveExistingPath(storagePath);
+			if (!absolutePath && downloadsLeft > 0) {
+				downloadsLeft -= 1;
+				const pulled = await this.sync.tryDownloadAttachmentQuiet(user, attachment.id);
+				if (pulled?.ok && pulled.path) {
+					downloaded += 1;
+					storagePath = pulled.path;
+					absolutePath = await this.resolveExistingPath(storagePath);
+				}
+			}
 			if (!absolutePath) {
-				skipped += 1;
+				pending += 1;
 				continue;
 			}
 			try {
@@ -161,7 +169,44 @@ export class WhatsAppStickersService {
 		this.historyHashIndex.delete(accountId);
 		this.libraryPrefixIndex.delete(accountId);
 		const list = await this.list(user, accountId);
-		return { imported, repaired, skipped, processed: attachments.length, ...list };
+		return {
+			imported,
+			repaired,
+			skipped,
+			downloaded,
+			pending,
+			processed: attachments.length,
+			...list,
+		};
+	}
+
+	private stickerHistoryQuery(accountId: string) {
+		return this.attachmentRepo
+			.createQueryBuilder('attachment')
+			.innerJoin('attachment.message', 'message')
+			.where('message.accountId = :accountId', { accountId })
+			.andWhere('(attachment.type = :sticker OR message.type = :sticker)', {
+				sticker: 'sticker',
+			})
+			.orderBy('attachment.created_at', 'DESC');
+	}
+
+	private async listStickerAttachments(accountId: string, limit: number) {
+		const items: WhatsAppMessageAttachment[] = [];
+		for (let skip = 0; skip < limit; skip += STICKER_SYNC_PAGE) {
+			const page = await this.stickerHistoryQuery(accountId)
+				.skip(skip)
+				.take(Math.min(STICKER_SYNC_PAGE, limit - skip))
+				.getMany();
+			items.push(...page);
+			if (page.length < STICKER_SYNC_PAGE) break;
+		}
+		const seen = new Set<string>();
+		return items.filter((item) => {
+			if (seen.has(item.id)) return false;
+			seen.add(item.id);
+			return true;
+		});
 	}
 
 	async remove(user: User, accountId: string, stickerId: string) {
@@ -485,16 +530,7 @@ export class WhatsAppStickersService {
 	}
 
 	private async buildHistoryIndex(accountId: string) {
-		const attachments = await this.attachmentRepo
-			.createQueryBuilder('attachment')
-			.innerJoin('attachment.message', 'message')
-			.where('message.accountId = :accountId', { accountId })
-			.andWhere('attachment.type = :type', { type: 'sticker' })
-			.andWhere('attachment.downloadStatus = :status', { status: 'downloaded' })
-			.andWhere('attachment.storagePath IS NOT NULL')
-			.orderBy('attachment.created_at', 'DESC')
-			.take(STICKER_SYNC_LIMIT)
-			.getMany();
+		const attachments = await this.listStickerAttachments(accountId, STICKER_SYNC_MAX);
 		const byHash = new Map<string, { absolutePath: string; mimeType: string; fileName: string }>();
 		for (const attachment of attachments) {
 			const absolutePath = await this.resolveExistingPath(attachment.storagePath);

@@ -191,12 +191,18 @@ export class WhatsAppConversationsController {
 		@Query('before') before?: string,
 		@Query('limit') limit = '100',
 		@Query('live') live?: string,
+		@Query('starredOnly') starredOnly?: string,
+		@Query('importantOnly') importantOnly?: string,
 	) {
 		// live=0|false skips the linked-device pull — used for previews and the
 		// initial DB paint before POST sync/latest does the heavy provider work.
 		const allowLivePull = !['0', 'false', 'no'].includes(String(live || '').toLowerCase());
+		const onlyImportant = ['1', 'true', 'yes'].includes(
+			String(starredOnly || importantOnly || '').toLowerCase(),
+		);
 		return this.sync.listMessages(req.user, conversationId, before, Number(limit), {
-			allowLivePull,
+			allowLivePull: allowLivePull && !onlyImportant,
+			starredOnly: onlyImportant,
 		});
 	}
 
@@ -258,6 +264,15 @@ export class WhatsAppConversationsController {
 		@Body() body: DeleteWhatsAppMessageDto,
 	) {
 		return this.sync.deleteMessage(req.user, conversationId, messageId, body.mode);
+	}
+
+	@Get('conversations/:conversationId/messages/:messageId/location')
+	messageLocation(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+	) {
+		return this.sync.getMessageLocation(req.user, conversationId, messageId);
 	}
 
 	@Get('conversations/:conversationId/messages/:messageId/info')

@@ -5,9 +5,11 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { User } from "../../entities/global.entity";
+import { AiService } from "../ai/ai.service";
 import { AiFreeKnowledgeService } from "./ai-free-knowledge.service";
 import { AiFreeChatDto, AiFreeTitleDto } from "./dto/ai-free.dto";
 import {
@@ -26,6 +28,7 @@ export class AiFreeService {
     @Inject(AI_FREE_PROVIDER_LIST) providers: AiFreeProvider[],
     private readonly config: ConfigService,
     private readonly knowledge: AiFreeKnowledgeService,
+    @Optional() private readonly ai?: AiService,
   ) {
     this.providers = new Map(
       providers.map((provider) => [provider.name, provider]),
@@ -65,7 +68,8 @@ export class AiFreeService {
         ? 'اكتب عنواناً قصيراً ومعبّراً للمحادثة (3 إلى 6 كلمات) بناءً على أول رسالة من المستخدم فقط. أعد العنوان فقط بدون علامات اقتباس أو شرح.'
         : 'Write a short expressive chat title (3 to 6 words) based only on the user\'s first message. Return the title only, with no quotes or explanation.';
 
-    const preferred = dto.provider || this.defaultProviderName();
+    const fromSettings = await this.resolveWorkspaceChoice(user, undefined, dto.provider);
+    const preferred = fromSettings.provider;
     const order = this.buildProviderOrder(preferred, true);
     let lastError: unknown;
     for (const name of order) {
@@ -77,7 +81,7 @@ export class AiFreeService {
             { role: "system", content: system },
             { role: "user", content: message.slice(0, 800) },
           ],
-          model: undefined,
+          model: fromSettings.model,
         });
         const title = String(result.text || "")
           .replace(/^["'«»]+|["'«»]+$/g, "")
@@ -155,7 +159,13 @@ export class AiFreeService {
       }
     }
 
-    const preferred = dto.provider || this.defaultProviderName();
+    const preferredChoice = await this.resolveWorkspaceChoice(
+      user,
+      dto.feature,
+      dto.provider,
+      dto.model,
+    );
+    const preferred = preferredChoice.provider;
     const allowFallback = dto.allowFallback !== false;
     const order = this.buildProviderOrder(preferred, allowFallback);
     const errors: string[] = [];
@@ -167,7 +177,7 @@ export class AiFreeService {
       try {
         const result = await provider.generate({
           messages,
-          model: dto.model,
+          model: preferredChoice.model,
         });
         return {
           ok: true,
@@ -205,6 +215,41 @@ export class AiFreeService {
     ).trim() as AiFreeProviderName;
     if (this.providers.has(configured)) return configured;
     return "llm7-free";
+  }
+
+  private async resolveWorkspaceChoice(
+    user: User,
+    feature?: string,
+    explicitProvider?: AiFreeProviderName,
+    explicitModel?: string,
+  ): Promise<{ provider: AiFreeProviderName; model?: string }> {
+    if (explicitProvider && explicitModel) {
+      return { provider: explicitProvider, model: explicitModel };
+    }
+    if (this.ai && user && feature) {
+      try {
+        const choice = await this.ai.resolveFeatureChoice(user, feature);
+        const mapped = this.mapFreeProvider(choice.provider);
+        return {
+          provider: explicitProvider || mapped || this.defaultProviderName(),
+          model:
+            explicitModel ||
+            (choice.modelKey && choice.modelKey !== "auto" ? choice.modelKey : undefined),
+        };
+      } catch {
+        // Settings lookup is best-effort; free providers still run with env defaults.
+      }
+    }
+    return {
+      provider: explicitProvider || this.defaultProviderName(),
+      model: explicitModel,
+    };
+  }
+
+  private mapFreeProvider(provider: string): AiFreeProviderName | undefined {
+    if (provider === "ai-free") return this.defaultProviderName();
+    if (this.providers.has(provider)) return provider as AiFreeProviderName;
+    return undefined;
   }
 
   private buildProviderOrder(

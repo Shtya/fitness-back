@@ -11,6 +11,7 @@ import {
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
 import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
+import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { ensureWhatsAppVoiceOgg, guessVoiceSeconds } from '../utils/whatsapp-voice-ogg';
 
 type BaileysSocket = any;
@@ -127,6 +128,10 @@ function toBaileysJid(jid: string): string {
 		return `${raw.slice(0, -'@c.us'.length)}@s.whatsapp.net`;
 	}
 	return raw;
+}
+
+function waitMs(ms: number) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** True when a label is just an id/phone — not a real contact/group name. */
@@ -256,6 +261,8 @@ function contextInfoOf(content: any) {
 		content.audioMessage?.contextInfo ||
 		content.documentMessage?.contextInfo ||
 		content.stickerMessage?.contextInfo ||
+		content.locationMessage?.contextInfo ||
+		content.liveLocationMessage?.contextInfo ||
 		null
 	);
 }
@@ -288,7 +295,8 @@ function detectType(message: any): string {
 	if (message.documentMessage) return 'document';
 	if (message.stickerMessage) return 'sticker';
 	if (message.contactMessage || message.contactsArrayMessage) return 'contact';
-	if (message.locationMessage || message.liveLocationMessage) return 'location';
+	if (message.liveLocationMessage) return 'live_location';
+	if (message.locationMessage) return 'location';
 	if (message.pollCreationMessage || message.pollCreationMessageV3) return 'poll';
 	return 'text';
 }
@@ -914,6 +922,174 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
+	findMessage(providerMessageId: string): NormalizedWhatsAppMessage | null {
+		const id = String(providerMessageId || '').trim();
+		if (!id) return null;
+		const remembered = this.findRememberedMessage(id);
+		if (extractWhatsAppLocation(remembered)) return remembered;
+		const raw = this.rawByMessageId.get(id);
+		if (raw) {
+			const normalized = this.normalizeWaMessage(raw);
+			if (normalized) return normalized;
+		}
+		return remembered;
+	}
+
+	async fetchMessage(
+		chatId: string,
+		providerMessageId: string,
+	): Promise<NormalizedWhatsAppMessage | null> {
+		const id = String(providerMessageId || '').trim();
+		if (!id) return null;
+		const located = this.messageWithLocation(this.findMessage(id));
+		if (extractWhatsAppLocation(located)) return located;
+
+		const loaded = await this.loadMessageFromSocket(chatId, id);
+		if (extractWhatsAppLocation(loaded)) return loaded;
+
+		try {
+			const recent = await this.getMessages(chatId, { limit: 200 });
+			const found = recent.find((item) => item.providerMessageId === id) || null;
+			if (found) this.rememberMessage(found);
+			const fromList = this.messageWithLocation(found);
+			if (extractWhatsAppLocation(fromList)) return fromList;
+		} catch {
+			/* RAM lookup only */
+		}
+
+		const fromHistory = await this.pullHistoryThenFind(chatId, id);
+		if (extractWhatsAppLocation(fromHistory)) return fromHistory;
+
+		const fromPhone = await this.requestMessageFromPhone(chatId, id);
+		if (extractWhatsAppLocation(fromPhone)) return fromPhone;
+
+		return this.messageWithLocation(this.findMessage(id)) || loaded || located;
+	}
+
+	private messageWithLocation(
+		message: NormalizedWhatsAppMessage | null,
+	): NormalizedWhatsAppMessage | null {
+		if (!message) return null;
+		const location = message.location || extractWhatsAppLocation(message);
+		return location ? { ...message, location } : message;
+	}
+
+	private loadMessageJids(chatId: string): string[] {
+		const raw = String(chatId || '').trim();
+		const ids = new Set<string>();
+		const add = (value: string | null | undefined) => {
+			const v = String(value || '').trim();
+			if (v) ids.add(v);
+		};
+		add(raw);
+		add(normalizeInboxJid(raw));
+		add(toBaileysJid(raw));
+		add(toBaileysJid(normalizeInboxJid(raw)));
+		for (const extra of this.collectMessageLookupIds(raw)) add(extra);
+		return [...ids];
+	}
+
+	private async loadMessageFromSocket(
+		chatId: string,
+		providerMessageId: string,
+	): Promise<NormalizedWhatsAppMessage | null> {
+		const sock = this.socket;
+		if (!sock || this.state !== 'connected') return null;
+		for (const jid of this.loadMessageJids(chatId)) {
+			if (typeof sock.loadMessage !== 'function') break;
+			try {
+				const raw = await sock.loadMessage(jid, providerMessageId);
+				const normalized = raw ? this.normalizeWaMessage(raw) : null;
+				if (normalized) {
+					this.rememberMessage(normalized, raw);
+					if (extractWhatsAppLocation(normalized)) {
+						return this.messageWithLocation(normalized);
+					}
+				}
+			} catch {
+				/* try the next JID shape */
+			}
+		}
+		return null;
+	}
+
+	private async requestMessageFromPhone(
+		chatId: string,
+		providerMessageId: string,
+	): Promise<NormalizedWhatsAppMessage | null> {
+		const sock = this.socket;
+		if (!sock || this.state !== 'connected') return null;
+		if (typeof sock.requestPlaceholderResend !== 'function') return null;
+		const remembered = this.findRememberedMessage(providerMessageId);
+		const raw = this.rawByMessageId.get(providerMessageId);
+		const fromMe = Boolean(raw?.key?.fromMe ?? remembered?.fromMe);
+		const jids = this.loadMessageJids(chatId || remembered?.chatId || raw?.key?.remoteJid);
+		let requested = false;
+		for (const jid of jids) {
+			try {
+				await sock.requestPlaceholderResend({
+					remoteJid: toBaileysJid(jid) || jid,
+					id: providerMessageId,
+					fromMe,
+					participant: raw?.key?.participant || undefined,
+				});
+				requested = true;
+				break;
+			} catch {
+				/* try the next JID shape */
+			}
+		}
+		if (!requested) return null;
+		await waitMs(2000);
+		return this.messageWithLocation(this.findMessage(providerMessageId));
+	}
+
+	private historyAnchorForChat(chatId: string): { key: any; timestamp: number } | null {
+		const ids = this.collectMessageLookupIds(chatId);
+		let oldest: NormalizedWhatsAppMessage | null = null;
+		let newest: NormalizedWhatsAppMessage | null = null;
+		for (const id of ids) {
+			const bucket = this.messagesByChat.get(id);
+			if (!bucket) continue;
+			for (const msg of bucket.values()) {
+				const ts = msg.timestamp?.getTime?.() || 0;
+				if (!oldest || ts < (oldest.timestamp?.getTime?.() || 0)) oldest = msg;
+				if (!newest || ts > (newest.timestamp?.getTime?.() || 0)) newest = msg;
+			}
+		}
+		const pick = oldest || newest;
+		if (!pick) return null;
+		const raw = this.rawByMessageId.get(pick.providerMessageId);
+		const key = raw?.key || {
+			remoteJid: toBaileysJid(pick.chatId) || pick.chatId,
+			id: pick.providerMessageId,
+			fromMe: pick.fromMe,
+		};
+		const timestamp =
+			Number(raw?.messageTimestamp) ||
+			Math.floor((pick.timestamp?.getTime?.() || Date.now()) / 1000);
+		if (!key?.id || !key?.remoteJid) return null;
+		return { key, timestamp };
+	}
+
+	private async pullHistoryThenFind(
+		chatId: string,
+		providerMessageId: string,
+	): Promise<NormalizedWhatsAppMessage | null> {
+		const sock = this.socket;
+		if (!sock || this.state !== 'connected') return null;
+		if (typeof sock.fetchMessageHistory !== 'function') return null;
+		const anchor = this.historyAnchorForChat(chatId);
+		if (!anchor) return null;
+		try {
+			await sock.fetchMessageHistory(30, anchor.key, anchor.timestamp);
+		} catch {
+			return null;
+		}
+		await waitMs(1500);
+		return this.messageWithLocation(this.findMessage(providerMessageId));
+	}
+
 	private findRememberedMessage(providerMessageId: string): NormalizedWhatsAppMessage | null {
 		for (const bucket of this.messagesByChat.values()) {
 			const found = bucket.get(providerMessageId);
@@ -1032,6 +1208,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			// Never use your own pushName to title the peer conversation.
 			contactName: fromMe ? null : raw.pushName || null,
 			attachments,
+			location: extractWhatsAppLocation({ type, raw }),
 			raw,
 		};
 	}

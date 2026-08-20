@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { User } from '../../../entities/global.entity';
+import { AiService } from '../../ai/ai.service';
 import { AiFreeService } from '../../ai-free/ai-free.service';
 import { AiFreeProviderName } from '../../ai-free/providers/ai-free-provider';
 import { EmailMemoNotificationSettings } from '../entities/email-memo.entity';
@@ -63,7 +64,10 @@ const FREE: AiFreeProviderName[] = ['llm7-free', 'pollinations-free', 'browser-c
 
 @Injectable()
 export class EmailMemoAiService {
-	constructor(private readonly aiFree: AiFreeService) {}
+	constructor(
+		private readonly aiFree: AiFreeService,
+		@Optional() private readonly ai?: AiService,
+	) {}
 
 	listStatus() {
 		const listed = this.aiFree.listProviders();
@@ -110,23 +114,60 @@ BODY:
 ${body}`;
 
 		const preferredRaw = String(input.settings.aiProvider || 'ai-free');
-		const preferred = (FREE.includes(preferredRaw as AiFreeProviderName)
+		let preferred = (FREE.includes(preferredRaw as AiFreeProviderName)
 			? preferredRaw
 			: 'llm7-free') as AiFreeProviderName;
+		let model: string | undefined;
+		let paidChoice: { provider: string; modelKey: string } | null = null;
+		if (this.ai) {
+			try {
+				const choice = await this.ai.resolveFeatureChoice({ id: input.userId }, 'email-memo');
+				if (FREE.includes(choice.provider as AiFreeProviderName)) {
+					preferred = choice.provider as AiFreeProviderName;
+					if (choice.modelKey && choice.modelKey !== 'auto') model = choice.modelKey;
+				} else if (choice.provider === 'ai-free') {
+					preferred = 'llm7-free';
+					if (choice.modelKey && choice.modelKey !== 'auto') model = choice.modelKey;
+				} else {
+					paidChoice = { provider: choice.provider, modelKey: choice.modelKey };
+				}
+			} catch {
+				// Keep local email-memo provider if workspace defaults are unavailable.
+			}
+		}
 
-		const chatInput: Parameters<AiFreeService['chat']>[1] = {
-			messages: [
-				{ role: 'system', content: system.slice(0, 8000) },
-				{ role: 'user', content: prompt.slice(0, 16000) },
-			],
-			provider: preferred,
-			allowFallback: true,
-			useProjectKnowledge: false,
-		};
+		let reply = '';
+		let provider: string = preferred;
+		let actualModel = model || preferred;
+		if (paidChoice && this.ai) {
+			const generated = await this.ai.generateText({
+				prompt: prompt.slice(0, 16000),
+				system: system.slice(0, 8000),
+				model: paidChoice.modelKey,
+				feature: 'email-memo',
+				user: { id: input.userId },
+			});
+			reply = generated.text;
+			provider = paidChoice.provider;
+			actualModel = generated.model || paidChoice.modelKey;
+		} else {
+			const result = await this.aiFree.chat({ id: input.userId } as User, {
+				messages: [
+					{ role: 'system', content: system.slice(0, 8000) },
+					{ role: 'user', content: prompt.slice(0, 16000) },
+				],
+				provider: preferred,
+				model,
+				feature: 'email-memo',
+				allowFallback: true,
+				useProjectKnowledge: false,
+			});
+			reply = result.reply;
+			provider = result.provider || preferred;
+			actualModel = result.actualModel || preferred;
+		}
 
-		const result = await this.aiFree.chat({ id: input.userId } as User, chatInput);
-
-		const parsed = safeJson(result.reply);
+		const parsed = safeJson(reply);
 		const facts = Array.isArray(parsed?.facts)
 			? parsed.facts.map((item: unknown) => String(item || '').trim()).filter(Boolean)
 			: [];
@@ -144,8 +185,8 @@ ${body}`;
 				.trim()
 				.replace(/^[\s"«»]+|[\s"«»]+$/g, '') || fallbackArabic(parsed?.from || input.senderName, parsed?.subject || input.subject);
 		return {
-			provider: result.provider || 'ai-free',
-			model: result.actualModel || preferred,
+			provider,
+			model: actualModel,
 			memoText,
 			arabicSummary,
 			actionText: action,

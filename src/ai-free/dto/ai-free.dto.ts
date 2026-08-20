@@ -50,9 +50,14 @@ export class AiFreeChatDto {
   @IsBoolean()
   allowFallback?: boolean;
 
-  @IsOptional()
-  @IsBoolean()
-  useProjectKnowledge?: boolean;
+	@IsOptional()
+	@IsBoolean()
+	useProjectKnowledge?: boolean;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(80)
+	feature?: string;
 }
 
 export class AiFreeTitleDto {

@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/global.entity';
 import { AiFreeModule } from '../ai-free/ai-free.module';
+import { AiModule } from '../ai/ai.module';
 import { WhatsAppModule } from '../whatsapp/whatsapp.module';
 import { EmailMemoController } from './email-memo.controller';
 import { EmailMemoWebhookController } from './email-memo-webhook.controller';
@@ -22,6 +23,7 @@ import { EmailMemoWhatsAppService } from './services/email-memo-whatsapp.service
 	imports: [
 		ConfigModule,
 		AiFreeModule,
+		AiModule,
 		WhatsAppModule,
 		TypeOrmModule.forFeature([...EMAIL_MEMO_ENTITIES, User]),
 		JwtModule.registerAsync({

@@ -1,3 +1,5 @@
+import { toCoord } from './whatsapp-location';
+
 function bytesToBase64(value: any): string | undefined {
 	if (value == null) return undefined;
 	if (typeof value === 'string') return value;
@@ -56,6 +58,8 @@ function contextInfoOf(content: any) {
 		content.audioMessage?.contextInfo ||
 		content.documentMessage?.contextInfo ||
 		content.stickerMessage?.contextInfo ||
+		content.locationMessage?.contextInfo ||
+		content.liveLocationMessage?.contextInfo ||
 		null
 	);
 }
@@ -84,7 +88,34 @@ function sanitizeQuotedMessage(quoted: any) {
 			...(jpegThumbnail ? { jpegThumbnail } : {}),
 		};
 	}
+	if (content.locationMessage) {
+		const location = sanitizeLocationNode(content.locationMessage, false);
+		if (location) out.locationMessage = location;
+	}
+	if (content.liveLocationMessage) {
+		const location = sanitizeLocationNode(content.liveLocationMessage, false);
+		if (location) out.liveLocationMessage = location;
+	}
 	return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeLocationNode(node: any, withContext = true) {
+	if (!node || typeof node !== 'object') return null;
+	const jpegThumbnail = bytesToBase64(node.jpegThumbnail);
+	const contextInfo = withContext ? sanitizeContextInfo(node.contextInfo) : undefined;
+	const out: Record<string, unknown> = {};
+	const latitude = toCoord(node.degreesLatitude ?? node.latitude ?? node.lat);
+	const longitude = toCoord(node.degreesLongitude ?? node.longitude ?? node.lng ?? node.lon);
+	if (latitude != null) out.degreesLatitude = latitude;
+	if (longitude != null) out.degreesLongitude = longitude;
+	if (typeof node.name === 'string') out.name = node.name;
+	if (typeof node.address === 'string') out.address = node.address;
+	if (typeof node.comment === 'string') out.comment = node.comment;
+	if (typeof node.caption === 'string') out.caption = node.caption;
+	if (typeof node.url === 'string') out.url = node.url;
+	if (jpegThumbnail) out.jpegThumbnail = jpegThumbnail;
+	if (contextInfo) out.contextInfo = contextInfo;
+	return Object.keys(out).length ? out : null;
 }
 
 function sanitizeContextInfo(info: any) {
@@ -160,6 +191,22 @@ export function sanitizeBaileysWaMessage(raw: any) {
 			content.stickerMessage,
 	);
 	if (!hasMedia) {
+		const locationMessage = content.locationMessage
+			? sanitizeLocationNode(content.locationMessage)
+			: null;
+		const liveLocationMessage = content.liveLocationMessage
+			? sanitizeLocationNode(content.liveLocationMessage)
+			: null;
+		if (locationMessage || liveLocationMessage) {
+			const message: Record<string, unknown> = {
+				...(locationMessage ? { locationMessage } : {}),
+				...(liveLocationMessage ? { liveLocationMessage } : {}),
+			};
+			if (source.message.ephemeralMessage) {
+				return baileysEnvelope(source, { ephemeralMessage: { message } });
+			}
+			return baileysEnvelope(source, message);
+		}
 		const contextInfo = sanitizeContextInfo(contextInfoOf(content));
 		const message: Record<string, unknown> = {};
 		if (content.extendedTextMessage) {

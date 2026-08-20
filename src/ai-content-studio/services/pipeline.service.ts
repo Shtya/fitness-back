@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AiService } from '../../ai/ai.service';
 import {
   AiContentStudioConfigEntity,
   AiContentStudioExecutionEntity,
@@ -109,6 +110,7 @@ export class PipelineService {
     private readonly research: TopicResearchService,
     private readonly fbBrowser: BrowserFacebookPublisher,
     private readonly igBrowser: BrowserInstagramPublisher,
+    @Optional() private readonly ai?: AiService,
   ) {}
 
   defaults(): StudioPipelineConfig {
@@ -174,17 +176,44 @@ export class PipelineService {
     };
   }
 
+  async defaultsFor(user?: { id?: string; tenantId?: string | null; tokenTenantId?: string | null }) {
+    const base = this.defaults();
+    if (!user?.id || !this.ai) return base;
+    return this.applyWorkspaceFeatureDefaults(base, user);
+  }
+
+  private async applyWorkspaceFeatureDefaults(
+    config: StudioPipelineConfig,
+    user: { id?: string; tenantId?: string | null; tokenTenantId?: string | null },
+  ): Promise<StudioPipelineConfig> {
+    if (!this.ai) return config;
+    try {
+      const [studio, studioImage] = await Promise.all([
+        this.ai.resolveFeatureChoice(user as any, 'studio'),
+        this.ai.resolveFeatureChoice(user as any, 'studio-image'),
+      ]);
+      return {
+        ...config,
+        topic: { ...config.topic, provider: studio.provider, model: studio.modelKey },
+        content: { ...config.content, provider: studio.provider, model: studio.modelKey },
+        image: { ...config.image, provider: studioImage.provider, model: studioImage.modelKey },
+      };
+    } catch {
+      return config;
+    }
+  }
+
   async getConfig(userId: string) {
     const row = await this.configRepo.findOne({ where: { userId } });
     const base = this.defaults();
-    if (!row) {
-      return { ...base, automationEnabled: false };
-    }
-    return this.normalizeConfig({
-      ...base,
-      ...(row.configJson || {}),
-      automationEnabled: row.automationEnabled,
-    });
+    const merged = !row
+      ? { ...base, automationEnabled: false }
+      : this.normalizeConfig({
+          ...base,
+          ...(row.configJson || {}),
+          automationEnabled: row.automationEnabled,
+        });
+    return this.applyWorkspaceFeatureDefaults(merged, { id: userId });
   }
 
   /** Move retired free no-key stacks to Gemini + Nano Banana Pro. */
