@@ -38,6 +38,8 @@ import {
 	WhatsAppVoiceChangerCredential,
 	WhatsAppVoiceChangerSettings,
 	WhatsAppSavedSticker,
+	WhatsAppChatMessageGroup,
+	WhatsAppChatMessageGroupItem,
 } from './entities/whatsapp.entity';
 import { WhatsAppAccessService } from './services/whatsapp-access.service';
 import { WhatsAppAccountsService } from './services/whatsapp-accounts.service';
@@ -52,6 +54,7 @@ import { WhatsAppReportsService } from './services/whatsapp-reports.service';
 import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
+import { WhatsAppMessageGroupsService } from './services/whatsapp-message-groups.service';
 import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
 import { TranscriptionModule } from '../transcription/transcription.module';
 import { AiModule } from '../ai/ai.module';
@@ -76,6 +79,8 @@ export const WHATSAPP_ENTITIES = [
 	WhatsAppVoiceChangerSettings,
 	WhatsAppVoiceChangerCredential,
 	WhatsAppSavedSticker,
+	WhatsAppChatMessageGroup,
+	WhatsAppChatMessageGroupItem,
 ];
 
 @Module({
@@ -117,6 +122,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppSchemaService,
 		WhatsAppVoiceChangerService,
 		WhatsAppStickersService,
+		WhatsAppMessageGroupsService,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
 		HuggingFaceWhatsAppImageProvider,

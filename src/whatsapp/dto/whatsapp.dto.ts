@@ -1,5 +1,6 @@
 import {
 	IsArray,
+	ArrayNotEmpty,
 	IsBoolean,
 	IsIn,
 	IsOptional,
@@ -131,6 +132,27 @@ export class CreateWhatsAppConversationNoteDto {
 	@MinLength(1)
 	@MaxLength(2000)
 	text: string;
+}
+
+export class CreateWhatsAppMessageGroupDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	name: string;
+}
+
+export class RenameWhatsAppMessageGroupDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	name: string;
+}
+
+export class WhatsAppMessageGroupMessagesDto {
+	@IsArray()
+	@ArrayNotEmpty()
+	@IsUUID('4', { each: true })
+	messageIds: string[];
 }
 
 export class PublishWhatsAppStatusDto {

@@ -25,13 +25,17 @@ import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
 	CreateWhatsAppConversationNoteDto,
+	CreateWhatsAppMessageGroupDto,
 	DeleteWhatsAppMessageDto,
 	ForwardWhatsAppMessageDto,
 	ReactWhatsAppMessageDto,
+	RenameWhatsAppMessageGroupDto,
 	SendWhatsAppMessageDto,
 	ToggleWhatsAppMessageDto,
+	WhatsAppMessageGroupMessagesDto,
 } from '../dto/whatsapp.dto';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
+import { WhatsAppMessageGroupsService } from '../services/whatsapp-message-groups.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 
 const mediaRoot = () =>
@@ -66,6 +70,7 @@ export class WhatsAppConversationsController {
 	constructor(
 		private readonly sync: WhatsAppSyncService,
 		private readonly access: WhatsAppAccessService,
+		private readonly messageGroups: WhatsAppMessageGroupsService,
 	) {}
 
 	@Get('unread')
@@ -323,6 +328,78 @@ export class WhatsAppConversationsController {
 		@Body() body: CreateWhatsAppConversationNoteDto,
 	) {
 		return this.sync.createConversationNote(req.user, conversationId, body.text);
+	}
+
+	@Get('conversations/:conversationId/message-groups')
+	listMessageGroups(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.messageGroups.list(req.user, conversationId);
+	}
+
+	@Get('conversations/:conversationId/message-groups/membership')
+	messageGroupMembership(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.messageGroups.membershipMap(req.user, conversationId);
+	}
+
+	@Post('conversations/:conversationId/message-groups')
+	createMessageGroup(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: CreateWhatsAppMessageGroupDto,
+	) {
+		return this.messageGroups.create(req.user, conversationId, body.name);
+	}
+
+	@Put('conversations/:conversationId/message-groups/:groupId')
+	renameMessageGroup(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('groupId') groupId: string,
+		@Body() body: RenameWhatsAppMessageGroupDto,
+	) {
+		return this.messageGroups.rename(req.user, conversationId, groupId, body.name);
+	}
+
+	@Delete('conversations/:conversationId/message-groups/:groupId')
+	deleteMessageGroup(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('groupId') groupId: string,
+	) {
+		return this.messageGroups.remove(req.user, conversationId, groupId);
+	}
+
+	@Get('conversations/:conversationId/message-groups/:groupId/messages')
+	listMessageGroupMessages(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('groupId') groupId: string,
+	) {
+		return this.messageGroups.listGroupMessages(req.user, conversationId, groupId);
+	}
+
+	@Post('conversations/:conversationId/message-groups/:groupId/messages')
+	addMessagesToGroup(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('groupId') groupId: string,
+		@Body() body: WhatsAppMessageGroupMessagesDto,
+	) {
+		return this.messageGroups.addMessages(req.user, conversationId, groupId, body.messageIds);
+	}
+
+	@Post('conversations/:conversationId/message-groups/:groupId/messages/remove')
+	removeMessagesFromGroup(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('groupId') groupId: string,
+		@Body() body: WhatsAppMessageGroupMessagesDto,
+	) {
+		return this.messageGroups.removeMessages(
+			req.user,
+			conversationId,
+			groupId,
+			body.messageIds,
+		);
 	}
 
 	@Post('conversations/:conversationId/messages')

@@ -16,10 +16,16 @@ describe('WhatsAppConversationsController', () => {
 			syncConversation: jest.fn(),
 		};
 		const access = { assertAccountPermission: jest.fn() };
+		const messageGroups = {};
 		return {
-			controller: new WhatsAppConversationsController(sync as any, access as any),
+			controller: new WhatsAppConversationsController(
+				sync as any,
+				access as any,
+				messageGroups as any,
+			),
 			sync,
 			access,
+			messageGroups,
 		};
 	}
 

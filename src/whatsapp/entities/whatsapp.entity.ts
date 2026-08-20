@@ -714,3 +714,63 @@ export class WhatsAppSavedSticker extends CoreEntity {
 	@Column({ name: 'is_animated', type: 'boolean', default: false })
 	isAnimated: boolean;
 }
+
+@Entity('whatsapp_chat_message_groups')
+@Index('idx_whatsapp_chat_message_groups_conversation', ['conversationId'])
+export class WhatsAppChatMessageGroup extends CoreEntity {
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ type: 'varchar', length: 120 })
+	name: string;
+}
+
+@Entity('whatsapp_chat_message_group_items')
+@Index('idx_whatsapp_chat_message_group_items_group', ['groupId'])
+@Index('idx_whatsapp_chat_message_group_items_conversation', ['conversationId'])
+export class WhatsAppChatMessageGroupItem extends CoreEntity {
+	@Index()
+	@Column({ name: 'group_id', type: 'uuid' })
+	groupId: string;
+
+	@ManyToOne(() => WhatsAppChatMessageGroup, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'group_id' })
+	group: WhatsAppChatMessageGroup;
+
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Index()
+	@Column({ name: 'message_id', type: 'uuid' })
+	messageId: string;
+
+	@ManyToOne(() => WhatsAppMessage, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'message_id' })
+	message: WhatsAppMessage;
+
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+}
