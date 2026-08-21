@@ -20,6 +20,9 @@ Initial Load (Postgres) → Cached UI → Background hydrate → Incremental rec
 ```
 
 - First paint comes from Postgres. The workspace must not wait for a full provider dump.
+- Open-chat `POST .../sync/latest` is hydration-aware: skipped when `lastProviderSyncAt` is fresh and local rows exist. Pass `?force=1` only for gap repair / empty-thread recovery.
+- Soft catch-up uses provider `after: newestLocalProviderId` instead of re-pulling a full latest page every open.
+- Frontend mirrors this with `whatsapp-message-sync.js` (`shouldProviderBackfill` / `shouldSkipOpenChatNetwork`) — short chats are not treated as incomplete merely because they have fewer than 100 messages.
 - `syncFullHistory` is **off** unless `WHATSAPP_SYNC_FULL_HISTORY=1|true|yes`.
 - After `initialHydratedAt` is set, reconnect/restart runs an incremental inbox pass, not another full bootstrap.
 - History chunks are persisted in bulk and debounced into a single inbox reconcile.

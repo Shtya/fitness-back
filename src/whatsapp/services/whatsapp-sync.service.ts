@@ -48,6 +48,7 @@ import {
 	whatsAppTimestampToMs,
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
+import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -3986,7 +3987,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
-	async syncConversation(user: User, conversationId: string, mode: 'latest' | 'older', limit = 30) {
+	async syncConversation(
+		user: User,
+		conversationId: string,
+		mode: 'latest' | 'older',
+		limit = 30,
+		options: { force?: boolean } = {},
+	) {
+		const force = Boolean(options.force);
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -3994,17 +4002,25 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send/sync access denied');
 		const provider = this.requireProvider(conversation.accountId);
 		if (!provider.capabilities.history) {
-			return { supported: false, items: [], hasMore: false };
+			return { supported: false, items: [], hasMore: false, syncReason: 'unsupported' };
 		}
-		const [oldestBeforeSync, localCount] = await Promise.all([
+		const [oldestBeforeSync, newestLocal, localCount] = await Promise.all([
 			this.messageRepo.findOne({
 				where: { conversationId },
 				order: { providerTimestamp: 'ASC' },
 			}),
+			this.messageRepo.findOne({
+				where: { conversationId },
+				order: { providerTimestamp: 'DESC' },
+			}),
 			this.messageRepo.count({ where: { conversationId } }),
 		]);
 		const requestedLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
-		const returnLocalOnly = async (syncError: string, message?: string) => ({
+		const returnLocalOnly = async (
+			syncError: string,
+			message?: string,
+			extra: Record<string, unknown> = {},
+		) => ({
 			supported: true,
 			// Never live-pull again here — we just tried the provider.
 			items: await this.listMessages(
@@ -4017,9 +4033,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			hasMore: Boolean(conversation.hasMoreProviderHistory),
 			syncSkipped: true,
 			syncError,
+			syncReason: syncError,
 			cooldownMs: provider.getChatStoreCooldownMs?.() || 0,
+			lastProviderSyncAt: conversation.lastProviderSyncAt,
 			message,
+			...extra,
 		});
+		const freshSkip = shouldSkipFreshProviderSync({
+			mode,
+			force,
+			localCount,
+			lastProviderSyncAt: conversation.lastProviderSyncAt,
+		});
+		if (freshSkip.skip) {
+			return returnLocalOnly('fresh', undefined, {
+				syncReason: 'fresh',
+			});
+		}
 		const cooldownMs = provider.getChatStoreCooldownMs?.() || 0;
 		if (cooldownMs > 0) {
 			// Empty chats must still attempt history once — otherwise GET /messages
@@ -4046,15 +4076,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				aliases.push(`${resolvedPhone}@c.us`, `${resolvedPhone}@s.whatsapp.net`);
 			}
 		}
+		// Soft catch-up: only ask the provider for messages newer than our newest
+		// local row. Full latest page remains available via force=1 (gap repair).
+		const afterCursor =
+			mode === 'latest' && !force && localCount > 0
+				? String(newestLocal?.providerMessageId || '').trim() || undefined
+				: undefined;
 		let messages: Awaited<ReturnType<WhatsAppProvider['getMessages']>>;
 		try {
 			messages = await provider.getMessages(conversation.providerChatId, {
 				limit: requestedLimit,
 				before: mode === 'older' ? conversation.oldestProviderCursor || undefined : undefined,
-				// Always pull the latest page for "latest" sync and merge into DB.
-				// Using `after: latestLocal` previously skipped mid-history gaps when
-				// a partial prefetch left 50+ rows that were not actually contiguous.
-				after: undefined,
+				after: afterCursor,
 				aliases: [...new Set(aliases)],
 			});
 		} catch (error) {
@@ -4100,6 +4133,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					'WhatsApp Web is still syncing with the phone. Messages will appear when ready.',
 				);
 			}
+			// Catch-up found nothing new — stamp hydration so reopen stays soft.
+			await this.conversationRepo.update(conversation.id, {
+				lastProviderSyncAt: new Date(),
+			});
 			const items = await this.listMessages(
 				user,
 				conversationId,
@@ -4111,6 +4148,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				supported: true,
 				items,
 				hasMore: Boolean(conversation.hasMoreProviderHistory),
+				syncReason: afterCursor ? 'caught_up' : 'empty_provider_page',
+				lastProviderSyncAt: new Date(),
 			};
 		}
 		// Persist provider history with bounded concurrency. Sequential hydration
@@ -4223,6 +4262,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				supported: true,
 				items,
 				hasMore: nextHasMore,
+				syncReason: afterCursor ? 'incremental' : force ? 'forced' : 'full_latest',
+				lastProviderSyncAt: new Date(),
 			};
 		}
 		// If DB still empty after persist attempts, serve linked-device payload directly.
@@ -4231,6 +4272,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			items: this.mapLiveMessagesForApi(conversationId, messages),
 			hasMore: nextHasMore,
 			source: 'linked_device',
+			syncReason: 'linked_device',
+			lastProviderSyncAt: new Date(),
 		};
 	}
 

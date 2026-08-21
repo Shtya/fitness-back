@@ -294,8 +294,12 @@ export class WhatsAppConversationsController {
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
 		@Query('limit') limit = '100',
+		@Query('force') force?: string,
 	) {
-		return this.sync.syncConversation(req.user, conversationId, 'latest', Number(limit));
+		const forceSync = ['1', 'true', 'yes'].includes(String(force || '').toLowerCase());
+		return this.sync.syncConversation(req.user, conversationId, 'latest', Number(limit), {
+			force: forceSync,
+		});
 	}
 
 	@Post('conversations/:conversationId/sync/older')
@@ -303,8 +307,12 @@ export class WhatsAppConversationsController {
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
 		@Query('limit') limit = '100',
+		@Query('force') force?: string,
 	) {
-		return this.sync.syncConversation(req.user, conversationId, 'older', Number(limit));
+		const forceSync = ['1', 'true', 'yes'].includes(String(force || '').toLowerCase());
+		return this.sync.syncConversation(req.user, conversationId, 'older', Number(limit), {
+			force: forceSync,
+		});
 	}
 
 	@Post('conversations/:conversationId/read')
