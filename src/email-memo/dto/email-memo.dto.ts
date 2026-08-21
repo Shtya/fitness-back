@@ -128,6 +128,10 @@ export class UpdateEmailMemoSettingsDto {
 	targetChatName?: string | null;
 
 	@IsOptional()
+	@IsIn(['whatsapp', 'in_site', 'both'])
+	deliveryDestination?: string;
+
+	@IsOptional()
 	@IsInt()
 	@Min(1)
 	@Max(24)

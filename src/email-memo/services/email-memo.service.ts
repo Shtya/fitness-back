@@ -13,6 +13,7 @@ import { EmailMemoGmailService } from './email-memo-gmail.service';
 import { EmailMemoProcessorService } from './email-memo-processor.service';
 import { EmailMemoSettingsService } from './email-memo-settings.service';
 import { EmailMemoWhatsAppService } from './email-memo-whatsapp.service';
+import { EmailMemoInSiteInboxService } from './email-memo-insite-inbox.service';
 
 @Injectable()
 export class EmailMemoService {
@@ -22,6 +23,7 @@ export class EmailMemoService {
 		private readonly settings: EmailMemoSettingsService,
 		private readonly processor: EmailMemoProcessorService,
 		private readonly ai: EmailMemoAiService,
+		private readonly inSiteInbox: EmailMemoInSiteInboxService,
 		@InjectRepository(EmailMemoGmailMessage)
 		private readonly messages: Repository<EmailMemoGmailMessage>,
 		@InjectRepository(EmailMemoProcessingLog)
@@ -245,13 +247,22 @@ export class EmailMemoService {
 	}
 
 	async sendNow(userId: string, opts: { ids?: string[]; limit?: number } = {}) {
-		const wa = await this.whatsapp.getConnection(userId);
-		if (!wa.connected) throw new BadRequestException('WhatsApp is not connected');
+		const settings = await this.settings.getOrCreate(userId);
+		const dest = String(settings.deliveryDestination || 'whatsapp').toLowerCase();
+		const needsPhone = dest === 'whatsapp' || dest === 'both';
+		if (needsPhone) {
+			const wa = await this.whatsapp.getConnection(userId);
+			if (!wa.connected) throw new BadRequestException('WhatsApp is not connected');
+		}
 		return this.processor.sendNow(userId, opts);
 	}
 
 	async updateSettings(userId: string, dto: UpdateEmailMemoSettingsDto) {
 		const row = await this.settings.update(userId, dto);
+		const dest = String(row.deliveryDestination || 'whatsapp').toLowerCase();
+		if (dest === 'in_site' || dest === 'both') {
+			void this.inSiteInbox.ensurePinnedInbox(userId).catch(() => undefined);
+		}
 		return this.settings.toPublic(row);
 	}
 

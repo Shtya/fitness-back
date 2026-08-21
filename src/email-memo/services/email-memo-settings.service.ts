@@ -31,6 +31,7 @@ const DEFAULTS: Partial<EmailMemoNotificationSettings> = {
 	notificationMode: 'immediate',
 	targetChatId: null,
 	targetChatName: null,
+	deliveryDestination: 'whatsapp',
 	pollIntervalHours: 1,
 };
 
@@ -87,6 +88,11 @@ export class EmailMemoSettingsService {
 			notificationMode: row.notificationMode,
 			targetChatId: row.targetChatId,
 			targetChatName: row.targetChatName,
+			deliveryDestination: ['whatsapp', 'in_site', 'both'].includes(
+				String(row.deliveryDestination || ''),
+			)
+				? row.deliveryDestination
+				: 'whatsapp',
 			pollIntervalHours: Math.min(24, Math.max(1, Number(row.pollIntervalHours) || 1)),
 		};
 	}

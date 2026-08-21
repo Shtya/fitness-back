@@ -2930,6 +2930,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
 					isArchived: Boolean(preference?.isArchived),
+					isEmailMemoAi:
+						String(item.providerChatId || '') === 'email-memo-ai@so7ba.internal',
 					lastMessage: (() => {
 						const message = lastMessageByConversationId.get(item.id);
 						return message
@@ -2968,6 +2970,55 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isPinned: Boolean(isPinned),
 		});
 		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
+	}
+
+	/**
+	 * Post an Email Memo summary into the CRM WhatsApp inbox as a pinned "AI" chat.
+	 * Does not touch the linked phone / Baileys send path.
+	 */
+	async postEmailMemoSiteMessage(input: {
+		accountId: string;
+		userId: string;
+		text: string;
+		providerMessageId: string;
+		title?: string;
+	}) {
+		const chatId = 'email-memo-ai@so7ba.internal';
+		const title = String(input.title || 'AI').trim() || 'AI';
+		const text = String(input.text || '').trim();
+		if (!text) throw new BadRequestException('Email memo text is required');
+		const saved = await this.persistMessage(
+			input.accountId,
+			{
+				providerMessageId: String(input.providerMessageId),
+				chatId,
+				fromMe: false,
+				type: 'text',
+				text,
+				timestamp: new Date(),
+				timestampReliable: true,
+				contactName: title,
+				senderWaId: chatId,
+				raw: { __emailMemoAi: true, source: 'email-memo' },
+			},
+			null,
+			false,
+			{ emitEvents: true },
+		);
+		const conversationId = saved.conversationId;
+		await this.conversationRepo.update(conversationId, {
+			lastMessageAt: saved.providerTimestamp || new Date(),
+		});
+		await this.saveConversationPreference(input.userId, conversationId, {
+			isPinned: true,
+			isArchived: false,
+		});
+		return {
+			conversationId,
+			messageId: saved.id,
+			providerMessageId: saved.providerMessageId,
+			accountId: input.accountId,
+		};
 	}
 
 	async setConversationArchived(user: User, conversationId: string, isArchived: boolean) {
@@ -4000,6 +4051,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversationId,
 		);
 		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send/sync access denied');
+		const providerChatIdEarly = String(conversation.providerChatId || '');
+		if (providerChatIdEarly.endsWith('@so7ba.internal')) {
+			const requestedLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
+			return {
+				supported: true,
+				items: await this.listMessages(
+					user,
+					conversationId,
+					undefined,
+					requestedLimit,
+					{ allowLivePull: false },
+				),
+				hasMore: false,
+				syncSkipped: true,
+				syncReason: 'internal_inbox',
+			};
+		}
 		const provider = this.requireProvider(conversation.accountId);
 		if (!provider.capabilities.history) {
 			return { supported: false, items: [], hasMore: false, syncReason: 'unsupported' };

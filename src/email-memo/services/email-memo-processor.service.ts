@@ -16,6 +16,7 @@ import { EmailMemoAiService } from './email-memo-ai.service';
 import { EmailMemoGmailService } from './email-memo-gmail.service';
 import { EmailMemoSettingsService } from './email-memo-settings.service';
 import { EmailMemoWhatsAppService } from './email-memo-whatsapp.service';
+import { EmailMemoInSiteInboxService } from './email-memo-insite-inbox.service';
 import { EmailMemoGateway } from '../email-memo.gateway';
 import {
 	ExtractedGmailMessage,
@@ -38,6 +39,23 @@ function matchList(values: string[] = [], haystack: string) {
 	return values.some((value) => value && text.includes(String(value).toLowerCase()));
 }
 
+function normalizeDeliveryDestination(value?: string | null) {
+	const dest = String(value || 'whatsapp').trim().toLowerCase();
+	if (dest === 'in_site' || dest === 'both' || dest === 'whatsapp') return dest;
+	return 'whatsapp';
+}
+
+function wantsWhatsAppDelivery(settings: EmailMemoNotificationSettings, forceSend = false) {
+	const dest = normalizeDeliveryDestination(settings.deliveryDestination);
+	if (dest !== 'whatsapp' && dest !== 'both') return false;
+	return Boolean(settings.whatsappEnabled || forceSend);
+}
+
+function wantsInSiteDelivery(settings: EmailMemoNotificationSettings) {
+	const dest = normalizeDeliveryDestination(settings.deliveryDestination);
+	return dest === 'in_site' || dest === 'both';
+}
+
 @Injectable()
 export class EmailMemoProcessorService {
 	private readonly logger = new Logger(EmailMemoProcessorService.name);
@@ -51,6 +69,7 @@ export class EmailMemoProcessorService {
 		private readonly settings: EmailMemoSettingsService,
 		private readonly ai: EmailMemoAiService,
 		private readonly whatsapp: EmailMemoWhatsAppService,
+		private readonly inSiteInbox: EmailMemoInSiteInboxService,
 		private readonly gateway: EmailMemoGateway,
 		@InjectRepository(EmailMemoGmailMessage)
 		private readonly messages: Repository<EmailMemoGmailMessage>,
@@ -457,7 +476,11 @@ export class EmailMemoProcessorService {
 				return;
 			}
 
-			if (!cfg.whatsappEnabled && !opts.forceSend) {
+			if (
+				!wantsWhatsAppDelivery(cfg, Boolean(opts.forceSend)) &&
+				!wantsInSiteDelivery(cfg) &&
+				!opts.forceSend
+			) {
 				row.processedAt = new Date();
 				await this.messages.save(row);
 				return;
@@ -472,7 +495,7 @@ export class EmailMemoProcessorService {
 				return;
 			}
 
-			await this.deliver(row, memo, cfg);
+			await this.deliver(row, memo, cfg, { forceSend: Boolean(opts.forceSend) });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			row.status = EmailMemoMessageStatus.FAILED;
@@ -493,6 +516,7 @@ export class EmailMemoProcessorService {
 		row: EmailMemoGmailMessage,
 		memo: EmailMemoAiMemo,
 		settings: EmailMemoNotificationSettings,
+		opts: { forceSend?: boolean } = {},
 	) {
 		const already = await this.waMessages.findOne({
 			where: { gmailMessageId: row.id, status: EmailMemoDeliveryStatus.SENT },
@@ -507,36 +531,87 @@ export class EmailMemoProcessorService {
 		}
 		row.status = EmailMemoMessageStatus.SENDING;
 		await this.messages.save(row);
-		const chatId = await this.whatsapp.resolveTargetChat(row.userId, settings.targetChatId);
-		const linked = await this.whatsapp.getConnection(row.userId);
-		if (!linked.connected || !chatId) {
-			throw new Error('WhatsApp is not connected');
+
+		const sendWa = wantsWhatsAppDelivery(settings, Boolean(opts.forceSend));
+		const sendInSite = wantsInSiteDelivery(settings) || (!sendWa && Boolean(opts.forceSend));
+		const errors: string[] = [];
+		let delivered = false;
+		let waRecordId: string | null = null;
+		let chatId: string | null = null;
+
+		if (sendInSite) {
+			try {
+				const posted = await this.inSiteInbox.deliverMemo({
+					userId: row.userId,
+					text: memo.formattedMessage,
+					memoId: memo.id,
+					gmailMessageId: row.id,
+				});
+				chatId = posted.chatId;
+				const wa = await this.waMessages.save(
+					this.waMessages.create({
+						userId: row.userId,
+						gmailMessageId: row.id,
+						aiMemoId: memo.id,
+						chatId: posted.chatId,
+						providerMessageId: posted.results[0]?.providerMessageId || `in-site:${memo.id}`,
+						body: memo.formattedMessage,
+						status: EmailMemoDeliveryStatus.SENT,
+						sentAt: new Date(),
+					}),
+				);
+				waRecordId = wa.id;
+				delivered = true;
+				await this.log(row.userId, row.id, 'in_site', 'info', 'Memo posted to WhatsApp AI inbox');
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
 		}
-		const sent = await this.whatsapp.sendText(row.userId, chatId, memo.formattedMessage);
-		const wa = await this.waMessages.save(
-			this.waMessages.create({
-				userId: row.userId,
-				gmailMessageId: row.id,
-				aiMemoId: memo.id,
-				chatId,
-				providerMessageId: sent.id,
-				body: memo.formattedMessage,
-				status: EmailMemoDeliveryStatus.SENT,
-				sentAt: new Date(),
-			}),
-		);
+
+		if (sendWa) {
+			try {
+				chatId = await this.whatsapp.resolveTargetChat(row.userId, settings.targetChatId);
+				const linked = await this.whatsapp.getConnection(row.userId);
+				if (!linked.connected || !chatId) {
+					throw new Error('WhatsApp is not connected');
+				}
+				const sent = await this.whatsapp.sendText(row.userId, chatId, memo.formattedMessage);
+				const wa = await this.waMessages.save(
+					this.waMessages.create({
+						userId: row.userId,
+						gmailMessageId: row.id,
+						aiMemoId: memo.id,
+						chatId,
+						providerMessageId: sent.id,
+						body: memo.formattedMessage,
+						status: EmailMemoDeliveryStatus.SENT,
+						sentAt: new Date(),
+					}),
+				);
+				waRecordId = wa.id;
+				delivered = true;
+				await this.log(row.userId, row.id, 'whatsapp', 'info', 'Memo sent');
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+
+		if (!delivered) {
+			throw new Error(errors.join(' | ') || 'Email memo delivery failed');
+		}
+
 		row.status = EmailMemoMessageStatus.SENT;
 		row.processedAt = new Date();
-		row.errorMessage = null;
+		row.errorMessage = errors.length ? errors.join(' | ') : null;
 		row.skipReason = null;
 		row.nextRetryAt = null;
 		await this.messages.save(row);
 		await this.bumpUsage(row.userId, 'whatsapp_sent');
-		await this.log(row.userId, row.id, 'whatsapp', 'info', 'Memo sent');
 		this.gateway.emitToUser(row.userId, 'email-memo:message', {
 			id: row.id,
 			status: row.status,
-			whatsappMessageId: wa.id,
+			whatsappMessageId: waRecordId,
+			deliveryDestination: normalizeDeliveryDestination(settings.deliveryDestination),
 		});
 	}
 
@@ -600,20 +675,51 @@ export class EmailMemoProcessorService {
 			const settings = await this.settings.getOrCreate(userId);
 			if (settings.notificationMode === 'immediate') continue;
 			const memoLines: string[] = ['📧 Email Memo Digest', ''];
+			const memoRows: Array<{ row: EmailMemoGmailMessage; memo: EmailMemoAiMemo }> = [];
 			for (const row of rows) {
 				const memo = await this.memos.findOne({ where: { gmailMessageId: row.id } });
 				if (!memo) continue;
 				memoLines.push(memo.formattedMessage, '');
+				memoRows.push({ row, memo });
 			}
-			if (memoLines.length <= 2) continue;
+			if (memoLines.length <= 2 || !memoRows.length) continue;
+			const digestText = memoLines.join('\n').trim();
 			try {
-				const chatId = await this.whatsapp.resolveTargetChat(userId, settings.targetChatId);
-				const linked = await this.whatsapp.getConnection(userId);
-				if (!linked.connected || !chatId) {
-					throw new Error('WhatsApp is not connected');
+				const sendWa = wantsWhatsAppDelivery(settings, false);
+				const sendInSite = wantsInSiteDelivery(settings);
+				if (!sendWa && !sendInSite) continue;
+				const errors: string[] = [];
+				let delivered = false;
+				if (sendInSite) {
+					try {
+						await this.inSiteInbox.deliverMemo({
+							userId,
+							text: digestText,
+							memoId: memoRows[0]?.memo.id,
+						});
+						delivered = true;
+					} catch (error) {
+						errors.push(error instanceof Error ? error.message : String(error));
+					}
 				}
-				await this.whatsapp.sendText(userId, chatId, memoLines.join('\n').trim());
-				for (const row of rows) {
+				if (sendWa) {
+					try {
+						const chatId = await this.whatsapp.resolveTargetChat(
+							userId,
+							settings.targetChatId,
+						);
+						const linked = await this.whatsapp.getConnection(userId);
+						if (!linked.connected || !chatId) {
+							throw new Error('WhatsApp is not connected');
+						}
+						await this.whatsapp.sendText(userId, chatId, digestText);
+						delivered = true;
+					} catch (error) {
+						errors.push(error instanceof Error ? error.message : String(error));
+					}
+				}
+				if (!delivered) throw new Error(errors.join(' | ') || 'Digest delivery failed');
+				for (const { row } of memoRows) {
 					row.status = EmailMemoMessageStatus.SENT;
 					row.processedAt = new Date();
 					row.sendAfter = null;

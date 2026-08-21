@@ -18,6 +18,11 @@ import { EmailMemoProcessorService } from './services/email-memo-processor.servi
 import { EmailMemoService } from './services/email-memo.service';
 import { EmailMemoSettingsService } from './services/email-memo-settings.service';
 import { EmailMemoWhatsAppService } from './services/email-memo-whatsapp.service';
+import { EmailMemoInSiteInboxService } from './services/email-memo-insite-inbox.service';
+import {
+	WhatsAppAccount,
+	WhatsAppAccountAccess,
+} from '../whatsapp/entities/whatsapp.entity';
 
 @Module({
 	imports: [
@@ -25,7 +30,12 @@ import { EmailMemoWhatsAppService } from './services/email-memo-whatsapp.service
 		AiFreeModule,
 		AiModule,
 		WhatsAppModule,
-		TypeOrmModule.forFeature([...EMAIL_MEMO_ENTITIES, User]),
+		TypeOrmModule.forFeature([
+			...EMAIL_MEMO_ENTITIES,
+			User,
+			WhatsAppAccount,
+			WhatsAppAccountAccess,
+		]),
 		JwtModule.registerAsync({
 			useFactory: () => ({
 				secret: process.env.JWT_SECRET,
@@ -40,6 +50,7 @@ import { EmailMemoWhatsAppService } from './services/email-memo-whatsapp.service
 		EmailMemoGmailService,
 		EmailMemoGateway,
 		EmailMemoWhatsAppService,
+		EmailMemoInSiteInboxService,
 		EmailMemoProcessorService,
 		EmailMemoService,
 		EmailMemoScheduler,

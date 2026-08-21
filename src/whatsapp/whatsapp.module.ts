@@ -148,6 +148,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAuditService,
 		WhatsAppGateway,
 		WhatsAppProviderManagerService,
+		WhatsAppSyncService,
 	],
 })
 export class WhatsAppModule {}
