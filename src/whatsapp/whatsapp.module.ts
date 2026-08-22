@@ -12,6 +12,7 @@ import { WhatsAppReportsController } from './controllers/whatsapp-reports.contro
 import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
 import { WhatsAppStickersController } from './controllers/whatsapp-stickers.controller';
+import { WhatsAppMessageSchedulesController } from './controllers/whatsapp-message-schedules.controller';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
 import { WHATSAPP_AI_IMAGE_PROVIDERS } from './ai-media/whatsapp-ai-image.provider';
@@ -40,6 +41,10 @@ import {
 	WhatsAppSavedSticker,
 	WhatsAppChatMessageGroup,
 	WhatsAppChatMessageGroupItem,
+	WhatsAppMessageSchedule,
+	WhatsAppMessageScheduleRecipient,
+	WhatsAppMessageScheduleRun,
+	WhatsAppMessageScheduleDelivery,
 } from './entities/whatsapp.entity';
 import { WhatsAppAccessService } from './services/whatsapp-access.service';
 import { WhatsAppAccountsService } from './services/whatsapp-accounts.service';
@@ -55,6 +60,8 @@ import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 import { WhatsAppMessageGroupsService } from './services/whatsapp-message-groups.service';
+import { WhatsAppMessageSchedulesService } from './services/whatsapp-message-schedules.service';
+import { WhatsAppMessageSchedulesScheduler } from './whatsapp-message-schedules.scheduler';
 import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
 import { TranscriptionModule } from '../transcription/transcription.module';
 import { AiModule } from '../ai/ai.module';
@@ -81,6 +88,10 @@ export const WHATSAPP_ENTITIES = [
 	WhatsAppSavedSticker,
 	WhatsAppChatMessageGroup,
 	WhatsAppChatMessageGroupItem,
+	WhatsAppMessageSchedule,
+	WhatsAppMessageScheduleRecipient,
+	WhatsAppMessageScheduleRun,
+	WhatsAppMessageScheduleDelivery,
 ];
 
 @Module({
@@ -106,6 +117,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppStatusController,
 		WhatsAppVoiceChangerController,
 		WhatsAppStickersController,
+		WhatsAppMessageSchedulesController,
 		WhatsAppAiMediaController,
 	],
 	providers: [
@@ -123,6 +135,8 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppVoiceChangerService,
 		WhatsAppStickersService,
 		WhatsAppMessageGroupsService,
+		WhatsAppMessageSchedulesService,
+		WhatsAppMessageSchedulesScheduler,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
 		HuggingFaceWhatsAppImageProvider,

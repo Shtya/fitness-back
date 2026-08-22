@@ -774,3 +774,225 @@ export class WhatsAppChatMessageGroupItem extends CoreEntity {
 	@JoinColumn({ name: 'user_id' })
 	user: User;
 }
+
+export enum WhatsAppMessageScheduleKind {
+	ONCE = 'once',
+	RECURRING = 'recurring',
+}
+
+export enum WhatsAppMessageScheduleStatus {
+	ACTIVE = 'active',
+	PAUSED = 'paused',
+	PROCESSING = 'processing',
+	COMPLETED = 'completed',
+	CANCELLED = 'cancelled',
+}
+
+export enum WhatsAppMessageScheduleRecipientStatus {
+	ACTIVE = 'active',
+	REMOVED = 'removed',
+}
+
+export enum WhatsAppMessageScheduleRunStatus {
+	RUNNING = 'running',
+	COMPLETED = 'completed',
+	PARTIAL = 'partial',
+	FAILED = 'failed',
+}
+
+export enum WhatsAppMessageScheduleDeliveryStatus {
+	PENDING = 'pending',
+	SENT = 'sent',
+	FAILED = 'failed',
+	SKIPPED = 'skipped',
+}
+
+@Entity('whatsapp_message_schedules')
+@Index('idx_whatsapp_message_schedules_account', ['accountId'])
+export class WhatsAppMessageSchedule extends CoreEntity {
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@ManyToOne(() => WhatsAppAccount, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount;
+
+	@Index()
+	@Column({ name: 'created_by_user_id', type: 'uuid' })
+	createdByUserId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'created_by_user_id' })
+	createdByUser: User;
+
+	@Column({ type: 'varchar', length: 160, nullable: true })
+	title: string | null;
+
+	@Column({ type: 'varchar', length: 32, default: 'text' })
+	type: string;
+
+	@Column({ type: 'text', nullable: true })
+	text: string | null;
+
+	@Column({ type: 'text', nullable: true })
+	caption: string | null;
+
+	@Column({ name: 'file_id', type: 'varchar', length: 1024, nullable: true })
+	fileId: string | null;
+
+	@Column({ name: 'quoted_provider_message_id', type: 'varchar', length: 128, nullable: true })
+	quotedProviderMessageId: string | null;
+
+	@Column({ name: 'schedule_kind', type: 'varchar', length: 16, default: 'once' })
+	scheduleKind: WhatsAppMessageScheduleKind;
+
+	@Column({ name: 'scheduled_at', type: 'timestamptz', nullable: true })
+	scheduledAt: Date | null;
+
+	@Column({ name: 'time_of_day', type: 'varchar', length: 8, nullable: true })
+	timeOfDay: string | null;
+
+	@Column({ type: 'varchar', length: 64, default: 'Asia/Qatar' })
+	timezone: string;
+
+	@Column({ name: 'days_of_week', type: 'jsonb', default: () => "'[]'::jsonb" })
+	daysOfWeek: number[];
+
+	@Column({ name: 'recurrence_start_date', type: 'date', nullable: true })
+	recurrenceStartDate: string | null;
+
+	@Column({ name: 'recurrence_end_date', type: 'date', nullable: true })
+	recurrenceEndDate: string | null;
+
+	@Index()
+	@Column({ name: 'next_run_at', type: 'timestamptz', nullable: true })
+	nextRunAt: Date | null;
+
+	@Column({ name: 'last_run_at', type: 'timestamptz', nullable: true })
+	lastRunAt: Date | null;
+
+	@Index()
+	@Column({ type: 'varchar', length: 16, default: 'active' })
+	status: WhatsAppMessageScheduleStatus;
+
+	@Column({ name: 'client_message_id', type: 'varchar', length: 120, nullable: true })
+	clientMessageId: string | null;
+
+	@Column({ name: 'last_error', type: 'text', nullable: true })
+	lastError: string | null;
+
+	@OneToMany(() => WhatsAppMessageScheduleRecipient, recipient => recipient.schedule)
+	recipients: WhatsAppMessageScheduleRecipient[];
+
+	@OneToMany(() => WhatsAppMessageScheduleRun, run => run.schedule)
+	runs: WhatsAppMessageScheduleRun[];
+}
+
+@Entity('whatsapp_message_schedule_recipients')
+@Unique('uq_whatsapp_message_schedule_recipient', ['scheduleId', 'conversationId'])
+export class WhatsAppMessageScheduleRecipient extends CoreEntity {
+	@Index()
+	@Column({ name: 'schedule_id', type: 'uuid' })
+	scheduleId: string;
+
+	@ManyToOne(() => WhatsAppMessageSchedule, schedule => schedule.recipients, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'schedule_id' })
+	schedule: WhatsAppMessageSchedule;
+
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Column({ type: 'varchar', length: 16, default: 'active' })
+	status: WhatsAppMessageScheduleRecipientStatus;
+
+	@Column({ name: 'last_sent_at', type: 'timestamptz', nullable: true })
+	lastSentAt: Date | null;
+
+	@Column({ name: 'last_error', type: 'text', nullable: true })
+	lastError: string | null;
+}
+
+@Entity('whatsapp_message_schedule_runs')
+export class WhatsAppMessageScheduleRun extends CoreEntity {
+	@Index()
+	@Column({ name: 'schedule_id', type: 'uuid' })
+	scheduleId: string;
+
+	@ManyToOne(() => WhatsAppMessageSchedule, schedule => schedule.runs, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'schedule_id' })
+	schedule: WhatsAppMessageSchedule;
+
+	@Column({ name: 'run_at', type: 'timestamptz', default: () => 'now()' })
+	runAt: Date;
+
+	@Column({ type: 'varchar', length: 16, default: 'running' })
+	status: WhatsAppMessageScheduleRunStatus;
+
+	@Column({ name: 'total_recipients', type: 'int', default: 0 })
+	totalRecipients: number;
+
+	@Column({ name: 'sent_count', type: 'int', default: 0 })
+	sentCount: number;
+
+	@Column({ name: 'failed_count', type: 'int', default: 0 })
+	failedCount: number;
+
+	@OneToMany(() => WhatsAppMessageScheduleDelivery, delivery => delivery.run)
+	deliveries: WhatsAppMessageScheduleDelivery[];
+}
+
+@Entity('whatsapp_message_schedule_deliveries')
+export class WhatsAppMessageScheduleDelivery extends CoreEntity {
+	@Index()
+	@Column({ name: 'run_id', type: 'uuid' })
+	runId: string;
+
+	@ManyToOne(() => WhatsAppMessageScheduleRun, run => run.deliveries, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'run_id' })
+	run: WhatsAppMessageScheduleRun;
+
+	@Index()
+	@Column({ name: 'schedule_id', type: 'uuid' })
+	scheduleId: string;
+
+	@ManyToOne(() => WhatsAppMessageSchedule, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'schedule_id' })
+	schedule: WhatsAppMessageSchedule;
+
+	@Index()
+	@Column({ name: 'recipient_id', type: 'uuid' })
+	recipientId: string;
+
+	@ManyToOne(() => WhatsAppMessageScheduleRecipient, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'recipient_id' })
+	recipient: WhatsAppMessageScheduleRecipient;
+
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Column({ type: 'varchar', length: 16, default: 'pending' })
+	status: WhatsAppMessageScheduleDeliveryStatus;
+
+	@Column({ name: 'sent_message_id', type: 'uuid', nullable: true })
+	sentMessageId: string | null;
+
+	@Column({ name: 'attempt_count', type: 'int', default: 0 })
+	attemptCount: number;
+
+	@Column({ name: 'last_error', type: 'text', nullable: true })
+	lastError: string | null;
+
+	@Column({ name: 'client_message_id', type: 'varchar', length: 160 })
+	clientMessageId: string;
+}
