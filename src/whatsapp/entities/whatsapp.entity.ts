@@ -996,3 +996,161 @@ export class WhatsAppMessageScheduleDelivery extends CoreEntity {
 	@Column({ name: 'client_message_id', type: 'varchar', length: 160 })
 	clientMessageId: string;
 }
+
+@Entity('whatsapp_boards')
+@Index('idx_whatsapp_boards_account', ['accountId'])
+export class WhatsAppBoard extends CoreEntity {
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@ManyToOne(() => WhatsAppAccount, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount;
+
+	@Column({ type: 'varchar', length: 120, default: 'Tasks' })
+	name: string;
+
+	@Column({ name: 'is_default', type: 'boolean', default: false })
+	isDefault: boolean;
+
+	@Column({ name: 'created_by_user_id', type: 'uuid', nullable: true })
+	createdByUserId: string | null;
+
+	@ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+	@JoinColumn({ name: 'created_by_user_id' })
+	createdByUser: User | null;
+
+	@OneToMany(() => WhatsAppBoardColumn, (column) => column.board)
+	columns: WhatsAppBoardColumn[];
+}
+
+@Entity('whatsapp_board_columns')
+@Index('idx_whatsapp_board_columns_board', ['boardId', 'orderIndex'])
+export class WhatsAppBoardColumn extends CoreEntity {
+	@Index()
+	@Column({ name: 'board_id', type: 'uuid' })
+	boardId: string;
+
+	@ManyToOne(() => WhatsAppBoard, (board) => board.columns, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'board_id' })
+	board: WhatsAppBoard;
+
+	@Column({ type: 'varchar', length: 120 })
+	name: string;
+
+	@Column({ name: 'order_index', type: 'int', default: 0 })
+	orderIndex: number;
+
+	@Column({ type: 'varchar', length: 32, nullable: true })
+	color: string | null;
+}
+
+@Entity('whatsapp_board_cards')
+@Index('idx_whatsapp_board_cards_column', ['columnId', 'orderIndex'])
+@Index('idx_whatsapp_board_cards_board', ['boardId'])
+export class WhatsAppBoardCard extends CoreEntity {
+	@Index()
+	@Column({ name: 'board_id', type: 'uuid' })
+	boardId: string;
+
+	@ManyToOne(() => WhatsAppBoard, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'board_id' })
+	board: WhatsAppBoard;
+
+	@Index()
+	@Column({ name: 'column_id', type: 'uuid' })
+	columnId: string;
+
+	@ManyToOne(() => WhatsAppBoardColumn, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'column_id' })
+	column: WhatsAppBoardColumn;
+
+	@Column({ type: 'varchar', length: 500 })
+	title: string;
+
+	@Column({ type: 'text', nullable: true })
+	description: string | null;
+
+	@Column({ name: 'order_index', type: 'int', default: 0 })
+	orderIndex: number;
+
+	@Column({ name: 'assigned_user_id', type: 'uuid', nullable: true })
+	assignedUserId: string | null;
+
+	@ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+	@JoinColumn({ name: 'assigned_user_id' })
+	assignedUser: User | null;
+
+	@Column({ name: 'conversation_id', type: 'uuid', nullable: true })
+	conversationId: string | null;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'SET NULL', nullable: true })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation | null;
+
+	@Column({ name: 'due_at', type: 'timestamptz', nullable: true })
+	dueAt: Date | null;
+
+	@Column({ name: 'is_starred', type: 'boolean', default: false })
+	isStarred: boolean;
+
+	@Column({ type: 'jsonb', default: () => "'[]'" })
+	labels: Array<{ id: string; name: string; color: string }>;
+
+	@Column({ type: 'jsonb', default: () => "'[]'" })
+	checklist: Array<{ id: string; text: string; completed: boolean }>;
+
+	@Column({ type: 'jsonb', default: () => "'[]'" })
+	comments: Array<Record<string, unknown>>;
+
+	@Column({ type: 'jsonb', default: () => "'[]'" })
+	attachments: Array<Record<string, unknown>>;
+
+	@Column({ name: 'cover_image_url', type: 'text', nullable: true })
+	coverImageUrl: string | null;
+
+	@Column({ name: 'created_by_user_id', type: 'uuid', nullable: true })
+	createdByUserId: string | null;
+
+	@ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+	@JoinColumn({ name: 'created_by_user_id' })
+	createdByUser: User | null;
+
+	@OneToMany(() => WhatsAppBoardCardLink, (link) => link.card)
+	links: WhatsAppBoardCardLink[];
+}
+
+@Entity('whatsapp_board_card_links')
+@Index('idx_whatsapp_board_card_links_card', ['cardId'])
+export class WhatsAppBoardCardLink extends CoreEntity {
+	@Index()
+	@Column({ name: 'card_id', type: 'uuid' })
+	cardId: string;
+
+	@ManyToOne(() => WhatsAppBoardCard, (card) => card.links, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'card_id' })
+	card: WhatsAppBoardCard;
+
+	@Index()
+	@Column({ name: 'message_id', type: 'uuid' })
+	messageId: string;
+
+	@ManyToOne(() => WhatsAppMessage, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'message_id' })
+	message: WhatsAppMessage;
+
+	@Index()
+	@Column({ name: 'conversation_id', type: 'uuid' })
+	conversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'conversation_id' })
+	conversation: WhatsAppConversation;
+
+	@Column({ type: 'text', nullable: true })
+	snippet: string | null;
+
+	@Column({ name: 'message_type', type: 'varchar', length: 40, nullable: true })
+	messageType: string | null;
+}

@@ -13,6 +13,7 @@ import { WhatsAppStatusController } from './controllers/whatsapp-status.controll
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
 import { WhatsAppStickersController } from './controllers/whatsapp-stickers.controller';
 import { WhatsAppMessageSchedulesController } from './controllers/whatsapp-message-schedules.controller';
+import { WhatsAppBoardsController } from './controllers/whatsapp-boards.controller';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
 import { WHATSAPP_AI_IMAGE_PROVIDERS } from './ai-media/whatsapp-ai-image.provider';
@@ -45,6 +46,10 @@ import {
 	WhatsAppMessageScheduleRecipient,
 	WhatsAppMessageScheduleRun,
 	WhatsAppMessageScheduleDelivery,
+	WhatsAppBoard,
+	WhatsAppBoardColumn,
+	WhatsAppBoardCard,
+	WhatsAppBoardCardLink,
 } from './entities/whatsapp.entity';
 import { WhatsAppAccessService } from './services/whatsapp-access.service';
 import { WhatsAppAccountsService } from './services/whatsapp-accounts.service';
@@ -60,6 +65,7 @@ import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 import { WhatsAppMessageGroupsService } from './services/whatsapp-message-groups.service';
+import { WhatsAppBoardsService } from './services/whatsapp-boards.service';
 import { WhatsAppMessageSchedulesService } from './services/whatsapp-message-schedules.service';
 import { WhatsAppMessageSchedulesScheduler } from './whatsapp-message-schedules.scheduler';
 import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
@@ -92,6 +98,10 @@ export const WHATSAPP_ENTITIES = [
 	WhatsAppMessageScheduleRecipient,
 	WhatsAppMessageScheduleRun,
 	WhatsAppMessageScheduleDelivery,
+	WhatsAppBoard,
+	WhatsAppBoardColumn,
+	WhatsAppBoardCard,
+	WhatsAppBoardCardLink,
 ];
 
 @Module({
@@ -118,6 +128,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppVoiceChangerController,
 		WhatsAppStickersController,
 		WhatsAppMessageSchedulesController,
+		WhatsAppBoardsController,
 		WhatsAppAiMediaController,
 	],
 	providers: [
@@ -136,6 +147,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppStickersService,
 		WhatsAppMessageGroupsService,
 		WhatsAppMessageSchedulesService,
+		WhatsAppBoardsService,
 		WhatsAppMessageSchedulesScheduler,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
