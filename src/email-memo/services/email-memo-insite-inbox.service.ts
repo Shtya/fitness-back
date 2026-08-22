@@ -9,7 +9,7 @@ import {
 import { WhatsAppSyncService } from '../../whatsapp/services/whatsapp-sync.service';
 
 export const EMAIL_MEMO_AI_CHAT_ID = 'email-memo-ai@so7ba.internal';
-export const EMAIL_MEMO_AI_TITLE = 'AI';
+export const EMAIL_MEMO_AI_TITLE = 'AI Memo Emails';
 
 @Injectable()
 export class EmailMemoInSiteInboxService {
@@ -87,7 +87,7 @@ export class EmailMemoInSiteInboxService {
 				await this.sync.postEmailMemoSiteMessage({
 					accountId: account.id,
 					userId,
-					text: 'Email Memo AI inbox is ready. Summaries of your emails will appear here.',
+					text: 'AI Memo Emails inbox is ready. Summaries of your emails will appear here.',
 					providerMessageId: `email-memo:welcome:${account.id}`,
 					title: EMAIL_MEMO_AI_TITLE,
 				});

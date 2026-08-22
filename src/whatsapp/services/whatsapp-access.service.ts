@@ -163,7 +163,12 @@ export class WhatsAppAccessService {
 		if (!conversation) throw new NotFoundException('WhatsApp conversation not found');
 		const accountAccess = await this.getAccountAccess(user, conversation.accountId);
 		const canSeeAll = this.canSeeAllConversations(user, accountAccess);
-		if (!accountAccess.canView || (!canSeeAll && conversation.assignedUserId !== user.id)) {
+		const isEmailMemoAi =
+			String(conversation.providerChatId || '') === 'email-memo-ai@so7ba.internal';
+		if (
+			!accountAccess.canView ||
+			(!canSeeAll && conversation.assignedUserId !== user.id && !isEmailMemoAi)
+		) {
 			throw new ForbiddenException('WhatsApp conversation access denied');
 		}
 		return { conversation, accountAccess, canSeeAll };

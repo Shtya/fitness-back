@@ -491,6 +491,27 @@ function safeProviderMetadata(raw: any) {
 	};
 }
 
+function readVoiceDurationFromRaw(raw: unknown): number {
+	if (!raw || typeof raw !== 'object') return 0;
+	const record = raw as Record<string, any>;
+	const candidates = [
+		record.duration,
+		record.mediaData?.duration,
+		record.message?.audioMessage?.seconds,
+		record.message?.audioMessage?.duration,
+		record.message?.pttMessage?.seconds,
+		record.audioMessage?.seconds,
+		record.audioMessage?.duration,
+	];
+	for (const value of candidates) {
+		const num = Number(value);
+		if (!Number.isFinite(num) || num <= 0) continue;
+		if (num > 600 && num < 3_600_000) return Math.round(num / 1000);
+		return num;
+	}
+	return 0;
+}
+
 @Injectable()
 export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private readonly logger = new Logger(WhatsAppSyncService.name);
@@ -631,6 +652,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			throw new BadRequestException('WhatsApp account is not connected');
 		}
 		return provider;
+	}
+
+	/** Reconnect and wait briefly before pulling media from the linked device. */
+	private async ensureProviderConnectedForMedia(accountId: string) {
+		const accountIdStr = String(accountId || '').trim();
+		if (!accountIdStr) return null;
+
+		const current = this.providers.getProvider(accountIdStr);
+		if (current?.getState?.() === 'connected') return current;
+
+		try {
+			await this.providers.connect(accountIdStr);
+		} catch (error) {
+			this.logger.warn(
+				`WhatsApp connect before media download failed for ${accountIdStr}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+
+		await this.providers.waitUntilConnected(accountIdStr, 30_000);
+		const provider = this.providers.getProvider(accountIdStr);
+		return provider?.getState?.() === 'connected' ? provider : null;
 	}
 
 	private runIdempotentSend<T>(
@@ -2791,9 +2835,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		}
 		if (!canSeeAll) {
-			query.andWhere('conversation.assignedUserId = :userId', {
-				userId: user.id,
-			});
+			query.andWhere(
+				`(conversation.assignedUserId = :userId OR conversation.providerChatId = :emailMemoAiChatId)`,
+				{
+					userId: user.id,
+					emailMemoAiChatId: 'email-memo-ai@so7ba.internal',
+				},
+			);
 		}
 		if (filter === 'unread') {
 			query.andWhere('conversation.unreadCount > 0');
@@ -2984,7 +3032,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		title?: string;
 	}) {
 		const chatId = 'email-memo-ai@so7ba.internal';
-		const title = String(input.title || 'AI').trim() || 'AI';
+		const title = String(input.title || 'AI Memo Emails').trim() || 'AI Memo Emails';
 		const text = String(input.text || '').trim();
 		if (!text) throw new BadRequestException('Email memo text is required');
 		const saved = await this.persistMessage(
@@ -3246,7 +3294,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.take(take)
 				.getMany();
 			for (const message of rows) {
-				const duration = Number(message.raw?.duration ?? message.raw?.mediaData?.duration ?? 0);
+				const duration = readVoiceDurationFromRaw(message.raw);
 				if (!(Number.isFinite(duration) && duration > 0)) continue;
 				for (const attachment of message.attachments || []) {
 					const type = String(attachment.type || '').toLowerCase();
@@ -4866,14 +4914,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				await this.attachmentRepo.save(attachment);
 			}
 		}
-		const provider = this.providers.getProvider(attachment.message.accountId);
-		const providerState =
-			provider?.getState?.() || this.providers.getProviderState?.(attachment.message.accountId);
-		if (!provider || providerState !== 'connected') {
+		const provider = await this.ensureProviderConnectedForMedia(attachment.message.accountId);
+		if (!provider) {
 			attachment.downloadStatus = 'pending';
 			await this.attachmentRepo.save(attachment);
 			throw new BadRequestException(
-				'WhatsApp media is not ready yet. Wait for the account to finish syncing, then retry.',
+				'WhatsApp is not connected. Keep WhatsApp open on your phone, wait until the account shows Connected, then retry.',
 			);
 		}
 		if (!provider.capabilities.mediaDownload) {

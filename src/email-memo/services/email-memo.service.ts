@@ -229,11 +229,15 @@ export class EmailMemoService {
 	async retryMessage(userId: string, id: string) {
 		const row = await this.messages.findOne({ where: { id, userId } });
 		if (!row) throw new NotFoundException('Email not found');
-		const wa = await this.whatsapp.getConnection(userId);
-		if (!wa.connected) {
-			throw new BadRequestException('WhatsApp is not connected. Scan the QR code first.');
-		}
 		const settings = await this.settings.getOrCreate(userId);
+		const dest = String(settings.deliveryDestination || 'whatsapp').toLowerCase();
+		const needsPhone = dest === 'whatsapp' || dest === 'both';
+		if (needsPhone) {
+			const wa = await this.whatsapp.getConnection(userId);
+			if (!wa.connected) {
+				throw new BadRequestException('WhatsApp is not connected. Scan the QR code first.');
+			}
+		}
 		try {
 			await this.processor.processPipeline(row, settings, { forceSend: true });
 		} catch (error) {

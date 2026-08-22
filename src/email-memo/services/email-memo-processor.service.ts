@@ -822,22 +822,22 @@ export class EmailMemoProcessorService {
 	}
 
 	async sendNow(userId: string, opts: { ids?: string[]; limit?: number } = {}) {
-		const linked = await this.whatsapp.getConnection(userId);
-		if (!linked.connected) throw new BadRequestException('WhatsApp is not connected');
 		const settings = await this.settings.getOrCreate(userId);
 		const take = Math.min(Math.max(Number(opts.limit) || 100, 1), 150);
 		const ids = (opts.ids || []).map((id) => String(id || '').trim()).filter(Boolean).slice(0, 150);
 
 		this.emitSendProgress(userId, { phase: 'collect', current: 0, total: 0 });
-		const connections = await this.gmail.listConnectedForUser(userId);
-		for (const connection of connections) {
-			try {
-				await this.expireBeforeToday(connection);
-				await this.importTodaysInbox(connection);
-			} catch (error) {
-				this.logger.warn(
-					`Send now import failed for ${connection.id}: ${error instanceof Error ? error.message : error}`,
-				);
+		if (!ids.length) {
+			const connections = await this.gmail.listConnectedForUser(userId);
+			for (const connection of connections) {
+				try {
+					await this.expireBeforeToday(connection);
+					await this.importTodaysInbox(connection);
+				} catch (error) {
+					this.logger.warn(
+						`Send now import failed for ${connection.id}: ${error instanceof Error ? error.message : error}`,
+					);
+				}
 			}
 		}
 
