@@ -126,6 +126,10 @@ export class UpdateBoardCardDto {
 	isStarred?: boolean;
 
 	@IsOptional()
+	@IsBoolean()
+	isCompleted?: boolean;
+
+	@IsOptional()
 	@IsArray()
 	@ValidateNested({ each: true })
 	@Type(() => BoardLabelDto)

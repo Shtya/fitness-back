@@ -1095,6 +1095,9 @@ export class WhatsAppBoardCard extends CoreEntity {
 	@Column({ name: 'is_starred', type: 'boolean', default: false })
 	isStarred: boolean;
 
+	@Column({ name: 'is_completed', type: 'boolean', default: false })
+	isCompleted: boolean;
+
 	@Column({ type: 'jsonb', default: () => "'[]'" })
 	labels: Array<{ id: string; name: string; color: string }>;
 

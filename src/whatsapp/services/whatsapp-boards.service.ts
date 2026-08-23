@@ -260,6 +260,7 @@ export class WhatsAppBoardsService {
 		if (body.assignedUserId !== undefined) card.assignedUserId = body.assignedUserId;
 		if (body.dueAt !== undefined) card.dueAt = body.dueAt ? new Date(body.dueAt) : null;
 		if (body.isStarred != null) card.isStarred = body.isStarred;
+		if (body.isCompleted != null) card.isCompleted = body.isCompleted;
 		if (body.labels) card.labels = body.labels;
 		if (body.checklist) card.checklist = body.checklist;
 		if (body.comments) card.comments = body.comments;
@@ -437,6 +438,20 @@ export class WhatsAppBoardsService {
 	}
 
 	private toCardDto(card: WhatsAppBoardCard, links: WhatsAppBoardCardLink[]) {
+		const createdRaw = (card as WhatsAppBoardCard & { created_at?: Date }).created_at;
+		const updatedRaw = (card as WhatsAppBoardCard & { updated_at?: Date }).updated_at;
+		const createdAt =
+			createdRaw instanceof Date
+				? createdRaw.toISOString()
+				: createdRaw
+					? String(createdRaw)
+					: null;
+		const updatedAt =
+			updatedRaw instanceof Date
+				? updatedRaw.toISOString()
+				: updatedRaw
+					? String(updatedRaw)
+					: null;
 		return {
 			id: card.id,
 			listId: card.columnId,
@@ -447,6 +462,7 @@ export class WhatsAppBoardsService {
 			dueDate: card.dueAt ? card.dueAt.toISOString().slice(0, 10) : null,
 			dueAt: card.dueAt,
 			isStarred: card.isStarred,
+			isCompleted: Boolean(card.isCompleted),
 			labels: card.labels || [],
 			checklist: card.checklist || [],
 			comments: card.comments || [],
@@ -454,6 +470,9 @@ export class WhatsAppBoardsService {
 			coverImage: card.coverImageUrl,
 			conversationId: card.conversationId,
 			assignedUserId: card.assignedUserId,
+			orderIndex: card.orderIndex,
+			createdAt,
+			updatedAt,
 			links: links.map((link) => ({
 				id: link.id,
 				messageId: link.messageId,

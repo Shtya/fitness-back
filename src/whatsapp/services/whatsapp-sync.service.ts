@@ -288,6 +288,14 @@ function quotedTextFromRaw(raw: any): string | null {
 	return String(text || '').trim() || null;
 }
 
+function quotedDurationFromRaw(raw: any): number | null {
+	const quoted = baileysContextInfo(raw)?.quotedMessage;
+	const seconds = Number(quoted?.audioMessage?.seconds ?? quoted?.audioMessage?.duration);
+	if (!Number.isFinite(seconds) || seconds <= 0) return null;
+	if (seconds > 600 && seconds < 3_600_000) return Math.round(seconds / 1000);
+	return Math.round(seconds);
+}
+
 function needsLocationHydration(message: WhatsAppMessage | null | undefined) {
 	const type = String(message?.type || '').toLowerCase();
 	if (type !== 'location' && type !== 'live_location' && type !== 'livelocation') {
@@ -525,7 +533,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private conversationUpdatePayloads = new Map<string, Record<string, unknown>>();
 	private attachmentDownloads = new Map<string, Promise<any>>();
 	private activeMediaDownloads = 0;
-	private readonly maxConcurrentMediaDownloads = 2;
+	private readonly maxConcurrentMediaDownloads = Number(
+		process.env.WHATSAPP_MEDIA_DOWNLOAD_CONCURRENCY || 3,
+	);
 	private sendOperations = new Map<string, Promise<unknown>>();
 	private inboxReconcileTimers = new Map<string, NodeJS.Timeout>();
 	private inboxReconcileInFlight = new Set<string>();
@@ -654,25 +664,43 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return provider;
 	}
 
-	/** Reconnect and wait briefly before pulling media from the linked device. */
-	private async ensureProviderConnectedForMedia(accountId: string) {
+	/** Reconnect and wait briefly before pulling media from the linked device.
+	 *  Prefetch must fail fast when offline — a 30s wait per attachment flooded
+	 *  workers and made chat open feel stuck with "Failed" images/voice. */
+	private async ensureProviderConnectedForMedia(
+		accountId: string,
+		options: { waitMs?: number; tryConnect?: boolean } = {},
+	) {
 		const accountIdStr = String(accountId || '').trim();
 		if (!accountIdStr) return null;
 
+		const waitMs = Number.isFinite(options.waitMs) ? Math.max(0, Number(options.waitMs)) : 8_000;
+		const tryConnect = options.tryConnect !== false;
+
 		const current = this.providers.getProvider(accountIdStr);
 		if (current?.getState?.() === 'connected') return current;
+		if (waitMs <= 0) return null;
 
-		try {
-			await this.providers.connect(accountIdStr);
-		} catch (error) {
-			this.logger.warn(
-				`WhatsApp connect before media download failed for ${accountIdStr}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+		const state = String(current?.getState?.() || '').toLowerCase();
+		// QR / logged-out sessions will not become connected without user action —
+		// waiting here only stalls image/voice loads for tens of seconds.
+		if (state === 'qr' || state === 'logged_out' || state === 'disconnected') {
+			return null;
 		}
 
-		await this.providers.waitUntilConnected(accountIdStr, 30_000);
+		if (tryConnect) {
+			try {
+				await this.providers.connect(accountIdStr);
+			} catch (error) {
+				this.logger.warn(
+					`WhatsApp connect before media download failed for ${accountIdStr}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+
+		await this.providers.waitUntilConnected(accountIdStr, waitMs);
 		const provider = this.providers.getProvider(accountIdStr);
 		return provider?.getState?.() === 'connected' ? provider : null;
 	}
@@ -3361,7 +3389,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 				const refreshed = await loadLocal(before);
 				await this.prepareMessagesForApi(conversation, refreshed);
-				this.queuePendingAttachmentDownloads(refreshed);
+				this.queuePendingAttachmentDownloads(refreshed, conversation.accountId);
 				return refreshed;
 			}
 		}
@@ -3370,7 +3398,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (local.length || before || !accountAccess.canUse || !allowLivePull) {
 			await this.prepareMessagesForApi(conversation, local);
 			if (local.length && !before && accountAccess.canUse) {
-				this.queuePendingAttachmentDownloads(local);
+				this.queuePendingAttachmentDownloads(local, conversation.accountId);
 			}
 			return local;
 		}
@@ -3402,7 +3430,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const saved = await loadLocal();
 		if (saved.length) {
 			await this.prepareMessagesForApi(conversation, saved);
-			this.queuePendingAttachmentDownloads(saved);
+			this.queuePendingAttachmentDownloads(saved, conversation.accountId);
 			return saved;
 		}
 		// Persist may fail (unique/db) — still return linked-device messages to the UI.
@@ -3476,12 +3504,37 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private buildReplyToPayload(quoted: WhatsAppMessage, parentRaw?: any) {
+		const durationSeconds =
+			readVoiceDurationFromRaw((quoted as any)?.raw) ||
+			quotedDurationFromRaw(parentRaw) ||
+			0;
+		const attachments = Array.isArray(quoted.attachments) ? quoted.attachments : [];
+		let durationFromAttachment = 0;
+		for (const attachment of attachments) {
+			const match = String(attachment?.fileName || '').match(/voice-(\d+(?:\.\d+)?)s/i);
+			if (match) {
+				const num = Number(match[1]);
+				if (Number.isFinite(num) && num > 0) {
+					durationFromAttachment = Math.round(num);
+					break;
+				}
+			}
+		}
 		return {
 			id: quoted.id,
 			providerMessageId: quoted.providerMessageId,
 			text: quoted.text,
 			type: quoted.type,
 			direction: quoted.direction,
+			durationSeconds: durationSeconds || durationFromAttachment || null,
+			timestamp: quoted.providerTimestamp || (quoted as any).created_at || null,
+			senderName:
+				String(
+					(quoted as any).senderName ||
+						(quoted as any).contactName ||
+						(quoted as any).raw?.pushName ||
+						'',
+				).trim() || null,
 			previewDataUrl:
 				mediaPreviewDataUrlFromRaw((quoted as any)?.raw) ||
 				quotedPreviewFromRaw(parentRaw) ||
@@ -3497,11 +3550,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				if (!replyTo.previewDataUrl) {
 					replyTo.previewDataUrl = quotedPreviewFromRaw(raw) || null;
 				}
+				if (!replyTo.durationSeconds) {
+					const duration = quotedDurationFromRaw(raw);
+					if (duration) replyTo.durationSeconds = duration;
+				}
 				continue;
 			}
 			const preview = quotedPreviewFromRaw(raw);
 			const type = quotedTypeFromRaw(raw);
 			const text = quotedTextFromRaw(raw);
+			const durationSeconds = quotedDurationFromRaw(raw);
 			if (!preview && !type && !text) continue;
 			(message as any).replyTo = {
 				id: null,
@@ -3509,6 +3567,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				text,
 				type: type || 'text',
 				direction: null,
+				durationSeconds,
+				timestamp: null,
+				senderName: null,
 				previewDataUrl: preview,
 			};
 		}
@@ -3754,9 +3815,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	/** Kick off durable downloads for pending/failed media once the chat is open
 	 *  and WhatsApp is connected — same moment the old WPP ChatStore path used to
 	 *  hydrate photos after link. */
-	private queuePendingAttachmentDownloads(messages: WhatsAppMessage[]) {
+	private queuePendingAttachmentDownloads(
+		messages: WhatsAppMessage[],
+		accountIdHint?: string,
+	) {
 		const ids: string[] = [];
+		let accountId = String(accountIdHint || '').trim();
 		for (const message of messages || []) {
+			if (!accountId) accountId = String(message.accountId || '').trim();
 			if (baileysRawMediaScore((message as any)?.raw) < 5) continue;
 			for (const attachment of message.attachments || []) {
 				if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
@@ -3765,22 +3831,65 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		if (!ids.length) return;
+
+		const provider = accountId ? this.providers.getProvider(accountId) : null;
+		if (!provider || provider.getState?.() !== 'connected') {
+			this.logger.debug(
+				`Media prefetch skipped for ${ids.length} attachment(s): WhatsApp is not connected`,
+			);
+			return;
+		}
+
+		const uniqueIds = [...new Set(ids)].slice(0, 24);
 		void (async () => {
-			for (const attachmentId of ids.slice(0, 16)) {
-				if (this.attachmentDownloads.has(attachmentId)) continue;
-				const attachment = await this.attachmentRepo.findOne({
-					where: { id: attachmentId },
-					relations: ['message'],
-				});
-				if (!attachment?.message) continue;
-				const download = this.downloadAttachmentInternal(attachment)
-					.catch(() => undefined)
-					.finally(() => {
-						this.attachmentDownloads.delete(attachmentId);
+			const workers = Math.max(1, Math.min(this.maxConcurrentMediaDownloads, uniqueIds.length));
+			let cursor = 0;
+			const runWorker = async () => {
+				while (cursor < uniqueIds.length) {
+					const attachmentId = uniqueIds[cursor];
+					cursor += 1;
+					if (this.attachmentDownloads.has(attachmentId)) continue;
+					const attachment = await this.attachmentRepo.findOne({
+						where: { id: attachmentId },
+						relations: ['message'],
 					});
-				this.attachmentDownloads.set(attachmentId, download);
-				await download;
-			}
+					if (!attachment?.message) continue;
+					// Account may disconnect mid-batch — stop instead of waiting per file.
+					const live = this.providers.getProvider(attachment.message.accountId);
+					if (!live || live.getState?.() !== 'connected') {
+						this.logger.debug(
+							`Media prefetch stopped early: WhatsApp disconnected (${attachmentId.slice(0, 8)}…)`,
+						);
+						return;
+					}
+					const started = Date.now();
+					const download = this.downloadAttachmentInternal(attachment, {
+						reconnectWaitMs: 0,
+					})
+						.then((result) => {
+							this.logger.debug(
+								`Media prefetch ${attachmentId.slice(0, 8)}… ${Date.now() - started}ms cached=${Boolean(
+									(result as any)?.cached,
+								)}`,
+							);
+							return result;
+						})
+						.catch((error) => {
+							this.logger.debug(
+								`Media prefetch failed ${attachmentId.slice(0, 8)}… ${Date.now() - started}ms: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+							return undefined;
+						})
+						.finally(() => {
+							this.attachmentDownloads.delete(attachmentId);
+						});
+					this.attachmentDownloads.set(attachmentId, download);
+					await download;
+				}
+			};
+			await Promise.all(Array.from({ length: workers }, () => runWorker()));
 		})();
 	}
 
@@ -4874,7 +4983,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return download;
 	}
 
-	private async downloadAttachmentInternal(attachment: WhatsAppMessageAttachment) {
+	private async downloadAttachmentInternal(
+		attachment: WhatsAppMessageAttachment,
+		options: { reconnectWaitMs?: number } = {},
+	) {
+		const debugMedia = process.env.WHATSAPP_MEDIA_DEBUG === '1';
+		const started = Date.now();
+		const reconnectWaitMs = Number.isFinite(options.reconnectWaitMs)
+			? Math.max(0, Number(options.reconnectWaitMs))
+			: 8_000;
+		const logStep = (step: string) => {
+			if (!debugMedia) return;
+			this.logger.log(
+				`[media-debug] ${String(attachment.id).slice(0, 8)}… ${step} +${Date.now() - started}ms`,
+			);
+		};
+		logStep('start');
 		const fresh = await this.attachmentRepo.findOne({
 			where: { id: attachment.id },
 			relations: ['message'],
@@ -4899,6 +5023,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					attachment.mimeType = sniffedMime;
 					await this.attachmentRepo.save(attachment);
 				}
+				logStep(`cache-hit bytes=${cachedBuffer.length}`);
 				return {
 					ok: true,
 					path: attachment.storagePath,
@@ -4912,9 +5037,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				attachment.storagePath = null;
 				attachment.downloadStatus = 'pending';
 				await this.attachmentRepo.save(attachment);
+				logStep('cache-invalid');
 			}
 		}
-		const provider = await this.ensureProviderConnectedForMedia(attachment.message.accountId);
+		const provider = await this.ensureProviderConnectedForMedia(attachment.message.accountId, {
+			waitMs: reconnectWaitMs,
+			tryConnect: reconnectWaitMs > 0,
+		});
 		if (!provider) {
 			attachment.downloadStatus = 'pending';
 			await this.attachmentRepo.save(attachment);
@@ -4936,6 +5065,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 			let data: any;
 			try {
+				logStep('provider-download');
 				data = await attemptDownload(rawHint);
 			} catch (error: any) {
 				const refreshed = await this.refreshAttachmentRawFromLive(attachment).catch(
@@ -4951,8 +5081,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						rawHint = attachment.message?.raw || rawHint;
 					}
 				}
-				await new Promise((resolve) => setTimeout(resolve, refreshed ? 400 : 800));
+				await new Promise((resolve) => setTimeout(resolve, refreshed ? 250 : 500));
 				try {
+					logStep('provider-retry');
 					data = await attemptDownload(rawHint);
 				} catch (retryError: any) {
 					const detail = String(retryError?.message || error?.message || error || '');
@@ -4995,6 +5126,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			attachment.fileSizeBytes = String(buffer.length);
 			attachment.downloadStatus = 'downloaded';
 			await this.attachmentRepo.save(attachment);
+			logStep(`downloaded bytes=${buffer.length}`);
 			return {
 				ok: true,
 				path: attachment.storagePath,
@@ -5007,6 +5139,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			attachment.downloadStatus = 'failed';
 			await this.attachmentRepo.save(attachment);
 			const detail = String(error?.message || error || '');
+			logStep(`failed ${detail}`);
 			throw new BadRequestException(
 				detail && detail !== 'Object' ? detail : 'WhatsApp media is not available',
 			);
