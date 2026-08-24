@@ -4469,9 +4469,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const olderPageDidExtend =
 			!oldestStoredTs ||
 			(oldestFromProviderTs > 0 && oldestFromProviderTs < oldestStoredTs - 500);
+		// Full provider page ⇒ assume more history exists. Short page that did not
+		// move older ⇒ stop. Previously requiring BOTH full-page AND extend flipped
+		// hasMore off too early when WhatsApp returned an overlapping window first.
 		const nextHasMore =
 			mode === 'older'
-				? Boolean(hasMoreProviderHistory && olderPageDidExtend)
+				? messages.length >= requestedLimit || olderPageDidExtend
 				: hasMoreProviderHistory;
 		await this.conversationRepo.update(conversation.id, {
 			lastProviderSyncAt: new Date(),

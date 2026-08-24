@@ -326,6 +326,13 @@ export class AuthService {
 			expiresIn: this.cfg.get<string>('JWT_REFRESH_EXPIRE') || '7d',
 		});
 	}
+
+	/** Same tokens as login — used by the browser extension pairing flow. */
+	issueSession(user: User) {
+		const accessToken = this.signAccess(user.id, user.tenantId);
+		const refreshToken = this.signRefresh(user.id, user.tenantId);
+		return { accessToken, refreshToken, user: this.serialize(user) };
+	}
 	// inside AuthService
 	private serialize(u: User, tokens?: { accessToken: string; refreshToken: string }) {
 		const { password, resetPasswordToken, resetPasswordExpires, ...safe } = u as any;
