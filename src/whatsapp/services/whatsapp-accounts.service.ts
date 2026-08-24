@@ -81,6 +81,12 @@ export class WhatsAppAccountsService {
 					label: account.label,
 					ownerAdminId: account.ownerAdminId,
 					phoneNumber: account.phoneNumber,
+					connectionMethod:
+						account.providerCapabilities?.connectionMethod === 'pairing_code'
+							? 'pairing_code'
+							: account.providerCapabilities?.connectionMethod === 'qr'
+								? 'qr'
+								: null,
 					providerName: account.providerName,
 					status: account.status,
 					syncPhase: resolveWhatsAppSyncPhase(account),

@@ -1617,7 +1617,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async getMessages(
 		chatId: string,
-		options: { limit?: number; before?: string; after?: string; aliases?: string[] } = {},
+		options: { limit?: number; before?: string; after?: string; aliases?: string[]; loadEarlier?: boolean } = {},
 	) {
 		const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
 		const ids = this.collectMessageLookupIds(chatId, options.aliases);

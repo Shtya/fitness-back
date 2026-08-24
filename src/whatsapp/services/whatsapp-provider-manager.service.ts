@@ -197,7 +197,11 @@ export class WhatsAppProviderManagerService
 		return this.providers.get(accountId) || null;
 	}
 
-	async connect(accountId: string, phoneNumber?: string) {
+	async connect(
+		accountId: string,
+		phoneNumber?: string,
+		options?: { connectionMethod?: 'qr' | 'pairing_code' },
+	) {
 		const pending = this.connecting.get(accountId);
 		if (pending) return pending;
 
@@ -260,7 +264,7 @@ export class WhatsAppProviderManagerService
 			}
 		}
 
-		const promise = this.connectExclusive(accountId, phoneNumber);
+		const promise = this.connectExclusive(accountId, phoneNumber, options);
 		this.connecting.set(accountId, promise);
 		try {
 			return await promise;
@@ -280,7 +284,11 @@ export class WhatsAppProviderManagerService
 		return this.configuredProviderName();
 	}
 
-	private async connectExclusive(accountId: string, phoneNumber?: string) {
+	private async connectExclusive(
+		accountId: string,
+		phoneNumber?: string,
+		options?: { connectionMethod?: 'qr' | 'pairing_code' },
+	) {
 		let locked = await this.acquireLock(accountId);
 		if (!locked) {
 			// Stale/foreign locks are common after overlapping local backends or a
@@ -300,15 +308,30 @@ export class WhatsAppProviderManagerService
 		}
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
 		const providerName = this.resolveProviderName(account);
+		const connectionMethod =
+			options?.connectionMethod ||
+			(phoneNumber ? 'pairing_code' : undefined);
+		const nextCapabilities = {
+			...(account.providerCapabilities || {}),
+			...(connectionMethod ? { connectionMethod } : {}),
+		};
+		const pendingPhone = phoneNumber
+			? String(phoneNumber).replace(/[^\d+]/g, '')
+			: undefined;
 		// Keep CONNECTED in the DB while we restore the in-memory session.
 		if (account.status !== WhatsAppAccountStatus.CONNECTED) {
 			await this.accountRepo.update(accountId, {
 				status: WhatsAppAccountStatus.CONNECTING,
 				lastError: null,
 				providerName,
+				providerCapabilities: nextCapabilities,
+				...(pendingPhone ? { phoneNumber: pendingPhone } : {}),
 			});
-		} else if (account.providerName !== providerName) {
-			await this.accountRepo.update(accountId, { providerName });
+		} else if (account.providerName !== providerName || connectionMethod) {
+			await this.accountRepo.update(accountId, {
+				providerName,
+				providerCapabilities: nextCapabilities,
+			});
 		}
 		account.providerName = providerName;
 		const provider = this.createProvider(account);

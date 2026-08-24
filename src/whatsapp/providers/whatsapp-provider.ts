@@ -115,6 +115,8 @@ export interface WhatsAppProvider {
 			after?: string;
 			/** Extra JIDs to try (e.g. phone @c.us for a @lid conversation). */
 			aliases?: string[];
+			/** Pull older history from the phone. Open-chat must leave this false. */
+			loadEarlier?: boolean;
 		},
 	): Promise<NormalizedWhatsAppMessage[]>;
 	findMessage?(providerMessageId: string): NormalizedWhatsAppMessage | null;

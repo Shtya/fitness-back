@@ -13,8 +13,9 @@ export function providerSyncAgeMs(
 }
 
 /**
- * Skip linked-device getMessages when this conversation was hydrated recently
- * and already has local rows (WhatsApp Web soft-open behavior).
+ * Skip linked-device getMessages when local rows already exist.
+ * WhatsApp Web does not re-pull history on open; Postgres is our replica.
+ * Age / 5-minute TTL must not trigger a phone pull (catch-up is live events).
  */
 export function shouldSkipFreshProviderSync(options: {
 	mode: 'latest' | 'older';
@@ -24,19 +25,16 @@ export function shouldSkipFreshProviderSync(options: {
 	now?: number;
 	freshMs?: number;
 }): { skip: boolean; reason: string } {
-	const {
-		mode,
-		force = false,
-		localCount,
-		lastProviderSyncAt = null,
-		now = Date.now(),
-		freshMs = PROVIDER_SYNC_FRESH_MS,
-	} = options;
+	const { mode, force = false, localCount } = options;
 	if (mode !== 'latest') return { skip: false, reason: 'older_mode' };
 	if (force) return { skip: false, reason: 'forced' };
-	if (localCount <= 0) return { skip: false, reason: 'empty_thread' };
-	const age = providerSyncAgeMs(lastProviderSyncAt, now);
-	if (age == null) return { skip: false, reason: 'never_hydrated' };
-	if (age < freshMs) return { skip: true, reason: 'fresh' };
-	return { skip: false, reason: 'stale' };
+	if (localCount <= 0) {
+		// Already probed this thread (including a genuine empty chat).
+		// Do not treat browser refresh as first_hydrate.
+		if (providerSyncAgeMs(options.lastProviderSyncAt, options.now) != null) {
+			return { skip: true, reason: 'hydrated_empty' };
+		}
+		return { skip: false, reason: 'empty_thread' };
+	}
+	return { skip: true, reason: 'local_replica' };
 }

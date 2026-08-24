@@ -20,7 +20,9 @@ Initial Load (Postgres) → Cached UI → Background hydrate → Incremental rec
 ```
 
 - First paint comes from Postgres. The workspace must not wait for a full provider dump.
-- Open-chat `POST .../sync/latest` is hydration-aware: skipped when `lastProviderSyncAt` is fresh and local rows exist. Pass `?force=1` only for gap repair / empty-thread recovery.
+- Open-chat `POST .../sync/latest` is skipped when the conversation already has local Postgres rows (`local_replica`), or when it is empty but already hydrated (`hydrated_empty` via `lastProviderSyncAt` on the inbox DTO). Pass `?force=1` only for an explicit repair action.
+- Automatic retry, socket reconnect, search, and clone-voice prefetch must never send `force=1`.
+- Empty-thread recovery is at most one non-forced retry; after that wait for live socket / history_sync.
 - Soft catch-up uses provider `after: newestLocalProviderId` instead of re-pulling a full latest page every open.
 - Frontend mirrors this with `whatsapp-message-sync.js` (`shouldProviderBackfill` / `shouldSkipOpenChatNetwork`) — short chats are not treated as incomplete merely because they have fewer than 100 messages.
 - `syncFullHistory` is **off** unless `WHATSAPP_SYNC_FULL_HISTORY=1|true|yes`.

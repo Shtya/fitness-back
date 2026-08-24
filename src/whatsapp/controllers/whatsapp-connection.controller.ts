@@ -3,6 +3,7 @@ import {
 	Body,
 	Controller,
 	Get,
+	HttpException,
 	Param,
 	Post,
 	Query,
@@ -15,9 +16,11 @@ import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { ConnectWhatsAppAccountDto } from '../dto/whatsapp.dto';
 import { WhatsAppConnectionLog } from '../entities/whatsapp.entity';
+import { resolveWhatsAppSyncPhase } from '../services/whatsapp-accounts.service';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppAuditService } from '../services/whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from '../services/whatsapp-provider-manager.service';
+import { assertPairingCodeRateLimit } from '../utils/whatsapp-pairing-rate-limit';
 
 @Controller('whatsapp/accounts/:accountId')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -38,22 +41,50 @@ export class WhatsAppConnectionController {
 	) {
 		await this.access.assertAccountPermission(req.user, accountId, 'canManage');
 		try {
-			const provider = await this.providers.connect(accountId, body?.phoneNumber);
+			if (body?.phoneNumber) {
+				assertPairingCodeRateLimit(`${req.user.id}:${accountId}`);
+			}
+			const provider = await this.providers.connect(accountId, body?.phoneNumber, {
+				connectionMethod: body?.phoneNumber
+					? 'pairing_code'
+					: body?.mode === 'qr'
+						? 'qr'
+						: undefined,
+			});
 			await this.audit.write({
 				actorUserId: req.user.id,
 				accountId,
 				action: 'whatsapp.account.connect_requested',
 				targetType: 'WhatsAppAccount',
 				targetId: accountId,
-				metadata: body?.phoneNumber ? { mode: 'pairing_code' } : { mode: 'qr' },
+				metadata: body?.phoneNumber
+					? { mode: 'pairing_code' }
+					: { mode: body?.mode || 'restore' },
 			});
+			const account = await this.access.assertAccountPermission(
+				req.user,
+				accountId,
+				'canManage',
+			);
+			const storedMethod = account.providerCapabilities?.connectionMethod;
 			return {
 				ok: true,
 				status: provider.getState(),
 				qr: provider.getQr(),
 				pairingCode: provider.getPairingCode(),
+				connectionMethod:
+					storedMethod === 'pairing_code' || storedMethod === 'qr'
+						? storedMethod
+						: body?.phoneNumber
+							? 'pairing_code'
+							: body?.mode || null,
+				restore: {
+					hasLocalHistory: Boolean(account.initialHydratedAt),
+					syncPhase: resolveWhatsAppSyncPhase(account),
+				},
 			};
 		} catch (error) {
+			if (error instanceof HttpException) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			throw new BadRequestException(message);
 		}

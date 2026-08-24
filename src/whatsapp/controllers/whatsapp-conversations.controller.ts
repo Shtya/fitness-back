@@ -199,9 +199,8 @@ export class WhatsAppConversationsController {
 		@Query('starredOnly') starredOnly?: string,
 		@Query('importantOnly') importantOnly?: string,
 	) {
-		// live=0|false skips the linked-device pull — used for previews and the
-		// initial DB paint before POST sync/latest does the heavy provider work.
-		const allowLivePull = !['0', 'false', 'no'].includes(String(live || '').toLowerCase());
+		// Opt-in only. Omitting `live` used to default ON and hit the phone on GET.
+		const allowLivePull = ['1', 'true', 'yes'].includes(String(live || '').toLowerCase());
 		const onlyImportant = ['1', 'true', 'yes'].includes(
 			String(starredOnly || importantOnly || '').toLowerCase(),
 		);

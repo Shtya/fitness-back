@@ -3003,6 +3003,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					preferenceByChatId.get(`${item.accountId}:${item.providerChatId}`);
 				return {
 					...item,
+					lastProviderSyncAt: item.lastProviderSyncAt
+						? new Date(item.lastProviderSyncAt).toISOString()
+						: null,
+					hasMoreProviderHistory: Boolean(item.hasMoreProviderHistory),
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
 					isArchived: Boolean(preference?.isArchived),
@@ -3283,7 +3287,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		options: { allowLivePull?: boolean; starredOnly?: boolean } = {},
 	) {
 		const starredOnly = Boolean(options.starredOnly);
-		const allowLivePull = options.allowLivePull !== false && !starredOnly;
+		const allowLivePull = options.allowLivePull === true && !starredOnly;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -4271,8 +4275,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			lastProviderSyncAt: conversation.lastProviderSyncAt,
 		});
 		if (freshSkip.skip) {
-			return returnLocalOnly('fresh', undefined, {
-				syncReason: 'fresh',
+			return returnLocalOnly(freshSkip.reason, undefined, {
+				syncReason: freshSkip.reason,
 			});
 		}
 		const cooldownMs = provider.getChatStoreCooldownMs?.() || 0;
@@ -4314,6 +4318,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				before: mode === 'older' ? conversation.oldestProviderCursor || undefined : undefined,
 				after: afterCursor,
 				aliases: [...new Set(aliases)],
+				loadEarlier: mode === 'older',
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

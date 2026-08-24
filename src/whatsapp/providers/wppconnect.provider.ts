@@ -1054,7 +1054,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 	private async fetchMessagesForChat(
 		chatId: string,
 		count: number,
-		options: { before?: string; after?: string } = {},
+		options: { before?: string; after?: string; loadEarlier?: boolean } = {},
 	): Promise<any[]> {
 		const target = String(chatId || '').trim();
 		if (!target || !this.client) return [];
@@ -1156,7 +1156,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 
 		// Legacy loaders also go through assertGetChat — skip for LID/groups.
+		// Open-chat must not call these: they pull archive from the phone.
+		const allowHistoryPull = Boolean(options.loadEarlier || options.before);
 		if (
+			allowHistoryPull &&
 			!preferPageFirst &&
 			!this.legacyHistoryApiGone &&
 			typeof this.client.loadEarlierMessages === 'function'
@@ -1173,6 +1176,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 
 		if (
+			allowHistoryPull &&
 			!preferPageFirst &&
 			!this.legacyHistoryApiGone &&
 			typeof this.client.loadAndGetAllMessagesInChat === 'function'
@@ -1186,6 +1190,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 
 		if (
+			allowHistoryPull &&
 			!preferPageFirst &&
 			!this.legacyHistoryApiGone &&
 			typeof this.client.getAllMessagesInChat === 'function'
@@ -1204,7 +1209,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 	private async fetchMessagesViaPage(
 		chatId: string,
 		count: number,
-		options: { before?: string; after?: string } = {},
+		options: { before?: string; after?: string; loadEarlier?: boolean } = {},
 	): Promise<any[]> {
 		const page = this.client?.page;
 		const target = String(chatId || '').trim();
@@ -1216,6 +1221,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 						id: string,
 						limit: number,
 						cursor: { before?: string; after?: string },
+						allowHistoryPull: boolean,
 					) => {
 						const w = window as any;
 						const WPP = w.WPP;
@@ -1300,13 +1306,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 						};
 
 						let chat = await findChatWithoutAssert();
-						try {
-							if (chat && typeof WPP?.chat?.openChatBottom === 'function') {
-								const sid = asSerialized(chat) || id;
-								await WPP.chat.openChatBottom(sid).catch(() => null);
+						if (allowHistoryPull) {
+							try {
+								if (chat && typeof WPP?.chat?.openChatBottom === 'function') {
+									const sid = asSerialized(chat) || id;
+									await WPP.chat.openChatBottom(sid).catch(() => null);
+								}
+							} catch {
+								/* ignore */
 							}
-						} catch {
-							/* ignore */
 						}
 
 						// Only call WPP.chat.getMessages when ChatStore exists —
@@ -1314,7 +1322,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 						const chatStoreReady = Boolean(Store?.Chat?.get);
 						let fromApi: any[] = [];
 						const sid = asSerialized(chat) || id;
-						if (chatStoreReady && typeof WPP?.chat?.getMessages === 'function') {
+						if (
+							allowHistoryPull &&
+							chatStoreReady &&
+							typeof WPP?.chat?.getMessages === 'function'
+						) {
 							try {
 								const opts: Record<string, unknown> = { count: limit };
 								if (cursor.before) {
@@ -1330,22 +1342,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 							}
 						}
 
-						try {
-							if (typeof chat?.msgs?.loadEarlierMsgs === 'function') {
-								await chat.msgs.loadEarlierMsgs();
-							} else if (
-								chatStoreReady &&
-								!fromApi.length &&
-								typeof WPP?.chat?.getMessages === 'function' &&
-								!cursor.before &&
-								!cursor.after
-							) {
-								// Recent WA Web builds removed loadEarlierMsgs; asking for the
-								// full history is what pulls a never-opened chat off the server.
-								fromApi = (await WPP.chat.getMessages(sid, { count: -1 })) || [];
+						if (allowHistoryPull) {
+							try {
+								if (typeof chat?.msgs?.loadEarlierMsgs === 'function') {
+									await chat.msgs.loadEarlierMsgs();
+								} else if (
+									chatStoreReady &&
+									!fromApi.length &&
+									typeof WPP?.chat?.getMessages === 'function' &&
+									!cursor.before &&
+									!cursor.after
+								) {
+									// Never count:-1 (full archive). Bound older pages to `limit`.
+									fromApi =
+										(await WPP.chat.getMessages(sid, {
+											count: Math.min(Math.max(limit, 1), 50),
+										})) || [];
+								}
+							} catch {
+								/* ignore */
 							}
-						} catch {
-							/* ignore */
 						}
 						if (!chat) chat = await findChatWithoutAssert();
 
@@ -1367,6 +1383,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 					target,
 					count,
 					{ before: options.before, after: options.after },
+					Boolean(options.loadEarlier || options.before),
 				),
 				10_000,
 				`fetchMessagesViaPage(${target})`,
@@ -1454,6 +1471,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			before?: string;
 			after?: string;
 			aliases?: string[];
+			loadEarlier?: boolean;
 		} = {},
 	) {
 		const run = () => this.getMessagesExclusive(chatId, options);
@@ -1549,6 +1567,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			before?: string;
 			after?: string;
 			aliases?: string[];
+			loadEarlier?: boolean;
 		} = {},
 	) {
 		if (this.state !== 'connected' || !this.client) {
@@ -1578,6 +1597,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			}
 		}
 		const count = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+		const loadEarlier = Boolean(options.loadEarlier || options.before);
 		let messages: any[] = [];
 		const chatIds = await this.resolveSendableChatIds(chatId);
 		const primary = String(chatId || '').trim();
@@ -1598,7 +1618,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 		// Phone-first caused Chat not found storms when ChatStore only had LID keys.
 		const isGroup = primary.endsWith('@g.us');
 		const merged = [...chatIds, primary, ...aliasIds];
-		const candidates = [...new Set(merged.filter(Boolean))];
+		let candidates = [...new Set(merged.filter(Boolean))];
+		// Open-chat: one primary + at most one fallback. Alias storms hit the phone.
+		if (!loadEarlier) {
+			candidates = candidates.slice(0, 2);
+		}
 		const tried = new Set<string>();
 		let lastChatMissingError: unknown = null;
 		try {

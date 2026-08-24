@@ -32,6 +32,11 @@ export class ConnectWhatsAppAccountDto {
 		message: 'phoneNumber must be a valid international number, e.g. +201234567890',
 	})
 	phoneNumber?: string;
+
+	/** Explicit UI choice. Restore/reconnect omits this so the last method is kept. */
+	@IsOptional()
+	@IsIn(['qr', 'pairing_code'])
+	mode?: 'qr' | 'pairing_code';
 }
 
 export class WhatsAppAccountAccessItemDto {
