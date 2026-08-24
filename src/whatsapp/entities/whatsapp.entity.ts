@@ -1095,6 +1095,9 @@ export class WhatsAppBoardCard extends CoreEntity {
 	@Column({ name: 'is_starred', type: 'boolean', default: false })
 	isStarred: boolean;
 
+	@Column({ type: 'varchar', length: 16, default: 'medium' })
+	priority: string;
+
 	@Column({ name: 'is_completed', type: 'boolean', default: false })
 	isCompleted: boolean;
 

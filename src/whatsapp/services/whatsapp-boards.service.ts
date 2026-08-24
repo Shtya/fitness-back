@@ -244,6 +244,9 @@ export class WhatsAppBoardsService {
 	) {
 		const board = await this.requireDefaultBoard(user, accountId, 'canUse');
 		const card = await this.requireCard(board.id, cardId);
+		if (card.deleted_at) {
+			throw new NotFoundException('Card not found');
+		}
 		if (body.title != null) card.title = body.title.trim();
 		if (body.description !== undefined) card.description = body.description?.trim() || null;
 		if (body.columnId) {
@@ -259,7 +262,20 @@ export class WhatsAppBoardsService {
 		}
 		if (body.assignedUserId !== undefined) card.assignedUserId = body.assignedUserId;
 		if (body.dueAt !== undefined) card.dueAt = body.dueAt ? new Date(body.dueAt) : null;
-		if (body.isStarred != null) card.isStarred = body.isStarred;
+		if (body.priority != null) {
+			const allowed = new Set(['low', 'medium', 'high', 'urgent']);
+			const next = String(body.priority).toLowerCase();
+			if (allowed.has(next)) {
+				card.priority = next;
+				card.isStarred = next === 'high' || next === 'urgent';
+			}
+		} else if (body.isStarred != null) {
+			card.isStarred = body.isStarred;
+			if (body.isStarred && card.priority !== 'urgent') card.priority = 'high';
+			if (!body.isStarred && (card.priority === 'high' || card.priority === 'urgent')) {
+				card.priority = 'medium';
+			}
+		}
 		if (body.isCompleted != null) card.isCompleted = body.isCompleted;
 		if (body.labels) card.labels = body.labels;
 		if (body.checklist) card.checklist = body.checklist;
@@ -302,7 +318,7 @@ export class WhatsAppBoardsService {
 		const board = await this.requireDefaultBoard(user, accountId, 'canUse');
 		const card = await this.requireCard(board.id, cardId);
 		await this.linkRepo.softDelete({ cardId: card.id });
-		await this.cardRepo.softRemove(card);
+		await this.cardRepo.softDelete({ id: card.id, boardId: board.id });
 		return { deleted: true, cardId };
 	}
 
@@ -462,6 +478,7 @@ export class WhatsAppBoardsService {
 			dueDate: card.dueAt ? card.dueAt.toISOString().slice(0, 10) : null,
 			dueAt: card.dueAt,
 			isStarred: card.isStarred,
+			priority: card.priority || (card.isStarred ? 'high' : 'medium'),
 			isCompleted: Boolean(card.isCompleted),
 			labels: card.labels || [],
 			checklist: card.checklist || [],

@@ -101,6 +101,8 @@ const OPTIONAL_TABLES = [
 		ON whatsapp_chat_message_group_items(group_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_chat_message_group_items_conversation
 		ON whatsapp_chat_message_group_items(conversation_id)`,
+	`ALTER TABLE whatsapp_board_cards ADD COLUMN IF NOT EXISTS priority varchar(16) NOT NULL DEFAULT 'medium'`,
+	`ALTER TABLE whatsapp_board_cards ADD COLUMN IF NOT EXISTS is_completed boolean NOT NULL DEFAULT false`,
 ];
 
 @Injectable()

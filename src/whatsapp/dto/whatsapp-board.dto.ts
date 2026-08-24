@@ -126,6 +126,11 @@ export class UpdateBoardCardDto {
 	isStarred?: boolean;
 
 	@IsOptional()
+	@IsString()
+	@MaxLength(16)
+	priority?: string;
+
+	@IsOptional()
 	@IsBoolean()
 	isCompleted?: boolean;
 

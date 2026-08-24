@@ -3393,7 +3393,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 				const refreshed = await loadLocal(before);
 				await this.prepareMessagesForApi(conversation, refreshed);
-				this.queuePendingAttachmentDownloads(refreshed, conversation.accountId);
 				return refreshed;
 			}
 		}
@@ -3401,9 +3400,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// the linked WhatsApp Web session on the phone.
 		if (local.length || before || !accountAccess.canUse || !allowLivePull) {
 			await this.prepareMessagesForApi(conversation, local);
-			if (local.length && !before && accountAccess.canUse) {
-				this.queuePendingAttachmentDownloads(local, conversation.accountId);
-			}
+			// Do not prefetch media from the phone on every chat open — that causes
+			// duplicate downloads + phone notification spam. Media loads on demand
+			// via /attachments/:id/content when the bubble is near the viewport.
 			return local;
 		}
 
@@ -3434,7 +3433,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const saved = await loadLocal();
 		if (saved.length) {
 			await this.prepareMessagesForApi(conversation, saved);
-			this.queuePendingAttachmentDownloads(saved, conversation.accountId);
 			return saved;
 		}
 		// Persist may fail (unique/db) — still return linked-device messages to the UI.
