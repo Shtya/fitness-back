@@ -1,4 +1,8 @@
-import { ensureWhatsAppVoiceOgg, guessVoiceSeconds } from './whatsapp-voice-ogg';
+import {
+	ensureWhatsAppVoiceOgg,
+	fallbackVoiceWaveform,
+	guessVoiceSeconds,
+} from './whatsapp-voice-ogg';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -8,6 +12,14 @@ describe('whatsapp voice ogg helper', () => {
 		expect(guessVoiceSeconds('/tmp/x', 'voice-12s.webm')).toBe(12);
 		expect(guessVoiceSeconds('/tmp/abc-voice-5s.webm')).toBe(5);
 		expect(guessVoiceSeconds('/tmp/photo.jpg')).toBeUndefined();
+	});
+
+	it('builds a 64-sample fallback waveform WhatsApp can render', () => {
+		const waveform = fallbackVoiceWaveform(Buffer.from('voice-note-bytes'));
+		expect(waveform).toBeInstanceOf(Uint8Array);
+		expect(waveform.length).toBe(64);
+		expect([...waveform].every((value) => value >= 1 && value <= 100)).toBe(true);
+		expect(fallbackVoiceWaveform(Buffer.from('voice-note-bytes'))).toEqual(waveform);
 	});
 
 	it('leaves an already-OGG recording untouched', async () => {

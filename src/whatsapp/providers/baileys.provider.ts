@@ -12,7 +12,11 @@ import {
 import { loadBaileysModule } from './baileys-loader';
 import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
-import { ensureWhatsAppVoiceOgg, guessVoiceSeconds } from '../utils/whatsapp-voice-ogg';
+import {
+	buildVoiceWaveform,
+	ensureWhatsAppVoiceOgg,
+	resolveVoiceSeconds,
+} from '../utils/whatsapp-voice-ogg';
 
 type BaileysSocket = any;
 
@@ -1864,13 +1868,18 @@ export class BaileysProvider implements WhatsAppProvider {
 			if (options.isSticker) {
 				content = { sticker: buffer };
 			} else if (options.isVoice || mime.startsWith('audio/')) {
+				const isPtt = Boolean(options.isVoice);
+				const seconds = isPtt
+					? await resolveVoiceSeconds(sendPath, options.fileName || path.basename(filePath))
+					: undefined;
+				// Without waveform WhatsApp mobile renders a flat progress line.
+				const waveform = isPtt ? await buildVoiceWaveform(sendPath) : undefined;
 				content = {
 					audio: buffer,
 					mimetype: mime || 'audio/ogg; codecs=opus',
-					ptt: Boolean(options.isVoice),
-					seconds: options.isVoice
-						? guessVoiceSeconds(filePath, options.fileName)
-						: undefined,
+					ptt: isPtt,
+					...(seconds ? { seconds } : {}),
+					...(waveform ? { waveform } : {}),
 				};
 			} else if (mime.startsWith('image/')) {
 				content = { image: buffer, caption: options.caption || undefined, mimetype: mime };

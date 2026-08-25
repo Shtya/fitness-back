@@ -77,6 +77,125 @@ export function guessVoiceSeconds(filePath: string, fileName?: string | null): n
 	return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 299) : undefined;
 }
 
+/** WhatsApp PTT UI expects 64 samples in the 0–100 range. */
+export const VOICE_WAVEFORM_SAMPLES = 64;
+
+/**
+ * Deterministic fake bars when decode fails — still better than WhatsApp's flat line.
+ */
+export function fallbackVoiceWaveform(
+	seed: Buffer | string,
+	samples = VOICE_WAVEFORM_SAMPLES,
+): Uint8Array {
+	const source = Buffer.isBuffer(seed) ? seed : Buffer.from(String(seed || 'voice'));
+	const out = new Uint8Array(samples);
+	let state = 0x811c9dc5;
+	for (let i = 0; i < Math.min(source.length, 256); i += 1) {
+		state ^= source[i];
+		state = Math.imul(state, 0x01000193);
+	}
+	for (let i = 0; i < samples; i += 1) {
+		state ^= state << 13;
+		state ^= state >>> 17;
+		state ^= state << 5;
+		const envelope = Math.sin((Math.PI * i) / Math.max(samples - 1, 1));
+		const raw = ((state >>> 0) % 70) + 20;
+		out[i] = Math.max(8, Math.min(100, Math.round(raw * (0.35 + 0.65 * envelope))));
+	}
+	return out;
+}
+
+function waveformFromPcmS16le(pcm: Buffer, samples = VOICE_WAVEFORM_SAMPLES): Uint8Array | null {
+	if (!pcm?.length || pcm.length < 4) return null;
+	const sampleCount = Math.floor(pcm.length / 2);
+	if (sampleCount < samples) return null;
+	const blockSize = Math.floor(sampleCount / samples);
+	if (blockSize < 1) return null;
+	const peaks: number[] = [];
+	for (let i = 0; i < samples; i += 1) {
+		const start = i * blockSize * 2;
+		let sum = 0;
+		for (let j = 0; j < blockSize; j += 1) {
+			const offset = start + j * 2;
+			if (offset + 1 >= pcm.length) break;
+			sum += Math.abs(pcm.readInt16LE(offset));
+		}
+		peaks.push(sum / blockSize);
+	}
+	const max = Math.max(...peaks, 1);
+	return new Uint8Array(peaks.map((value) => Math.max(1, Math.min(100, Math.round((value / max) * 100)))));
+}
+
+function decodeAudioToPcmS16le(filePath: string): Promise<Buffer> {
+	return new Promise((resolve, reject) => {
+		const processHandle = spawn(
+			resolveFfmpeg(),
+			['-y', '-i', filePath, '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', '-acodec', 'pcm_s16le', 'pipe:1'],
+			{ windowsHide: true },
+		);
+		const chunks: Buffer[] = [];
+		let stderr = '';
+		const timer = setTimeout(() => {
+			processHandle.kill();
+			reject(new Error('Waveform decode timed out'));
+		}, 20_000);
+		processHandle.stdout?.on('data', (chunk: Buffer) => {
+			chunks.push(chunk);
+		});
+		processHandle.stderr?.on('data', (chunk: Buffer) => {
+			stderr = `${stderr}${chunk.toString()}`.slice(-1500);
+		});
+		processHandle.once('error', (error: Error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		processHandle.once('close', (code: number) => {
+			clearTimeout(timer);
+			const pcm = Buffer.concat(chunks);
+			if (code === 0 && pcm.length) {
+				resolve(pcm);
+				return;
+			}
+			reject(new Error(`Waveform decode failed (code ${code}): ${stderr}`));
+		});
+	});
+}
+
+/**
+ * Build the waveform WhatsApp mobile shows for PTT notes.
+ * Baileys only auto-generates this when optional `audio-decode` is installed —
+ * we compute it with ffmpeg so site-sent notes match mobile bars.
+ */
+export async function buildVoiceWaveform(
+	filePath: string,
+	samples = VOICE_WAVEFORM_SAMPLES,
+): Promise<Uint8Array> {
+	try {
+		const pcm = await decodeAudioToPcmS16le(filePath);
+		const fromPcm = waveformFromPcmS16le(pcm, samples);
+		if (fromPcm) return fromPcm;
+	} catch {
+		/* fall through */
+	}
+	try {
+		const buffer = await fs.readFile(filePath);
+		return fallbackVoiceWaveform(buffer, samples);
+	} catch {
+		return fallbackVoiceWaveform(path.basename(filePath || 'voice'), samples);
+	}
+}
+
+export async function resolveVoiceSeconds(
+	filePath: string,
+	fileName?: string | null,
+): Promise<number | undefined> {
+	const fromName = guessVoiceSeconds(filePath, fileName);
+	if (fromName) return fromName;
+	const probed = await probeAudioSeconds(filePath);
+	if (probed > 0) return Math.min(299, Math.max(1, Math.round(probed)));
+	return undefined;
+}
+
 /**
  * WhatsApp PTT is OGG/Opus. Chrome records WebM/Opus and sending that container
  * can ACK locally while the phone never shows the voice note.
