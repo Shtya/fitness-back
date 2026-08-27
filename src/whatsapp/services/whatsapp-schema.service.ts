@@ -16,12 +16,14 @@ const OPTIONAL_TABLES = [
 		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		is_favorite boolean NOT NULL DEFAULT false,
 		is_pinned boolean NOT NULL DEFAULT false,
-		is_archived boolean NOT NULL DEFAULT false
+		is_archived boolean NOT NULL DEFAULT false,
+		is_muted boolean NOT NULL DEFAULT false
 	)`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS account_id uuid`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS provider_chat_id varchar(160)`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_pinned boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
+	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_muted boolean NOT NULL DEFAULT false`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity
 		ON whatsapp_conversation_preferences (account_id, provider_chat_id)`,
 	`CREATE TABLE IF NOT EXISTS whatsapp_voice_changer_credentials (

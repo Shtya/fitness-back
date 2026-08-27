@@ -3010,6 +3010,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
 					isArchived: Boolean(preference?.isArchived),
+					isMuted: Boolean(preference?.isMuted),
 					isEmailMemoAi:
 						String(item.providerChatId || '') === 'email-memo-ai@so7ba.internal',
 					lastMessage: (() => {
@@ -3050,6 +3051,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isPinned: Boolean(isPinned),
 		});
 		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
+	}
+
+	async setConversationMuted(user: User, conversationId: string, isMuted: boolean) {
+		await this.assertConversationVisible(user, conversationId);
+		await this.saveConversationPreference(user.id, conversationId, {
+			isMuted: Boolean(isMuted),
+		});
+		return { ok: true, conversationId, isMuted: Boolean(isMuted) };
 	}
 
 	/**
@@ -3160,7 +3169,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async saveConversationPreference(
 		userId: string,
 		conversationId: string,
-		patch: { isPinned?: boolean; isFavorite?: boolean; isArchived?: boolean },
+		patch: {
+			isPinned?: boolean;
+			isFavorite?: boolean;
+			isArchived?: boolean;
+			isMuted?: boolean;
+		},
 	) {
 		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
 		const row = (await this.findConversationPreference(userId, conversation)) ||
@@ -3169,6 +3183,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				isPinned: false,
 				isFavorite: false,
 				isArchived: false,
+				isMuted: false,
 			});
 		row.deleted_at = null;
 		row.userId = userId;
@@ -3178,6 +3193,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (patch.isPinned != null) row.isPinned = patch.isPinned;
 		if (patch.isFavorite != null) row.isFavorite = patch.isFavorite;
 		if (patch.isArchived != null) row.isArchived = patch.isArchived;
+		if (patch.isMuted != null) row.isMuted = patch.isMuted;
 		await this.preferenceRepo.save(row);
 	}
 
@@ -3236,6 +3252,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				existing.isPinned = Boolean(existing.isPinned || row.isPinned);
 				existing.isFavorite = Boolean(existing.isFavorite || row.isFavorite);
 				existing.isArchived = Boolean(existing.isArchived || row.isArchived);
+				existing.isMuted = Boolean(existing.isMuted || row.isMuted);
 				await this.preferenceRepo.save(existing);
 				await this.preferenceRepo.delete(row.id);
 				continue;

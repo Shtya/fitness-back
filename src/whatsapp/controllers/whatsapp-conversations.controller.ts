@@ -156,6 +156,19 @@ export class WhatsAppConversationsController {
 		);
 	}
 
+	@Put('conversations/:conversationId/mute')
+	setMuted(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: { isMuted?: boolean },
+	) {
+		return this.sync.setConversationMuted(
+			req.user,
+			conversationId,
+			Boolean(body.isMuted),
+		);
+	}
+
 	@Post('accounts/:accountId/sync/contacts')
 	syncContacts(@Req() req: any, @Param('accountId') accountId: string) {
 		return this.sync.syncContacts(req.user, accountId);

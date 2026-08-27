@@ -371,6 +371,9 @@ export class WhatsAppConversationPreference extends CoreEntity {
 
 	@Column({ name: 'is_archived', type: 'boolean', default: false })
 	isArchived: boolean;
+
+	@Column({ name: 'is_muted', type: 'boolean', default: false })
+	isMuted: boolean;
 }
 
 @Entity('whatsapp_messages')
