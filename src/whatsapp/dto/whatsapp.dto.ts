@@ -111,6 +111,17 @@ export class ForwardWhatsAppMessageDto {
 	targetConversationId: string;
 }
 
+/** Re-send message content as a fresh outbound message (no WhatsApp "Forwarded" label). */
+export class ShareWhatsAppMessagesAsOriginalDto {
+	@IsUUID()
+	targetConversationId: string;
+
+	@IsArray()
+	@ArrayNotEmpty()
+	@IsUUID('4', { each: true })
+	messageIds: string[];
+}
+
 export class ToggleWhatsAppMessageDto {
 	@IsBoolean()
 	enabled: boolean;

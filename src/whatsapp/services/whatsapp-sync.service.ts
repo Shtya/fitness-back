@@ -4080,6 +4080,194 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true, messageId, targetConversationId };
 	}
 
+	/**
+	 * Re-send selected messages as fresh outbound content (text/media).
+	 * Unlike WhatsApp forward, recipients do not see a "Forwarded" label.
+	 */
+	async shareMessagesAsOriginal(
+		user: User,
+		conversationId: string,
+		messageIds: string[],
+		targetConversationId: string,
+	) {
+		const uniqueIds = [...new Set((messageIds || []).map(id => String(id || '').trim()).filter(Boolean))];
+		if (!uniqueIds.length) {
+			throw new BadRequestException('Select at least one message to share');
+		}
+		if (uniqueIds.length > 40) {
+			throw new BadRequestException('You can share at most 40 messages at once');
+		}
+
+		const sourceConversation = await this.assertConversationVisible(user, conversationId);
+		const target = await this.assertConversationVisible(user, targetConversationId);
+		if (!target.accountAccess.canUse) {
+			throw new ForbiddenException('WhatsApp send access denied');
+		}
+		if (sourceConversation.conversation.accountId !== target.conversation.accountId) {
+			throw new BadRequestException(
+				'Messages can only be shared within the same WhatsApp account',
+			);
+		}
+
+		const messages = await this.messageRepo.find({
+			where: {
+				id: In(uniqueIds),
+				conversationId,
+				accountId: sourceConversation.conversation.accountId,
+			},
+			relations: ['attachments'],
+			order: { providerTimestamp: 'ASC' },
+		});
+		if (!messages.length) {
+			throw new NotFoundException('No matching WhatsApp messages found');
+		}
+		const byId = new Map(messages.map(item => [item.id, item]));
+		const ordered = uniqueIds.map(id => byId.get(id)).filter(Boolean) as WhatsAppMessage[];
+		if (ordered.length !== uniqueIds.length) {
+			throw new BadRequestException('Some selected messages were not found in this chat');
+		}
+
+		const results: Array<{ messageId: string; ok: boolean; error?: string }> = [];
+		for (const message of ordered) {
+			try {
+				await this.resendMessageAsOriginal(user, targetConversationId, message);
+				results.push({ messageId: message.id, ok: true });
+				await new Promise(resolve => setTimeout(resolve, 180));
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error || 'Failed');
+				this.logger.warn(`share-as-original failed for ${message.id}: ${detail}`);
+				results.push({ messageId: message.id, ok: false, error: detail });
+			}
+		}
+
+		const sent = results.filter(item => item.ok).length;
+		const failed = results.length - sent;
+		await this.audit.write({
+			actorUserId: user.id,
+			accountId: sourceConversation.conversation.accountId,
+			action: 'whatsapp.message.shared_as_original',
+			targetType: 'WhatsAppConversation',
+			targetId: targetConversationId,
+			metadata: {
+				sourceConversationId: conversationId,
+				sent,
+				failed,
+				messageIds: uniqueIds,
+			},
+		});
+
+		if (!sent) {
+			throw new BadRequestException(
+				results[0]?.error || 'Could not share the selected messages',
+			);
+		}
+
+		return {
+			ok: true,
+			targetConversationId,
+			sent,
+			failed,
+			results,
+		};
+	}
+
+	private async resendMessageAsOriginal(
+		user: User,
+		targetConversationId: string,
+		message: WhatsAppMessage,
+	) {
+		const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+		const primary = attachments[0] || null;
+		const caption = String(message.text || '').trim() || undefined;
+		const type = String(primary?.type || message.type || 'text').toLowerCase();
+
+		const mediaKinds = new Set(['image', 'video', 'audio', 'ptt', 'voice', 'document', 'sticker']);
+		if (primary && mediaKinds.has(type)) {
+			const fileId = await this.materializeAttachmentForOutgoingResend(user, message, primary);
+			const sendType =
+				type === 'ptt' || type === 'voice'
+					? 'voice'
+					: type === 'audio'
+						? 'audio'
+						: type === 'sticker'
+							? 'sticker'
+							: type === 'video'
+								? 'video'
+								: type === 'document'
+									? 'document'
+									: 'image';
+			await this.sendMedia(user, targetConversationId, {
+				type: sendType,
+				fileId,
+				caption: sendType === 'sticker' || sendType === 'voice' ? undefined : caption,
+			});
+			return;
+		}
+
+		if (!caption) {
+			throw new BadRequestException('This message has no text or media to share');
+		}
+		await this.sendText(user, targetConversationId, caption);
+	}
+
+	private async materializeAttachmentForOutgoingResend(
+		user: User,
+		message: WhatsAppMessage,
+		attachment: WhatsAppMessageAttachment,
+	) {
+		const downloaded = await this.downloadAttachment(user, attachment.id);
+		if (!downloaded?.ok) {
+			throw new BadRequestException('Could not download media for this message');
+		}
+
+		const root = path.resolve(
+			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+		);
+		const freshAttachment = await this.attachmentRepo.findOne({ where: { id: attachment.id } });
+		let sourceAbsolute: string | null = null;
+		if (freshAttachment?.storagePath) {
+			sourceAbsolute = path.resolve(process.cwd(), freshAttachment.storagePath);
+		} else if (downloaded.path) {
+			sourceAbsolute = path.resolve(process.cwd(), downloaded.path);
+		}
+		if (!sourceAbsolute) {
+			throw new BadRequestException('Shared media file is unavailable');
+		}
+		await fs.access(sourceAbsolute);
+
+		const outgoingDir = path.join(root, 'outgoing', message.accountId, user.id);
+		await fs.mkdir(outgoingDir, { recursive: true });
+		const mime =
+			String(downloaded.mimeType || freshAttachment?.mimeType || attachment.mimeType || '').toLowerCase() ||
+			guessMimeFromPath(sourceAbsolute, attachment.type) ||
+			'';
+		const ext =
+			mime.includes('png')
+				? '.png'
+				: mime.includes('webp')
+					? '.webp'
+					: mime.includes('gif')
+						? '.gif'
+						: mime.includes('mp4')
+							? '.mp4'
+							: mime.includes('ogg') || mime.includes('opus')
+								? '.ogg'
+								: mime.includes('webm')
+									? '.webm'
+									: mime.includes('mpeg') || mime.includes('mp3')
+										? '.mp3'
+										: mime.includes('pdf')
+											? '.pdf'
+											: path.extname(attachment.fileName || sourceAbsolute) || '.bin';
+		const baseName = path
+			.basename(attachment.fileName || `share${ext}`)
+			.replace(/[^a-zA-Z0-9._-]/g, '_');
+		const fileName = `share_${Date.now()}_${randomUUID().slice(0, 8)}_${baseName || `file${ext}`}`;
+		const destAbsolute = path.join(outgoingDir, fileName);
+		await fs.copyFile(sourceAbsolute, destAbsolute);
+		return path.relative(root, destAbsolute).replace(/\\/g, '/');
+	}
+
 	async starMessage(user: User, conversationId: string, messageId: string, isStarred: boolean) {
 		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
 		try {

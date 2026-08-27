@@ -31,6 +31,7 @@ import {
 	ReactWhatsAppMessageDto,
 	RenameWhatsAppMessageGroupDto,
 	SendWhatsAppMessageDto,
+	ShareWhatsAppMessagesAsOriginalDto,
 	ToggleWhatsAppMessageDto,
 	WhatsAppMessageGroupMessagesDto,
 } from '../dto/whatsapp.dto';
@@ -236,6 +237,21 @@ export class WhatsAppConversationsController {
 			req.user,
 			conversationId,
 			messageId,
+			body.targetConversationId,
+		);
+	}
+
+	/** Send selected messages as new outbound messages (images/text) — not WhatsApp forward. */
+	@Post('conversations/:conversationId/messages/share-as-original')
+	shareMessagesAsOriginal(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: ShareWhatsAppMessagesAsOriginalDto,
+	) {
+		return this.sync.shareMessagesAsOriginal(
+			req.user,
+			conversationId,
+			body.messageIds,
 			body.targetConversationId,
 		);
 	}
