@@ -32,8 +32,10 @@ import {
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import {
 	NormalizedWhatsAppMessage,
+	WhatsAppEmbeddedQuote,
 	WhatsAppProvider,
 	WhatsAppProviderEvent,
+	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
@@ -4188,11 +4190,47 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
+	private async resolveMessageReplySnapshot(
+		message: WhatsAppMessage,
+	): Promise<WhatsAppEmbeddedQuote | null> {
+		if (message.quotedProviderMessageId) {
+			const quoted = await this.messageRepo.findOne({
+				where: {
+					conversationId: message.conversationId,
+					providerMessageId: message.quotedProviderMessageId,
+				},
+			});
+			if (quoted) {
+				const payload = this.buildReplyToPayload(quoted, (message as any).raw);
+				return {
+					text: payload.text,
+					type: payload.type,
+					senderName: payload.senderName,
+					durationSeconds: payload.durationSeconds,
+				};
+			}
+		}
+		const raw = (message as any).raw;
+		const text = quotedTextFromRaw(raw);
+		const type = quotedTypeFromRaw(raw);
+		if (!text && !type) return null;
+		return {
+			text,
+			type: type || 'text',
+			senderName: null,
+			durationSeconds: quotedDurationFromRaw(raw),
+		};
+	}
+
 	private async resendMessageAsOriginal(
 		user: User,
 		targetConversationId: string,
 		message: WhatsAppMessage,
 	) {
+		const embeddedQuote = await this.resolveMessageReplySnapshot(message);
+		const quoteOption: WhatsAppSendQuoteOptions | undefined = embeddedQuote
+			? { embeddedQuote }
+			: undefined;
 		const attachments = Array.isArray(message.attachments) ? message.attachments : [];
 		const primary = attachments[0] || null;
 		const caption = String(message.text || '').trim() || undefined;
@@ -4217,6 +4255,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				type: sendType,
 				fileId,
 				caption: sendType === 'sticker' || sendType === 'voice' ? undefined : caption,
+				embeddedQuote: embeddedQuote || undefined,
 			});
 			return;
 		}
@@ -4224,7 +4263,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (!caption) {
 			throw new BadRequestException('This message has no text or media to share');
 		}
-		await this.sendText(user, targetConversationId, caption);
+		await this.sendText(user, targetConversationId, caption, quoteOption);
 	}
 
 	private async materializeAttachmentForOutgoingResend(
@@ -4824,7 +4863,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		user: User,
 		conversationId: string,
 		text: string,
-		quotedProviderMessageId?: string,
+		quote?: string | WhatsAppSendQuoteOptions,
 		clientMessageId?: string,
 		persistClientMessageId?: string,
 	) {
@@ -4834,12 +4873,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					user,
 					conversationId,
 					text,
-					quotedProviderMessageId,
+					quote,
 					undefined,
 					clientMessageId,
 				),
 			);
 		}
+		const quotedProviderMessageId =
+			typeof quote === 'string'
+				? quote
+				: quote?.quotedProviderMessageId || undefined;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -4849,7 +4892,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const result = await provider.sendText(
 			conversation.providerChatId,
 			text,
-			quotedProviderMessageId,
+			quote,
 		);
 		const id =
 			providerMessageId(result) ||
@@ -4860,7 +4903,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 		}
 		await this.markReadAfterReply(conversation, accountAccess.account, provider, user.id);
-		const saved = await this.persistMessage(
+		const persisted = await this.persistMessage(
 			conversation.accountId,
 			{
 				providerMessageId: id,
@@ -4877,6 +4920,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			false,
 			{ clientMessageId: persistClientMessageId },
 		);
+		const saved = await this.messageRepo.findOneOrFail({
+			where: { id: persisted.id },
+			relations: ['attachments', 'senderUser', 'reactions'],
+		});
+		this.attachReplyPreviews([saved]);
 		if (persistClientMessageId) (saved as any).clientMessageId = persistClientMessageId;
 		await this.audit.write({
 			actorUserId: user.id,
@@ -4897,6 +4945,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			fileId: string;
 			caption?: string;
 			quotedProviderMessageId?: string;
+			embeddedQuote?: WhatsAppEmbeddedQuote;
 			clientMessageId?: string;
 			persistClientMessageId?: string;
 		},
@@ -4935,6 +4984,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isSticker: input.type === 'sticker',
 			mimeType: mimeGuess,
 			quotedProviderMessageId: input.quotedProviderMessageId,
+			embeddedQuote: input.embeddedQuote,
 		});
 		const id =
 			providerMessageId(result) ||
@@ -4993,6 +5043,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { id: saved.id },
 			relations: ['attachments', 'senderUser'],
 		});
+		const outbound = refreshed || saved;
+		this.attachReplyPreviews([outbound]);
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId: conversation.accountId,
@@ -5001,7 +5053,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			targetId: saved.id,
 			metadata: { conversationId, type: input.type },
 		});
-		return { ok: true, message: refreshed || saved, providerResult: { id } };
+		return { ok: true, message: outbound, providerResult: { id } };
 	}
 
 	private async bindOutboundLocalAttachment(input: {

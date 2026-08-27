@@ -71,6 +71,19 @@ export interface NormalizedWhatsAppMessage {
 	raw?: any;
 }
 
+/** Embedded quote content for cross-chat resend (share-as-original with reply). */
+export interface WhatsAppEmbeddedQuote {
+	text?: string | null;
+	type?: string;
+	senderName?: string | null;
+	durationSeconds?: number | null;
+}
+
+export interface WhatsAppSendQuoteOptions {
+	quotedProviderMessageId?: string;
+	embeddedQuote?: WhatsAppEmbeddedQuote;
+}
+
 export interface WhatsAppProviderCapabilities {
 	qr: boolean;
 	history: boolean;
@@ -129,7 +142,11 @@ export interface WhatsAppProvider {
 	getProfilePictureUrl?(chatId: string): Promise<string | null>;
 	getGroups(): Promise<any[]>;
 	getGroupParticipants(groupId: string): Promise<any[]>;
-	sendText(chatId: string, text: string, quotedProviderMessageId?: string): Promise<any>;
+	sendText(
+		chatId: string,
+		text: string,
+		quote?: string | WhatsAppSendQuoteOptions,
+	): Promise<any>;
 	sendMedia(
 		chatId: string,
 		path: string,
@@ -140,6 +157,7 @@ export interface WhatsAppProvider {
 			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
+			embeddedQuote?: WhatsAppEmbeddedQuote;
 		},
 	): Promise<any>;
 	sendReaction(providerMessageId: string, emoji: string | false): Promise<any>;

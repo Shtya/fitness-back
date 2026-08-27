@@ -5,9 +5,11 @@ import {
 } from '../../common/chrome-executable';
 import {
 	NormalizedWhatsAppMessage,
+	WhatsAppEmbeddedQuote,
 	WhatsAppProvider,
 	WhatsAppProviderCapabilities,
 	WhatsAppProviderEvent,
+	WhatsAppSendQuoteOptions,
 } from './whatsapp-provider';
 import {
 	forceReleaseWppBrowserProfile,
@@ -158,6 +160,40 @@ function pathExtFromMime(mime?: string | null) {
 	if (value.includes('mpeg') || value.includes('mp3')) return '.mp3';
 	if (value.includes('mp4') || value.includes('m4a')) return '.m4a';
 	return '';
+}
+
+function normalizeSendQuoteOptions(
+	quote?: string | WhatsAppSendQuoteOptions,
+): WhatsAppSendQuoteOptions | null {
+	if (!quote) return null;
+	if (typeof quote === 'string') {
+		const id = quote.trim();
+		return id ? { quotedProviderMessageId: id } : null;
+	}
+	if (quote.quotedProviderMessageId || quote.embeddedQuote) return quote;
+	return null;
+}
+
+function embeddedQuotePrefix(quote?: WhatsAppEmbeddedQuote | null): string {
+	if (!quote) return '';
+	const type = String(quote.type || 'text').toLowerCase();
+	const text = String(quote.text || '').trim();
+	if (text) return `↩ ${text}`;
+	if (['image', 'sticker'].includes(type)) return '↩ Photo';
+	if (type === 'video') return '↩ Video';
+	if (['audio', 'ptt', 'voice'].includes(type)) return '↩ Voice message';
+	if (type === 'document') return '↩ Document';
+	return '↩ Message';
+}
+
+function withEmbeddedQuotePrefix(
+	text: string,
+	quote?: WhatsAppEmbeddedQuote | null,
+): string {
+	const prefix = embeddedQuotePrefix(quote);
+	if (!prefix) return text;
+	const body = String(text || '').trim();
+	return body ? `${prefix}\n${body}` : prefix;
 }
 
 export class WppConnectProvider implements WhatsAppProvider {
@@ -1961,17 +1997,22 @@ export class WppConnectProvider implements WhatsAppProvider {
 		);
 	}
 
-	async sendText(chatId: string, text: string, quotedProviderMessageId?: string) {
+	async sendText(chatId: string, text: string, quote?: string | WhatsAppSendQuoteOptions) {
+		const quoteOptions = normalizeSendQuoteOptions(quote);
+		const quotedProviderMessageId = quoteOptions?.quotedProviderMessageId;
+		const outbound = quoteOptions?.embeddedQuote
+			? withEmbeddedQuotePrefix(text, quoteOptions.embeddedQuote)
+			: text;
 		const targets = await this.resolveSendableChatIds(chatId);
 		let lastError: unknown;
 		for (const target of targets) {
 			try {
 				const sendPromise = async () => {
 					if (quotedProviderMessageId && this.client.reply) {
-						return this.client.reply(target, text, quotedProviderMessageId);
+						return this.client.reply(target, outbound, quotedProviderMessageId);
 					}
 					try {
-						return await this.client.sendText(target, text, {
+						return await this.client.sendText(target, outbound, {
 							createChat: true,
 							waitForAck: true,
 							...(quotedProviderMessageId
@@ -1981,7 +2022,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 					} catch (error) {
 						// Older clients reject unknown options — retry plain send.
 						if (quotedProviderMessageId) throw error;
-						return this.client.sendText(target, text);
+						return this.client.sendText(target, outbound);
 					}
 				};
 				return await this.withTimeout(sendPromise(), 45000, `sendText(${target})`);
@@ -2014,8 +2055,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
+			embeddedQuote?: WhatsAppEmbeddedQuote;
 		} = {},
 	) {
+		if (options.embeddedQuote) {
+			options.caption = withEmbeddedQuotePrefix(
+				options.caption || '',
+				options.embeddedQuote,
+			);
+		}
 		const targets = await this.resolveSendableChatIds(chatId);
 		const filename = options.fileName || require('path').basename(filePath) || 'file';
 		let lastError: unknown;

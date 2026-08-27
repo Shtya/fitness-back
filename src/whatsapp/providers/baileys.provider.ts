@@ -8,6 +8,8 @@ import {
 	WhatsAppProvider,
 	WhatsAppProviderCapabilities,
 	WhatsAppProviderEvent,
+	WhatsAppEmbeddedQuote,
+	WhatsAppSendQuoteOptions,
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
 import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
@@ -269,6 +271,50 @@ function contextInfoOf(content: any) {
 		content.liveLocationMessage?.contextInfo ||
 		null
 	);
+}
+
+function normalizeSendQuoteOptions(
+	quote?: string | WhatsAppSendQuoteOptions,
+): WhatsAppSendQuoteOptions | null {
+	if (!quote) return null;
+	if (typeof quote === 'string') {
+		const id = quote.trim();
+		return id ? { quotedProviderMessageId: id } : null;
+	}
+	if (quote.quotedProviderMessageId || quote.embeddedQuote) return quote;
+	return null;
+}
+
+function buildEmbeddedQuotedMessage(quote: WhatsAppEmbeddedQuote): any {
+	const type = String(quote.type || 'text').toLowerCase();
+	const text = String(quote.text || '').trim();
+	if (['image', 'sticker'].includes(type)) {
+		return text ? { imageMessage: { caption: text } } : { imageMessage: {} };
+	}
+	if (type === 'video') {
+		return { videoMessage: { caption: text || undefined } };
+	}
+	if (['audio', 'ptt', 'voice'].includes(type)) {
+		const seconds = Math.max(1, Math.round(Number(quote.durationSeconds) || 1));
+		return { audioMessage: { ptt: type !== 'audio', seconds } };
+	}
+	if (type === 'document') {
+		return {
+			documentMessage: {
+				caption: text || undefined,
+				fileName: text || 'document',
+			},
+		};
+	}
+	if (['location', 'live_location', 'livelocation'].includes(type)) {
+		return {
+			locationMessage: {
+				name: text || undefined,
+				address: text || undefined,
+			},
+		};
+	}
+	return { conversation: text || 'Message' };
 }
 
 function messageText(message: any): string {
@@ -1796,18 +1842,42 @@ export class BaileysProvider implements WhatsAppProvider {
 		return [];
 	}
 
-	async sendText(chatId: string, text: string, quotedProviderMessageId?: string) {
+	private resolveQuotedPayload(
+		chatId: string,
+		quote?: string | WhatsAppSendQuoteOptions | null,
+	): any | null {
+		const options = normalizeSendQuoteOptions(quote || undefined);
+		if (!options) return null;
+		const jid = toBaileysJid(chatId);
+		if (options.quotedProviderMessageId) {
+			const stored = this.rawByMessageId.get(options.quotedProviderMessageId);
+			if (stored) return stored;
+			return {
+				key: { remoteJid: jid, id: options.quotedProviderMessageId },
+				message: { conversation: '' },
+			};
+		}
+		if (options.embeddedQuote) {
+			return {
+				key: {
+					remoteJid: jid,
+					id: `embed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+					fromMe: false,
+				},
+				message: buildEmbeddedQuotedMessage(options.embeddedQuote),
+			};
+		}
+		return null;
+	}
+
+	async sendText(chatId: string, text: string, quote?: string | WhatsAppSendQuoteOptions) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const jid = toBaileysJid(chatId);
 		const payload: any = { text };
-		if (quotedProviderMessageId) {
-			payload.quoted = {
-				key: { remoteJid: jid, id: quotedProviderMessageId },
-				message: { conversation: '' },
-			};
-		}
+		const quotedPayload = this.resolveQuotedPayload(chatId, quote);
+		if (quotedPayload) payload.quoted = quotedPayload;
 		const result = await this.socket.sendMessage(jid, payload);
 		const normalized = this.normalizeWaMessage(result);
 		if (normalized) this.rememberMessage(normalized, result);
@@ -1824,6 +1894,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			isSticker?: boolean;
 			mimeType?: string | null;
 			quotedProviderMessageId?: string;
+			embeddedQuote?: WhatsAppEmbeddedQuote;
 		} = {},
 	) {
 		if (!this.socket || this.state !== 'connected') {
@@ -1893,7 +1964,14 @@ export class BaileysProvider implements WhatsAppProvider {
 					caption: options.caption || undefined,
 				};
 			}
-			const result = await this.socket.sendMessage(jid, content);
+			const quotedPayload = options.embeddedQuote
+				? this.resolveQuotedPayload(chatId, { embeddedQuote: options.embeddedQuote })
+				: options.quotedProviderMessageId
+					? this.resolveQuotedPayload(chatId, options.quotedProviderMessageId)
+					: null;
+			const result = quotedPayload
+				? await this.socket.sendMessage(jid, content, { quoted: quotedPayload })
+				: await this.socket.sendMessage(jid, content);
 			const normalized = this.normalizeWaMessage(result);
 			if (normalized) this.rememberMessage(normalized, result);
 			return result;
