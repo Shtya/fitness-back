@@ -27,6 +27,7 @@ import {
 	CreateWhatsAppConversationNoteDto,
 	CreateWhatsAppMessageGroupDto,
 	DeleteWhatsAppMessageDto,
+	EditWhatsAppMessageDto,
 	ForwardWhatsAppMessageDto,
 	ReactWhatsAppMessageDto,
 	RenameWhatsAppMessageGroupDto,
@@ -160,12 +161,20 @@ export class WhatsAppConversationsController {
 	setMuted(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { isMuted?: boolean },
+		@Body() body: { isMuted?: boolean; mutedUntil?: string | null; durationMinutes?: number },
 	) {
+		let mutedUntil: string | Date | null | undefined = body.mutedUntil;
+		if (body.isMuted && body.durationMinutes != null && !mutedUntil) {
+			const minutes = Number(body.durationMinutes);
+			if (Number.isFinite(minutes) && minutes > 0) {
+				mutedUntil = new Date(Date.now() + minutes * 60_000);
+			}
+		}
 		return this.sync.setConversationMuted(
 			req.user,
 			conversationId,
 			Boolean(body.isMuted),
+			mutedUntil,
 		);
 	}
 
@@ -212,6 +221,7 @@ export class WhatsAppConversationsController {
 		@Query('live') live?: string,
 		@Query('starredOnly') starredOnly?: string,
 		@Query('importantOnly') importantOnly?: string,
+		@Query('q') q?: string,
 	) {
 		// Opt-in only. Omitting `live` used to default ON and hit the phone on GET.
 		const allowLivePull = ['1', 'true', 'yes'].includes(String(live || '').toLowerCase());
@@ -219,8 +229,9 @@ export class WhatsAppConversationsController {
 			String(starredOnly || importantOnly || '').toLowerCase(),
 		);
 		return this.sync.listMessages(req.user, conversationId, before, Number(limit), {
-			allowLivePull: allowLivePull && !onlyImportant,
+			allowLivePull: allowLivePull && !onlyImportant && !String(q || '').trim(),
 			starredOnly: onlyImportant,
+			search: String(q || '').trim() || undefined,
 		});
 	}
 
@@ -352,6 +363,24 @@ export class WhatsAppConversationsController {
 		return this.sync.markConversationRead(req.user, conversationId, manual === 'true');
 	}
 
+	@Post('conversations/:conversationId/unread')
+	markUnread(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.sync.markConversationUnread(req.user, conversationId);
+	}
+
+	@Post('conversations/:conversationId/presence')
+	sendPresence(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: { state?: 'composing' | 'recording' | 'paused' | 'available' },
+	) {
+		return this.sync.sendConversationPresence(
+			req.user,
+			conversationId,
+			body?.state || 'composing',
+		);
+	}
+
 	@Get('conversations/:conversationId/notes')
 	listNotes(@Req() req: any, @Param('conversationId') conversationId: string) {
 		return this.sync.listConversationNotes(req.user, conversationId);
@@ -454,6 +483,13 @@ export class WhatsAppConversationsController {
 				body.clientMessageId,
 			);
 		}
+		if (body.type === 'contact') {
+			return this.sync.sendContact(req.user, conversationId, {
+				displayName: body.contact?.displayName || body.text || 'Contact',
+				phoneNumber: body.contact?.phoneNumber || '',
+				waId: body.contact?.waId,
+			});
+		}
 		if (!body.fileId) throw new BadRequestException('Media fileId is required');
 		return this.sync.sendMedia(req.user, conversationId, {
 			type: body.type,
@@ -462,6 +498,16 @@ export class WhatsAppConversationsController {
 			quotedProviderMessageId: body.quotedProviderMessageId,
 			clientMessageId: body.clientMessageId,
 		});
+	}
+
+	@Put('conversations/:conversationId/messages/:messageId')
+	editMessage(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('messageId') messageId: string,
+		@Body() body: EditWhatsAppMessageDto,
+	) {
+		return this.sync.editMessageText(req.user, conversationId, messageId, body.text);
 	}
 
 	@Post('accounts/:accountId/media')
@@ -577,7 +623,18 @@ export class WhatsAppConversationsController {
 			mimeType.startsWith('video/');
 		res.setHeader('X-Content-Type-Options', 'nosniff');
 		res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
-		res.setHeader('Cache-Control', 'private, max-age=3600');
+		res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+		try {
+			const stats = await fs.promises.stat(file.absolutePath);
+			const etag = `"wa-${attachmentId}-${stats.size}-${stats.mtimeMs}"`;
+			res.setHeader('ETag', etag);
+			if (String(req.headers['if-none-match'] || '') === etag) {
+				res.status(304);
+				return undefined as any;
+			}
+		} catch {
+			/* ignore etag failures */
+		}
 		res.setHeader(
 			'Content-Disposition',
 			`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,

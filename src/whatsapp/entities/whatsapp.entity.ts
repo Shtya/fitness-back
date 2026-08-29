@@ -374,6 +374,9 @@ export class WhatsAppConversationPreference extends CoreEntity {
 
 	@Column({ name: 'is_muted', type: 'boolean', default: false })
 	isMuted: boolean;
+
+	@Column({ name: 'muted_until', type: 'timestamptz', nullable: true })
+	mutedUntil: Date | null;
 }
 
 @Entity('whatsapp_messages')
@@ -448,6 +451,9 @@ export class WhatsAppMessage extends CoreEntity {
 
 	@Column({ name: 'is_pinned', type: 'boolean', default: false })
 	isPinned: boolean;
+
+	@Column({ name: 'edited_at', type: 'timestamptz', nullable: true })
+	editedAt: Date | null;
 
 	@Column({ name: 'pinned_until', type: 'timestamptz', nullable: true })
 	pinnedUntil: Date | null;

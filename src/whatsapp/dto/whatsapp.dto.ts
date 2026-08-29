@@ -75,7 +75,7 @@ export class UpdateWhatsAppPrivacySettingsDto {
 }
 
 export class SendWhatsAppMessageDto {
-	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document', 'sticker'])
+	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document', 'sticker', 'contact'])
 	type: string;
 
 	@IsOptional()
@@ -97,6 +97,15 @@ export class SendWhatsAppMessageDto {
 	@IsOptional()
 	@IsString()
 	clientMessageId?: string;
+
+	@IsOptional()
+	contact?: { displayName?: string; phoneNumber?: string; waId?: string };
+}
+
+export class EditWhatsAppMessageDto {
+	@IsString()
+	@MaxLength(4096)
+	text: string;
 }
 
 export class ReactWhatsAppMessageDto {

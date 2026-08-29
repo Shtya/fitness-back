@@ -2435,38 +2435,95 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				accountId,
 				conversation.assignedUserId,
 			);
-			const title =
-				conversation.group?.subject ||
-				conversation.contact?.name ||
-				normalized.contactName ||
-				conversation.contact?.phoneNumber ||
-				'New WhatsApp message';
-			const message =
-				normalized.text?.trim().slice(0, 240) ||
-				(normalized.type === 'image'
-					? 'Photo'
-					: normalized.type === 'ptt' || normalized.type === 'audio' || normalized.type === 'voice'
-						? 'Voice message'
-						: `New ${normalized.type || 'message'}`);
-			await Promise.all(
-				recipientIds.map((userId) =>
-					this.notifications.create({
-						type: NotificationType.WHATSAPP_MESSAGE,
-						title,
-						message,
-						data: {
-							accountId,
-							conversationId: conversation.id,
-							messageId: hydrated.id,
-							type: 'whatsapp_message',
-						},
-						audience: NotificationAudience.USER,
-						userId,
-					}),
-				),
+			const unmutedRecipientIds = await this.filterUnmutedNotificationRecipients(
+				recipientIds,
+				conversation,
 			);
+			if (unmutedRecipientIds.length) {
+				const title =
+					conversation.group?.subject ||
+					conversation.contact?.name ||
+					normalized.contactName ||
+					conversation.contact?.phoneNumber ||
+					'New WhatsApp message';
+				const message =
+					normalized.text?.trim().slice(0, 240) ||
+					(normalized.type === 'image'
+						? 'Photo'
+						: normalized.type === 'ptt' ||
+							  normalized.type === 'audio' ||
+							  normalized.type === 'voice'
+							? 'Voice message'
+							: `New ${normalized.type || 'message'}`);
+				await Promise.all(
+					unmutedRecipientIds.map((userId) =>
+						this.notifications.create({
+							type: NotificationType.WHATSAPP_MESSAGE,
+							title,
+							message,
+							data: {
+								accountId,
+								conversationId: conversation.id,
+								messageId: hydrated.id,
+								type: 'whatsapp_message',
+							},
+							audience: NotificationAudience.USER,
+							userId,
+						}),
+					),
+				);
+			}
 		}
 		return hydrated;
+	}
+
+	/** Skip push for users who muted this conversation (all channels). */
+	private preferenceIsActivelyMuted(row: {
+		isMuted?: boolean;
+		mutedUntil?: Date | string | null;
+	}): boolean {
+		if (!row?.isMuted) return false;
+		if (!row.mutedUntil) return true;
+		const until = new Date(row.mutedUntil).getTime();
+		if (!Number.isFinite(until)) return true;
+		return until > Date.now();
+	}
+
+	private async filterUnmutedNotificationRecipients(
+		recipientIds: string[],
+		conversation: WhatsAppConversation,
+	): Promise<string[]> {
+		const ids = Array.from(
+			new Set((recipientIds || []).map((id) => String(id || '').trim()).filter(Boolean)),
+		);
+		if (!ids.length || !conversation?.id) return ids;
+		const prefs = await this.preferenceRepo.find({
+			where: {
+				userId: In(ids),
+				conversationId: conversation.id,
+			},
+			withDeleted: true,
+		});
+		const mutedByConversation = new Set(
+			prefs
+				.filter((row) => this.preferenceIsActivelyMuted(row))
+				.map((row) => String(row.userId)),
+		);
+		const missing = ids.filter((userId) => !prefs.some((row) => String(row.userId) === userId));
+		if (missing.length && conversation.accountId && conversation.providerChatId) {
+			const byChat = await this.preferenceRepo.find({
+				where: {
+					userId: In(missing),
+					accountId: conversation.accountId,
+					providerChatId: conversation.providerChatId,
+				},
+				withDeleted: true,
+			});
+			for (const row of byChat) {
+				if (this.preferenceIsActivelyMuted(row)) mutedByConversation.add(String(row.userId));
+			}
+		}
+		return ids.filter((userId) => !mutedByConversation.has(userId));
 	}
 
 	/** Coalesces bursts without postponing them: the pending timer is never reset,
@@ -3012,7 +3069,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
 					isArchived: Boolean(preference?.isArchived),
-					isMuted: Boolean(preference?.isMuted),
+					isMuted: this.preferenceIsActivelyMuted(preference || {}),
+					mutedUntil: preference?.mutedUntil
+						? new Date(preference.mutedUntil).toISOString()
+						: null,
 					isEmailMemoAi:
 						String(item.providerChatId || '') === 'email-memo-ai@so7ba.internal',
 					lastMessage: (() => {
@@ -3055,12 +3115,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
 	}
 
-	async setConversationMuted(user: User, conversationId: string, isMuted: boolean) {
+	async setConversationMuted(
+		user: User,
+		conversationId: string,
+		isMuted: boolean,
+		mutedUntil?: Date | string | null,
+	) {
 		await this.assertConversationVisible(user, conversationId);
+		const until =
+			isMuted && mutedUntil
+				? new Date(mutedUntil)
+				: isMuted
+					? null
+					: null;
 		await this.saveConversationPreference(user.id, conversationId, {
 			isMuted: Boolean(isMuted),
+			mutedUntil: Boolean(isMuted) ? (Number.isFinite(until?.getTime?.()) ? until : null) : null,
 		});
-		return { ok: true, conversationId, isMuted: Boolean(isMuted) };
+		return {
+			ok: true,
+			conversationId,
+			isMuted: Boolean(isMuted),
+			mutedUntil: Boolean(isMuted) && until && Number.isFinite(until.getTime()) ? until : null,
+		};
 	}
 
 	/**
@@ -3176,6 +3253,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isFavorite?: boolean;
 			isArchived?: boolean;
 			isMuted?: boolean;
+			mutedUntil?: Date | null;
 		},
 	) {
 		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
@@ -3186,6 +3264,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				isFavorite: false,
 				isArchived: false,
 				isMuted: false,
+				mutedUntil: null,
 			});
 		row.deleted_at = null;
 		row.userId = userId;
@@ -3196,6 +3275,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (patch.isFavorite != null) row.isFavorite = patch.isFavorite;
 		if (patch.isArchived != null) row.isArchived = patch.isArchived;
 		if (patch.isMuted != null) row.isMuted = patch.isMuted;
+		if (patch.mutedUntil !== undefined) row.mutedUntil = patch.mutedUntil;
 		await this.preferenceRepo.save(row);
 	}
 
@@ -3277,6 +3357,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await provider.subscribePresence(conversation.providerChatId);
 	}
 
+	async sendConversationPresence(
+		user: User,
+		conversationId: string,
+		state: 'composing' | 'recording' | 'paused' | 'available' = 'composing',
+	) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse) return { ok: false };
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider?.sendPresenceUpdate || !conversation.providerChatId) {
+			return { ok: false };
+		}
+		await provider.sendPresenceUpdate(conversation.providerChatId, state);
+		return { ok: true };
+	}
+
 	private async hydrateConversationAvatar(conversation: WhatsAppConversation) {
 		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
 		if (existing) return;
@@ -3303,17 +3401,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		conversationId: string,
 		before?: string,
 		limit = 30,
-		options: { allowLivePull?: boolean; starredOnly?: boolean } = {},
+		options: { allowLivePull?: boolean; starredOnly?: boolean; search?: string } = {},
 	) {
 		const starredOnly = Boolean(options.starredOnly);
-		const allowLivePull = options.allowLivePull === true && !starredOnly;
+		const search = String(options.search || '').trim();
+		const allowLivePull = options.allowLivePull === true && !starredOnly && !search;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
 		);
 		void this.subscribeConversationPresence(conversation).catch(() => undefined);
 		void this.hydrateConversationAvatar(conversation).catch(() => undefined);
-		const take = Math.min(Math.max(Number(limit) || 100, 1), 200);
+		const take = Math.min(Math.max(Number(limit) || 100, 1), search ? 200 : 200);
 		const loadLocal = async (cursorId?: string) => {
 			const query = this.messageRepo
 				.createQueryBuilder('message')
@@ -3323,6 +3422,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.where('message.conversationId = :conversationId', { conversationId });
 			if (starredOnly) {
 				query.andWhere('message.isStarred = true');
+			}
+			if (search) {
+				query.andWhere('message.text ILIKE :search', { search: `%${search}%` });
 			}
 			if (cursorId) {
 				const cursor = await this.messageRepo.findOne({
@@ -4829,6 +4931,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
+	async markConversationUnread(user: User, conversationId: string) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		const nextUnread = Math.max(1, Number(conversation.unreadCount) || 0);
+		await this.conversationRepo.update(conversationId, { unreadCount: nextUnread });
+		if (accountAccess.canUse) {
+			try {
+				const provider = this.requireProvider(conversation.accountId);
+				if (typeof provider.markChatUnread === 'function') {
+					await provider.markChatUnread(conversation.providerChatId);
+				}
+			} catch (error) {
+				this.logger.warn(
+					`markConversationUnread provider failed for ${conversationId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_updated', {
+			conversationId,
+			unreadCount: nextUnread,
+			userId: user.id,
+		});
+		return { ok: true, conversationId, unreadCount: nextUnread };
+	}
+
 	async listConversationNotes(user: User, conversationId: string) {
 		await this.assertConversationVisible(user, conversationId);
 		return this.noteRepo.find({
@@ -4935,6 +5066,95 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			metadata: { conversationId },
 		});
 		return { ok: true, message: saved, providerResult: { id } };
+	}
+
+	async sendContact(
+		user: User,
+		conversationId: string,
+		contact: { displayName: string; phoneNumber: string; waId?: string },
+	) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
+		const provider = this.requireProvider(conversation.accountId);
+		if (typeof provider.sendContact !== 'function') {
+			throw new BadRequestException('Contact send is not supported by this provider');
+		}
+		const displayName = String(contact?.displayName || '').trim() || 'Contact';
+		const phoneNumber = String(contact?.phoneNumber || contact?.waId || '').trim();
+		if (!phoneNumber) throw new BadRequestException('Contact phone number is required');
+		const result = await provider.sendContact(conversation.providerChatId, {
+			displayName,
+			phoneNumber,
+			waId: contact?.waId,
+		});
+		const id =
+			providerMessageId(result) ||
+			`local_out_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+		const persisted = await this.persistMessage(
+			conversation.accountId,
+			{
+				providerMessageId: id,
+				chatId: conversation.providerChatId,
+				fromMe: true,
+				type: 'contact',
+				text: displayName,
+				timestamp: new Date(),
+				timestampReliable: true,
+				raw: {
+					...(result && typeof result === 'object' ? result : {}),
+					contact: { displayName, phoneNumber, waId: contact?.waId || null },
+				},
+			},
+			user.id,
+			false,
+		);
+		const saved = await this.messageRepo.findOneOrFail({
+			where: { id: persisted.id },
+			relations: ['attachments', 'senderUser', 'reactions'],
+		});
+		return { ok: true, message: saved };
+	}
+
+	async editMessageText(user: User, conversationId: string, messageId: string, text: string) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
+		const trimmed = String(text || '').trim();
+		if (!trimmed) throw new BadRequestException('Message text is required');
+		const message = await this.messageRepo.findOne({
+			where: { id: messageId, conversationId },
+		});
+		if (!message) throw new BadRequestException('Message not found');
+		if (message.direction !== WhatsAppMessageDirection.OUTBOUND) {
+			throw new ForbiddenException('Only your messages can be edited');
+		}
+		if (String(message.type || '').toLowerCase() !== 'text') {
+			throw new BadRequestException('Only text messages can be edited');
+		}
+		const provider = this.requireProvider(conversation.accountId);
+		if (typeof provider.editText !== 'function') {
+			throw new BadRequestException('Edit is not supported by this provider');
+		}
+		await provider.editText(message.providerMessageId, trimmed);
+		const editedAt = new Date();
+		await this.messageRepo.update(message.id, {
+			text: trimmed,
+			editedAt,
+		} as any);
+		const saved = await this.messageRepo.findOneOrFail({
+			where: { id: message.id },
+			relations: ['attachments', 'senderUser', 'reactions'],
+		});
+		this.gateway.emitAccountEvent(conversation.accountId, 'message_updated', {
+			conversationId,
+			message: saved,
+		});
+		return { ok: true, message: saved };
 	}
 
 	async sendMedia(

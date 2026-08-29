@@ -147,6 +147,12 @@ export interface WhatsAppProvider {
 		text: string,
 		quote?: string | WhatsAppSendQuoteOptions,
 	): Promise<any>;
+	sendContact?(
+		chatId: string,
+		contact: { displayName: string; phoneNumber: string; waId?: string },
+	): Promise<any>;
+	editText?(providerMessageId: string, text: string): Promise<any>;
+	markChatUnread?(chatId: string): Promise<any>;
 	sendMedia(
 		chatId: string,
 		path: string,
@@ -176,9 +182,13 @@ export interface WhatsAppProvider {
 		providerMessageId: string,
 		options?: { rawHint?: any },
 	): Promise<any>;
-	/** Subscribe to typing/online presence for a chat (WppConnect). */
+	/** Subscribe to typing/online presence for a chat. */
 	subscribePresence?(chatId: string | string[]): Promise<number | void>;
 	unsubscribePresence?(chatId: string | string[]): Promise<number | void>;
+	sendPresenceUpdate?(
+		chatId: string,
+		state?: 'composing' | 'recording' | 'paused' | 'available',
+	): Promise<void>;
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
 	downloadStatus?(providerStatusId: string, senderWaId?: string | null): Promise<any>;
 	getStatuses(): Promise<any[]>;

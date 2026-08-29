@@ -5,6 +5,7 @@ import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { WhatsAppConversationsController } from './whatsapp-conversations.controller';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
+import { WhatsAppMessageGroupsService } from '../services/whatsapp-message-groups.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 
 describe('WhatsApp conversations API (isolated HTTP integration)', () => {
@@ -23,6 +24,17 @@ describe('WhatsApp conversations API (isolated HTTP integration)', () => {
 				{
 					provide: WhatsAppAccessService,
 					useValue: { assertAccountPermission: jest.fn() },
+				},
+				{
+					provide: WhatsAppMessageGroupsService,
+					useValue: {
+						listGroups: jest.fn(),
+						createGroup: jest.fn(),
+						renameGroup: jest.fn(),
+						deleteGroup: jest.fn(),
+						addMessages: jest.fn(),
+						removeMessages: jest.fn(),
+					},
 				},
 			],
 		})
@@ -102,6 +114,9 @@ describe('WhatsApp conversations API (isolated HTTP integration)', () => {
 			'account-1',
 			2,
 			75,
+			'',
+			'all',
+			'',
 			'',
 		);
 	});

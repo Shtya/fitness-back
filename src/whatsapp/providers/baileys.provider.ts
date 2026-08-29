@@ -461,7 +461,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		history: true,
 		contacts: true,
 		groups: true,
-		groupParticipants: false,
+		groupParticipants: true,
 		mediaDownload: true,
 		statusFetch: true,
 		statusPublish: false,
@@ -1488,6 +1488,34 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.rememberLidMapping(mapping?.lid, mapping?.pn);
 		});
 
+		socket.ev.on('presence.update', (update: any) => {
+			const chatId = normalizeInboxJid(jidOf(update?.id) || String(update?.id || ''));
+			if (!chatId) return;
+			const presences =
+				update?.presences && typeof update.presences === 'object' ? update.presences : {};
+			const firstKey = Object.keys(presences)[0];
+			const first = firstKey ? presences[firstKey] : null;
+			const lastKnown =
+				String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
+				String(update?.lastKnownPresence || '').toLowerCase();
+			let state = 'unavailable';
+			if (lastKnown === 'composing') state = 'composing';
+			else if (lastKnown === 'recording') state = 'recording';
+			else if (lastKnown === 'available' || lastKnown === 'online') state = 'available';
+			else if (lastKnown === 'unavailable' || lastKnown === 'offline') state = 'unavailable';
+			const isOnline = state === 'available' || state === 'composing' || state === 'recording';
+			this.emit({
+				type: 'presence',
+				payload: {
+					chatId,
+					isOnline,
+					isGroup: chatId.endsWith('@g.us'),
+					state,
+					t: Date.now(),
+				},
+			});
+		});
+
 		// Optional history dump on link (Baileys versions that emit it).
 		socket.ev.on('messaging-history.set', (data: any) => {
 			const chats = Array.isArray(data?.chats) ? data.chats : [];
@@ -1838,8 +1866,34 @@ export class BaileysProvider implements WhatsAppProvider {
 		);
 	}
 
-	async getGroupParticipants() {
-		return [];
+	async getGroupParticipants(groupId: string) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const jid = toBaileysJid(groupId);
+		if (!String(jid).endsWith('@g.us')) return [];
+		try {
+			const meta =
+				typeof (this.socket as any).groupMetadata === 'function'
+					? await (this.socket as any).groupMetadata(jid)
+					: null;
+			const participants = Array.isArray(meta?.participants) ? meta.participants : [];
+			return participants.map((participant: any) => {
+				const id = String(participant?.id || participant?.jid || '');
+				return {
+					id,
+					isAdmin: Boolean(participant?.admin),
+					isSuperAdmin: participant?.admin === 'superadmin',
+				};
+			});
+		} catch (error) {
+			this.logger.warn(
+				`getGroupParticipants(${jid}) failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return [];
+		}
 	}
 
 	private resolveQuotedPayload(
@@ -1881,6 +1935,64 @@ export class BaileysProvider implements WhatsAppProvider {
 		const result = await this.socket.sendMessage(jid, payload);
 		const normalized = this.normalizeWaMessage(result);
 		if (normalized) this.rememberMessage(normalized, result);
+		return result;
+	}
+
+	async sendContact(
+		chatId: string,
+		contact: { displayName: string; phoneNumber: string; waId?: string },
+	) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const jid = toBaileysJid(chatId);
+		const displayName = String(contact?.displayName || '').trim() || 'Contact';
+		const phone = String(contact?.phoneNumber || contact?.waId || '')
+			.replace(/[^\d+]/g, '')
+			.replace(/^\+/, '');
+		if (!phone) throw new Error('Contact phone number is required');
+		const vcard =
+			`BEGIN:VCARD\nVERSION:3.0\nFN:${displayName}\nTEL;type=CELL;type=VOICE;waid=${phone}:+${phone}\nEND:VCARD`;
+		const result = await this.socket.sendMessage(jid, {
+			contacts: {
+				displayName,
+				contacts: [{ vcard, displayName }],
+			},
+		});
+		const normalized = this.normalizeWaMessage(result);
+		if (normalized) this.rememberMessage(normalized, result);
+		return result;
+	}
+
+	async editText(providerMessageId: string, text: string) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const id = String(providerMessageId || '').trim();
+		const body = String(text || '').trim();
+		if (!id || !body) throw new Error('Message id and text are required');
+		let found: any = null;
+		for (const bucket of this.messagesByChat.values()) {
+			const hit = [...bucket.values()].find((msg) => msg.providerMessageId === id);
+			if (hit) {
+				found = hit;
+				break;
+			}
+		}
+		const chatId = found?.chatId;
+		if (!chatId) throw new Error('Original message not found in session cache');
+		const key = {
+			remoteJid: toBaileysJid(chatId),
+			id,
+			fromMe: true,
+		};
+		if (typeof this.socket.sendMessage !== 'function') {
+			throw new Error('Edit is not supported by this session');
+		}
+		const result = await this.socket.sendMessage(toBaileysJid(chatId), {
+			text: body,
+			edit: key,
+		});
 		return result;
 	}
 
@@ -2113,6 +2225,63 @@ export class BaileysProvider implements WhatsAppProvider {
 			await this.socket.readMessages(keys);
 		}
 		this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
+	}
+
+	async markChatUnread(chatId: string) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const jid = toBaileysJid(chatId);
+		if (typeof this.socket.chatModify === 'function') {
+			await this.socket.chatModify({ markRead: false }, jid);
+		}
+		this.rememberChat(normalizeInboxJid(chatId), { unreadCount: -1 });
+	}
+
+	async subscribePresence(chatId: string | string[]) {
+		if (!this.socket || this.state !== 'connected') return 0;
+		const ids = Array.isArray(chatId) ? chatId : [chatId];
+		let count = 0;
+		for (const raw of ids) {
+			const jid = toBaileysJid(String(raw || '').trim());
+			if (!jid) continue;
+			try {
+				if (typeof this.socket.presenceSubscribe === 'function') {
+					await this.socket.presenceSubscribe(jid);
+					count += 1;
+				}
+			} catch (error) {
+				this.logger.debug(
+					`presenceSubscribe failed for ${this.accountId}/${jid}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+		return count;
+	}
+
+	async unsubscribePresence(_chatId: string | string[]) {
+		return 0;
+	}
+
+	/** Staff typing indicator toward a chat (Baileys). */
+	async sendPresenceUpdate(
+		chatId: string,
+		state: 'composing' | 'recording' | 'paused' | 'available' = 'composing',
+	) {
+		if (!this.socket || this.state !== 'connected') return;
+		const jid = toBaileysJid(chatId);
+		if (!jid || typeof this.socket.sendPresenceUpdate !== 'function') return;
+		try {
+			await this.socket.sendPresenceUpdate(state, jid);
+		} catch (error) {
+			this.logger.debug(
+				`sendPresenceUpdate failed for ${this.accountId}/${jid}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
 	}
 
 	async downloadMedia(providerMessageId: string, options: { rawHint?: any } = {}) {
