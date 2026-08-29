@@ -215,6 +215,23 @@ function baileysRawMediaScore(raw: any): number {
 	return score;
 }
 
+/** Prefer light media first so chat open feels like WhatsApp Web. */
+function mediaPrefetchPriority(type: string | null | undefined): number {
+	const kind = String(type || '').toLowerCase();
+	// Images + voice notes first (same urgency as WhatsApp Web auto-download).
+	if (
+		kind === 'image' ||
+		kind === 'sticker' ||
+		kind === 'audio' ||
+		kind === 'ptt' ||
+		kind === 'voice'
+	) {
+		return 0;
+	}
+	if (kind === 'video') return 1;
+	return 2;
+}
+
 function jpegThumbnailToDataUrl(thumb: any): string | null {
 	if (thumb == null) return null;
 	if (typeof thumb === 'string' && thumb.length) {
@@ -536,7 +553,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private attachmentDownloads = new Map<string, Promise<any>>();
 	private activeMediaDownloads = 0;
 	private readonly maxConcurrentMediaDownloads = Number(
-		process.env.WHATSAPP_MEDIA_DOWNLOAD_CONCURRENCY || 3,
+		process.env.WHATSAPP_MEDIA_DOWNLOAD_CONCURRENCY || 4,
 	);
 	private sendOperations = new Map<string, Promise<unknown>>();
 	private inboxReconcileTimers = new Map<string, NodeJS.Timeout>();
@@ -2243,6 +2260,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				await this.clearUnreadFromPhone(accountId, conversation.id);
 			}
 			if (clientMessageId) (existing as any).clientMessageId = clientMessageId;
+			if (
+				(existing.attachments || []).some(
+					(item) => item.downloadStatus !== 'downloaded' || !item.storagePath,
+				)
+			) {
+				this.queuePendingAttachmentDownloads([existing], accountId);
+			}
 			return existing;
 		}
 
@@ -2311,6 +2335,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 				if (emitEvents && !fromHistory && normalized.fromMe && !this.bootstrapping.has(accountId)) {
 					await this.clearUnreadFromPhone(accountId, conversation.id);
+				}
+				if (
+					(existing.attachments || []).some(
+						(item) => item.downloadStatus !== 'downloaded' || !item.storagePath,
+					)
+				) {
+					this.queuePendingAttachmentDownloads([existing], accountId);
 				}
 				return existing;
 			}
@@ -2473,6 +2504,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					),
 				);
 			}
+		}
+		if (hydrated.attachments?.length) {
+			this.queuePendingAttachmentDownloads([hydrated], accountId);
 		}
 		return hydrated;
 	}
@@ -3514,6 +3548,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 				const refreshed = await loadLocal(before);
 				await this.prepareMessagesForApi(conversation, refreshed);
+				this.queuePendingAttachmentDownloads(refreshed, conversation.accountId);
 				return refreshed;
 			}
 		}
@@ -3521,9 +3556,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// the linked WhatsApp Web session on the phone.
 		if (local.length || before || !accountAccess.canUse || !allowLivePull) {
 			await this.prepareMessagesForApi(conversation, local);
-			// Do not prefetch media from the phone on every chat open — that causes
-			// duplicate downloads + phone notification spam. Media loads on demand
-			// via /attachments/:id/content when the bubble is near the viewport.
+			// Prefetch media into disk cache (Baileys CDN decrypt) so the next
+			// /attachments/:id/content hit is local — closer to WhatsApp Web.
+			// Downloads share the in-flight map with on-demand requests (no dup work).
+			this.queuePendingAttachmentDownloads(local, conversation.accountId);
 			return local;
 		}
 
@@ -3554,11 +3590,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const saved = await loadLocal();
 		if (saved.length) {
 			await this.prepareMessagesForApi(conversation, saved);
+			this.queuePendingAttachmentDownloads(saved, conversation.accountId);
 			return saved;
 		}
 		// Persist may fail (unique/db) — still return linked-device messages to the UI.
 		const mapped = this.mapLiveMessagesForApi(conversation.id, live);
 		await this.prepareMessagesForApi(conversation, mapped as any);
+		this.queuePendingAttachmentDownloads(mapped as any, conversation.accountId);
 		return mapped;
 	}
 
@@ -3936,34 +3974,43 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	/** Kick off durable downloads for pending/failed media once the chat is open
-	 *  and WhatsApp is connected — same moment the old WPP ChatStore path used to
-	 *  hydrate photos after link. */
+	 *  (or a live media message arrives) and WhatsApp is connected. Images/stickers
+	 *  first so the open chat fills like WhatsApp Web without waiting for viewport. */
 	private queuePendingAttachmentDownloads(
 		messages: WhatsAppMessage[],
 		accountIdHint?: string,
 	) {
-		const ids: string[] = [];
+		const ranked: Array<{ id: string; priority: number }> = [];
 		let accountId = String(accountIdHint || '').trim();
 		for (const message of messages || []) {
 			if (!accountId) accountId = String(message.accountId || '').trim();
-			if (baileysRawMediaScore((message as any)?.raw) < 5) continue;
+			const rawScore = baileysRawMediaScore((message as any)?.raw);
 			for (const attachment of message.attachments || []) {
 				if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
 				if (!attachment.id) continue;
-				ids.push(attachment.id);
+				// Skip envelopes that cannot decrypt yet (no mediaKey/path) unless
+				// the file was already marked failed — then retry after raw refresh.
+				if (rawScore < 5 && attachment.downloadStatus !== 'failed') continue;
+				ranked.push({
+					id: attachment.id,
+					priority: mediaPrefetchPriority(attachment.type),
+				});
 			}
 		}
-		if (!ids.length) return;
+		if (!ranked.length) return;
 
 		const provider = accountId ? this.providers.getProvider(accountId) : null;
 		if (!provider || provider.getState?.() !== 'connected') {
 			this.logger.debug(
-				`Media prefetch skipped for ${ids.length} attachment(s): WhatsApp is not connected`,
+				`Media prefetch skipped for ${ranked.length} attachment(s): WhatsApp is not connected`,
 			);
 			return;
 		}
 
-		const uniqueIds = [...new Set(ids)].slice(0, 24);
+		ranked.sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+		const uniqueIds = [
+			...new Set(ranked.map((item) => item.id)),
+		].slice(0, Number(process.env.WHATSAPP_MEDIA_PREFETCH_LIMIT || 40));
 		void (async () => {
 			const workers = Math.max(1, Math.min(this.maxConcurrentMediaDownloads, uniqueIds.length));
 			let cursor = 0;
@@ -3977,6 +4024,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						relations: ['message'],
 					});
 					if (!attachment?.message) continue;
+					if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
 					// Account may disconnect mid-batch — stop instead of waiting per file.
 					const live = this.providers.getProvider(attachment.message.accountId);
 					if (!live || live.getState?.() !== 'connected') {
@@ -4014,6 +4062,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			};
 			await Promise.all(Array.from({ length: workers }, () => runWorker()));
 		})();
+	}
+
+	private emitAttachmentReady(attachment: WhatsAppMessageAttachment, cached: boolean) {
+		const message = attachment.message;
+		const conversationId = message?.conversationId;
+		if (!conversationId || !attachment.id) return;
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'attachment_ready',
+			{
+				attachmentId: attachment.id,
+				messageId: message.id,
+				downloadStatus: 'downloaded',
+				mimeType: attachment.mimeType,
+				type: attachment.type,
+				cached,
+				url: `/api/v1/whatsapp/attachments/${attachment.id}/content`,
+			},
+			message.accountId,
+		);
 	}
 
 	private conversationMessageAliases(conversation: WhatsAppConversation) {
@@ -5345,6 +5413,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		attachment.fileSizeBytes = String(input.fileSizeBytes);
 		attachment.providerMediaId = input.providerMessageId;
 		await this.attachmentRepo.save(attachment);
+		const message = await this.messageRepo.findOne({
+			where: { id: attachment.messageId },
+		});
+		if (message) {
+			(attachment as any).message = message;
+			this.emitAttachmentReady(attachment, true);
+		}
 	}
 
 	async listGroups(user: User, accountId: string) {
@@ -5491,22 +5566,44 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (attachment.storagePath && attachment.downloadStatus === 'downloaded') {
 			const cachedPath = path.resolve(process.cwd(), attachment.storagePath);
 			try {
-				const cachedBuffer = await fs.readFile(cachedPath);
 				const audioType = ['audio', 'ptt', 'voice'].includes(
 					String(attachment.type || '').toLowerCase(),
 				);
-				if (audioType && !isValidAudioBuffer(cachedBuffer, attachment.mimeType)) {
-					throw new Error('Cached audio is invalid');
+				if (audioType) {
+					const cachedBuffer = await fs.readFile(cachedPath);
+					if (!isValidAudioBuffer(cachedBuffer, attachment.mimeType)) {
+						throw new Error('Cached audio is invalid');
+					}
+					const sniffedMime =
+						sniffAudioMime(cachedBuffer) ||
+						guessMimeFromPath(cachedPath, attachment.type);
+					if (sniffedMime && sniffedMime !== attachment.mimeType) {
+						attachment.mimeType = sniffedMime;
+						await this.attachmentRepo.save(attachment);
+					}
+				} else {
+					// Images/video/docs: existence + size only (avoid reading whole file into RAM).
+					const stats = await fs.stat(cachedPath);
+					if (!stats.isFile() || stats.size <= 0) {
+						throw new Error('Cached media is missing');
+					}
+					if (!attachment.mimeType || String(attachment.mimeType).includes('octet-stream')) {
+						const head = Buffer.alloc(64);
+						const handle = await fs.open(cachedPath, 'r');
+						try {
+							await handle.read(head, 0, 64, 0);
+						} finally {
+							await handle.close();
+						}
+						const sniffedMime =
+							sniffImageMime(head) || guessMimeFromPath(cachedPath, attachment.type);
+						if (sniffedMime && sniffedMime !== attachment.mimeType) {
+							attachment.mimeType = sniffedMime;
+							await this.attachmentRepo.save(attachment);
+						}
+					}
 				}
-				const sniffedMime =
-					(audioType ? sniffAudioMime(cachedBuffer) : null) ||
-					sniffImageMime(cachedBuffer) ||
-					guessMimeFromPath(cachedPath, attachment.type);
-				if (sniffedMime && sniffedMime !== attachment.mimeType) {
-					attachment.mimeType = sniffedMime;
-					await this.attachmentRepo.save(attachment);
-				}
-				logStep(`cache-hit bytes=${cachedBuffer.length}`);
+				logStep(`cache-hit path=${attachment.storagePath}`);
 				return {
 					ok: true,
 					path: attachment.storagePath,
@@ -5610,6 +5707,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			attachment.downloadStatus = 'downloaded';
 			await this.attachmentRepo.save(attachment);
 			logStep(`downloaded bytes=${buffer.length}`);
+			this.emitAttachmentReady(attachment, false);
 			return {
 				ok: true,
 				path: attachment.storagePath,
