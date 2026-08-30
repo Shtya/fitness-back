@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
-import { User } from '../../entities/global.entity';
+import { User } from '../../../entities/global.entity';
 import { WhatsAppAccount } from '../../whatsapp/entities/whatsapp.entity';
 import { WhatsAppAccountsService } from '../../whatsapp/services/whatsapp-accounts.service';
 import { WhatsAppSyncService } from '../../whatsapp/services/whatsapp-sync.service';
