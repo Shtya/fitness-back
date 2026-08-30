@@ -167,9 +167,24 @@ export class AiFreeService {
     );
     const preferred = preferredChoice.provider;
     const allowFallback = dto.allowFallback !== false;
-    const order = this.buildProviderOrder(preferred, allowFallback);
+    const excluded = new Set(
+      (Array.isArray((dto as any).excludeProviders)
+        ? (dto as any).excludeProviders
+        : []
+      )
+        .map((name: unknown) => String(name || "").trim())
+        .filter(Boolean),
+    );
+    const order = this.buildProviderOrder(preferred, allowFallback).filter(
+      (name) => !excluded.has(name),
+    );
     const errors: string[] = [];
     const startedAt = Date.now();
+    const maxTokens =
+      Number.isFinite(Number((dto as any).maxTokens)) &&
+      Number((dto as any).maxTokens) > 0
+        ? Number((dto as any).maxTokens)
+        : undefined;
 
     for (const name of order) {
       const provider = this.providers.get(name);
@@ -178,6 +193,7 @@ export class AiFreeService {
         const result = await provider.generate({
           messages,
           model: preferredChoice.model,
+          maxTokens,
         });
         return {
           ok: true,
@@ -202,7 +218,9 @@ export class AiFreeService {
     throw new HttpException(
       {
         statusCode: HttpStatus.BAD_GATEWAY,
-        message: "All free AI providers failed",
+        message:
+          errors[0] ||
+          "All free AI providers failed. Try again in a minute.",
         errors: errors.slice(0, 5),
       },
       HttpStatus.BAD_GATEWAY,

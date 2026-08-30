@@ -50,14 +50,24 @@ export class AiFreeChatDto {
   @IsBoolean()
   allowFallback?: boolean;
 
-	@IsOptional()
-	@IsBoolean()
-	useProjectKnowledge?: boolean;
+  @IsOptional()
+  @IsBoolean()
+  useProjectKnowledge?: boolean;
 
-	@IsOptional()
-	@IsString()
-	@MaxLength(80)
-	feature?: string;
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  feature?: string;
+
+  /** Internal / advanced: skip slow or unsuitable providers for this request. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @IsIn(AI_FREE_PROVIDERS, { each: true })
+  excludeProviders?: AiFreeProviderName[];
+
+  @IsOptional()
+  maxTokens?: number;
 }
 
 export class AiFreeTitleDto {

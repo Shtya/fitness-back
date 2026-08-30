@@ -3,6 +3,7 @@ import {
 	BadRequestException,
 	HttpException,
 	Injectable,
+	Logger,
 	NotFoundException,
 	ServiceUnavailableException,
 } from '@nestjs/common';
@@ -52,6 +53,8 @@ export type AudioUpload = {
 
 @Injectable()
 export class TranscriptionService {
+	private readonly logger = new Logger(TranscriptionService.name);
+
 	constructor(
 		@InjectRepository(Transcription)
 		private readonly transcriptionRepo: Repository<Transcription>,
@@ -625,6 +628,45 @@ export class TranscriptionService {
 			.slice(0, limit);
 	}
 
+	private localEnhanceTranscript(text: string) {
+		return String(text || '')
+			.replace(/\u00a0/g, ' ')
+			.replace(/[ \t]+\n/g, '\n')
+			.replace(/\n{3,}/g, '\n\n')
+			.replace(/[ \t]{2,}/g, ' ')
+			.replace(/\s+([,.!?؟،؛:…])/g, '$1')
+			.trim();
+	}
+
+	private extractEnhancedText(reply: unknown, fallback: string) {
+		const parsed = this.asObject(this.tryParseJson(reply));
+		const fromJson = String(parsed.enhancedText || '').trim();
+		if (fromJson) {
+			return {
+				enhancedText: fromJson,
+				changesSummary: this.asStringArray(parsed.changesSummary, 12),
+			};
+		}
+		const raw = String(reply || '').trim();
+		if (!raw) {
+			return { enhancedText: fallback, changesSummary: [] as string[] };
+		}
+		const cleaned = raw
+			.replace(/^```(?:json)?\s*/i, '')
+			.replace(/\s*```$/i, '')
+			.trim();
+		if (cleaned.startsWith('{')) {
+			return { enhancedText: fallback, changesSummary: [] as string[] };
+		}
+		if (cleaned.length >= Math.max(12, Math.floor(fallback.length * 0.35))) {
+			return {
+				enhancedText: cleaned,
+				changesSummary: ['Corrected formatting from free AI response.'],
+			};
+		}
+		return { enhancedText: fallback, changesSummary: [] as string[] };
+	}
+
 	async enhance(user: any, id: string, dto: EnhanceTranscriptionDto) {
 		const userId = String(user?.id || '');
 		const record = await this.transcriptionRepo.findOne({ where: { id, userId } });
@@ -640,60 +682,72 @@ export class TranscriptionService {
 		const mode = dto?.mode || 'full';
 		const apply = dto?.apply === true;
 
-		const system = `You are an expert speech-to-text cleanup editor for So7baFit Transcript.
-Your job is to repair ASR mistakes from context. You must NEVER translate the transcript into another language.
+		const system = `You clean speech-to-text transcripts for So7baFit.
+Fix wrong words, spelling, punctuation, spacing, and unclear sentences using context only.
+Keep the same language (Arabic dialect / English / mixed). Never translate. Never summarize. Never invent facts.
+Return ONLY JSON: {"enhancedText":"...","changesSummary":["..."]}`;
 
-LANGUAGE RULES (mandatory):
-- Detect the speaker's language from the source text, not from the UI.
-- If the speaker spoke Arabic (including dialect / Egyptian), the enhanced text MUST stay Arabic.
-- If the speaker spoke English, the enhanced text MUST stay English.
-- If they mixed languages (code-switching), keep each phrase in the language it was actually spoken. Do not unify everything into one language.
-- Never convert Arabic speech into English, and never convert English speech into Arabic.
+		const userMessage = `Mode: ${mode}
+Language: ${locale}
+Correct this transcript in-place and return JSON only.
 
-WHAT TO FIX:
-- Wrong, garbled, or context-incoherent words. Infer the intended word from surrounding meaning.
-- Example: ASR wrote an English fragment like "deal with" but the Arabic speaker meant an offer / "Deal" / عرض. Restore the intended wording in the SAME language the speaker used.
-- Broken punctuation, spacing, obvious grammar slips, and unreadable ASR tokens.
+---
+${before.slice(0, 60_000)}`;
 
-WHAT NOT TO DO:
-- Do NOT translate.
-- Do NOT rewrite the meaning, add facts, names, numbers, or topics that are not supported by the source.
-- Do NOT drop content.
-- changesSummary must be short notes in the same language as the source.
+		let enhancedText = before;
+		let changesSummary: string[] = [];
+		let provider: string | null = null;
+		let model: string | null = null;
+		let usedLocalFallback = false;
 
-Reply with ONLY valid JSON (no markdown fences):
-{
-  "enhancedText": string,
-  "changesSummary": string[]
-}
-Mode: ${mode}
-- clarity: fix garbled / wrong words from unclear speech
-- punctuation: mostly punctuation, casing, and paragraph breaks
-- full: clarity + punctuation + light grammar cleanup
-Output language: ${locale === 'ar' ? 'Arabic (same as source)' : 'English (same as source)'}`;
+		try {
+			const ai = await this.aiFree.chat(user, {
+				messages: [
+					{ role: 'system', content: system },
+					{ role: 'user', content: userMessage },
+				],
+				allowFallback: true,
+				useProjectKnowledge: false,
+				provider: 'llm7-free',
+				excludeProviders: ['browser-chatgpt', 'pollinations-free'],
+				maxTokens: 4096,
+			} as any);
 
-		const userMessage = `Clean up this speech transcript in-place. Do not translate.\nMode: ${mode}\nSource language: ${locale}\n\n--- TRANSCRIPT ---\n${before.slice(0, 120_000)}`;
-
-		const ai = await this.aiFree.chat(user, {
-			messages: [
-				{ role: 'system', content: system },
-				{ role: 'user', content: userMessage },
-			],
-			allowFallback: true,
-			useProjectKnowledge: false,
-		} as any);
-
-		const parsed = this.asObject(this.tryParseJson(ai?.reply));
-		const rawEnhanced = String(parsed.enhancedText || '').trim() || before;
-		const translated = this.looksTranslated(before, rawEnhanced);
-		const enhancedText = translated ? before : rawEnhanced;
-		const changesSummary = translated
-			? [
-					this.detectScriptLocale(before) === 'ar'
-						? 'تم الإبقاء على لغة المصدر وتجاهل تحويل النص للغة أخرى.'
-						: 'Enhancement stayed in the source language; a translated rewrite was discarded.',
-				]
-			: this.asStringArray(parsed.changesSummary, 12);
+			const extracted = this.extractEnhancedText(ai?.reply, before);
+			const translated = this.looksTranslated(before, extracted.enhancedText);
+			enhancedText = translated ? before : extracted.enhancedText;
+			changesSummary = translated
+				? [
+						locale === 'ar'
+							? 'تم الإبقاء على لغة المصدر وتجاهل تحويل النص للغة أخرى.'
+							: 'Enhancement stayed in the source language; a translated rewrite was discarded.',
+					]
+				: extracted.changesSummary;
+			provider = ai?.provider || null;
+			model = ai?.actualModel || null;
+		} catch (error) {
+			enhancedText = this.localEnhanceTranscript(before);
+			usedLocalFallback = enhancedText !== before;
+			changesSummary = usedLocalFallback
+				? [
+						locale === 'ar'
+							? 'تعذر الوصول لمزوّد الذكاء الاصطناعي؛ تم تنظيف المسافات وعلامات الترقيم محلياً.'
+							: 'Free AI was unavailable; applied local spacing and punctuation cleanup.',
+					]
+				: [
+						locale === 'ar'
+							? 'تعذر تحسين النص عبر الذكاء الاصطناعي حالياً.'
+							: 'Free AI enhance is temporarily unavailable.',
+					];
+			provider = 'local-fallback';
+			this.logger.warn(
+				`Transcription enhance AI failed for ${id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			// Always return a successful enhance payload when local cleanup ran,
+			// even if text is unchanged — UI can still show compare state.
+		}
 
 		if (!record.originalText) {
 			record.originalText = before;
@@ -703,8 +757,9 @@ Output language: ${locale === 'ar' ? 'Arabic (same as source)' : 'English (same 
 			mode,
 			locale,
 			changesSummary,
-			provider: ai?.provider || null,
-			model: ai?.actualModel || null,
+			provider,
+			model,
+			usedLocalFallback,
 			enhancedAt: new Date().toISOString(),
 		};
 
@@ -719,8 +774,9 @@ Output language: ${locale === 'ar' ? 'Arabic (same as source)' : 'English (same 
 			originalText: before,
 			enhancedText,
 			changesSummary,
-			provider: ai?.provider || null,
+			provider,
 			applied: apply,
+			usedLocalFallback,
 			transcription: saved,
 		};
 	}

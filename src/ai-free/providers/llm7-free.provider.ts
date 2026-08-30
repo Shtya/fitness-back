@@ -53,12 +53,14 @@ export class Llm7FreeProvider implements AiFreeProvider {
           messages: request.messages,
           max_tokens: Math.min(
             Math.max(
-              Number(this.config.get("AI_FREE_MAX_TOKENS")) || 1024,
+              Number(request.maxTokens) ||
+                Number(this.config.get("AI_FREE_MAX_TOKENS")) ||
+                1024,
               64,
             ),
-            4096,
+            8192,
           ),
-          temperature: 0.7,
+          temperature: 0.2,
         }),
         signal: controller.signal,
       });

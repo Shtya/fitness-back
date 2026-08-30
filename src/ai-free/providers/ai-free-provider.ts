@@ -11,6 +11,7 @@ export interface AiFreeChatMessage {
 export interface AiFreeProviderRequest {
   messages: AiFreeChatMessage[];
   model?: string;
+  maxTokens?: number;
 }
 
 export interface AiFreeProviderResult {
