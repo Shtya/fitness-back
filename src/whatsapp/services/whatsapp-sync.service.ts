@@ -51,6 +51,11 @@ import {
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
+import {
+	isWeakWhatsAppContactName,
+	preferWhatsAppContactName,
+	resolveWhatsAppContactLabel,
+} from '../utils/whatsapp-contact-name';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -163,6 +168,20 @@ function sniffImageMime(buffer: Buffer): string | null {
 		buffer.toString('ascii', 8, 12) === 'WEBP'
 	) {
 		return 'image/webp';
+	}
+	return null;
+}
+
+function sniffVideoMime(buffer: Buffer): string | null {
+	if (!buffer || buffer.length < 12) return null;
+	if (buffer.toString('ascii', 4, 8) === 'ftyp') return 'video/mp4';
+	if (
+		buffer[0] === 0x1a &&
+		buffer[1] === 0x45 &&
+		buffer[2] === 0xdf &&
+		buffer[3] === 0xa3
+	) {
+		return 'video/webm';
 	}
 	return null;
 }
@@ -395,19 +414,7 @@ function isWeakContactDisplayName(
 	chatId?: string | null,
 	phone?: string | null,
 ): boolean {
-	const n = String(name || '').trim();
-	if (!n) return true;
-	const phoneDigits = String(phone || '').replace(/\D/g, '');
-	if (phoneDigits && n.replace(/\D/g, '') === phoneDigits && /^\+?\d[\d\s-]*$/.test(n)) {
-		return true;
-	}
-	const user = String(chatId || '')
-		.split('@')[0]
-		.split(':')[0]
-		.trim();
-	if (user && n === user) return true;
-	if (/^\d{8,32}$/.test(n)) return true;
-	return false;
+	return isWeakWhatsAppContactName(name, chatId, phone);
 }
 
 export function providerUnreadCount(chat: any): number | null {
@@ -899,8 +906,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					},
 					accountId,
 				);
+				const inboundReadOnDevice =
+					message.direction === WhatsAppMessageDirection.INBOUND &&
+					['read', 'played'].includes(String(nextStatus || event.status || ''));
+				if (inboundReadOnDevice && !this.bootstrapping.has(accountId)) {
+					await this.clearUnreadFromPhone(accountId, message.conversationId);
+				}
 				this.scheduleConversationUpdated(accountId, {
 					conversationId: message.conversationId,
+					...(inboundReadOnDevice ? { unreadCount: 0 } : {}),
 					preview: {
 						id: message.id,
 						status: message.status,
@@ -946,7 +960,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	/** Serialize reaction writes per message — sendReaction emits an event that
+	 *  also persists, so a concurrent API persist can hit uq_whatsapp_message_reaction_actor. */
+	private reactionPersistChains = new Map<string, Promise<unknown>>();
+
 	private async persistMessageReactions(
+		accountId: string,
+		providerMessageIdValue: string,
+		reactions: Array<{
+			actorKey: string;
+			emoji: string;
+			timestamp?: Date | null;
+		}>,
+	) {
+		const lockKey = `${accountId}:${providerMessageIdValue}`;
+		const previous = this.reactionPersistChains.get(lockKey) ?? Promise.resolve();
+		const run = previous.catch(() => undefined).then(() =>
+			this.writeMessageReactions(accountId, providerMessageIdValue, reactions),
+		);
+		this.reactionPersistChains.set(lockKey, run);
+		try {
+			return await run;
+		} finally {
+			if (this.reactionPersistChains.get(lockKey) === run) {
+				this.reactionPersistChains.delete(lockKey);
+			}
+		}
+	}
+
+	private async writeMessageReactions(
 		accountId: string,
 		providerMessageIdValue: string,
 		reactions: Array<{
@@ -959,17 +1001,44 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { accountId, providerMessageId: providerMessageIdValue },
 		});
 		if (!message) return [];
+
+		const byActor = new Map<
+			string,
+			{ actorKey: string; emoji: string; reactedAt: Date | null }
+		>();
+		for (const reaction of reactions || []) {
+			const actorKey = String(reaction?.actorKey || '')
+				.trim()
+				.slice(0, 200);
+			const emoji = String(reaction?.emoji || '')
+				.trim()
+				.slice(0, 32);
+			if (!actorKey || !emoji) continue;
+			byActor.set(actorKey, {
+				actorKey,
+				emoji,
+				reactedAt: reaction.timestamp || null,
+			});
+		}
+		const uniqueReactions = [...byActor.values()];
+
 		await this.reactionRepo.manager.transaction(async (manager) => {
-			await manager.delete(WhatsAppMessageReaction, { messageId: message.id });
-			if (reactions.length) {
+			// Hard delete (soft-deleted rows would still violate the unique pair).
+			await manager
+				.createQueryBuilder()
+				.delete()
+				.from(WhatsAppMessageReaction)
+				.where('message_id = :messageId', { messageId: message.id })
+				.execute();
+			if (uniqueReactions.length) {
 				await manager.save(
 					WhatsAppMessageReaction,
-					reactions.map((reaction) =>
+					uniqueReactions.map((reaction) =>
 						manager.create(WhatsAppMessageReaction, {
 							messageId: message.id,
 							actorKey: reaction.actorKey,
 							emoji: reaction.emoji,
-							reactedAt: reaction.timestamp || null,
+							reactedAt: reaction.reactedAt,
 						}),
 					),
 				);
@@ -1761,13 +1830,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		options: { title?: string | null; phone?: string | null },
 	) {
 		if (conversation.contact && options.title) {
-			const weak = isWeakContactDisplayName(
+			const nextName = preferWhatsAppContactName(
 				conversation.contact.name,
+				options.title,
 				conversation.providerChatId || chatId,
 				conversation.contact.phoneNumber || options.phone,
 			);
-			if (weak && !isWeakContactDisplayName(options.title, chatId, options.phone)) {
-				conversation.contact.name = options.title;
+			if (nextName && nextName !== conversation.contact.name) {
+				conversation.contact.name = nextName;
 				await this.contactRepo.save(conversation.contact);
 			}
 		}
@@ -2135,6 +2205,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversationId,
 			reason: 'phone_read',
 		});
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'conversation_read',
+			{ conversationId, reason: 'phone_read' },
+			accountId,
+		);
 	}
 
 	async persistMessage(
@@ -2565,7 +2641,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	 *  instead of drifting while a contact keeps typing. */
 	private scheduleConversationUpdated(accountId: string, payload: Record<string, unknown>) {
 		const timerKey = `${accountId}:${String(payload.conversationId || 'unknown')}`;
-		this.conversationUpdatePayloads.set(timerKey, payload);
+		const previous = this.conversationUpdatePayloads.get(timerKey) || {};
+		this.conversationUpdatePayloads.set(timerKey, {
+			...previous,
+			...payload,
+			unreadCount:
+				payload.unreadCount != null ? payload.unreadCount : previous.unreadCount,
+			preview: payload.preview
+				? { ...(previous.preview as object | undefined), ...(payload.preview as object) }
+				: previous.preview,
+		});
 		if (this.conversationUpdateTimers.has(timerKey)) return;
 		this.conversationUpdateTimers.set(
 			timerKey,
@@ -2598,13 +2683,35 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		for (const item of contacts) {
 			const id = waId(item);
 			if (!isSupportedInboxChatId(id) || id.endsWith('@g.us')) continue;
+			const phoneNumber = item?.id?.user || phoneFromWaId(id);
+			const savedName = String(item?.name || item?.formattedName || '').trim() || null;
+			const pushName =
+				String(item?.pushname || item?.notify || item?.pushName || '').trim() || null;
+			const existing = await this.contactRepo.findOne({ where: { accountId, waId: id } });
+			// Provider address-book `name` always wins when present (recovers pushName stomps).
+			let nextName: string | null = null;
+			if (savedName && !isWeakWhatsAppContactName(savedName, id, phoneNumber)) {
+				nextName = savedName;
+			} else {
+				nextName = preferWhatsAppContactName(
+					existing?.name,
+					resolveWhatsAppContactLabel({
+						savedName: null,
+						pushName,
+						chatId: id,
+						phone: phoneNumber,
+					}),
+					id,
+					phoneNumber || existing?.phoneNumber,
+				);
+			}
 			await this.contactRepo.upsert(
 				{
 					accountId,
 					waId: id,
-					phoneNumber: item?.id?.user || phoneFromWaId(id),
-					name: item?.name || item?.pushname || item?.formattedName || null,
-					avatarUrl: item?.profilePicThumbObj?.eurl || null,
+					phoneNumber: phoneNumber || existing?.phoneNumber || null,
+					name: nextName,
+					avatarUrl: item?.profilePicThumbObj?.eurl || existing?.avatarUrl || null,
 					isBusiness: Boolean(item?.isBusiness),
 				},
 				['accountId', 'waId'],
@@ -2722,6 +2829,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				chat?.name ||
 				chat?.contact?.name ||
 				chat?.contact?.pushname ||
+				chat?.contact?.notify ||
 				chat?.contact?.formattedName ||
 				chat?.formattedTitle ||
 				chat?.formattedName ||
@@ -2765,13 +2873,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 			avatarUrl = avatarUrl || existingAvatar || null;
 			if (conversation.contact) {
-				const existingWeak = isWeakContactDisplayName(
+				const nextName = preferWhatsAppContactName(
 					conversation.contact.name,
+					title,
 					id,
-					conversation.contact.phoneNumber,
+					conversation.contact.phoneNumber || phone,
 				);
-				const nextName =
-					title || (existingWeak ? null : conversation.contact.name);
 				const nextPhone = phone || conversation.contact.phoneNumber;
 				const nextAvatarUrl = avatarUrl || conversation.contact.avatarUrl;
 				if (
@@ -5398,6 +5505,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		try {
 			const bytes = await fs.readFile(durablePath);
 			mimeType =
+				sniffVideoMime(bytes) ||
 				sniffImageMime(bytes) ||
 				sniffAudioMime(bytes) ||
 				mimeType ||
@@ -5587,7 +5695,31 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					if (!stats.isFile() || stats.size <= 0) {
 						throw new Error('Cached media is missing');
 					}
-					if (!attachment.mimeType || String(attachment.mimeType).includes('octet-stream')) {
+					const kind = String(attachment.type || '').toLowerCase();
+					if (kind === 'video' || kind === 'image' || kind === 'sticker') {
+						const head = Buffer.alloc(16);
+						const handle = await fs.open(cachedPath, 'r');
+						try {
+							await handle.read(head, 0, 16, 0);
+						} finally {
+							await handle.close();
+						}
+						if (kind === 'video' && !sniffVideoMime(head) && sniffImageMime(head)) {
+							throw new Error('Cached video is a thumbnail');
+						}
+						if (
+							!attachment.mimeType ||
+							String(attachment.mimeType).includes('octet-stream')
+						) {
+							const sniffedMime =
+								(kind === 'video' ? sniffVideoMime(head) : sniffImageMime(head)) ||
+								guessMimeFromPath(cachedPath, attachment.type);
+							if (sniffedMime && sniffedMime !== attachment.mimeType) {
+								attachment.mimeType = sniffedMime;
+								await this.attachmentRepo.save(attachment);
+							}
+						}
+					} else if (!attachment.mimeType || String(attachment.mimeType).includes('octet-stream')) {
 						const head = Buffer.alloc(64);
 						const handle = await fs.open(cachedPath, 'r');
 						try {
@@ -5676,15 +5808,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 			const buffer = decodeProviderMedia(data);
 			if (!buffer.length) throw new Error('Provider returned empty media');
-			const audioType = ['audio', 'ptt', 'voice'].includes(
-				String(attachment.type || '').toLowerCase(),
-			);
+			const mediaKind = String(attachment.type || '').toLowerCase();
+			const audioType = ['audio', 'ptt', 'voice'].includes(mediaKind);
 			if (audioType && !isValidAudioBuffer(buffer, attachment.mimeType)) {
 				throw new Error('Provider returned invalid audio media');
 			}
+			if (mediaKind === 'video') {
+				const videoMime = sniffVideoMime(buffer);
+				if (!videoMime && sniffImageMime(buffer)) {
+					throw new Error('Provider returned a thumbnail instead of video');
+				}
+				if (videoMime) attachment.mimeType = videoMime;
+			}
 			const sniffedMime =
 				(audioType ? sniffAudioMime(buffer) : null) ||
-				sniffImageMime(buffer) ||
+				(mediaKind === 'video' ? sniffVideoMime(buffer) : sniffImageMime(buffer)) ||
 				guessMimeFromPath(attachment.fileName || '', attachment.type);
 			if (sniffedMime && sniffedMime !== attachment.mimeType) {
 				attachment.mimeType = sniffedMime;

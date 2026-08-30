@@ -1,11 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
-import {
-	WhatsAppAccount,
-	WhatsAppAccountAccess,
-} from '../../whatsapp/entities/whatsapp.entity';
+import { User } from '../../entities/global.entity';
+import { WhatsAppAccount } from '../../whatsapp/entities/whatsapp.entity';
+import { WhatsAppAccountsService } from '../../whatsapp/services/whatsapp-accounts.service';
 import { WhatsAppSyncService } from '../../whatsapp/services/whatsapp-sync.service';
 
 export const EMAIL_MEMO_AI_CHAT_ID = 'email-memo-ai@so7ba.internal';
@@ -17,27 +16,35 @@ export class EmailMemoInSiteInboxService {
 
 	constructor(
 		private readonly sync: WhatsAppSyncService,
+		private readonly accountsService: WhatsAppAccountsService,
+		@InjectRepository(User)
+		private readonly users: Repository<User>,
 		@InjectRepository(WhatsAppAccount)
 		private readonly accounts: Repository<WhatsAppAccount>,
-		@InjectRepository(WhatsAppAccountAccess)
-		private readonly access: Repository<WhatsAppAccountAccess>,
 	) {}
 
 	/** WhatsApp CRM accounts this user can open in the dashboard. */
 	async listTargetAccounts(userId: string): Promise<WhatsAppAccount[]> {
-		const [owned, grants] = await Promise.all([
-			this.accounts.find({ where: { ownerAdminId: userId } }),
-			this.access.find({
-				where: { userId },
-				relations: ['account'],
-			}),
-		]);
-		const byId = new Map<string, WhatsAppAccount>();
-		for (const account of owned) byId.set(account.id, account);
-		for (const row of grants) {
-			if (row.account) byId.set(row.account.id, row.account);
-		}
-		return [...byId.values()];
+		const user = await this.users.findOne({ where: { id: userId } });
+		if (!user) return [];
+		const listed = await this.accountsService.list(user);
+		const ids = listed.map((item) => String(item.id || '')).filter(Boolean);
+		if (!ids.length) return [];
+		return this.accounts.find({ where: { id: In(ids) } });
+	}
+
+	async ensureTargetAccounts(userId: string): Promise<WhatsAppAccount[]> {
+		const existing = await this.listTargetAccounts(userId);
+		if (existing.length) return existing;
+		const user = await this.users.findOne({ where: { id: userId } });
+		if (!user) throw new Error('User not found');
+		const created = await this.accountsService.create(user, {
+			label: EMAIL_MEMO_AI_TITLE,
+			providerName: process.env.WHATSAPP_PROVIDER || 'baileys',
+		});
+		this.logger.log(`Created in-site Email Memo inbox account ${created.id} for ${userId}`);
+		const row = await this.accounts.findOne({ where: { id: created.id } });
+		return row ? [row] : [];
 	}
 
 	async deliverMemo(input: {
@@ -48,11 +55,9 @@ export class EmailMemoInSiteInboxService {
 	}) {
 		const text = String(input.text || '').trim();
 		if (!text) throw new Error('Email memo text is empty');
-		const accounts = await this.listTargetAccounts(input.userId);
+		const accounts = await this.ensureTargetAccounts(input.userId);
 		if (!accounts.length) {
-			throw new Error(
-				'No WhatsApp account in the CRM. Open WhatsApp in the dashboard (or create an account) so Email Memo can post the AI inbox chat.',
-			);
+			throw new Error('Could not create the in-site AI Memo Emails inbox');
 		}
 		const providerMessageId = `email-memo:${input.memoId || randomUUID()}:${Date.now()}`;
 		const results = [];
@@ -81,7 +86,7 @@ export class EmailMemoInSiteInboxService {
 	}
 
 	async ensurePinnedInbox(userId: string) {
-		const accounts = await this.listTargetAccounts(userId);
+		const accounts = await this.ensureTargetAccounts(userId);
 		for (const account of accounts) {
 			try {
 				await this.sync.postEmailMemoSiteMessage({

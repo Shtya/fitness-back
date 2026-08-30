@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { promises as fs } from 'fs';
 import * as path from 'path';
@@ -266,6 +266,101 @@ export class WhatsAppAccountsService {
 			relations: ['user'],
 			order: { created_at: 'ASC' },
 		});
+	}
+
+	/** Staff who can appear in the Assign menu, with account permission flags. */
+	async listAssignableStaff(user: User, accountId: string) {
+		const access = await this.accessService.getAccountAccess(user, accountId);
+		if (!access.canAssign && !access.canManage) {
+			throw new ForbiddenException('WhatsApp account permission denied: canAssign');
+		}
+		const account = access.account;
+		if (!account) return [];
+		const [eligible, rows] = await Promise.all([
+			this.listEligibleStaff(user),
+			this.accessRepo.find({
+				where: { accountId },
+				relations: ['user'],
+				order: { created_at: 'ASC' },
+			}),
+		]);
+		const accessByUser = new Map(rows.map((row) => [row.userId, row]));
+		const byId = new Map<
+			string,
+			{
+				id: string;
+				name: string;
+				email?: string;
+				role?: string;
+				avatarUrl?: string | null;
+				isOwner: boolean;
+				canView: boolean;
+				canUse: boolean;
+				canManage: boolean;
+				canAssign: boolean;
+				canTransfer: boolean;
+				assignable: boolean;
+			}
+		>();
+		const pushPerson = (
+			person: { id: string; name: string; email?: string; role?: string; avatarUrl?: string | null },
+			access?: WhatsAppAccountAccess | null,
+		) => {
+			if (!person?.id || byId.has(person.id)) return;
+			const isOwner = person.id === account.ownerAdminId;
+			const canView = isOwner || Boolean(access?.canView);
+			const canUse = isOwner || Boolean(access?.canUse);
+			byId.set(person.id, {
+				id: person.id,
+				name: person.name,
+				email: person.email,
+				role: person.role,
+				avatarUrl: person.avatarUrl || null,
+				isOwner,
+				canView,
+				canUse,
+				canManage: isOwner || Boolean(access?.canManage),
+				canAssign: isOwner || Boolean(access?.canAssign),
+				canTransfer: isOwner || Boolean(access?.canTransfer),
+				assignable: canView && canUse,
+			});
+		};
+		for (const person of eligible) {
+			pushPerson(
+				{
+					id: person.id,
+					name: person.name,
+					email: person.email,
+					role: person.role,
+					avatarUrl: null,
+				},
+				accessByUser.get(person.id) || null,
+			);
+		}
+		for (const row of rows) {
+			if (row.user) {
+				pushPerson(
+					{
+						id: row.user.id,
+						name: row.user.name,
+						email: row.user.email,
+						role: row.user.role,
+						avatarUrl: (row.user as any).avatarUrl || null,
+					},
+					row,
+				);
+			}
+		}
+		if (account.ownerAdminId && !byId.has(account.ownerAdminId)) {
+			const owner = await this.userRepo.findOne({
+				where: { id: account.ownerAdminId },
+				select: ['id', 'name', 'email', 'role'],
+			});
+			if (owner) pushPerson(owner, accessByUser.get(owner.id) || null);
+		}
+		return [...byId.values()].sort((a, b) =>
+			String(a.name || '').localeCompare(String(b.name || '')),
+		);
 	}
 
 	async replaceAccess(user: User, accountId: string, access: any[]) {

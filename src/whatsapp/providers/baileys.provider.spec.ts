@@ -111,6 +111,34 @@ describe('BaileysProvider stories', () => {
 		expect(statuses[0].contactName).toBe('Ahmed');
 	});
 
+	it('keeps address-book name above message pushName', () => {
+		const provider = new BaileysProvider('account-contact-priority');
+		const chatId = '201551495772@c.us';
+		(provider as any).rememberContact({
+			id: chatId,
+			name: 'Ahmed Ibrahim',
+			notify: 'yassinnasser',
+		});
+		(provider as any).rememberContact({
+			id: chatId,
+			notify: 'aaaaaaaaasa211',
+		});
+		expect((provider as any).contactDisplayName(chatId)).toBe('Ahmed Ibrahim');
+		expect((provider as any).contacts.get(chatId).notify).toBe('aaaaaaaaasa211');
+	});
+
+	it('uses WhatsApp display name when the peer is not saved', () => {
+		const provider = new BaileysProvider('account-contact-push');
+		const chatId = '201000000001@c.us';
+		(provider as any).rememberContact({
+			id: chatId,
+			notify: 'ادارة التغيير تبدأ من داخلك',
+		});
+		expect((provider as any).contactDisplayName(chatId)).toBe(
+			'ادارة التغيير تبدأ من داخلك',
+		);
+	});
+
 	it('does not leak stories into the chat inbox', () => {
 		const provider = new BaileysProvider('account-stories-inbox');
 		const chatId = 'status@broadcast';

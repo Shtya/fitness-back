@@ -40,7 +40,7 @@ function matchList(values: string[] = [], haystack: string) {
 }
 
 function normalizeDeliveryDestination(value?: string | null) {
-	const dest = String(value || 'whatsapp').trim().toLowerCase();
+	const dest = String(value || 'in_site').trim().toLowerCase();
 	if (dest === 'in_site' || dest === 'both' || dest === 'whatsapp') return dest;
 	return 'whatsapp';
 }

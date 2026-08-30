@@ -107,6 +107,19 @@ const OPTIONAL_TABLES = [
 		ON whatsapp_chat_message_group_items(conversation_id)`,
 	`ALTER TABLE whatsapp_board_cards ADD COLUMN IF NOT EXISTS priority varchar(16) NOT NULL DEFAULT 'medium'`,
 	`ALTER TABLE whatsapp_board_cards ADD COLUMN IF NOT EXISTS is_completed boolean NOT NULL DEFAULT false`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_message_reactions (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		message_id uuid NOT NULL REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
+		actor_key varchar(200) NOT NULL,
+		emoji varchar(32) NOT NULL,
+		reacted_at timestamptz,
+		CONSTRAINT uq_whatsapp_message_reaction_actor UNIQUE (message_id, actor_key)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_whatsapp_message_reactions_message_id
+		ON whatsapp_message_reactions(message_id)`,
 ];
 
 @Injectable()

@@ -37,6 +37,16 @@ export class QueryFailedErrorFilter implements ExceptionFilter {
       return;
     }
 
+    if (code === '23505') {
+      response.status(HttpStatus.CONFLICT).json({
+        statusCode: HttpStatus.CONFLICT,
+        message: 'This reaction was already saved. Refresh and try again if it does not appear.',
+        error: 'Unique Constraint Violation',
+        details: exception.driverError?.detail || driverMessage,
+      });
+      return;
+    }
+
     this.logger.error(driverMessage);
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       statusCode: HttpStatus.INTERNAL_SERVER_ERROR,

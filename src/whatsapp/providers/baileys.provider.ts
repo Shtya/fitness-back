@@ -634,29 +634,31 @@ export class BaileysProvider implements WhatsAppProvider {
 		const phoneDigits = phoneJid
 			? phoneJid.split('@')[0].split(':')[0].replace(/\D/g, '')
 			: null;
-		const name =
-			[contact.name, contact.notify, contact.verifiedName, contact.pushname, contact.shortName]
-				.map((v) => String(v || '').trim())
-				.find((v) => v && !isWeakDisplayName(v, id, phoneDigits)) || null;
-		const notify = String(contact.notify || '').trim() || null;
-		const entry = {
-			id,
-			lid,
-			phoneNumber: phoneDigits,
-			name: name || notify,
-			notify,
-		};
+		// Baileys: `name` / verifiedName / shortName = address book.
+		// `notify` / pushname = WhatsApp profile display name the peer set.
+		const savedRaw = [contact.name, contact.verifiedName, contact.shortName]
+			.map((v) => String(v || '').trim())
+			.find((v) => v && !isWeakDisplayName(v, id, phoneDigits)) || null;
+		const pushRaw = [contact.notify, contact.pushname, contact.pushName]
+			.map((v) => String(v || '').trim())
+			.find((v) => v && !isWeakDisplayName(v, id, phoneDigits)) || null;
 		const merge = (key: string) => {
 			if (!key) return;
 			const prev = this.contacts.get(key) || { id: key };
+			const nextSaved =
+				savedRaw ||
+				(prev.name && !isWeakDisplayName(String(prev.name), key, phoneDigits || prev.phoneNumber)
+					? prev.name
+					: null);
+			const nextNotify = pushRaw || prev.notify || null;
 			this.contacts.set(key, {
 				...prev,
-				...entry,
 				id: key,
-				name: entry.name || prev.name || null,
-				notify: entry.notify || prev.notify || null,
-				phoneNumber: entry.phoneNumber || prev.phoneNumber || null,
-				lid: entry.lid || prev.lid || null,
+				// Never promote pushName into the address-book slot.
+				name: nextSaved,
+				notify: nextNotify,
+				phoneNumber: phoneDigits || prev.phoneNumber || null,
+				lid: lid || prev.lid || null,
 			});
 		};
 		merge(id);
@@ -673,13 +675,22 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!id) return null;
 		const hit = this.contacts.get(id);
 		const phone = hit?.phoneNumber || this.lidToPn.get(id) || null;
-		const name = hit?.name || hit?.notify || null;
-		if (name && !isWeakDisplayName(name, id, phone)) return name;
+		const label =
+			(hit?.name && !isWeakDisplayName(hit.name, id, phone) ? hit.name : null) ||
+			(hit?.notify && !isWeakDisplayName(hit.notify, id, phone) ? hit.notify : null) ||
+			null;
+		if (label) return label;
 		if (phone) {
 			const byPhone =
 				this.contacts.get(`${phone}@c.us`) || this.contacts.get(`${phone}@s.whatsapp.net`);
-			const phoneName = byPhone?.name || byPhone?.notify || null;
-			if (phoneName && !isWeakDisplayName(phoneName, id, phone)) return phoneName;
+			const phoneLabel =
+				(byPhone?.name && !isWeakDisplayName(byPhone.name, id, phone)
+					? byPhone.name
+					: null) ||
+				(byPhone?.notify && !isWeakDisplayName(byPhone.notify, id, phone)
+					? byPhone.notify
+					: null);
+			if (phoneLabel) return phoneLabel;
 		}
 		return null;
 	}
@@ -799,10 +810,10 @@ export class BaileysProvider implements WhatsAppProvider {
 				? normalized.senderWaId || normalized.chatId
 				: normalized.chatId;
 			if (contactId) {
+				// pushName only — never write into the address-book `name` slot.
 				this.rememberContact({
 					id: contactId,
 					notify: normalized.contactName,
-					name: normalized.contactName,
 				});
 			}
 		}
@@ -912,8 +923,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		const published = toDate(raw.messageTimestamp);
 		const timestamp = Math.floor(published.getTime() / 1000) || Math.floor(Date.now() / 1000);
 		const contactName =
-			(!fromMe && String(raw.pushName || '').trim()) ||
 			(senderWaId ? this.contactDisplayName(senderWaId) : '') ||
+			(!fromMe && String(raw.pushName || '').trim()) ||
 			null;
 		const item = {
 			id: { _serialized: serialized, id: String(raw?.key?.id || ''), remote: 'status@broadcast' },
@@ -933,11 +944,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.statusesById.set(serialized, item);
 		this.statusRawById.set(serialized, raw);
 		if (item.messageId) this.statusRawById.set(item.messageId, raw);
-		if (senderWaId && contactName) {
+		if (senderWaId && !fromMe && String(raw.pushName || '').trim()) {
 			this.rememberContact({
 				id: senderWaId,
-				notify: contactName,
-				name: contactName,
+				notify: String(raw.pushName).trim(),
 			});
 		}
 		this.pruneExpiredStatuses();
@@ -1431,13 +1441,25 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		socket.ev.on('messages.update', async (updates: any[]) => {
 			if (!Array.isArray(updates)) return;
+			const readChatIds = new Set<string>();
 			for (const item of updates) {
 				const providerMessageId = String(item?.key?.id || '').trim();
-				if (!providerMessageId) continue;
 				const status = mapBaileysMessageStatus(item?.update?.status);
-				if (status) {
+				if (providerMessageId && status) {
 					this.emit({ type: 'message_status', providerMessageId, status });
 				}
+				if (status !== 'read' && status !== 'played') continue;
+				const fromMe = Boolean(item?.key?.fromMe ?? item?.update?.key?.fromMe);
+				if (fromMe) continue;
+				const chatId =
+					jidOf(item?.key?.remoteJid) ||
+					jidOf(item?.update?.key?.remoteJid) ||
+					'';
+				if (chatId && !isStatusBroadcastJid(chatId)) readChatIds.add(chatId);
+			}
+			for (const chatId of readChatIds) {
+				this.rememberChat(chatId, { unreadCount: 0 });
+				this.emit({ type: 'chat_unread', chatId, unreadCount: 0 });
 			}
 		});
 
@@ -1774,8 +1796,10 @@ export class BaileysProvider implements WhatsAppProvider {
 	async getContacts() {
 		return [...this.contacts.values()].map((contact) => ({
 			id: { _serialized: contact.id },
-			name: contact.name || contact.notify || null,
+			// Keep fields separate so sync can prefer address-book over pushName.
+			name: contact.name || null,
 			pushname: contact.notify || null,
+			notify: contact.notify || null,
 			number: contact.phoneNumber || null,
 		}));
 	}

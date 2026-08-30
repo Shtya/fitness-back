@@ -13,6 +13,7 @@ import {
 } from '../../../entities/global.entity';
 import { NotificationService } from '../../notification/notification.service';
 import {
+	WhatsAppAccount,
 	WhatsAppAccountAccess,
 	WhatsAppConversation,
 	WhatsAppConversationAssignment,
@@ -30,6 +31,8 @@ export class WhatsAppAssignmentService {
 		private readonly assignmentRepo: Repository<WhatsAppConversationAssignment>,
 		@InjectRepository(WhatsAppAccountAccess)
 		private readonly accountAccessRepo: Repository<WhatsAppAccountAccess>,
+		@InjectRepository(WhatsAppAccount)
+		private readonly accountRepo: Repository<WhatsAppAccount>,
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
 		private readonly access: WhatsAppAccessService,
@@ -71,13 +74,19 @@ export class WhatsAppAssignmentService {
 		if (targetUserId) {
 			target = await this.userRepo.findOne({ where: { id: targetUserId } });
 			if (!target) throw new NotFoundException('Target user not found');
-			const targetAccess = await this.accountAccessRepo.findOne({
-				where: { accountId: conversation.accountId, userId: targetUserId },
+			const account = await this.accountRepo.findOne({
+				where: { id: conversation.accountId },
 			});
-			if (!targetAccess?.canView || !targetAccess?.canUse) {
-				throw new ForbiddenException(
-					'Target user must have view and use access to this WhatsApp account',
-				);
+			const isOwner = account?.ownerAdminId === targetUserId;
+			if (!isOwner) {
+				const targetAccess = await this.accountAccessRepo.findOne({
+					where: { accountId: conversation.accountId, userId: targetUserId },
+				});
+				if (!targetAccess?.canView || !targetAccess?.canUse) {
+					throw new ForbiddenException(
+						'Target user must have view and use access to this WhatsApp account',
+					);
+				}
 			}
 		}
 

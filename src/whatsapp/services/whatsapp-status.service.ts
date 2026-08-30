@@ -21,6 +21,10 @@ import {
 	decodeProviderMedia,
 	isIncompleteStatusMedia,
 } from '../utils/whatsapp-media-decode';
+import {
+	isWeakWhatsAppContactName,
+	preferWhatsAppContactName,
+} from '../utils/whatsapp-contact-name';
 
 function statusId(item: any) {
 	return String(
@@ -148,14 +152,29 @@ export class WhatsAppStatusService {
 			const contactName = String(
 				item?.contactName || item?.notifyName || item?.sender?.pushname || '',
 			).trim();
-			if (senderWaId && contactName) {
-				contactNames.set(senderWaId, contactName);
+			if (senderWaId && contactName && !isWeakWhatsAppContactName(contactName, senderWaId)) {
+				// Prefer any stronger name already collected in this refresh batch.
+				const previous = contactNames.get(senderWaId);
+				contactNames.set(
+					senderWaId,
+					preferWhatsAppContactName(previous, contactName, senderWaId) || contactName,
+				);
+				const existing = await this.contactRepo.findOne({
+					where: { accountId, waId: senderWaId },
+				});
+				const nextName = preferWhatsAppContactName(
+					existing?.name,
+					contactName,
+					senderWaId,
+					existing?.phoneNumber || String(senderWaId).replace(/@.*/, '') || null,
+				);
 				await this.contactRepo.upsert(
 					{
 						accountId,
 						waId: senderWaId,
-						name: contactName,
-						phoneNumber: String(senderWaId).replace(/@.*/, '') || null,
+						name: nextName,
+						phoneNumber:
+							existing?.phoneNumber || String(senderWaId).replace(/@.*/, '') || null,
 					},
 					['accountId', 'waId'],
 				);
@@ -326,8 +345,17 @@ export class WhatsAppStatusService {
 			const contacts = await this.contactRepo.find({
 				where: { accountId, waId: In(senderIds) },
 			});
+			// Address-book / DB labels win over ephemeral status pushNames.
 			for (const contact of contacts) {
-				if (contact.name && !contactNames.has(contact.waId)) {
+				const phone = contact.phoneNumber;
+				if (
+					contact.name &&
+					!isWeakWhatsAppContactName(contact.name, contact.waId, phone)
+				) {
+					contactNames.set(contact.waId, contact.name);
+					continue;
+				}
+				if (!contactNames.has(contact.waId) && contact.name) {
 					contactNames.set(contact.waId, contact.name);
 				}
 			}
@@ -337,14 +365,20 @@ export class WhatsAppStatusService {
 			sessionReady,
 			providerState,
 			hint: refreshHint,
-			items: dedupedItems.map(item => ({
-				...item,
-				contactName: item.senderWaId
-					? contactNames.get(item.senderWaId) || (item.isOwn ? 'You' : null)
-					: item.isOwn
-						? 'You'
-						: null,
-			})),
+			items: dedupedItems.map(item => {
+				const fromMap = item.senderWaId ? contactNames.get(item.senderWaId) : null;
+				const phoneHint = item.senderWaId
+					? String(item.senderWaId).replace(/@.*$/, '').replace(/\D/g, '')
+					: '';
+				const contactName = item.isOwn
+					? fromMap || 'You'
+					: fromMap ||
+						(phoneHint.length >= 8 ? `+${phoneHint}` : null);
+				return {
+					...item,
+					contactName,
+				};
+			}),
 		};
 	}
 	async publish(

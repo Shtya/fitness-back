@@ -37,6 +37,11 @@ export class EmailMemoService {
 			this.settings.getOrCreate(userId),
 			this.processor.usageToday(userId),
 		]);
+		const dest = String(settings.deliveryDestination || 'in_site').toLowerCase();
+		if (dest === 'in_site' || dest === 'both') {
+			await this.inSiteInbox.ensurePinnedInbox(userId).catch(() => undefined);
+		}
+		const inSiteAccounts = await this.inSiteInbox.listTargetAccounts(userId);
 		const providers = this.ai.listStatus();
 		const oauth = await this.gmail.oauthAppMeta(userId);
 		const activeProvider =
@@ -46,6 +51,12 @@ export class EmailMemoService {
 		const gmailAccounts = accounts.map((row) => this.gmail.toPublicAccount(row));
 		const connected = gmailAccounts.filter((item) => item.connected);
 		const primary = connected[0] || gmailAccounts[0];
+		const inSiteTargets = (inSiteAccounts || []).map((account) => ({
+			id: account.id,
+			label: account.label || account.phoneNumber || 'WhatsApp',
+			phoneNumber: account.phoneNumber || null,
+			status: account.status,
+		}));
 		return {
 			gmail: primary?.connected
 				? {
@@ -79,6 +90,8 @@ export class EmailMemoService {
 				accounts: whatsapp.accounts,
 				maxAccounts: whatsapp.maxAccounts,
 				linkingAccountId: whatsapp.linkingAccountId,
+				inSiteReady: inSiteTargets.length > 0,
+				inSiteAccounts: inSiteTargets,
 			},
 			ai: {
 				provider: activeProvider?.id || 'ai-free',
@@ -230,7 +243,7 @@ export class EmailMemoService {
 		const row = await this.messages.findOne({ where: { id, userId } });
 		if (!row) throw new NotFoundException('Email not found');
 		const settings = await this.settings.getOrCreate(userId);
-		const dest = String(settings.deliveryDestination || 'whatsapp').toLowerCase();
+		const dest = String(settings.deliveryDestination || 'in_site').toLowerCase();
 		const needsPhone = dest === 'whatsapp' || dest === 'both';
 		if (needsPhone) {
 			const wa = await this.whatsapp.getConnection(userId);
@@ -252,7 +265,7 @@ export class EmailMemoService {
 
 	async sendNow(userId: string, opts: { ids?: string[]; limit?: number } = {}) {
 		const settings = await this.settings.getOrCreate(userId);
-		const dest = String(settings.deliveryDestination || 'whatsapp').toLowerCase();
+		const dest = String(settings.deliveryDestination || 'in_site').toLowerCase();
 		const needsPhone = dest === 'whatsapp' || dest === 'both';
 		if (needsPhone) {
 			const wa = await this.whatsapp.getConnection(userId);
@@ -263,7 +276,7 @@ export class EmailMemoService {
 
 	async updateSettings(userId: string, dto: UpdateEmailMemoSettingsDto) {
 		const row = await this.settings.update(userId, dto);
-		const dest = String(row.deliveryDestination || 'whatsapp').toLowerCase();
+		const dest = String(row.deliveryDestination || 'in_site').toLowerCase();
 		if (dest === 'in_site' || dest === 'both') {
 			void this.inSiteInbox.ensurePinnedInbox(userId).catch(() => undefined);
 		}

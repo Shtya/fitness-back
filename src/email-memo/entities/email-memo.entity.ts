@@ -394,7 +394,7 @@ export class EmailMemoNotificationSettings {
 	targetChatName: string | null;
 
 	/** whatsapp | in_site | both */
-	@Column({ name: 'delivery_destination', type: 'varchar', length: 24, default: 'whatsapp' })
+	@Column({ name: 'delivery_destination', type: 'varchar', length: 24, default: 'in_site' })
 	deliveryDestination: string;
 
 	@Column({ name: 'poll_interval_hours', type: 'int', default: 1 })

@@ -55,13 +55,19 @@ export class WhatsAppAccountsController {
 	}
 
 	@Get(':accountId/access')
-	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	getAccess(@Req() req: any, @Param('accountId') accountId: string) {
 		return this.accounts.getAccess(req.user, accountId);
 	}
 
+	@Get(':accountId/assignable-staff')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	listAssignableStaff(@Req() req: any, @Param('accountId') accountId: string) {
+		return this.accounts.listAssignableStaff(req.user, accountId);
+	}
+
 	@Put(':accountId/access')
-	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	replaceAccess(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
