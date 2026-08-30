@@ -304,24 +304,24 @@ export class WhatsAppAccountsService {
 		>();
 		const pushPerson = (
 			person: { id: string; name: string; email?: string; role?: string; avatarUrl?: string | null },
-			access?: WhatsAppAccountAccess | null,
+			row?: WhatsAppAccountAccess | null,
 		) => {
 			if (!person?.id || byId.has(person.id)) return;
 			const isOwner = person.id === account.ownerAdminId;
-			const canView = isOwner || Boolean(access?.canView);
-			const canUse = isOwner || Boolean(access?.canUse);
+			const canView = isOwner || Boolean(row?.canView);
+			const canUse = isOwner || Boolean(row?.canUse);
 			byId.set(person.id, {
 				id: person.id,
-				name: person.name,
+				name: person.name || person.email || 'Staff',
 				email: person.email,
 				role: person.role,
 				avatarUrl: person.avatarUrl || null,
 				isOwner,
 				canView,
 				canUse,
-				canManage: isOwner || Boolean(access?.canManage),
-				canAssign: isOwner || Boolean(access?.canAssign),
-				canTransfer: isOwner || Boolean(access?.canTransfer),
+				canManage: isOwner || Boolean(row?.canManage),
+				canAssign: isOwner || Boolean(row?.canAssign),
+				canTransfer: isOwner || Boolean(row?.canTransfer),
 				assignable: canView && canUse,
 			});
 		};
@@ -351,12 +351,27 @@ export class WhatsAppAccountsService {
 				);
 			}
 		}
-		if (account.ownerAdminId && !byId.has(account.ownerAdminId)) {
-			const owner = await this.userRepo.findOne({
-				where: { id: account.ownerAdminId },
+		// Access rows whose user relation did not load (soft-delete / missing join).
+		const missingAccessIds = rows
+			.map((row) => row.userId)
+			.filter((id) => id && !byId.has(id));
+		const mustLoadIds = [
+			...new Set(
+				[
+					user.id,
+					account.ownerAdminId,
+					...missingAccessIds,
+				].filter(Boolean),
+			),
+		].filter((id) => !byId.has(id as string)) as string[];
+		if (mustLoadIds.length) {
+			const extras = await this.userRepo.find({
+				where: { id: In(mustLoadIds) },
 				select: ['id', 'name', 'email', 'role'],
 			});
-			if (owner) pushPerson(owner, accessByUser.get(owner.id) || null);
+			for (const person of extras) {
+				pushPerson(person, accessByUser.get(person.id) || null);
+			}
 		}
 		return [...byId.values()].sort((a, b) =>
 			String(a.name || '').localeCompare(String(b.name || '')),
@@ -410,18 +425,34 @@ export class WhatsAppAccountsService {
 
 	async listEligibleStaff(user: User) {
 		const roles = [UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN];
-		const where =
-			user.role === UserRole.SUPER_ADMIN
-				? { role: In(roles) }
-				: [
-						{ id: user.id, role: In(roles) },
-						{ adminId: user.id, role: In(roles) },
-						{ coachId: user.id, role: In(roles) },
-					];
-		return this.userRepo.find({
+		if (user.role === UserRole.SUPER_ADMIN) {
+			return this.userRepo.find({
+				where: { role: In(roles) },
+				select: ['id', 'name', 'email', 'role', 'status'],
+				order: { name: 'ASC' },
+			});
+		}
+		const where: Array<Record<string, unknown>> = [
+			{ id: user.id, role: In(roles) },
+			{ adminId: user.id, role: In(roles) },
+			{ coachId: user.id, role: In(roles) },
+		];
+		// Same org / tenant staff (admin tree often shares tenantId).
+		if (user.tenantId) {
+			where.push({ tenantId: user.tenantId, role: In(roles) });
+		}
+		if (user.adminId) {
+			where.push({ adminId: user.adminId, role: In(roles) });
+			where.push({ id: user.adminId, role: In(roles) });
+		}
+		const rows = await this.userRepo.find({
 			where: where as any,
 			select: ['id', 'name', 'email', 'role', 'status'],
 			order: { name: 'ASC' },
 		});
+		const byId = new Map(rows.map((row) => [row.id, row]));
+		return [...byId.values()].sort((a, b) =>
+			String(a.name || '').localeCompare(String(b.name || '')),
+		);
 	}
 }
