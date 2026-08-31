@@ -43,7 +43,12 @@ export class PollinationsFreeProvider implements AiFreeProvider {
       "https://text.pollinations.ai"
     ).replace(/\/$/, "");
     const timeoutMs = Math.min(
-      Math.max(Number(this.config.get("AI_FREE_HTTP_TIMEOUT_MS")) || 90000, 5000),
+      Math.max(
+        Number(request.httpTimeoutMs) ||
+          Number(this.config.get("AI_FREE_HTTP_TIMEOUT_MS")) ||
+          90000,
+        5000,
+      ),
       180000,
     );
 

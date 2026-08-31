@@ -35,7 +35,12 @@ export class Llm7FreeProvider implements AiFreeProvider {
     const apiKey =
       this.config.get<string>("AI_FREE_LLM7_API_KEY") || "unused";
     const timeoutMs = Math.min(
-      Math.max(Number(this.config.get("AI_FREE_HTTP_TIMEOUT_MS")) || 90000, 5000),
+      Math.max(
+        Number(request.httpTimeoutMs) ||
+          Number(this.config.get("AI_FREE_HTTP_TIMEOUT_MS")) ||
+          90000,
+        5000,
+      ),
       180000,
     );
 

@@ -22,7 +22,11 @@ import {
 	whatsAppTimestampToDate,
 } from '../utils/whatsapp-time';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
-import { ensureWhatsAppVoiceOgg } from '../utils/whatsapp-voice-ogg';
+import {
+	dataUrlMime,
+	ensureWhatsAppVoiceOgg,
+	WHATSAPP_VOICE_MIME,
+} from '../utils/whatsapp-voice-ogg';
 
 declare const require: any;
 
@@ -583,6 +587,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 				`WhatsApp connection timed out after ${Math.round(timeoutMs / 1000)}s. Restart the connection.`,
 			);
 		}, timeoutMs);
+		// Pairing watchdogs must never be the reason the process cannot exit.
+		this.authReconcileTimer.unref?.();
+		this.authReconcileStopTimer.unref?.();
 	}
 
 	/**
@@ -1918,70 +1925,6 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 	}
 
-	private async convertVoiceToOgg(filePath: string): Promise<string> {
-		const path = require('path');
-		const os = require('os');
-		const fs = require('fs');
-		const { spawn } = require('child_process');
-		const outputPath = path.join(
-			os.tmpdir(),
-			`whatsapp-voice-${this.accountId}-${Date.now()}-${Math.random()
-				.toString(36)
-				.slice(2)}.ogg`,
-		);
-		const executable = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
-		try {
-			await new Promise<void>((resolve, reject) => {
-				const processHandle = spawn(
-					executable,
-					[
-						'-y',
-						'-i',
-						filePath,
-						'-vn',
-						'-ac',
-						'1',
-						'-ar',
-						'48000',
-						'-c:a',
-						'libopus',
-						'-b:a',
-						'32k',
-						'-application',
-						'voip',
-						'-f',
-						'ogg',
-						outputPath,
-					],
-					{ windowsHide: true },
-				);
-				let stderr = '';
-				const timer = setTimeout(() => {
-					processHandle.kill();
-					reject(new Error('Voice conversion timed out after 30000ms'));
-				}, 30000);
-				processHandle.stderr?.on('data', (chunk: Buffer) => {
-					stderr = `${stderr}${chunk.toString()}`.slice(-2000);
-				});
-				processHandle.once('error', (error: Error) => {
-					clearTimeout(timer);
-					reject(error);
-				});
-				processHandle.once('close', (code: number) => {
-					clearTimeout(timer);
-					if (code === 0) resolve();
-					else reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
-				});
-			});
-			const converted = await fs.promises.stat(outputPath);
-			if (!converted?.size) throw new Error('Converted voice file is empty');
-			return outputPath;
-		} catch (error) {
-			await fs.promises.rm(outputPath, { force: true }).catch(() => {});
-			throw error;
-		}
-	}
-
 	private isRetriableSendError(error: unknown) {
 		const text = String(
 			error instanceof Error ? error.message : error || '',
@@ -2055,6 +1998,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 			isVoice?: boolean;
 			isSticker?: boolean;
 			mimeType?: string | null;
+			voiceAlreadyConverted?: boolean;
 			quotedProviderMessageId?: string;
 			embeddedQuote?: WhatsAppEmbeddedQuote;
 		} = {},
@@ -2103,83 +2047,112 @@ export class WppConnectProvider implements WhatsAppProvider {
 				let sendPath = filePath;
 				let sendFilename = filename;
 				let voiceCleanup: (() => Promise<void>) | undefined;
-				try {
-					const converted = await ensureWhatsAppVoiceOgg(filePath, {
-						mimeType: options.mimeType,
-						fileName: filename,
-					});
-					sendPath = converted.filePath;
-					sendFilename = converted.fileName;
-					voiceCleanup = converted.cleanup;
-				} catch (error) {
-					const detail =
-						error instanceof Error ? error.message : String(error || 'Voice conversion failed');
-					throw new Error(`Voice conversion failed: ${detail}`);
-				}
-				try {
-				const buffer: Buffer = await fs.promises.readFile(sendPath);
-				if (!buffer?.length) throw new Error('Voice file is empty');
-				const mime = 'audio/ogg';
-				const base64 = `data:${mime};base64,${buffer.toString('base64')}`;
-				const sendAudio = (isPtt: boolean) => {
-					if (typeof this.client.sendPttFromBase64 === 'function') {
-						return this.client.sendPttFromBase64(
-							target,
-							base64,
-							sendFilename,
-							options.caption || '',
-							options.quotedProviderMessageId,
-							undefined,
-							isPtt,
-						);
-					}
-					return this.client.sendFile(target, base64, {
-						type: 'audio',
-						isPtt,
-						filename: sendFilename,
-						caption: options.caption || '',
-						quotedMsg: options.quotedProviderMessageId,
-						waitForAck: true,
-					});
-				};
-				let voiceError: unknown;
-				for (const isPtt of [true, false]) {
+				if (!options.voiceAlreadyConverted) {
 					try {
-						return await this.withTimeout(
-							sendAudio(isPtt),
-							60000,
-							`sendVoice(${target},isPtt=${isPtt})`,
-						);
+						const converted = await ensureWhatsAppVoiceOgg(filePath, {
+							mimeType: options.mimeType,
+							fileName: filename,
+						});
+						sendPath = converted.filePath;
+						sendFilename = converted.fileName;
+						voiceCleanup = converted.cleanup;
 					} catch (error) {
-						voiceError = error;
-						this.logger.warn(
-							`Voice send failed (isPtt=${isPtt}): ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						);
+						const detail =
+							error instanceof Error ? error.message : String(error || 'Voice conversion failed');
+						throw new Error(`Voice conversion failed: ${detail}`);
 					}
 				}
 				try {
-					return await this.withTimeout(
-						this.client.sendFile(target, sendPath, {
+					const pttArgs = [
+						target,
+						sendPath,
+						sendFilename,
+						options.caption || '',
+						options.quotedProviderMessageId,
+						undefined,
+						true,
+					] as const;
+					if (typeof this.client?.sendPtt === 'function') {
+						try {
+							return await this.withTimeout(
+								this.client.sendPtt(...pttArgs),
+								60000,
+								`sendPtt(${target})`,
+							);
+						} catch (error) {
+							this.logger.warn(
+								`sendPtt failed for ${target}: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+						}
+					}
+					const buffer: Buffer = await fs.promises.readFile(sendPath);
+					if (!buffer?.length) throw new Error('Voice file is empty');
+					const base64 = `data:${dataUrlMime(WHATSAPP_VOICE_MIME)};base64,${buffer.toString(
+						'base64',
+					)}`;
+					const sendAudio = (isPtt: boolean) => {
+						if (typeof this.client.sendPttFromBase64 === 'function') {
+							return this.client.sendPttFromBase64(
+								target,
+								base64,
+								sendFilename,
+								options.caption || '',
+								options.quotedProviderMessageId,
+								undefined,
+								isPtt,
+							);
+						}
+						return this.client.sendFile(target, base64, {
+							type: 'audio',
+							isPtt,
 							filename: sendFilename,
 							caption: options.caption || '',
 							quotedMsg: options.quotedProviderMessageId,
 							waitForAck: true,
-						}),
-						60000,
-						`sendVoiceFile(${target})`,
-					);
-				} catch (error) {
-					voiceError = error;
-				}
-				const detail =
-					voiceError instanceof Error
-						? voiceError.message
-						: typeof voiceError === 'string'
-							? voiceError
-							: JSON.stringify(voiceError);
-				throw new Error(`Failed to send voice note: ${detail || 'unknown WhatsApp error'}`);
+						});
+					};
+					let voiceError: unknown;
+					for (const isPtt of [true, false]) {
+						try {
+							return await this.withTimeout(
+								sendAudio(isPtt),
+								60000,
+								`sendVoice(${target},isPtt=${isPtt})`,
+							);
+						} catch (error) {
+							voiceError = error;
+							this.logger.warn(
+								`Voice send failed (isPtt=${isPtt}): ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+						}
+					}
+					try {
+						return await this.withTimeout(
+							this.client.sendFile(target, sendPath, {
+								filename: sendFilename,
+								type: 'audio',
+								isPtt: true,
+								caption: options.caption || '',
+								quotedMsg: options.quotedProviderMessageId,
+								waitForAck: true,
+							}),
+							60000,
+							`sendVoiceFile(${target})`,
+						);
+					} catch (error) {
+						voiceError = error;
+					}
+					const detail =
+						voiceError instanceof Error
+							? voiceError.message
+							: typeof voiceError === 'string'
+								? voiceError
+								: JSON.stringify(voiceError);
+					throw new Error(`Failed to send voice note: ${detail || 'unknown WhatsApp error'}`);
 				} finally {
 					await voiceCleanup?.();
 				}
@@ -2564,7 +2537,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 						if (!blob) return null;
 						if (typeof blob === 'string') {
 							if (blob.startsWith('data:')) return blob;
-							return `data:${mimeHint || 'application/octet-stream'};base64,${blob}`;
+							return `data:${dataUrlMime(mimeHint)};base64,${blob}`;
 						}
 						try {
 							if (typeof blob.forceToBlob === 'function') {

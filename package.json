@@ -113,6 +113,10 @@
       "ts"
     ],
     "rootDir": "src",
+    "roots": [
+      "<rootDir>",
+      "<rootDir>/../common"
+    ],
     "moduleDirectories": [
       "node_modules",
       "<rootDir>",

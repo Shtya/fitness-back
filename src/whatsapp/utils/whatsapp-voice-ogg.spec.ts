@@ -1,7 +1,10 @@
 import {
+	dataUrlMime,
 	ensureWhatsAppVoiceOgg,
 	fallbackVoiceWaveform,
 	guessVoiceSeconds,
+	looksLikeOutgoingVoiceUpload,
+	WHATSAPP_VOICE_MIME,
 } from './whatsapp-voice-ogg';
 import { promises as fs } from 'fs';
 import * as os from 'os';
@@ -22,20 +25,33 @@ describe('whatsapp voice ogg helper', () => {
 		expect(fallbackVoiceWaveform(Buffer.from('voice-note-bytes'))).toEqual(waveform);
 	});
 
-	it('leaves an already-OGG recording untouched', async () => {
-		const filePath = path.join(os.tmpdir(), `wa-ogg-${Date.now()}.ogg`);
-		const ogg = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(80, 1)]);
-		await fs.writeFile(filePath, ogg);
-		try {
-			const result = await ensureWhatsAppVoiceOgg(filePath, {
-				mimeType: 'audio/ogg; codecs=opus',
-				fileName: 'voice-3s.ogg',
-			});
-			expect(result.filePath).toBe(filePath);
-			expect(result.cleanup).toBeUndefined();
-			expect(result.mimeType).toContain('ogg');
-		} finally {
-			await fs.rm(filePath, { force: true });
-		}
+	it('detects outgoing voice uploads by filename or mime', () => {
+		expect(looksLikeOutgoingVoiceUpload('voice-8s.webm', 'audio/webm')).toBe(true);
+		expect(looksLikeOutgoingVoiceUpload('clip.mp3', 'audio/mpeg')).toBe(false);
+	});
+
+	// Copy of wa-js `valid-data-url`; a mime it rejects makes sendFileMessage
+	// throw `invalid_data_url` instead of sending the note.
+	const WA_JS_DATA_URL =
+		/^data:([a-z]+\/[a-z0-9-+.]+(;[a-z0-9-.!#$%*+.{}|~`]+=[a-z0-9-.!#$%*+.{}()_|~`]+)*)?(;base64)?,([a-z0-9!$&',()*+;=\-._~:@/?%\s<>]*?)$/i;
+
+	it('strips whitespace so the voice mime is a legal data URL for wa-js', () => {
+		const payload = Buffer.from('voice-data').toString('base64');
+		expect(WA_JS_DATA_URL.test(`data:${WHATSAPP_VOICE_MIME};base64,${payload}`)).toBe(false);
+		expect(
+			WA_JS_DATA_URL.test(`data:${dataUrlMime(WHATSAPP_VOICE_MIME)};base64,${payload}`),
+		).toBe(true);
+		expect(dataUrlMime(WHATSAPP_VOICE_MIME)).toBe('audio/ogg;codecs=opus');
+		expect(dataUrlMime(null)).toBe('application/octet-stream');
+		expect(dataUrlMime('  ')).toBe('application/octet-stream');
+	});
+
+	it('rejects empty voice files', async () => {
+		const filePath = path.join(os.tmpdir(), `wa-empty-${Date.now()}.webm`);
+		await fs.writeFile(filePath, Buffer.alloc(0));
+		await expect(
+			ensureWhatsAppVoiceOgg(filePath, { mimeType: 'audio/webm', fileName: 'voice-1s.webm' }),
+		).rejects.toThrow(/empty/i);
+		await fs.rm(filePath, { force: true });
 	});
 });

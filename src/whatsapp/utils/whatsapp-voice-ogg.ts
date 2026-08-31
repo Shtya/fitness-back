@@ -7,6 +7,22 @@ function isOggBuffer(buffer: Buffer): boolean {
 	return Boolean(buffer?.length >= 4 && buffer.subarray(0, 4).toString('ascii') === 'OggS');
 }
 
+/** Baileys default for PTT; keep the space after the semicolon to match their encoder. */
+export const WHATSAPP_VOICE_MIME = 'audio/ogg; codecs=opus';
+
+/**
+ * A raw space is not legal in a data URL media type. wa-js validates with
+ * `valid-data-url`, whose parameter group rejects `; codecs=opus`, so passing
+ * `WHATSAPP_VOICE_MIME` straight into a data URL fails with `invalid_data_url`
+ * and the base64 send fallback can never deliver.
+ */
+export function dataUrlMime(
+	mimeType?: string | null,
+	fallback = 'application/octet-stream',
+): string {
+	return String(mimeType || '').replace(/\s+/g, '') || fallback;
+}
+
 export function resolveFfmpeg(): string {
 	const fromEnv = process.env.FFMPEG_PATH?.trim();
 	if (fromEnv) return fromEnv;
@@ -197,8 +213,9 @@ export async function resolveVoiceSeconds(
 }
 
 /**
- * WhatsApp PTT is OGG/Opus. Chrome records WebM/Opus and sending that container
- * can ACK locally while the phone never shows the voice note.
+ * WhatsApp PTT is OGG/Opus mono (16 kHz). Chrome records WebM/Opus and even
+ * browser OGG can ACK locally while the recipient phone shows "audio no longer available".
+ * Always re-encode through FFmpeg so mobile clients can decrypt and play the note.
  */
 export async function ensureWhatsAppVoiceOgg(
 	filePath: string,
@@ -214,16 +231,6 @@ export async function ensureWhatsAppVoiceOgg(
 	if (!buffer.length) {
 		throw new Error('Voice file is empty');
 	}
-	if (isOggBuffer(buffer)) {
-		const probed = await probeAudioSeconds(filePath);
-		if (probed > 0) {
-			return {
-				filePath,
-				mimeType: 'audio/ogg; codecs=opus',
-				fileName: originalName.replace(/\.[^.]+$/, '') + '.ogg',
-			};
-		}
-	}
 
 	const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	const outputPath = path.join(os.tmpdir(), `wa-voice-${stamp}.ogg`);
@@ -236,30 +243,51 @@ export async function ensureWhatsAppVoiceOgg(
 			'-ac',
 			'1',
 			'-ar',
-			'48000',
+			'16000',
 			'-c:a',
 			'libopus',
 			'-b:a',
-			'32k',
+			'24k',
 			'-application',
 			'voip',
 			'-f',
 			'ogg',
 			outputPath,
 		],
-		30_000,
+		45_000,
 	);
 	const converted = await fs.readFile(outputPath);
 	if (!converted.length || !isOggBuffer(converted)) {
 		await fs.rm(outputPath, { force: true }).catch(() => undefined);
 		throw new Error('Converted voice file is not valid OGG/Opus');
 	}
+	const probedSeconds = await probeAudioSeconds(outputPath);
+	if (probedSeconds <= 0) {
+		await fs.rm(outputPath, { force: true }).catch(() => undefined);
+		throw new Error('Converted voice file has no playable audio duration');
+	}
 	return {
 		filePath: outputPath,
-		mimeType: 'audio/ogg; codecs=opus',
+		mimeType: WHATSAPP_VOICE_MIME,
 		fileName: `${path.parse(originalName).name || 'voice'}.ogg`,
 		cleanup: async () => {
 			await fs.rm(outputPath, { force: true }).catch(() => undefined);
 		},
 	};
+}
+
+export function looksLikeOutgoingVoiceUpload(
+	fileName?: string | null,
+	mimeType?: string | null,
+): boolean {
+	const name = String(fileName || '').toLowerCase();
+	if (/voice-\d+s/i.test(name)) return true;
+	const mime = String(mimeType || '')
+		.toLowerCase()
+		.replace(/\s+/g, '');
+	return (
+		mime.startsWith('audio/webm') ||
+		mime.startsWith('audio/ogg') ||
+		mime === 'audio/opus'
+	);
 }

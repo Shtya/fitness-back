@@ -1,4 +1,5 @@
 import { isStatusMessage, WppConnectProvider } from './wppconnect.provider';
+import * as voiceOgg from '../utils/whatsapp-voice-ogg';
 
 describe('WppConnectProvider message normalization', () => {
 	function providerWithMessages(messages: any[]) {
@@ -317,11 +318,18 @@ describe('WppConnectProvider message normalization', () => {
 		const readFile = jest
 			.spyOn(require('fs').promises, 'readFile')
 			.mockResolvedValue(Buffer.from('voice-data'));
-		jest
-			.spyOn(provider as any, 'convertVoiceToOgg')
-			.mockResolvedValue('C:\\test\\voice-converted.ogg');
+		const cleanup = jest.fn().mockResolvedValue(undefined);
+		const ensureOgg = jest
+			.spyOn(voiceOgg, 'ensureWhatsAppVoiceOgg')
+			.mockResolvedValue({
+				filePath: 'C:\\test\\voice-converted.ogg',
+				mimeType: voiceOgg.WHATSAPP_VOICE_MIME,
+				fileName: 'voice.ogg',
+				cleanup,
+			});
 		(provider as any).client = { sendPttFromBase64 };
 
+		let ensureOggCalls = 0;
 		try {
 			await provider.sendMedia('201000000000@c.us', 'C:\\test\\voice.webm', {
 				fileName: 'voice.webm',
@@ -329,12 +337,18 @@ describe('WppConnectProvider message normalization', () => {
 				mimeType: 'audio/webm; codecs=opus',
 			});
 		} finally {
+			// mockRestore() also clears call history, so snapshot it first.
+			ensureOggCalls = ensureOgg.mock.calls.length;
 			readFile.mockRestore();
+			ensureOgg.mockRestore();
 		}
+
+		expect(ensureOggCalls).toBe(1);
+		expect(cleanup).toHaveBeenCalledTimes(1);
 
 		expect(sendPttFromBase64).toHaveBeenCalledWith(
 			'201000000000@c.us',
-			expect.stringMatching(/^data:audio\/ogg;base64,/),
+			expect.stringMatching(/^data:audio\/ogg;codecs=opus;base64,/),
 			'voice.ogg',
 			'',
 			undefined,

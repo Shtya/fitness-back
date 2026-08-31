@@ -68,6 +68,10 @@ export class AiFreeChatDto {
 
   @IsOptional()
   maxTokens?: number;
+
+  /** Per-request HTTP timeout for provider calls (enhance uses a shorter budget). */
+  @IsOptional()
+  httpTimeoutMs?: number;
 }
 
 export class AiFreeTitleDto {

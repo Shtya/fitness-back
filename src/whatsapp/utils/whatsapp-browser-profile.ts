@@ -19,6 +19,15 @@ export function resolveWppUserDataDir(accountId: string) {
 	return path.resolve(process.cwd(), folder, safe);
 }
 
+async function profileDirExists(userDataDir: string) {
+	try {
+		const stats = await fs.stat(userDataDir);
+		return stats.isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 export function isBrowserAlreadyRunningError(error: unknown) {
 	const message = error instanceof Error ? error.message : String(error || '');
 	return /browser is already running|Failed to create a ProcessSingleton|SingletonLock/i.test(
@@ -91,6 +100,9 @@ async function tryKillChromeForProfile(userDataDir: string) {
  */
 export async function forceReleaseWppBrowserProfile(accountId: string) {
 	const userDataDir = resolveWppUserDataDir(accountId);
+	// Baileys deployments never create this profile, and the win32 branch below
+	// costs a full Win32_Process CIM scan. Skipping keeps reconnect/relink fast.
+	if (!(await profileDirExists(userDataDir))) return;
 	await tryKillChromeForProfile(userDataDir);
 	await sleep(400);
 	await clearChromiumProfileLocks(userDataDir);
@@ -104,6 +116,7 @@ export async function forceReleaseWppBrowserProfile(accountId: string) {
  */
 export async function purgeWppBrowserProfile(accountId: string) {
 	const userDataDir = resolveWppUserDataDir(accountId);
+	if (!(await profileDirExists(userDataDir))) return;
 	await tryKillChromeForProfile(userDataDir);
 
 	// Chromium releases its file handles a moment after exiting, and a half-deleted

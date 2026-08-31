@@ -194,6 +194,11 @@ export class AiFreeService {
           messages,
           model: preferredChoice.model,
           maxTokens,
+          httpTimeoutMs:
+            Number.isFinite(Number((dto as any).httpTimeoutMs)) &&
+            Number((dto as any).httpTimeoutMs) > 0
+              ? Number((dto as any).httpTimeoutMs)
+              : undefined,
         });
         return {
           ok: true,

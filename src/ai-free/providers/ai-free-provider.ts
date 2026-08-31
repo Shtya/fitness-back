@@ -12,6 +12,7 @@ export interface AiFreeProviderRequest {
   messages: AiFreeChatMessage[];
   model?: string;
   maxTokens?: number;
+  httpTimeoutMs?: number;
 }
 
 export interface AiFreeProviderResult {

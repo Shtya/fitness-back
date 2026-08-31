@@ -29,7 +29,10 @@ import {
 	WhatsAppMessageReaction,
 	WhatsAppMessageStatus,
 } from '../entities/whatsapp.entity';
-import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
+import {
+	ConversationEventScope,
+	WhatsAppGateway,
+} from '../gateways/whatsapp.gateway';
 import {
 	NormalizedWhatsAppMessage,
 	WhatsAppEmbeddedQuote,
@@ -40,7 +43,11 @@ import {
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
-import { ensureWhatsAppVoiceOgg } from '../utils/whatsapp-voice-ogg';
+import {
+	ensureWhatsAppVoiceOgg,
+	probeAudioSeconds,
+	WHATSAPP_VOICE_MIME,
+} from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -51,6 +58,10 @@ import {
 	whatsAppTimestampToMs,
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
+import {
+	redactMessagesRawForClient,
+	redactRawForClient,
+} from '../utils/whatsapp-raw-redact';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
 	isWeakWhatsAppContactName,
@@ -371,6 +382,20 @@ function phoneAliasChatIds(digits: string): string[] {
 	return [`${clean}@c.us`, `${clean}@s.whatsapp.net`];
 }
 
+/** Batch size that keeps `IN (...)` lists and bulk upserts inside Postgres limits. */
+const CONTACT_SYNC_CHUNK = 400;
+
+/** Mirrors `EMAIL_MEMO_AI_CHAT_ID`; duplicated to avoid a module cycle with email-memo. */
+const EMAIL_MEMO_AI_CHAT_ID = 'email-memo-ai@so7ba.internal';
+
+function chunkList<T>(items: T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let index = 0; index < items.length; index += size) {
+		chunks.push(items.slice(index, index + size));
+	}
+	return chunks;
+}
+
 function waId(value: any): string {
 	if (value == null || value === '') return '';
 	if (typeof value === 'string') return value;
@@ -558,6 +583,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private readonly maxConcurrentPersists = 1;
 	private conversationUpdateTimers = new Map<string, NodeJS.Timeout>();
 	private conversationUpdatePayloads = new Map<string, Record<string, unknown>>();
+	private conversationUpdateScopes = new Map<string, ConversationEventScope>();
 	private attachmentDownloads = new Map<string, Promise<any>>();
 	private activeMediaDownloads = 0;
 	private readonly maxConcurrentMediaDownloads = Number(
@@ -2513,7 +2539,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			await this.decorateGroupMessages(conversation, [hydrated]);
-			this.gateway.emitConversationEvent(conversation.id, 'message', hydrated, accountId);
+			// Emit a redacted copy; `hydrated` itself is still read below.
+			this.gateway.emitConversationEvent(
+				conversation.id,
+				'message',
+				{ ...hydrated, raw: redactRawForClient((hydrated as any).raw) },
+				accountId,
+				this.conversationEventScope(conversation),
+			);
 			this.scheduleConversationUpdated(accountId, {
 				conversationId: conversation.id,
 				assignedUserId: conversation.assignedUserId,
@@ -2530,7 +2563,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					hasAttachments: Boolean(hydrated.attachments?.length),
 					...(clientMessageId ? { clientMessageId } : {}),
 				},
-			});
+			}, this.conversationEventScope(conversation));
 		}
 		if (
 			emitEvents &&
@@ -2637,12 +2670,32 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return ids.filter((userId) => !mutedByConversation.has(userId));
 	}
 
+	/**
+	 * Who may receive inbox-room events about this conversation. Mirrors
+	 * `WhatsAppAccessService.assertConversationVisible` so socket delivery and the
+	 * REST inbox agree on visibility.
+	 */
+	private conversationEventScope(
+		conversation: WhatsAppConversation,
+	): ConversationEventScope {
+		return {
+			assignedUserId: conversation.assignedUserId ?? null,
+			shared: String(conversation.providerChatId || '') === EMAIL_MEMO_AI_CHAT_ID,
+		};
+	}
+
 	/** Coalesces bursts without postponing them: the pending timer is never reset,
 	 *  so the inbox row always updates within one window of the first message
 	 *  instead of drifting while a contact keeps typing. */
-	private scheduleConversationUpdated(accountId: string, payload: Record<string, unknown>) {
+	private scheduleConversationUpdated(
+		accountId: string,
+		payload: Record<string, unknown>,
+		scope?: ConversationEventScope,
+	) {
 		const timerKey = `${accountId}:${String(payload.conversationId || 'unknown')}`;
 		const previous = this.conversationUpdatePayloads.get(timerKey) || {};
+		// Kept out of the payload so the scope is never serialised to clients.
+		if (scope) this.conversationUpdateScopes.set(timerKey, scope);
 		this.conversationUpdatePayloads.set(timerKey, {
 			...previous,
 			...payload,
@@ -2658,8 +2711,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			setTimeout(() => {
 				this.conversationUpdateTimers.delete(timerKey);
 				const latest = this.conversationUpdatePayloads.get(timerKey);
+				const latestScope = this.conversationUpdateScopes.get(timerKey);
 				this.conversationUpdatePayloads.delete(timerKey);
-				if (latest) {
+				this.conversationUpdateScopes.delete(timerKey);
+				if (latest && latestScope) {
+					this.gateway.emitAccountEvent(
+						accountId,
+						'conversation_updated',
+						latest,
+						latestScope,
+					);
+				} else if (latest) {
 					this.gateway.emitAccountEvent(accountId, 'conversation_updated', latest);
 				}
 			}, 250),
@@ -2680,44 +2742,73 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		} catch {
 			return { supported: true, count: 0, failed: true };
 		}
-		let count = 0;
+		// A full address book is thousands of rows; one findOne + one upsert per
+		// contact used to mean tens of thousands of sequential round-trips.
+		const incoming = new Map<
+			string,
+			{
+				phoneNumber: string | null;
+				savedName: string | null;
+				pushName: string | null;
+				avatarUrl: string | null;
+				isBusiness: boolean;
+			}
+		>();
 		for (const item of contacts) {
 			const id = waId(item);
 			if (!isSupportedInboxChatId(id) || id.endsWith('@g.us')) continue;
-			const phoneNumber = item?.id?.user || phoneFromWaId(id);
-			const savedName = String(item?.name || item?.formattedName || '').trim() || null;
-			const pushName =
-				String(item?.pushname || item?.notify || item?.pushName || '').trim() || null;
-			const existing = await this.contactRepo.findOne({ where: { accountId, waId: id } });
+			incoming.set(id, {
+				phoneNumber: item?.id?.user || phoneFromWaId(id) || null,
+				savedName: String(item?.name || item?.formattedName || '').trim() || null,
+				pushName:
+					String(item?.pushname || item?.notify || item?.pushName || '').trim() || null,
+				avatarUrl: item?.profilePicThumbObj?.eurl || null,
+				isBusiness: Boolean(item?.isBusiness),
+			});
+		}
+		if (!incoming.size) return { supported: true, count: 0 };
+
+		const waIds = [...incoming.keys()];
+		const existingByWaId = new Map<string, WhatsAppContact>();
+		for (const chunk of chunkList(waIds, CONTACT_SYNC_CHUNK)) {
+			const rows = await this.contactRepo.find({
+				where: { accountId, waId: In(chunk) },
+			});
+			for (const row of rows) existingByWaId.set(row.waId, row);
+		}
+
+		const rows = waIds.map((id) => {
+			const item = incoming.get(id)!;
+			const existing = existingByWaId.get(id);
 			// Provider address-book `name` always wins when present (recovers pushName stomps).
-			let nextName: string | null = null;
-			if (savedName && !isWeakWhatsAppContactName(savedName, id, phoneNumber)) {
-				nextName = savedName;
-			} else {
-				nextName = preferWhatsAppContactName(
-					existing?.name,
-					resolveWhatsAppContactLabel({
-						savedName: null,
-						pushName,
-						chatId: id,
-						phone: phoneNumber,
-					}),
-					id,
-					phoneNumber || existing?.phoneNumber,
-				);
-			}
-			await this.contactRepo.upsert(
-				{
-					accountId,
-					waId: id,
-					phoneNumber: phoneNumber || existing?.phoneNumber || null,
-					name: nextName,
-					avatarUrl: item?.profilePicThumbObj?.eurl || existing?.avatarUrl || null,
-					isBusiness: Boolean(item?.isBusiness),
-				},
-				['accountId', 'waId'],
-			);
-			count += 1;
+			const nextName =
+				item.savedName && !isWeakWhatsAppContactName(item.savedName, id, item.phoneNumber)
+					? item.savedName
+					: preferWhatsAppContactName(
+							existing?.name,
+							resolveWhatsAppContactLabel({
+								savedName: null,
+								pushName: item.pushName,
+								chatId: id,
+								phone: item.phoneNumber,
+							}),
+							id,
+							item.phoneNumber || existing?.phoneNumber,
+						);
+			return {
+				accountId,
+				waId: id,
+				phoneNumber: item.phoneNumber || existing?.phoneNumber || null,
+				name: nextName,
+				avatarUrl: item.avatarUrl || existing?.avatarUrl || null,
+				isBusiness: item.isBusiness,
+			};
+		});
+
+		let count = 0;
+		for (const chunk of chunkList(rows, CONTACT_SYNC_CHUNK)) {
+			await this.contactRepo.upsert(chunk, ['accountId', 'waId']);
+			count += chunk.length;
 		}
 		return { supported: true, count };
 	}
@@ -2788,6 +2879,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					stage: 'fetching_chats',
 				});
 			}, 8000);
+		if (fetchHeartbeat) fetchHeartbeat.unref?.();
 		try {
 			chats = await provider.getChats(Math.min(limit, 1000));
 		} catch (error) {
@@ -4078,7 +4170,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.attachMessageLocations(messages);
 		await this.decorateGroupMessages(conversation, messages);
 		await this.decorateMessageMentions(conversation, messages);
-		return messages;
+		// Last step on purpose: everything above may read the media-crypto fields,
+		// and server-side re-downloads reload `raw` from the DB, not from here.
+		return redactMessagesRawForClient(messages);
 	}
 
 	/** Kick off durable downloads for pending/failed media once the chat is open
@@ -5375,46 +5469,45 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			(input.type === 'voice' || input.type === 'audio' ? 'audio/ogg; codecs=opus' : null);
 		let sendPath = absolutePath;
 		let sendFileName = path.basename(absolutePath);
-		let voiceCleanup: (() => Promise<void>) | undefined;
+		let durablePath = absolutePath;
 		if (input.type === 'voice') {
-			try {
-				const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
-					mimeType: mimeGuess,
-					fileName: sendFileName,
-				});
-				sendPath = converted.filePath;
-				mimeGuess = converted.mimeType;
-				sendFileName = converted.fileName;
-				voiceCleanup = converted.cleanup;
-			} catch (error) {
-				const detail =
-					error instanceof Error ? error.message : String(error || 'Voice conversion failed');
-				throw new BadRequestException(
-					`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
-				);
+			const alreadyOgg = absolutePath.toLowerCase().endsWith('.ogg');
+			const preparedDuration = alreadyOgg ? await probeAudioSeconds(absolutePath) : 0;
+			if (alreadyOgg && preparedDuration > 0) {
+				mimeGuess = WHATSAPP_VOICE_MIME;
+			} else {
+				try {
+					const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
+						mimeType: mimeGuess,
+						fileName: sendFileName,
+					});
+					const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
+					await fs.copyFile(converted.filePath, oggPath);
+					await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+					await converted.cleanup?.();
+					sendPath = oggPath;
+					durablePath = oggPath;
+					sendFileName = path.basename(oggPath);
+					mimeGuess = converted.mimeType;
+				} catch (error) {
+					const detail =
+						error instanceof Error ? error.message : String(error || 'Voice conversion failed');
+					throw new BadRequestException(
+						`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
+					);
+				}
 			}
 		}
-		let durablePath = absolutePath;
-		if (input.type === 'voice' && sendPath !== absolutePath) {
-			const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
-			await fs.copyFile(sendPath, oggPath);
-			await fs.rm(absolutePath, { force: true }).catch(() => undefined);
-			durablePath = oggPath;
-		}
-		let result: any;
-		try {
-			result = await provider.sendMedia(conversation.providerChatId, sendPath, {
-				caption: input.caption,
-				fileName: sendFileName,
-				isVoice: input.type === 'voice',
-				isSticker: input.type === 'sticker',
-				mimeType: mimeGuess,
-				quotedProviderMessageId: input.quotedProviderMessageId,
-				embeddedQuote: input.embeddedQuote,
-			});
-		} finally {
-			await voiceCleanup?.();
-		}
+		const result = await provider.sendMedia(conversation.providerChatId, sendPath, {
+			caption: input.caption,
+			fileName: sendFileName,
+			isVoice: input.type === 'voice',
+			isSticker: input.type === 'sticker',
+			mimeType: mimeGuess,
+			voiceAlreadyConverted: input.type === 'voice',
+			quotedProviderMessageId: input.quotedProviderMessageId,
+			embeddedQuote: input.embeddedQuote,
+		});
 		const id =
 			providerMessageId(result) ||
 			`local_out_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -14,6 +14,17 @@ import { Server, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
+
+/**
+ * Who, inside an account's inbox room, is allowed to receive an event about one
+ * conversation. Omit it to broadcast to the whole room (events that carry no
+ * conversation content, e.g. sync progress or avatar hydration).
+ */
+export interface ConversationEventScope {
+	assignedUserId?: string | null;
+	/** Conversations every `canView` member may read, e.g. the email-memo AI chat. */
+	shared?: boolean;
+}
 
 @WebSocketGateway({
 	namespace: '/whatsapp',
@@ -76,6 +87,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			client.disconnect();
 			return;
 		}
+		client.data.accountScopes = {};
 		client.join(`whatsapp:user:${user.id}`);
 	}
 
@@ -94,7 +106,17 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			return { ok: false, error: 'Unauthorized' };
 		}
 		if (!accountId) return { ok: false, error: 'Account id is required' };
-		await this.accessService.assertAccountPermission(user, accountId, 'canView');
+		const access = await this.accessService.getAccountAccess(user, accountId);
+		if (!access.canView) {
+			throw new ForbiddenException('WhatsApp account permission denied: canView');
+		}
+		// Recorded before the join so every socket in the room carries a scope.
+		// `emitConversationEvent` relies on that invariant to decide who may see a
+		// conversation without hitting the database on every inbound message.
+		if (!client.data.accountScopes) client.data.accountScopes = {};
+		client.data.accountScopes[accountId] = {
+			canSeeAll: this.accessService.canSeeAllConversations(user, access),
+		};
 		await client.join(`whatsapp:account:${accountId}`);
 		return { ok: true };
 	}
@@ -104,6 +126,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		@ConnectedSocket() client: Socket,
 		@MessageBody() accountId: string,
 	) {
+		if (client.data?.accountScopes) delete client.data.accountScopes[accountId];
 		await client.leave(`whatsapp:account:${accountId}`);
 		return { ok: true };
 	}
@@ -139,10 +162,19 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		return { ok: true };
 	}
 
-	emitAccountEvent(accountId: string, event: string, payload: any) {
-		this.server
-			?.to(`whatsapp:account:${accountId}`)
-			.emit('whatsapp:event', { accountId, event, payload, at: new Date().toISOString() });
+	emitAccountEvent(
+		accountId: string,
+		event: string,
+		payload: any,
+		scope?: ConversationEventScope,
+	) {
+		const packet = { accountId, event, payload, at: new Date().toISOString() };
+		const room = `whatsapp:account:${accountId}`;
+		if (!scope) {
+			this.server?.to(room).emit('whatsapp:event', packet);
+			return;
+		}
+		void this.emitScopedToAccount(room, null, accountId, packet, scope);
 	}
 
 	emitConversationEvent(
@@ -150,6 +182,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		event: string,
 		payload: any,
 		accountId?: string | null,
+		scope?: ConversationEventScope,
 	) {
 		const resolvedAccountId = accountId || payload?.accountId || null;
 		const packet = {
@@ -159,11 +192,86 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			payload,
 			at: new Date().toISOString(),
 		};
-		const rooms = [`whatsapp:conversation:${conversationId}`];
-		if (resolvedAccountId) rooms.push(`whatsapp:account:${resolvedAccountId}`);
-		// Passing rooms as an array delivers the packet once even if the client
-		// joined both the inbox room and the open-chat room.
-		this.server?.to(rooms).emit('whatsapp:event', packet);
+		const conversationRoom = `whatsapp:conversation:${conversationId}`;
+		if (!resolvedAccountId) {
+			this.server?.to(conversationRoom).emit('whatsapp:event', packet);
+			return;
+		}
+
+		const accountRoom = `whatsapp:account:${resolvedAccountId}`;
+		if (!scope) {
+			// Passing rooms as an array delivers the packet once even if the client
+			// joined both the inbox room and the open-chat room.
+			this.server?.to([conversationRoom, accountRoom]).emit('whatsapp:event', packet);
+			return;
+		}
+
+		// Members of the conversation room already passed `assertConversationVisible`
+		// at watch time, so they are always allowed. `except` keeps them out of the
+		// scoped fan-out below so nobody receives the packet twice.
+		this.server?.to(conversationRoom).emit('whatsapp:event', packet);
+		void this.emitScopedToAccount(
+			accountRoom,
+			conversationRoom,
+			resolvedAccountId,
+			packet,
+			scope,
+		);
+	}
+
+	/**
+	 * Inbox-room delivery filtered by the same rule REST uses
+	 * (`WhatsAppAccessService.assertConversationVisible`): a member who cannot see
+	 * all conversations only receives events for chats assigned to them. Without
+	 * this, `canView`-only staff received full message payloads for conversations
+	 * the REST inbox deliberately hides from them.
+	 */
+	private async emitScopedToAccount(
+		accountRoom: string,
+		excludeRoom: string | null,
+		accountId: string,
+		packet: Record<string, unknown>,
+		scope: ConversationEventScope,
+	) {
+		if (!this.server) return;
+		try {
+			const target = excludeRoom
+				? this.server.in(accountRoom).except(excludeRoom)
+				: this.server.in(accountRoom);
+			const sockets = await target.fetchSockets();
+			for (const socket of sockets) {
+				if (this.socketMaySeeConversation(socket, accountId, scope)) {
+					socket.emit('whatsapp:event', packet);
+				}
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Scoped WhatsApp fan-out failed for ${accountRoom}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	private socketMaySeeConversation(
+		socket: { data?: any },
+		accountId: string,
+		scope: ConversationEventScope,
+	) {
+		if (scope.shared) return true;
+		const entry = socket.data?.accountScopes?.[accountId];
+		if (!entry) {
+			// Every join goes through `watchAccount`, which records the scope first.
+			// Reaching this means a new join path skipped it; drop the packet rather
+			// than leak, and make the bug visible.
+			this.logger.warn(
+				`WhatsApp socket in ${accountId} inbox room has no recorded scope; dropping event`,
+			);
+			return false;
+		}
+		if (entry.canSeeAll) return true;
+		const userId = socket.data?.user?.id;
+		return Boolean(scope.assignedUserId) && String(scope.assignedUserId) === String(userId);
 	}
 
 	emitToUser(userId: string, event: string, payload: any) {

@@ -162,6 +162,8 @@ export interface WhatsAppProvider {
 			isVoice?: boolean;
 			isSticker?: boolean;
 			mimeType?: string | null;
+			/** Sync layer already converted to WhatsApp OGG/Opus — skip provider re-encode. */
+			voiceAlreadyConverted?: boolean;
 			quotedProviderMessageId?: string;
 			embeddedQuote?: WhatsAppEmbeddedQuote;
 		},

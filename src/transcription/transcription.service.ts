@@ -700,23 +700,48 @@ ${before.slice(0, 60_000)}`;
 		let model: string | null = null;
 		let usedLocalFallback = false;
 
-		const enhanceProviders = ['llm7-free', 'pollinations-free', 'browser-chatgpt'] as const;
+		const enhanceProviders = ['llm7-free', 'pollinations-free'] as const;
 		const preferredProvider =
 			dto?.provider && enhanceProviders.includes(dto.provider as typeof enhanceProviders[number])
 				? dto.provider
 				: 'llm7-free';
+		const enhanceProviderOrder = [
+			preferredProvider,
+			...enhanceProviders.filter((name) => name !== preferredProvider),
+		];
+		const enhanceMessages = [
+			{ role: 'system', content: system },
+			{ role: 'user', content: userMessage },
+		] as const;
 
 		try {
-			const ai = await this.aiFree.chat(user, {
-				messages: [
-					{ role: 'system', content: system },
-					{ role: 'user', content: userMessage },
-				],
-				allowFallback: true,
-				useProjectKnowledge: false,
-				provider: preferredProvider,
-				maxTokens: 4096,
-			} as any);
+			let ai: Awaited<ReturnType<AiFreeService['chat']>> | null = null;
+			let lastError: unknown;
+			for (const providerName of enhanceProviderOrder) {
+				try {
+					ai = await this.aiFree.chat(user, {
+						messages: [...enhanceMessages],
+						allowFallback: false,
+						useProjectKnowledge: false,
+						provider: providerName,
+						maxTokens: 4096,
+						httpTimeoutMs: 22_000,
+						excludeProviders: ['browser-chatgpt'],
+						feature: 'transcript-enhance',
+					} as any);
+					break;
+				} catch (error) {
+					lastError = error;
+					this.logger.warn(
+						`Transcription enhance provider ${providerName} failed for ${id}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+			if (!ai) {
+				throw lastError || new Error('All enhance providers failed');
+			}
 
 			const extracted = this.extractEnhancedText(ai?.reply, before);
 			const translated = this.looksTranslated(before, extracted.enhancedText);

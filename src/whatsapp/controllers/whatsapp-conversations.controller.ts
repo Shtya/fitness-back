@@ -39,6 +39,11 @@ import {
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppMessageGroupsService } from '../services/whatsapp-message-groups.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
+import {
+	ensureWhatsAppVoiceOgg,
+	looksLikeOutgoingVoiceUpload,
+} from '../utils/whatsapp-voice-ogg';
+import { parseByteRange } from '../utils/whatsapp-byte-range';
 
 const mediaRoot = () =>
 	path.resolve(
@@ -559,11 +564,36 @@ export class WhatsAppConversationsController {
 	) {
 		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
 		if (!file) throw new BadRequestException('File is required');
+		let storedPath = file.path;
+		let storedName = file.originalname;
+		let mimeType = file.mimetype;
+		if (looksLikeOutgoingVoiceUpload(file.originalname, file.mimetype)) {
+			try {
+				const converted = await ensureWhatsAppVoiceOgg(file.path, {
+					mimeType: file.mimetype,
+					fileName: file.originalname,
+				});
+				const oggPath = `${file.path.replace(/\.[^.]+$/, '')}.ogg`;
+				await fs.promises.copyFile(converted.filePath, oggPath);
+				await fs.promises.rm(file.path, { force: true });
+				await converted.cleanup?.();
+				storedPath = oggPath;
+				storedName = path.basename(oggPath);
+				mimeType = converted.mimeType;
+			} catch (error) {
+				await fs.promises.rm(file.path, { force: true }).catch(() => undefined);
+				const detail = error instanceof Error ? error.message : String(error);
+				throw new BadRequestException(
+					`Could not prepare voice upload for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
+				);
+			}
+		}
+		const stat = await fs.promises.stat(storedPath);
 		return {
-			fileId: path.relative(mediaRoot(), file.path).replace(/\\/g, '/'),
-			fileName: file.originalname,
-			mimeType: file.mimetype,
-			size: file.size,
+			fileId: path.relative(mediaRoot(), storedPath).replace(/\\/g, '/'),
+			fileName: storedName,
+			mimeType,
+			size: stat.size,
 		};
 	}
 
@@ -624,8 +654,15 @@ export class WhatsAppConversationsController {
 		res.setHeader('X-Content-Type-Options', 'nosniff');
 		res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
 		res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+		res.setHeader(
+			'Content-Disposition',
+			`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,
+		);
+
+		let size: number | null = null;
 		try {
 			const stats = await fs.promises.stat(file.absolutePath);
+			size = stats.size;
 			const etag = `"wa-${attachmentId}-${stats.size}-${stats.mtimeMs}"`;
 			res.setHeader('ETag', etag);
 			if (String(req.headers['if-none-match'] || '') === etag) {
@@ -635,10 +672,29 @@ export class WhatsAppConversationsController {
 		} catch {
 			/* ignore etag failures */
 		}
-		res.setHeader(
-			'Content-Disposition',
-			`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,
+
+		// Safari refuses to play <audio>/<video> from a source that cannot answer a
+		// Range request, and without 206 no client can seek before the whole file
+		// has downloaded. Only media is worth partial delivery.
+		if (!inline || size == null) {
+			return new StreamableFile(createReadStream(file.absolutePath));
+		}
+		res.setHeader('Accept-Ranges', 'bytes');
+		const range = parseByteRange(String(req.headers.range || ''), size);
+		if (range === 'unsatisfiable') {
+			res.status(416);
+			res.setHeader('Content-Range', `bytes */${size}`);
+			return undefined as any;
+		}
+		if (!range) {
+			res.setHeader('Content-Length', String(size));
+			return new StreamableFile(createReadStream(file.absolutePath));
+		}
+		res.status(206);
+		res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+		res.setHeader('Content-Length', String(range.end - range.start + 1));
+		return new StreamableFile(
+			createReadStream(file.absolutePath, { start: range.start, end: range.end }),
 		);
-		return new StreamableFile(createReadStream(file.absolutePath));
 	}
 }

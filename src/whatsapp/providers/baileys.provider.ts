@@ -18,6 +18,7 @@ import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
 	resolveVoiceSeconds,
+	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 
 type BaileysSocket = any;
@@ -2029,6 +2030,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			isVoice?: boolean;
 			isSticker?: boolean;
 			mimeType?: string | null;
+			voiceAlreadyConverted?: boolean;
 			quotedProviderMessageId?: string;
 			embeddedQuote?: WhatsAppEmbeddedQuote;
 		} = {},
@@ -2062,13 +2064,15 @@ export class BaileysProvider implements WhatsAppProvider {
 		let sendPath = filePath;
 		let convertedVoice: Awaited<ReturnType<typeof ensureWhatsAppVoiceOgg>> | null = null;
 		try {
-			if (options.isVoice) {
+			if (options.isVoice && !options.voiceAlreadyConverted) {
 				convertedVoice = await ensureWhatsAppVoiceOgg(filePath, {
 					mimeType: mime,
 					fileName: options.fileName,
 				});
 				sendPath = convertedVoice.filePath;
 				mime = convertedVoice.mimeType;
+			} else if (options.isVoice) {
+				mime = WHATSAPP_VOICE_MIME;
 			}
 			const buffer = await fs.readFile(sendPath);
 			let content: any;
@@ -2076,17 +2080,19 @@ export class BaileysProvider implements WhatsAppProvider {
 				content = { sticker: buffer };
 			} else if (options.isVoice || mime.startsWith('audio/')) {
 				const isPtt = Boolean(options.isVoice);
-				const seconds = isPtt
+				const resolvedSeconds = isPtt
 					? await resolveVoiceSeconds(sendPath, options.fileName || path.basename(filePath))
 					: undefined;
-				// Without waveform WhatsApp mobile renders a flat progress line.
-				const waveform = isPtt ? await buildVoiceWaveform(sendPath) : undefined;
+				const seconds = isPtt
+					? Math.max(1, Math.min(299, Math.round(resolvedSeconds || 1)))
+					: undefined;
+				// Without waveform WhatsApp mobile renders a flat progress line; seconds are required for PTT playback.
+				const waveform = isPtt ? Buffer.from(await buildVoiceWaveform(sendPath)) : undefined;
 				content = {
 					audio: buffer,
-					mimetype: mime || 'audio/ogg; codecs=opus',
+					mimetype: isPtt ? WHATSAPP_VOICE_MIME : mime || WHATSAPP_VOICE_MIME,
 					ptt: isPtt,
-					...(seconds ? { seconds } : {}),
-					...(waveform ? { waveform } : {}),
+					...(isPtt ? { seconds, waveform } : {}),
 				};
 			} else if (mime.startsWith('image/')) {
 				content = { image: buffer, caption: options.caption || undefined, mimetype: mime };
