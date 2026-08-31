@@ -215,11 +215,14 @@ export async function ensureWhatsAppVoiceOgg(
 		throw new Error('Voice file is empty');
 	}
 	if (isOggBuffer(buffer)) {
-		return {
-			filePath,
-			mimeType: 'audio/ogg; codecs=opus',
-			fileName: originalName.replace(/\.[^.]+$/, '') + '.ogg',
-		};
+		const probed = await probeAudioSeconds(filePath);
+		if (probed > 0) {
+			return {
+				filePath,
+				mimeType: 'audio/ogg; codecs=opus',
+				fileName: originalName.replace(/\.[^.]+$/, '') + '.ogg',
+			};
+		}
 	}
 
 	const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;

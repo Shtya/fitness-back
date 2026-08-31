@@ -7,6 +7,12 @@ import {
 	MinLength,
 } from 'class-validator';
 
+const AI_FREE_ENHANCE_PROVIDERS = [
+	'llm7-free',
+	'pollinations-free',
+	'browser-chatgpt',
+] as const;
+
 export class CreateTranscriptionDto {
 	@IsOptional()
 	@IsIn(['local', 'groq', 'deepgram', 'assemblyai'])
@@ -67,6 +73,11 @@ export class EnhanceTranscriptionDto {
 	@IsOptional()
 	@IsBoolean()
 	apply?: boolean;
+
+	/** Last-known working free AI provider (client may persist in localStorage). */
+	@IsOptional()
+	@IsIn(AI_FREE_ENHANCE_PROVIDERS)
+	provider?: typeof AI_FREE_ENHANCE_PROVIDERS[number];
 }
 
 export class MemorizeTranscriptionDto {

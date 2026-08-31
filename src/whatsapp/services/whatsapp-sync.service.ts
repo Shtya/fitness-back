@@ -40,6 +40,7 @@ import {
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
+import { ensureWhatsAppVoiceOgg } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -5369,18 +5370,51 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		await fs.access(absolutePath);
 		const provider = this.requireProvider(conversation.accountId);
-		const mimeGuess =
+		let mimeGuess =
 			guessMimeFromPath(absolutePath, input.type) ||
 			(input.type === 'voice' || input.type === 'audio' ? 'audio/ogg; codecs=opus' : null);
-		const result = await provider.sendMedia(conversation.providerChatId, absolutePath, {
-			caption: input.caption,
-			fileName: path.basename(absolutePath),
-			isVoice: input.type === 'voice',
-			isSticker: input.type === 'sticker',
-			mimeType: mimeGuess,
-			quotedProviderMessageId: input.quotedProviderMessageId,
-			embeddedQuote: input.embeddedQuote,
-		});
+		let sendPath = absolutePath;
+		let sendFileName = path.basename(absolutePath);
+		let voiceCleanup: (() => Promise<void>) | undefined;
+		if (input.type === 'voice') {
+			try {
+				const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
+					mimeType: mimeGuess,
+					fileName: sendFileName,
+				});
+				sendPath = converted.filePath;
+				mimeGuess = converted.mimeType;
+				sendFileName = converted.fileName;
+				voiceCleanup = converted.cleanup;
+			} catch (error) {
+				const detail =
+					error instanceof Error ? error.message : String(error || 'Voice conversion failed');
+				throw new BadRequestException(
+					`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
+				);
+			}
+		}
+		let durablePath = absolutePath;
+		if (input.type === 'voice' && sendPath !== absolutePath) {
+			const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
+			await fs.copyFile(sendPath, oggPath);
+			await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+			durablePath = oggPath;
+		}
+		let result: any;
+		try {
+			result = await provider.sendMedia(conversation.providerChatId, sendPath, {
+				caption: input.caption,
+				fileName: sendFileName,
+				isVoice: input.type === 'voice',
+				isSticker: input.type === 'sticker',
+				mimeType: mimeGuess,
+				quotedProviderMessageId: input.quotedProviderMessageId,
+				embeddedQuote: input.embeddedQuote,
+			});
+		} finally {
+			await voiceCleanup?.();
+		}
 		const id =
 			providerMessageId(result) ||
 			`local_out_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -5390,7 +5424,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 		}
 		await this.markReadAfterReply(conversation, accountAccess.account, provider, user.id);
-		const stat = await fs.stat(absolutePath);
+		const stat = await fs.stat(durablePath);
 		const attachmentType =
 			input.type === 'voice' ? 'ptt' : input.type === 'audio' ? 'audio' : input.type;
 		const saved = await this.persistMessage(
@@ -5408,7 +5442,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					{
 						type: attachmentType,
 						mimeType: mimeGuess,
-						fileName: path.basename(absolutePath),
+						fileName: path.basename(durablePath),
 						fileSizeBytes: stat.size,
 						providerMediaId: id,
 					},
@@ -5428,10 +5462,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			accountId: conversation.accountId,
 			providerMessageId: id,
 			messageId: saved.id,
-			sourcePath: absolutePath,
+			sourcePath: durablePath,
 			mimeType: mimeGuess,
 			attachmentType,
-			fileName: path.basename(absolutePath),
+			fileName: path.basename(durablePath),
 			fileSizeBytes: stat.size,
 		});
 		const refreshed = await this.messageRepo.findOne({

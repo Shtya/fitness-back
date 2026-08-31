@@ -700,6 +700,12 @@ ${before.slice(0, 60_000)}`;
 		let model: string | null = null;
 		let usedLocalFallback = false;
 
+		const enhanceProviders = ['llm7-free', 'pollinations-free', 'browser-chatgpt'] as const;
+		const preferredProvider =
+			dto?.provider && enhanceProviders.includes(dto.provider as typeof enhanceProviders[number])
+				? dto.provider
+				: 'llm7-free';
+
 		try {
 			const ai = await this.aiFree.chat(user, {
 				messages: [
@@ -708,8 +714,7 @@ ${before.slice(0, 60_000)}`;
 				],
 				allowFallback: true,
 				useProjectKnowledge: false,
-				provider: 'llm7-free',
-				excludeProviders: ['browser-chatgpt', 'pollinations-free'],
+				provider: preferredProvider,
 				maxTokens: 4096,
 			} as any);
 
@@ -728,25 +733,29 @@ ${before.slice(0, 60_000)}`;
 		} catch (error) {
 			enhancedText = this.localEnhanceTranscript(before);
 			usedLocalFallback = enhancedText !== before;
-			changesSummary = usedLocalFallback
-				? [
-						locale === 'ar'
-							? 'تعذر الوصول لمزوّد الذكاء الاصطناعي؛ تم تنظيف المسافات وعلامات الترقيم محلياً.'
-							: 'Free AI was unavailable; applied local spacing and punctuation cleanup.',
-					]
-				: [
-						locale === 'ar'
-							? 'تعذر تحسين النص عبر الذكاء الاصطناعي حالياً.'
-							: 'Free AI enhance is temporarily unavailable.',
-					];
+			if (!usedLocalFallback) {
+				this.logger.warn(
+					`Transcription enhance AI failed for ${id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				throw new BadGatewayException(
+					locale === 'ar'
+						? 'تعذر تحسين النص عبر الذكاء الاصطناعي حالياً. جرّب مرة أخرى بعد قليل.'
+						: 'Free AI enhance is temporarily unavailable. Try again shortly.',
+				);
+			}
+			changesSummary = [
+				locale === 'ar'
+					? 'تعذر الوصول لمزوّد الذكاء الاصطناعي؛ تم تنظيف المسافات وعلامات الترقيم محلياً.'
+					: 'Free AI was unavailable; applied local spacing and punctuation cleanup.',
+			];
 			provider = 'local-fallback';
 			this.logger.warn(
-				`Transcription enhance AI failed for ${id}: ${
+				`Transcription enhance AI failed for ${id}; used local cleanup: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
-			// Always return a successful enhance payload when local cleanup ran,
-			// even if text is unchanged — UI can still show compare state.
 		}
 
 		if (!record.originalText) {

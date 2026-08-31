@@ -22,6 +22,7 @@ import {
 	whatsAppTimestampToDate,
 } from '../utils/whatsapp-time';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
+import { ensureWhatsAppVoiceOgg } from '../utils/whatsapp-voice-ogg';
 
 declare const require: any;
 
@@ -2099,38 +2100,26 @@ export class WppConnectProvider implements WhatsAppProvider {
 			}
 			if (options.isVoice) {
 				const fs = require('fs');
-				const lower = filename.toLowerCase();
-				const isWebm =
-					lower.endsWith('.webm') || String(options.mimeType || '').includes('webm');
 				let sendPath = filePath;
 				let sendFilename = filename;
-				let convertedPath: string | null = null;
-				if (isWebm) {
-					convertedPath = await this.convertVoiceToOgg(filePath);
-					sendPath = convertedPath;
-					sendFilename = filename.replace(/\.webm$/i, '.ogg');
-					if (sendFilename === filename) sendFilename = `${filename}.ogg`;
+				let voiceCleanup: (() => Promise<void>) | undefined;
+				try {
+					const converted = await ensureWhatsAppVoiceOgg(filePath, {
+						mimeType: options.mimeType,
+						fileName: filename,
+					});
+					sendPath = converted.filePath;
+					sendFilename = converted.fileName;
+					voiceCleanup = converted.cleanup;
+				} catch (error) {
+					const detail =
+						error instanceof Error ? error.message : String(error || 'Voice conversion failed');
+					throw new Error(`Voice conversion failed: ${detail}`);
 				}
 				try {
 				const buffer: Buffer = await fs.promises.readFile(sendPath);
 				if (!buffer?.length) throw new Error('Voice file is empty');
-				const mimeWithParameters =
-					convertedPath
-						? 'audio/ogg'
-						: options.mimeType ||
-							(lower.endsWith('.ogg')
-						? 'audio/ogg; codecs=opus'
-						: lower.endsWith('.mp3')
-							? 'audio/mpeg'
-							: lower.endsWith('.m4a') || lower.endsWith('.mp4')
-								? 'audio/mp4'
-								: isWebm
-									? 'audio/webm; codecs=opus'
-									: 'audio/ogg; codecs=opus');
-				// WPP validates data URLs against a strict MIME pattern. Codec
-				// parameters (especially the space in "; codecs=opus") make an
-				// otherwise valid recording fail with `invalid_data_url`.
-				const mime = String(mimeWithParameters).split(';')[0].trim() || 'audio/ogg';
+				const mime = 'audio/ogg';
 				const base64 = `data:${mime};base64,${buffer.toString('base64')}`;
 				const sendAudio = (isPtt: boolean) => {
 					if (typeof this.client.sendPttFromBase64 === 'function') {
@@ -2153,11 +2142,8 @@ export class WppConnectProvider implements WhatsAppProvider {
 						waitForAck: true,
 					});
 				};
-				// Browser MediaRecorder usually produces webm/opus. WhatsApp Web often
-				// rejects that as PTT (cryptic puppeteer "t" errors) — send as audio first.
-				const attempts = convertedPath ? [true, false] : isWebm ? [false, true] : [true, false];
 				let voiceError: unknown;
-				for (const isPtt of attempts) {
+				for (const isPtt of [true, false]) {
 					try {
 						return await this.withTimeout(
 							sendAudio(isPtt),
@@ -2195,9 +2181,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 							: JSON.stringify(voiceError);
 				throw new Error(`Failed to send voice note: ${detail || 'unknown WhatsApp error'}`);
 				} finally {
-					if (convertedPath) {
-						await fs.promises.rm(convertedPath, { force: true }).catch(() => {});
-					}
+					await voiceCleanup?.();
 				}
 			}
 			return this.withTimeout(
