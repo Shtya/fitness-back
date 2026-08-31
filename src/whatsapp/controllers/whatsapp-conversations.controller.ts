@@ -23,15 +23,23 @@ import * as path from 'path';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
+import { assertSendRateLimit } from '../utils/whatsapp-send-rate-limit';
 import {
 	CreateWhatsAppConversationNoteDto,
 	CreateWhatsAppMessageGroupDto,
 	DeleteWhatsAppMessageDto,
+	DeleteWhatsAppPendingUploadDto,
 	EditWhatsAppMessageDto,
 	ForwardWhatsAppMessageDto,
+	OpenWhatsAppConversationDto,
 	ReactWhatsAppMessageDto,
 	RenameWhatsAppMessageGroupDto,
 	SendWhatsAppMessageDto,
+	SendWhatsAppPresenceDto,
+	SetWhatsAppConversationArchivedDto,
+	SetWhatsAppConversationFavoriteDto,
+	SetWhatsAppConversationMutedDto,
+	SetWhatsAppConversationPinnedDto,
 	ShareWhatsAppMessagesAsOriginalDto,
 	ToggleWhatsAppMessageDto,
 	WhatsAppMessageGroupMessagesDto,
@@ -112,7 +120,7 @@ export class WhatsAppConversationsController {
 	openConversation(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
-		@Body() body: { chatId?: string; title?: string },
+		@Body() body: OpenWhatsAppConversationDto,
 	) {
 		const chatId = String(body?.chatId || '').trim();
 		if (!chatId) {
@@ -127,7 +135,7 @@ export class WhatsAppConversationsController {
 	setFavorite(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { isFavorite?: boolean },
+		@Body() body: SetWhatsAppConversationFavoriteDto,
 	) {
 		return this.sync.setConversationFavorite(
 			req.user,
@@ -140,7 +148,7 @@ export class WhatsAppConversationsController {
 	setPinned(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { isPinned?: boolean },
+		@Body() body: SetWhatsAppConversationPinnedDto,
 	) {
 		return this.sync.setConversationPinned(
 			req.user,
@@ -153,7 +161,7 @@ export class WhatsAppConversationsController {
 	setArchived(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { isArchived?: boolean },
+		@Body() body: SetWhatsAppConversationArchivedDto,
 	) {
 		return this.sync.setConversationArchived(
 			req.user,
@@ -166,7 +174,7 @@ export class WhatsAppConversationsController {
 	setMuted(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { isMuted?: boolean; mutedUntil?: string | null; durationMinutes?: number },
+		@Body() body: SetWhatsAppConversationMutedDto,
 	) {
 		let mutedUntil: string | Date | null | undefined = body.mutedUntil;
 		if (body.isMuted && body.durationMinutes != null && !mutedUntil) {
@@ -377,7 +385,7 @@ export class WhatsAppConversationsController {
 	sendPresence(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
-		@Body() body: { state?: 'composing' | 'recording' | 'paused' | 'available' },
+		@Body() body: SendWhatsAppPresenceDto,
 	) {
 		return this.sync.sendConversationPresence(
 			req.user,
@@ -478,6 +486,7 @@ export class WhatsAppConversationsController {
 		@Param('conversationId') conversationId: string,
 		@Body() body: SendWhatsAppMessageDto,
 	) {
+		assertSendRateLimit(String(req.user?.id || ''));
 		if (body.type === 'text') {
 			if (!body.text?.trim()) throw new BadRequestException('Message text is required');
 			return this.sync.sendText(
@@ -562,6 +571,7 @@ export class WhatsAppConversationsController {
 		@Param('accountId') accountId: string,
 		@UploadedFile() file: any,
 	) {
+		assertSendRateLimit(String(req.user?.id || ''));
 		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
 		if (!file) throw new BadRequestException('File is required');
 		let storedPath = file.path;
@@ -601,7 +611,7 @@ export class WhatsAppConversationsController {
 	async deletePendingUpload(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
-		@Body() body: { fileId?: string },
+		@Body() body: DeleteWhatsAppPendingUploadDto,
 	) {
 		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
 		if (!body.fileId) throw new BadRequestException('Media fileId is required');

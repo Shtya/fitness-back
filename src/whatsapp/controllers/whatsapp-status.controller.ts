@@ -14,7 +14,7 @@ import { createReadStream } from 'fs';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
-import { PublishWhatsAppStatusDto } from '../dto/whatsapp.dto';
+import { PublishWhatsAppStatusDto, ViewWhatsAppStatusDto } from '../dto/whatsapp.dto';
 import { WhatsAppStatusService } from '../services/whatsapp-status.service';
 
 @Controller('whatsapp/accounts/:accountId/statuses')
@@ -45,7 +45,7 @@ export class WhatsAppStatusController {
 		@Req() req: any,
 		@Param('accountId') accountId: string,
 		@Param('providerStatusId') providerStatusId: string,
-		@Body() body: { senderWaId?: string },
+		@Body() body: ViewWhatsAppStatusDto,
 	) {
 		return this.statuses.view(
 			req.user,

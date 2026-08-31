@@ -3,11 +3,13 @@ import {
 	ArrayNotEmpty,
 	IsBoolean,
 	IsIn,
+	IsInt,
 	IsOptional,
 	IsString,
 	IsUUID,
 	Matches,
 	MaxLength,
+	Min,
 	MinLength,
 	ValidateNested,
 } from 'class-validator';
@@ -226,4 +228,80 @@ export class SaveWhatsAppVoiceChangerCredentialDto {
 	@MinLength(8)
 	@MaxLength(500)
 	apiKey: string;
+}
+
+/*
+ * Conversation-flag and presence bodies. These endpoints previously declared
+ * inline object types, which makes Nest skip the global ValidationPipe entirely
+ * (no metatype to validate against). Field sets match exactly what the dashboard
+ * sends, so `forbidNonWhitelisted` cannot reject a legitimate request.
+ */
+
+export class OpenWhatsAppConversationDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(140)
+	chatId: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	title?: string;
+}
+
+export class SetWhatsAppConversationFavoriteDto {
+	@IsOptional()
+	@IsBoolean()
+	isFavorite?: boolean;
+}
+
+export class SetWhatsAppConversationPinnedDto {
+	@IsOptional()
+	@IsBoolean()
+	isPinned?: boolean;
+}
+
+export class SetWhatsAppConversationArchivedDto {
+	@IsOptional()
+	@IsBoolean()
+	isArchived?: boolean;
+}
+
+export class SetWhatsAppConversationMutedDto {
+	@IsOptional()
+	@IsBoolean()
+	isMuted?: boolean;
+
+	/** Explicit expiry. `@IsOptional` also accepts null, which means "no expiry". */
+	@IsOptional()
+	@IsString()
+	@MaxLength(40)
+	mutedUntil?: string | null;
+
+	/** Server derives `mutedUntil` from this when no explicit expiry is sent. */
+	@IsOptional()
+	@Type(() => Number)
+	@IsInt()
+	@Min(1)
+	durationMinutes?: number;
+}
+
+export class SendWhatsAppPresenceDto {
+	@IsOptional()
+	@IsIn(['composing', 'recording', 'paused', 'available'])
+	state?: 'composing' | 'recording' | 'paused' | 'available';
+}
+
+export class DeleteWhatsAppPendingUploadDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(400)
+	fileId: string;
+}
+
+export class ViewWhatsAppStatusDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(60)
+	senderWaId?: string;
 }

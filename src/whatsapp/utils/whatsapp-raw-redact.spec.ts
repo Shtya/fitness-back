@@ -76,4 +76,34 @@ describe('redactRawForClient', () => {
 		expect(result[0].raw.message.videoMessage.url).toBe('u');
 		expect(result[1].raw).toBeNull();
 	});
+
+	it('strips jpegThumbnail once previewDataUrl is already on the attachment', () => {
+		const messages = [
+			{
+				id: 'm1',
+				attachments: [{ previewDataUrl: 'data:image/jpeg;base64,AAA' }],
+				raw: { message: { imageMessage: { jpegThumbnail: 'THUMB', caption: 'hi' } } },
+			},
+		];
+
+		const result = redactMessagesRawForClient(messages as any) as any[];
+
+		expect(result[0].raw.message.imageMessage.jpegThumbnail).toBeUndefined();
+		expect(result[0].raw.message.imageMessage.caption).toBe('hi');
+		expect(result[0].attachments[0].previewDataUrl).toBe('data:image/jpeg;base64,AAA');
+	});
+
+	it('keeps jpegThumbnail when no previewDataUrl exists yet', () => {
+		const messages = [
+			{
+				id: 'm2',
+				attachments: [],
+				raw: { message: { imageMessage: { jpegThumbnail: 'THUMB' } } },
+			},
+		];
+
+		const result = redactMessagesRawForClient(messages as any) as any[];
+
+		expect(result[0].raw.message.imageMessage.jpegThumbnail).toBe('THUMB');
+	});
 });

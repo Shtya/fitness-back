@@ -58,10 +58,7 @@ import {
 	whatsAppTimestampToMs,
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
-import {
-	redactMessagesRawForClient,
-	redactRawForClient,
-} from '../utils/whatsapp-raw-redact';
+import { redactMessagesRawForClient } from '../utils/whatsapp-raw-redact';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
 	isWeakWhatsAppContactName,
@@ -2539,11 +2536,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			await this.decorateGroupMessages(conversation, [hydrated]);
-			// Emit a redacted copy; `hydrated` itself is still read below.
+			this.attachMediaPreviews([hydrated]);
+			const forClient = { ...hydrated } as typeof hydrated;
+			redactMessagesRawForClient([forClient]);
 			this.gateway.emitConversationEvent(
 				conversation.id,
 				'message',
-				{ ...hydrated, raw: redactRawForClient((hydrated as any).raw) },
+				forClient,
 				accountId,
 				this.conversationEventScope(conversation),
 			);
