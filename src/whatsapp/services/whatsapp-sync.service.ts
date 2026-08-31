@@ -45,12 +45,12 @@ import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp
 import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
 import {
 	ensureWhatsAppVoiceOgg,
-	probeAudioSeconds,
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
+import { WhatsAppStatusService } from './whatsapp-status.service';
 import {
 	providerChatActivityMs as providerChatActivityMsFromChat,
 	providerChatMessageActivityMs,
@@ -65,6 +65,12 @@ import {
 	preferWhatsAppContactName,
 	resolveWhatsAppContactLabel,
 } from '../utils/whatsapp-contact-name';
+import {
+	enrichContactMessageNormalized,
+	extractSharedContactFromRaw,
+	isContactMessageType,
+	looksLikeWhatsAppJid,
+} from '../utils/whatsapp-contact';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -622,6 +628,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		private readonly gateway: WhatsAppGateway,
 		private readonly audit: WhatsAppAuditService,
 		private readonly notifications: NotificationService,
+		private readonly statusService: WhatsAppStatusService,
 		@InjectRepository(WhatsAppConversationPreference)
 		private readonly preferenceRepo: Repository<WhatsAppConversationPreference>,
 	) {}
@@ -836,8 +843,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return;
 		}
 		if (event.type === 'status_changed') {
-			this.gateway.emitAccountEvent(accountId, 'statuses_updated', {
-				reason: 'provider_status_changed',
+			void this.statusService.syncFromProvider(accountId).finally(() => {
+				this.gateway.emitAccountEvent(accountId, 'statuses_updated', {
+					reason: 'provider_status_changed',
+				});
 			});
 			return;
 		}
@@ -1627,6 +1636,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// That stampeded getMessages while ChatStore was still empty, blocked the
 		// open-chat path, and felt like "endless sync" — WhatsApp Web loads
 		// history on demand when a chat is opened (plus live onMessage).
+		void this.statusService.syncFromProvider(accountId).catch(() => undefined);
 		return {
 			contacts: { supported: false, skipped: true },
 			chats,
@@ -2254,6 +2264,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (!normalized.providerMessageId || !normalized.chatId) {
 			throw new BadRequestException('Provider message does not have stable identifiers');
 		}
+		normalized = enrichContactMessageNormalized(normalized);
 		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
 		const phoneHint = await this.resolveChatPhoneDigits(
 			accountId,
@@ -2533,6 +2544,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		this.attachMessageLocations([hydrated]);
+		this.attachSharedContacts([hydrated]);
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			await this.decorateGroupMessages(conversation, [hydrated]);
@@ -3851,6 +3863,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	private attachSharedContacts(messages: WhatsAppMessage[]) {
+		for (const message of messages || []) {
+			const enriched = enrichContactMessageNormalized({
+				type: message.type,
+				text: message.text,
+				raw: (message as any).raw,
+			});
+			const shared = extractSharedContactFromRaw((enriched as any).raw, message.text);
+			if (!shared) continue;
+			(message as any).sharedContact = shared;
+			if ((message as any).raw && typeof (message as any).raw === 'object') {
+				(message as any).raw = { ...(message as any).raw, sharedContact: shared };
+			}
+			if (isContactMessageType(message.type)) {
+				message.type = 'contact';
+				const text = String(message.text || '').trim();
+				if (!text || looksLikeWhatsAppJid(text)) {
+					message.text = shared.displayName;
+				}
+			}
+		}
+	}
+
 	private attachMediaPreviews(messages: WhatsAppMessage[]) {
 		for (const message of messages || []) {
 			const preview = mediaPreviewDataUrlFromRaw((message as any)?.raw);
@@ -4167,6 +4202,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.attachMediaPreviews(messages);
 		await this.hydrateLocationsFromProvider(conversation, messages);
 		this.attachMessageLocations(messages);
+		this.attachSharedContacts(messages);
 		await this.decorateGroupMessages(conversation, messages);
 		await this.decorateMessageMentions(conversation, messages);
 		// Last step on purpose: everything above may read the media-crypto fields,
@@ -5470,31 +5506,25 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		let sendFileName = path.basename(absolutePath);
 		let durablePath = absolutePath;
 		if (input.type === 'voice') {
-			const alreadyOgg = absolutePath.toLowerCase().endsWith('.ogg');
-			const preparedDuration = alreadyOgg ? await probeAudioSeconds(absolutePath) : 0;
-			if (alreadyOgg && preparedDuration > 0) {
-				mimeGuess = WHATSAPP_VOICE_MIME;
-			} else {
-				try {
-					const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
-						mimeType: mimeGuess,
-						fileName: sendFileName,
-					});
-					const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
-					await fs.copyFile(converted.filePath, oggPath);
-					await fs.rm(absolutePath, { force: true }).catch(() => undefined);
-					await converted.cleanup?.();
-					sendPath = oggPath;
-					durablePath = oggPath;
-					sendFileName = path.basename(oggPath);
-					mimeGuess = converted.mimeType;
-				} catch (error) {
-					const detail =
-						error instanceof Error ? error.message : String(error || 'Voice conversion failed');
-					throw new BadRequestException(
-						`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
-					);
-				}
+			try {
+				const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
+					mimeType: mimeGuess,
+					fileName: sendFileName,
+				});
+				const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
+				await fs.copyFile(converted.filePath, oggPath);
+				await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+				await converted.cleanup?.();
+				sendPath = oggPath;
+				durablePath = oggPath;
+				sendFileName = path.basename(oggPath);
+				mimeGuess = converted.mimeType;
+			} catch (error) {
+				const detail =
+					error instanceof Error ? error.message : String(error || 'Voice conversion failed');
+				throw new BadRequestException(
+					`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
+				);
 			}
 		}
 		const result = await provider.sendMedia(conversation.providerChatId, sendPath, {

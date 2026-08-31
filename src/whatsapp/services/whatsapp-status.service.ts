@@ -125,6 +125,53 @@ export class WhatsAppStatusService {
 		return 'whatsapp_not_connected';
 	}
 
+	/** Internal: pull statuses from the linked provider and upsert into Postgres. */
+	async syncFromProvider(accountId: string) {
+		const readiness = await this.ensureStatusProvider(accountId, 45_000);
+		const provider = readiness.provider;
+		if (!readiness.ready || !provider?.capabilities.statusFetch) {
+			return { providerCount: 0, upserted: 0, hint: this.statusRefreshHint(readiness.state) };
+		}
+		try {
+			const statuses = await Promise.race([
+				provider.getStatuses(),
+				new Promise<any[]>((_, reject) => {
+					setTimeout(() => reject(new Error('Story sync timed out')), 45_000);
+				}),
+			]);
+			const list = Array.isArray(statuses) ? statuses : [];
+			const contactNames = new Map<string, string>();
+			const upserted = list.length
+				? await this.upsertProviderStatuses(accountId, list, contactNames)
+				: 0;
+			this.logger.log(
+				`Status sync ${accountId}: provider=${list.length} upserted=${upserted}`,
+			);
+			return {
+				providerCount: list.length,
+				upserted,
+				hint: list.length ? null : 'whatsapp_stories_empty',
+			};
+		} catch (error) {
+			this.logger.warn(
+				`Status sync failed for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return { providerCount: 0, upserted: 0, hint: 'whatsapp_stories_sync_failed' };
+		}
+	}
+
+	private async pruneExpiredStatuses(accountId: string) {
+		await this.repo
+			.createQueryBuilder()
+			.delete()
+			.where('accountId = :accountId', { accountId })
+			.andWhere('expiresAt IS NOT NULL')
+			.andWhere('expiresAt <= :now', { now: new Date() })
+			.execute();
+	}
+
 	private async upsertProviderStatuses(
 		accountId: string,
 		statuses: any[],
@@ -273,67 +320,41 @@ export class WhatsAppStatusService {
 		return refreshedIds.length;
 	}
 
-	async list(user: User, accountId: string, refresh = false) {
+	async list(user: User, accountId: string, refresh = false, debug = false) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.pruneExpiredStatuses(accountId);
 		const contactNames = new Map<string, string>();
 		let provider = this.providers.getProvider(accountId);
 		let providerState = provider?.getState() || this.providers.getProviderState(accountId);
 		let sessionReady = providerState === 'connected';
 		let refreshHint: string | null = null;
+		let providerCount = 0;
+		const excluded: Array<{ id: string; reason: string }> = [];
 
 		if (refresh) {
-			const readiness = await this.ensureStatusProvider(accountId);
-			provider = readiness.provider;
-			providerState = readiness.state;
-			sessionReady = readiness.ready;
-			if (sessionReady && provider?.capabilities.statusFetch) {
-				try {
-					const statuses = await Promise.race([
-						provider.getStatuses(),
-						new Promise<any[]>((_, reject) => {
-							setTimeout(
-								() => reject(new Error('Story sync timed out')),
-								35_000,
-							);
-						}),
-					]);
-					if (Array.isArray(statuses) && statuses.length > 0) {
-						await this.upsertProviderStatuses(accountId, statuses, contactNames);
-						refreshHint = null;
-					} else {
-						refreshHint = 'whatsapp_stories_empty';
-						this.logger.warn(
-							`Status refresh returned no items for account ${accountId} (provider state: ${providerState})`,
-						);
-					}
-				} catch (error) {
-					refreshHint =
-						error instanceof Error && error.message.includes('timed out')
-							? 'whatsapp_stories_sync_failed'
-							: 'whatsapp_stories_sync_failed';
-					this.logger.warn(
-						`Status refresh failed for ${accountId}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
-			} else {
-				refreshHint = this.statusRefreshHint(providerState);
-			}
+			const synced = await this.syncFromProvider(accountId);
+			providerCount = synced.providerCount;
+			refreshHint = synced.hint;
+			provider = this.providers.getProvider(accountId);
+			providerState = provider?.getState() || providerState;
+			sessionReady = providerState === 'connected';
 		}
 		const items = await this.repo
 			.createQueryBuilder('status')
 			.where('status.accountId = :accountId', { accountId })
 			.andWhere('(status.expiresAt IS NULL OR status.expiresAt > :now)', { now: new Date() })
 			.orderBy('status.publishedAt', 'DESC')
-			.take(200)
+			.take(500)
 			.getMany();
 		const dedupedItems: typeof items = [];
 		const seenIdentity = new Set<string>();
 		for (const item of items) {
 			const keys = statusIdentityKeys(item.providerStatusId);
 			const primary = keys[0] || item.id;
-			if (keys.some(key => seenIdentity.has(key))) continue;
+			if (keys.some(key => seenIdentity.has(key))) {
+				if (debug) excluded.push({ id: item.id, reason: 'duplicate_identity' });
+				continue;
+			}
 			for (const key of keys) seenIdentity.add(key);
 			seenIdentity.add(primary);
 			dedupedItems.push(item);
@@ -341,6 +362,7 @@ export class WhatsAppStatusService {
 		const senderIds = [
 			...new Set(dedupedItems.map(item => item.senderWaId).filter(Boolean) as string[]),
 		];
+		const contactAvatars = new Map<string, string>();
 		if (senderIds.length) {
 			const contacts = await this.contactRepo.find({
 				where: { accountId, waId: In(senderIds) },
@@ -348,6 +370,9 @@ export class WhatsAppStatusService {
 			// Address-book / DB labels win over ephemeral status pushNames.
 			for (const contact of contacts) {
 				const phone = contact.phoneNumber;
+				if (contact.avatarUrl) {
+					contactAvatars.set(contact.waId, contact.avatarUrl);
+				}
 				if (
 					contact.name &&
 					!isWeakWhatsAppContactName(contact.name, contact.waId, phone)
@@ -360,12 +385,8 @@ export class WhatsAppStatusService {
 				}
 			}
 		}
-		return {
-			supported: provider?.capabilities.statusFetch ?? true,
-			sessionReady,
-			providerState,
-			hint: refreshHint,
-			items: dedupedItems.map(item => {
+		const mapped = dedupedItems
+			.map(item => {
 				const fromMap = item.senderWaId ? contactNames.get(item.senderWaId) : null;
 				const phoneHint = item.senderWaId
 					? String(item.senderWaId).replace(/@.*$/, '').replace(/\D/g, '')
@@ -377,8 +398,46 @@ export class WhatsAppStatusService {
 				return {
 					...item,
 					contactName,
+					contactAvatarUrl: item.senderWaId
+						? contactAvatars.get(item.senderWaId) || null
+						: null,
 				};
-			}),
+			})
+			.filter(item => {
+				if (item.isOwn) return true;
+				if (!item.senderWaId) {
+					if (debug) excluded.push({ id: item.id, reason: 'missing_sender' });
+					return false;
+				}
+				return true;
+			});
+		if (debug || process.env.WHATSAPP_STATUS_DEBUG === '1') {
+			this.logger.log(
+				`Status list ${accountId}: provider=${providerCount} db=${items.length} deduped=${dedupedItems.length} api=${mapped.length} excluded=${excluded.length}`,
+			);
+			if (excluded.length) {
+				this.logger.debug(
+					`Status exclusions ${accountId}: ${JSON.stringify(excluded.slice(0, 20))}`,
+				);
+			}
+		}
+		return {
+			supported: provider?.capabilities.statusFetch ?? true,
+			sessionReady,
+			providerState,
+			hint: refreshHint,
+			items: mapped,
+			...(debug || process.env.WHATSAPP_STATUS_DEBUG === '1'
+				? {
+						debug: {
+							providerCount,
+							dbCount: items.length,
+							dedupedCount: dedupedItems.length,
+							apiCount: mapped.length,
+							excluded,
+						},
+					}
+				: {}),
 		};
 	}
 	async publish(

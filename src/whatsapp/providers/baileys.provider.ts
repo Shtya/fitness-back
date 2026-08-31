@@ -17,9 +17,11 @@ import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
+	isValidWhatsAppVoiceOggFile,
 	resolveVoiceSeconds,
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
+import { enrichContactMessageNormalized } from '../utils/whatsapp-contact';
 
 type BaileysSocket = any;
 
@@ -893,8 +895,8 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (messageId) this.statusRawById.delete(messageId);
 			}
 		}
-		if (this.statusesById.size > 400) {
-			const extra = [...this.statusesById.keys()].slice(0, this.statusesById.size - 400);
+		if (this.statusesById.size > 2000) {
+			const extra = [...this.statusesById.keys()].slice(0, this.statusesById.size - 2000);
 			for (const id of extra) {
 				const item = this.statusesById.get(id);
 				this.statusesById.delete(id);
@@ -1253,7 +1255,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.rememberLidMapping(remoteJid, remoteJidAlt);
 		}
 
-		return {
+		return enrichContactMessageNormalized({
 			providerMessageId: id,
 			chatId,
 			senderWaId: raw?.key?.participant || (fromMe ? null : chatId),
@@ -1271,7 +1273,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			attachments,
 			location: extractWhatsAppLocation({ type, raw }),
 			raw,
-		};
+		});
 	}
 
 	async connect(phoneNumber?: string) {
@@ -2064,15 +2066,19 @@ export class BaileysProvider implements WhatsAppProvider {
 		let sendPath = filePath;
 		let convertedVoice: Awaited<ReturnType<typeof ensureWhatsAppVoiceOgg>> | null = null;
 		try {
-			if (options.isVoice && !options.voiceAlreadyConverted) {
-				convertedVoice = await ensureWhatsAppVoiceOgg(filePath, {
-					mimeType: mime,
-					fileName: options.fileName,
-				});
-				sendPath = convertedVoice.filePath;
-				mime = convertedVoice.mimeType;
-			} else if (options.isVoice) {
-				mime = WHATSAPP_VOICE_MIME;
+			if (options.isVoice) {
+				const validPrepared =
+					options.voiceAlreadyConverted && (await isValidWhatsAppVoiceOggFile(filePath));
+				if (!validPrepared) {
+					convertedVoice = await ensureWhatsAppVoiceOgg(filePath, {
+						mimeType: mime,
+						fileName: options.fileName,
+					});
+					sendPath = convertedVoice.filePath;
+					mime = convertedVoice.mimeType;
+				} else {
+					mime = WHATSAPP_VOICE_MIME;
+				}
 			}
 			const buffer = await fs.readFile(sendPath);
 			let content: any;
@@ -2464,7 +2470,11 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async getStatuses() {
 		this.pruneExpiredStatuses();
-		return [...this.statusesById.values()];
+		const items = [...this.statusesById.values()];
+		this.logger.log(
+			`Baileys status cache for ${this.accountId}: ${items.length} active item(s)`,
+		);
+		return items;
 	}
 
 	async publishStatus() {

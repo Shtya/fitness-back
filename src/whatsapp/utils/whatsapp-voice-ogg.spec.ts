@@ -27,7 +27,8 @@ describe('whatsapp voice ogg helper', () => {
 
 	it('detects outgoing voice uploads by filename or mime', () => {
 		expect(looksLikeOutgoingVoiceUpload('voice-8s.webm', 'audio/webm')).toBe(true);
-		expect(looksLikeOutgoingVoiceUpload('clip.mp3', 'audio/mpeg')).toBe(false);
+		expect(looksLikeOutgoingVoiceUpload('voice.mp3', 'audio/mpeg')).toBe(true);
+		expect(looksLikeOutgoingVoiceUpload('clip.mp3', 'application/octet-stream')).toBe(false);
 	});
 
 	// Copy of wa-js `valid-data-url`; a mime it rejects makes sendFileMessage

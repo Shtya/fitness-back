@@ -312,12 +312,13 @@ describe('WppConnectProvider message normalization', () => {
 		});
 	});
 
-	it('sends voice recordings with a valid data URL MIME type', async () => {
+	it('sends voice recordings with waveform via WPP.chat.sendFileMessage', async () => {
 		const provider = new WppConnectProvider('account-test', {});
 		const sendPttFromBase64 = jest.fn().mockResolvedValue({ id: 'provider-voice-1' });
+		const oggBuffer = Buffer.concat([Buffer.from('OggS'), Buffer.from('voice-data')]);
 		const readFile = jest
-			.spyOn(require('fs').promises, 'readFile')
-			.mockResolvedValue(Buffer.from('voice-data'));
+			.spyOn(require('fs/promises'), 'readFile')
+			.mockResolvedValue(oggBuffer);
 		const cleanup = jest.fn().mockResolvedValue(undefined);
 		const ensureOgg = jest
 			.spyOn(voiceOgg, 'ensureWhatsAppVoiceOgg')
@@ -327,7 +328,11 @@ describe('WppConnectProvider message normalization', () => {
 				fileName: 'voice.ogg',
 				cleanup,
 			});
-		(provider as any).client = { sendPttFromBase64 };
+		const pageEvaluate = jest.fn().mockResolvedValue({ id: 'provider-voice-1', ack: 1 });
+		(provider as any).client = {
+			page: { evaluate: pageEvaluate },
+			sendPttFromBase64,
+		};
 
 		let ensureOggCalls = 0;
 		try {
@@ -337,7 +342,6 @@ describe('WppConnectProvider message normalization', () => {
 				mimeType: 'audio/webm; codecs=opus',
 			});
 		} finally {
-			// mockRestore() also clears call history, so snapshot it first.
 			ensureOggCalls = ensureOgg.mock.calls.length;
 			readFile.mockRestore();
 			ensureOgg.mockRestore();
@@ -345,16 +349,11 @@ describe('WppConnectProvider message normalization', () => {
 
 		expect(ensureOggCalls).toBe(1);
 		expect(cleanup).toHaveBeenCalledTimes(1);
-
-		expect(sendPttFromBase64).toHaveBeenCalledWith(
-			'201000000000@c.us',
-			expect.stringMatching(/^data:audio\/ogg;codecs=opus;base64,/),
-			'voice.ogg',
-			'',
-			undefined,
-			undefined,
-			true,
-		);
+		expect(pageEvaluate).toHaveBeenCalledTimes(1);
+		expect(sendPttFromBase64).not.toHaveBeenCalled();
+		const payload = pageEvaluate.mock.calls[0]?.[1];
+		expect(payload?.content).toMatch(/^data:audio\/ogg;codecs=opus;base64,/);
+		expect(payload?.filename).toBe('voice.ogg');
 	});
 
 	it('retries sendText against a resolved lid when c.us fails', async () => {

@@ -282,12 +282,28 @@ export function looksLikeOutgoingVoiceUpload(
 ): boolean {
 	const name = String(fileName || '').toLowerCase();
 	if (/voice-\d+s/i.test(name)) return true;
+	if (/^voice\.(ogg|opus|webm|mp3|m4a)$/i.test(name)) return true;
 	const mime = String(mimeType || '')
 		.toLowerCase()
 		.replace(/\s+/g, '');
 	return (
 		mime.startsWith('audio/webm') ||
 		mime.startsWith('audio/ogg') ||
-		mime === 'audio/opus'
+		mime === 'audio/opus' ||
+		mime.startsWith('audio/mpeg') ||
+		mime.startsWith('audio/mp4')
 	);
+}
+
+export async function isValidWhatsAppVoiceOggFile(filePath: string): Promise<boolean> {
+	try {
+		const buffer = await fs.readFile(filePath);
+		if (!buffer?.length || buffer.subarray(0, 4).toString('ascii') !== 'OggS') {
+			return false;
+		}
+		const seconds = await probeAudioSeconds(filePath);
+		return seconds > 0;
+	} catch {
+		return false;
+	}
 }

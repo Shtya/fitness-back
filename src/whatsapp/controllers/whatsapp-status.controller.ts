@@ -27,8 +27,14 @@ export class WhatsAppStatusController {
 		@Req() req: any,
 		@Param('accountId') accountId: string,
 		@Query('refresh') refresh?: string,
+		@Query('debug') debug?: string,
 	) {
-		return this.statuses.list(req.user, accountId, refresh === 'true');
+		return this.statuses.list(
+			req.user,
+			accountId,
+			refresh === 'true',
+			debug === 'true' || debug === '1',
+		);
 	}
 
 	@Post()
