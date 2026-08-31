@@ -110,18 +110,28 @@ function phoneFromLooseValue(value: unknown): WhatsAppSharedContactPhone | null 
 	};
 }
 
+function hasContactPayload(node: Record<string, any>): boolean {
+	if (!node || typeof node !== 'object') return false;
+	if (node.sharedContact?.displayName || node.sharedContact?.phones?.length) return true;
+	if (node.contact?.displayName || node.contact?.phoneNumber || node.contact?.waId) return true;
+	if (node.vcard || node.vcardFormattedName) return true;
+	if (node.message?.contactMessage || node.contactMessage) return true;
+	if (node.message?.contactsArrayMessage || node.contactsArrayMessage) return true;
+	if (Array.isArray(node.vcardList) && node.vcardList.length) return true;
+	return false;
+}
+
 function normalizeSharedContact(
 	displayName: string,
 	phones: WhatsAppSharedContactPhone[],
 ): WhatsAppSharedContact | null {
 	const name = String(displayName || '').trim();
 	const cleanedPhones = phones.filter(item => item?.phone || item?.waId);
-	if (!name && !cleanedPhones.length) return null;
-	const primaryWaId = cleanedPhones[0]?.waId || null;
+	if (!cleanedPhones.length) return null;
 	return {
 		displayName: name || cleanedPhones[0]?.formatted || cleanedPhones[0]?.phone || 'Contact',
 		phones: cleanedPhones,
-		waId: primaryWaId,
+		waId: cleanedPhones[0]?.waId || null,
 	};
 }
 
@@ -131,6 +141,7 @@ export function extractSharedContactFromRaw(
 ): WhatsAppSharedContact | null {
 	if (!raw || typeof raw !== 'object') return null;
 	const node = raw as Record<string, any>;
+	if (!hasContactPayload(node)) return null;
 
 	if (node.sharedContact?.displayName || node.sharedContact?.phones?.length) {
 		return normalizeSharedContact(
@@ -148,7 +159,8 @@ export function extractSharedContactFromRaw(
 
 	if (node.contact?.displayName || node.contact?.phoneNumber) {
 		const phone = phoneFromLooseValue(node.contact.phoneNumber || node.contact.waId);
-		return normalizeSharedContact(node.contact.displayName || fallbackText || '', phone ? [phone] : []);
+		if (!phone) return null;
+		return normalizeSharedContact(node.contact.displayName || fallbackText || '', [phone]);
 	}
 
 	const contactMessage =
@@ -181,10 +193,10 @@ export function extractSharedContactFromRaw(
 				node.notifyName ||
 				(Array.isArray(contactsArray) ? contactsArray[0]?.displayName : '') ||
 				parseVcardName(vcardSources[0] || '') ||
-				fallbackText ||
-				node.body ||
 				'',
 		).trim() || null;
+
+	if (!phones.length) return null;
 
 	const shared = normalizeSharedContact(displayName || 'Contact', phones);
 	if (shared) return shared;

@@ -63,4 +63,13 @@ describe('whatsapp-contact', () => {
 		expect(formatPhoneForDisplay('', '201090998111@c.us')).toBe('+201090998111');
 		expect(formatPhoneForDisplay('+20 10 9099 8111')).toBe('+20 10 9099 8111');
 	});
+
+	it('ignores plain chat text without vcard payload', () => {
+		expect(
+			extractSharedContactFromRaw({
+				type: 'chat',
+				body: 'على تلاته كده تاكل ولا ايه',
+			}),
+		).toBeNull();
+	});
 });

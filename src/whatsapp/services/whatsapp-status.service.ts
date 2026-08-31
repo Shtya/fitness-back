@@ -178,6 +178,9 @@ export class WhatsAppStatusService {
 		contactNames: Map<string, string>,
 	) {
 		const existingRows = await this.repo.find({ where: { accountId } });
+		const existingActiveCount = existingRows.filter(
+			row => !row.expiresAt || row.expiresAt > new Date(),
+		).length;
 		const byIdentity = new Map<string, (typeof existingRows)[number]>();
 		for (const row of existingRows) {
 			for (const key of statusIdentityKeys(row.providerStatusId)) {
@@ -276,8 +279,13 @@ export class WhatsAppStatusService {
 		}
 		// Drop statuses that WhatsApp no longer returns (deleted / expired),
 		// and collapse any leftover duplicate identity rows.
-		// Never wipe the DB when the provider returned nothing — that usually means sync is not ready yet.
-		if (Array.isArray(statuses) && refreshedIds.length > 0) {
+		// Never wipe the DB on a partial provider snapshot — that hides stories
+		// when StatusV3Store has not finished hydrating yet.
+		const allowStalePrune =
+			refreshedIds.length > 0 &&
+			(existingActiveCount === 0 ||
+				refreshedIds.length >= Math.max(3, Math.ceil(existingActiveCount * 0.65)));
+		if (Array.isArray(statuses) && refreshedIds.length > 0 && allowStalePrune) {
 			const refreshedKeys = new Set<string>();
 			for (const id of refreshedIds) {
 				for (const key of statusIdentityKeys(id)) refreshedKeys.add(key);
@@ -316,6 +324,10 @@ export class WhatsAppStatusService {
 			if (staleIds.length) {
 				await this.repo.delete([...new Set(staleIds)]);
 			}
+		} else if (refreshedIds.length > 0 && existingActiveCount > refreshedIds.length) {
+			this.logger.debug(
+				`Status sync ${accountId}: skipped stale prune (provider=${refreshedIds.length} dbActive=${existingActiveCount})`,
+			);
 		}
 		return refreshedIds.length;
 	}

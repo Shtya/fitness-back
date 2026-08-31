@@ -3865,6 +3865,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	private attachSharedContacts(messages: WhatsAppMessage[]) {
 		for (const message of messages || []) {
+			if (!isContactMessageType(message.type)) continue;
 			const enriched = enrichContactMessageNormalized({
 				type: message.type,
 				text: message.text,
@@ -3876,12 +3877,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if ((message as any).raw && typeof (message as any).raw === 'object') {
 				(message as any).raw = { ...(message as any).raw, sharedContact: shared };
 			}
-			if (isContactMessageType(message.type)) {
-				message.type = 'contact';
-				const text = String(message.text || '').trim();
-				if (!text || looksLikeWhatsAppJid(text)) {
-					message.text = shared.displayName;
-				}
+			message.type = 'contact';
+			const text = String(message.text || '').trim();
+			if (!text || looksLikeWhatsAppJid(text)) {
+				message.text = shared.displayName;
 			}
 		}
 	}

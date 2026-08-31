@@ -3082,6 +3082,36 @@ export class WppConnectProvider implements WhatsAppProvider {
 				});
 			};
 
+			const scanMsgStoreForStatuses = () => {
+				const msgStore = browserWindow.WPP?.whatsapp?.MsgStore;
+				const msgs =
+					(typeof msgStore?.getModelsArray === 'function' &&
+						msgStore.getModelsArray()) ||
+					msgStore?.models ||
+					[];
+				const start = Math.max(0, msgs.length - MAX_MSG_SCAN);
+				for (let index = msgs.length - 1; index >= start; index -= 1) {
+					const msg = msgs[index];
+					const isStatus =
+						msg?.isStatusV3 ||
+						msg?.id?.remote === 'status@broadcast' ||
+						String(msg?.from || '').includes('status@broadcast') ||
+						String(msg?.to || '').includes('status@broadcast');
+					if (!isStatus) continue;
+					const contactId = String(
+						msg?.author?._serialized ||
+							msg?.author ||
+							msg?.from?._serialized ||
+							msg?.from ||
+							msg?.id?.participant?._serialized ||
+							msg?.id?.participant ||
+							'',
+					);
+					if (!contactId || contactId === 'status@broadcast') continue;
+					push(msg, contactId, msg?.notifyName || null);
+				}
+			};
+
 			const readMessages = (status: any): any[] => {
 				try {
 					if (typeof status?.getAllMsgs === 'function') {
@@ -3156,11 +3186,16 @@ export class WppConnectProvider implements WhatsAppProvider {
 			if (store) {
 				try {
 					if (typeof store.sync === 'function') await store.sync();
-					if (typeof store.loadMore === 'function') await store.loadMore();
+					for (let round = 0; round < 4; round += 1) {
+						if (typeof store.loadMore === 'function') {
+							await store.loadMore();
+						}
+						await new Promise(resolve => setTimeout(resolve, 350));
+					}
 				} catch {
 					/* ignore */
 				}
-				await new Promise(resolve => setTimeout(resolve, 600));
+				await new Promise(resolve => setTimeout(resolve, 800));
 
 				const modelMap = new Map<string, any>();
 				const addModel = (model: any) => {
@@ -3207,11 +3242,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 									if (typeof status.loadStatusMsgs === 'function') {
 										await status.loadStatusMsgs();
 									} else if (typeof status.loadMore === 'function') {
-										await status.loadMore(12);
+										await status.loadMore(50);
 									}
 								})(),
 								new Promise((_, reject) =>
-									setTimeout(() => reject(new Error('status load timeout')), 400),
+									setTimeout(() => reject(new Error('status load timeout')), 2500),
 								),
 							]);
 							messages = readMessages(status);
@@ -3296,7 +3331,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 								if (typeof mine.loadStatusMsgs === 'function') {
 									await mine.loadStatusMsgs();
 								} else if (typeof mine.loadMore === 'function') {
-									await mine.loadMore(12);
+									await mine.loadMore(50);
 								}
 								myMessages = readMessages(mine);
 							} catch {
@@ -3323,33 +3358,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 				}
 			}
 
-			if (output.length === 0) {
-				const msgStore = browserWindow.WPP?.whatsapp?.MsgStore;
-				const msgs =
-					(typeof msgStore?.getModelsArray === 'function' &&
-						msgStore.getModelsArray()) ||
-					msgStore?.models ||
-					[];
-				const start = Math.max(0, msgs.length - MAX_MSG_SCAN);
-				for (let index = msgs.length - 1; index >= start; index -= 1) {
-					const msg = msgs[index];
-					const isStatus =
-						msg?.isStatusV3 ||
-						msg?.id?.remote === 'status@broadcast' ||
-						String(msg?.from || '').includes('status@broadcast') ||
-						String(msg?.to || '').includes('status@broadcast');
-					if (!isStatus) continue;
-					const contactId = String(
-						msg?.author?._serialized ||
-							msg?.author ||
-							msg?.from?._serialized ||
-							msg?.from ||
-							'',
-					);
-					if (!contactId || contactId === 'status@broadcast') continue;
-					push(msg, contactId, msg?.notifyName || null);
-				}
-			}
+			// StatusV3Store often hydrates slowly; MsgStore still holds recent status
+			// messages even when the store snapshot is partial — always merge both.
+			scanMsgStoreForStatuses();
 
 			return output;
 		});
