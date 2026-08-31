@@ -9,18 +9,14 @@ import {
 	Put,
 	Query,
 	Req,
-	Res,
-	StreamableFile,
 	UploadedFile,
 	UseGuards,
 	UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { createReadStream } from 'fs';
 import { diskStorage } from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { assertSendRateLimit } from '../utils/whatsapp-send-rate-limit';
@@ -51,7 +47,7 @@ import {
 	ensureWhatsAppVoiceOgg,
 	looksLikeOutgoingVoiceUpload,
 } from '../utils/whatsapp-voice-ogg';
-import { parseByteRange } from '../utils/whatsapp-byte-range';
+import { signMediaToken, signedMediaPath } from '../utils/whatsapp-media-signed-url';
 
 const mediaRoot = () =>
 	path.resolve(
@@ -634,77 +630,13 @@ export class WhatsAppConversationsController {
 		return this.sync.downloadAttachment(req.user, attachmentId);
 	}
 
-	@Get('attachments/:attachmentId/content')
-	async streamAttachment(
-		@Req() req: any,
-		@Param('attachmentId') attachmentId: string,
-		@Res({ passthrough: true }) res: Response,
-	) {
-		const file = await this.sync.resolveAttachmentFile(req.user, attachmentId);
-		const safeInlineTypes = new Set([
-			'image/jpeg',
-			'image/png',
-			'image/webp',
-			'image/gif',
-			'audio/mpeg',
-			'audio/ogg',
-			'audio/mp4',
-			'audio/webm',
-			'video/mp4',
-			'video/webm',
-		]);
-		const mimeType = String(file.mimeType || 'application/octet-stream')
-			.toLowerCase()
-			.split(';')[0];
-		const inline =
-			safeInlineTypes.has(mimeType) ||
-			mimeType.startsWith('image/') ||
-			mimeType.startsWith('audio/') ||
-			mimeType.startsWith('video/');
-		res.setHeader('X-Content-Type-Options', 'nosniff');
-		res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
-		res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
-		res.setHeader(
-			'Content-Disposition',
-			`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,
-		);
-
-		let size: number | null = null;
-		try {
-			const stats = await fs.promises.stat(file.absolutePath);
-			size = stats.size;
-			const etag = `"wa-${attachmentId}-${stats.size}-${stats.mtimeMs}"`;
-			res.setHeader('ETag', etag);
-			if (String(req.headers['if-none-match'] || '') === etag) {
-				res.status(304);
-				return undefined as any;
-			}
-		} catch {
-			/* ignore etag failures */
-		}
-
-		// Safari refuses to play <audio>/<video> from a source that cannot answer a
-		// Range request, and without 206 no client can seek before the whole file
-		// has downloaded. Only media is worth partial delivery.
-		if (!inline || size == null) {
-			return new StreamableFile(createReadStream(file.absolutePath));
-		}
-		res.setHeader('Accept-Ranges', 'bytes');
-		const range = parseByteRange(String(req.headers.range || ''), size);
-		if (range === 'unsatisfiable') {
-			res.status(416);
-			res.setHeader('Content-Range', `bytes */${size}`);
-			return undefined as any;
-		}
-		if (!range) {
-			res.setHeader('Content-Length', String(size));
-			return new StreamableFile(createReadStream(file.absolutePath));
-		}
-		res.status(206);
-		res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
-		res.setHeader('Content-Length', String(range.end - range.start + 1));
-		return new StreamableFile(
-			createReadStream(file.absolutePath, { start: range.start, end: range.end }),
-		);
+	@Get('attachments/:attachmentId/signed-url')
+	async signedAttachmentUrl(@Req() req: any, @Param('attachmentId') attachmentId: string) {
+		await this.sync.downloadAttachment(req.user, attachmentId);
+		const signed = signMediaToken(attachmentId, String(req.user?.id || ''));
+		return {
+			url: signedMediaPath(attachmentId, signed.token),
+			expiresAt: signed.expiresAt,
+		};
 	}
 }

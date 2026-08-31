@@ -6066,4 +6066,36 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			fileName: attachment?.fileName || path.basename(absolutePath),
 		};
 	}
+
+	/** HMAC media tokens already proved access at issue time — Range requests must
+	 *  not reload the user or re-run visibility on every byte slice. */
+	async resolveDownloadedAttachment(attachmentId: string) {
+		const attachment = await this.attachmentRepo.findOne({
+			where: { id: attachmentId },
+		});
+		if (!attachment?.storagePath || attachment.downloadStatus !== 'downloaded') {
+			throw new BadRequestException('WhatsApp media is not available');
+		}
+		const absolutePath = path.resolve(
+			process.cwd(),
+			String(attachment.storagePath).replace(/^\/+/, ''),
+		);
+		const privateRoot = path.resolve(
+			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+		);
+		const legacyRoot = path.resolve(path.join(process.cwd(), 'uploads', 'whatsapp-media'));
+		if (
+			![privateRoot, legacyRoot].some(
+				(root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`),
+			)
+		) {
+			throw new BadRequestException('Invalid WhatsApp media storage path');
+		}
+		await fs.access(absolutePath);
+		return {
+			absolutePath,
+			mimeType: attachment.mimeType || 'application/octet-stream',
+			fileName: attachment.fileName || path.basename(absolutePath),
+		};
+	}
 }

@@ -8,6 +8,7 @@ import { WhatsAppAccountsController } from './controllers/whatsapp-accounts.cont
 import { WhatsAppAssignmentsController } from './controllers/whatsapp-assignments.controller';
 import { WhatsAppConnectionController } from './controllers/whatsapp-connection.controller';
 import { WhatsAppConversationsController } from './controllers/whatsapp-conversations.controller';
+import { WhatsAppAttachmentStreamController } from './controllers/whatsapp-attachment-stream.controller';
 import { WhatsAppReportsController } from './controllers/whatsapp-reports.controller';
 import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
@@ -123,6 +124,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAssignmentsController,
 		WhatsAppConnectionController,
 		WhatsAppConversationsController,
+		WhatsAppAttachmentStreamController,
 		WhatsAppReportsController,
 		WhatsAppStatusController,
 		WhatsAppVoiceChangerController,
