@@ -60,20 +60,51 @@ const allowedMediaTypes = new Set([
 	'image/png',
 	'image/webp',
 	'image/gif',
+	'image/bmp',
+	'image/x-ms-bmp',
+	'image/heic',
+	'image/heif',
+	'image/tiff',
+	'image/x-tiff',
 	'video/mp4',
+	'video/webm',
+	'video/quicktime',
+	'video/x-msvideo',
+	'video/3gpp',
 	'audio/mpeg',
 	'audio/ogg',
 	'audio/ogg;codecs=opus',
 	'audio/mp4',
 	'audio/webm',
 	'audio/webm;codecs=opus',
-	'video/webm',
+	'audio/wav',
+	'audio/aac',
 	'application/pdf',
 	'application/msword',
 	'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 	'application/vnd.ms-excel',
 	'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
+
+function inferOutgoingMediaMime(originalName: string): string | null {
+	const lower = String(originalName || '').toLowerCase();
+	if (/\.jpe?g$/i.test(lower)) return 'image/jpeg';
+	if (/\.png$/i.test(lower)) return 'image/png';
+	if (/\.webp$/i.test(lower)) return 'image/webp';
+	if (/\.gif$/i.test(lower)) return 'image/gif';
+	if (/\.bmp$/i.test(lower)) return 'image/bmp';
+	if (/\.heic$/i.test(lower)) return 'image/heic';
+	if (/\.heif$/i.test(lower)) return 'image/heif';
+	if (/\.tiff?$/i.test(lower)) return 'image/tiff';
+	if (/\.mp4$/i.test(lower)) return 'video/mp4';
+	if (/\.webm$/i.test(lower)) return 'video/webm';
+	if (/\.mov$/i.test(lower)) return 'video/quicktime';
+	if (/\.m4v$/i.test(lower)) return 'video/mp4';
+	if (/\.3gp$/i.test(lower)) return 'video/3gpp';
+	if (/\.avi$/i.test(lower)) return 'video/x-msvideo';
+	if (/\.pdf$/i.test(lower)) return 'application/pdf';
+	return null;
+}
 
 @Controller('whatsapp')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -546,16 +577,16 @@ export class WhatsAppConversationsController {
 			}),
 			limits: { fileSize: 64 * 1024 * 1024 },
 			fileFilter: (_req, file, callback) => {
-				const originalName = String(file.originalname || '').toLowerCase();
+				const originalName = String(file.originalname || '');
 				let mime = String(file.mimetype || '')
 					.toLowerCase()
 					.replace(/\s+/g, '');
-				if ((!mime || mime === 'application/octet-stream') && /\.(jpe?g|png|webp|gif)$/i.test(originalName)) {
-					if (/\.png$/i.test(originalName)) mime = 'image/png';
-					else if (/\.webp$/i.test(originalName)) mime = 'image/webp';
-					else if (/\.gif$/i.test(originalName)) mime = 'image/gif';
-					else mime = 'image/jpeg';
-					file.mimetype = mime;
+				if (!mime || mime === 'application/octet-stream') {
+					const inferred = inferOutgoingMediaMime(originalName);
+					if (inferred) {
+						mime = inferred;
+						file.mimetype = inferred;
+					}
 				}
 				const allowed =
 					allowedMediaTypes.has(file.mimetype) ||
@@ -564,7 +595,12 @@ export class WhatsAppConversationsController {
 						type => mime === type.replace(/\s+/g, '') || mime.startsWith(`${type};`),
 					);
 				if (!allowed) {
-					return callback(new BadRequestException('Unsupported WhatsApp media type'), false);
+					return callback(
+						new BadRequestException(
+							`Unsupported WhatsApp media type (${mime || file.mimetype || 'unknown'})`,
+						),
+						false,
+					);
 				}
 				callback(null, true);
 			},

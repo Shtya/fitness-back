@@ -1,4 +1,5 @@
 import {
+	BadGatewayException,
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
@@ -5587,10 +5588,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const root = path.resolve(
 			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
 		);
-		const absolutePath = path.resolve(root, input.fileId);
-		const allowedUploadRoot = path.join(root, 'outgoing', conversation.accountId, user.id);
-		if (!absolutePath.startsWith(`${allowedUploadRoot}${path.sep}`)) {
+		const normalizedFileId = String(input.fileId || '').replace(/\\/g, '/');
+		if (!normalizedFileId || normalizedFileId.includes('..')) {
 			throw new BadRequestException('Invalid WhatsApp media identifier');
+		}
+		const absolutePath = path.normalize(path.resolve(root, normalizedFileId));
+		const allowedUploadRoot = path.normalize(
+			path.join(root, 'outgoing', String(conversation.accountId), String(user.id)),
+		);
+		if (
+			absolutePath !== allowedUploadRoot &&
+			!absolutePath.startsWith(`${allowedUploadRoot}${path.sep}`)
+		) {
+			throw new BadRequestException(
+				'Uploaded media does not match this conversation account. Re-select the chat and try again.',
+			);
 		}
 		await fs.access(absolutePath);
 		const provider = this.requireProvider(conversation.accountId);
@@ -5622,16 +5634,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 			}
 		}
-		const result = await provider.sendMedia(conversation.providerChatId, sendPath, {
-			caption: input.caption,
-			fileName: sendFileName,
-			isVoice: input.type === 'voice',
-			isSticker: input.type === 'sticker',
-			mimeType: mimeGuess,
-			voiceAlreadyConverted: input.type === 'voice',
-			quotedProviderMessageId: input.quotedProviderMessageId,
-			embeddedQuote: input.embeddedQuote,
-		});
+		let result: unknown;
+		try {
+			result = await provider.sendMedia(conversation.providerChatId, sendPath, {
+				caption: input.caption,
+				fileName: sendFileName,
+				isVoice: input.type === 'voice',
+				isSticker: input.type === 'sticker',
+				mimeType: mimeGuess,
+				voiceAlreadyConverted: input.type === 'voice',
+				quotedProviderMessageId: input.quotedProviderMessageId,
+				embeddedQuote: input.embeddedQuote,
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error || 'unknown provider error');
+			throw new BadGatewayException(
+				detail.startsWith('Failed to send WhatsApp media')
+					? detail
+					: `Failed to send WhatsApp media: ${detail}`,
+			);
+		}
 		const id =
 			providerMessageId(result) ||
 			`local_out_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
