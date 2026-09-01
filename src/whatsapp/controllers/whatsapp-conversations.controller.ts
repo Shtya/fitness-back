@@ -44,6 +44,7 @@ import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppMessageGroupsService } from '../services/whatsapp-message-groups.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 import {
+	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
 	looksLikeOutgoingVoiceUpload,
 } from '../utils/whatsapp-voice-ogg';
@@ -623,12 +624,10 @@ export class WhatsAppConversationsController {
 					mimeType: file.mimetype,
 					fileName: file.originalname,
 				});
-				const oggPath = `${file.path.replace(/\.[^.]+$/, '')}.ogg`;
-				await fs.promises.copyFile(converted.filePath, oggPath);
-				await fs.promises.rm(file.path, { force: true });
+				const committed = await commitConvertedVoiceOgg(converted.filePath, file.path);
 				await converted.cleanup?.();
-				storedPath = oggPath;
-				storedName = path.basename(oggPath);
+				storedPath = committed.sendPath;
+				storedName = committed.fileName;
 				mimeType = converted.mimeType;
 			} catch (error) {
 				await fs.promises.rm(file.path, { force: true }).catch(() => undefined);

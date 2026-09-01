@@ -1,8 +1,10 @@
 import {
+	commitConvertedVoiceOgg,
 	dataUrlMime,
 	ensureWhatsAppVoiceOgg,
 	fallbackVoiceWaveform,
 	guessVoiceSeconds,
+	isValidWhatsAppVoiceOggFile,
 	looksLikeOutgoingVoiceUpload,
 	WHATSAPP_VOICE_MIME,
 } from './whatsapp-voice-ogg';
@@ -54,5 +56,19 @@ describe('whatsapp voice ogg helper', () => {
 			ensureWhatsAppVoiceOgg(filePath, { mimeType: 'audio/webm', fileName: 'voice-1s.webm' }),
 		).rejects.toThrow(/empty/i);
 		await fs.rm(filePath, { force: true });
+	});
+
+	it('commitConvertedVoiceOgg keeps the file when destination is already .ogg', async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-voice-commit-'));
+		const destination = path.join(dir, 'share_demo.ogg');
+		const temp = path.join(dir, 'converted.ogg');
+		await fs.writeFile(destination, Buffer.from('placeholder'));
+		await fs.writeFile(temp, Buffer.from('converted-bytes'));
+		const committed = await commitConvertedVoiceOgg(temp, destination);
+		expect(committed.sendPath).toBe(destination);
+		await expect(fs.access(destination)).resolves.toBeUndefined();
+		const body = await fs.readFile(destination);
+		expect(body.toString()).toBe('converted-bytes');
+		await fs.rm(dir, { recursive: true, force: true });
 	});
 });

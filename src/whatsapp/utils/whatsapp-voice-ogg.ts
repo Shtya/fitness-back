@@ -276,6 +276,24 @@ export async function ensureWhatsAppVoiceOgg(
 	};
 }
 
+/**
+ * Install a converted OGG next to (or over) the uploaded source path.
+ * Never delete the destination when it is the same file we just wrote — that
+ * was causing ENOENT when re-encoding an already-.ogg upload/share copy.
+ */
+export async function commitConvertedVoiceOgg(
+	convertedTempPath: string,
+	originalAbsolutePath: string,
+): Promise<{ sendPath: string; fileName: string }> {
+	const original = path.resolve(originalAbsolutePath);
+	const oggPath = path.resolve(`${original.replace(/\.[^.]+$/i, '')}.ogg`);
+	await fs.copyFile(convertedTempPath, oggPath);
+	if (oggPath !== original) {
+		await fs.rm(original, { force: true }).catch(() => undefined);
+	}
+	return { sendPath: oggPath, fileName: path.basename(oggPath) };
+}
+
 export function looksLikeOutgoingVoiceUpload(
 	fileName?: string | null,
 	mimeType?: string | null,

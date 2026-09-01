@@ -45,7 +45,9 @@ import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
 import {
+	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
+	isValidWhatsAppVoiceOggFile,
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
@@ -5613,18 +5615,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		let sendFileName = path.basename(absolutePath);
 		let durablePath = absolutePath;
 		if (input.type === 'voice') {
+			const alreadyValid = await isValidWhatsAppVoiceOggFile(absolutePath).catch(() => false);
+			if (alreadyValid) {
+				sendPath = absolutePath;
+				durablePath = absolutePath;
+				sendFileName = path.basename(absolutePath);
+				mimeGuess = WHATSAPP_VOICE_MIME;
+			} else {
 			try {
 				const converted = await ensureWhatsAppVoiceOgg(absolutePath, {
 					mimeType: mimeGuess,
 					fileName: sendFileName,
 				});
-				const oggPath = `${absolutePath.replace(/\.[^.]+$/, '')}.ogg`;
-				await fs.copyFile(converted.filePath, oggPath);
-				await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+				const committed = await commitConvertedVoiceOgg(converted.filePath, absolutePath);
 				await converted.cleanup?.();
-				sendPath = oggPath;
-				durablePath = oggPath;
-				sendFileName = path.basename(oggPath);
+				sendPath = committed.sendPath;
+				durablePath = committed.sendPath;
+				sendFileName = committed.fileName;
 				mimeGuess = converted.mimeType;
 			} catch (error) {
 				const detail =
@@ -5632,6 +5639,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				throw new BadRequestException(
 					`Could not prepare voice note for WhatsApp (${detail}). Ensure FFmpeg is installed on the server.`,
 				);
+			}
 			}
 		}
 		let result: unknown;
