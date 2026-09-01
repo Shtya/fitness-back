@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { User } from '../../../entities/global.entity';
 import { AiService } from '../../ai/ai.service';
 import { AiFreeService } from '../../ai-free/ai-free.service';
@@ -64,6 +64,8 @@ const FREE: AiFreeProviderName[] = ['llm7-free', 'pollinations-free', 'browser-c
 
 @Injectable()
 export class EmailMemoAiService {
+	private readonly logger = new Logger(EmailMemoAiService.name);
+
 	constructor(
 		private readonly aiFree: AiFreeService,
 		@Optional() private readonly ai?: AiService,
@@ -139,32 +141,45 @@ ${body}`;
 		let reply = '';
 		let provider: string = preferred;
 		let actualModel = model || preferred;
-		if (paidChoice && this.ai) {
-			const generated = await this.ai.generateText({
-				prompt: prompt.slice(0, 16000),
-				system: system.slice(0, 8000),
-				model: paidChoice.modelKey,
-				feature: 'email-memo',
-				user: { id: input.userId },
-			});
-			reply = generated.text;
-			provider = paidChoice.provider;
-			actualModel = generated.model || paidChoice.modelKey;
-		} else {
-			const result = await this.aiFree.chat({ id: input.userId } as User, {
-				messages: [
-					{ role: 'system', content: system.slice(0, 8000) },
-					{ role: 'user', content: prompt.slice(0, 16000) },
-				],
-				provider: preferred,
-				model,
-				feature: 'email-memo',
-				allowFallback: true,
-				useProjectKnowledge: false,
-			});
-			reply = result.reply;
-			provider = result.provider || preferred;
-			actualModel = result.actualModel || preferred;
+		try {
+			if (paidChoice && this.ai) {
+				const generated = await this.ai.generateText({
+					prompt: prompt.slice(0, 16000),
+					system: system.slice(0, 8000),
+					model: paidChoice.modelKey,
+					feature: 'email-memo',
+					user: { id: input.userId },
+				});
+				reply = generated.text;
+				provider = paidChoice.provider;
+				actualModel = generated.model || paidChoice.modelKey;
+			} else {
+				const result = await this.aiFree.chat({ id: input.userId } as User, {
+					messages: [
+						{ role: 'system', content: system.slice(0, 8000) },
+						{ role: 'user', content: prompt.slice(0, 16000) },
+					],
+					provider: preferred,
+					model,
+					feature: 'email-memo',
+					allowFallback: true,
+					useProjectKnowledge: false,
+					httpTimeoutMs: 45_000,
+					excludeProviders: ['browser-chatgpt'],
+				} as any);
+				reply = result.reply;
+				provider = result.provider || preferred;
+				actualModel = result.actualModel || preferred;
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Email memo AI failed, using grounded fallback: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			provider = 'fallback';
+			actualModel = 'fallback';
+			reply = '';
 		}
 
 		const parsed = safeJson(reply);

@@ -25,13 +25,15 @@ import {
 	VOICE_CHANGER_CATALOG,
 	FISH_AUDIO_API,
 	FISH_AUDIO_TTS_MODEL,
-	MINIMAX_API,
-	MINIMAX_TTS_MODEL,
+	MINIMAX_CLONE_PREVIEW_TEXT,
 	ffmpegPitchFilter,
 	findVoiceChangerProvider,
 	HUGGINGFACE_INFERENCE_URL,
 	isVoiceChangerProviderId,
+	minimaxApiPath,
 	minimaxVoiceIdFromName,
+	resolveMiniMaxGroupId,
+	resolveMiniMaxSpeechModel,
 	resolveFfmpegPreset,
 	resolveGroqSpeech,
 	normalizeGroqVoice,
@@ -510,6 +512,8 @@ export class WhatsAppVoiceChangerService {
 	) {
 		const samplePath = await this.pickOrConcatCloneSamples(prepared);
 		const temps = samplePath !== prepared[0]?.path ? [samplePath] : [];
+		const speechModel = resolveMiniMaxSpeechModel();
+		const groupId = resolveMiniMaxGroupId();
 		try {
 			const upload = new FormData();
 			upload.append('purpose', 'voice_clone');
@@ -517,7 +521,7 @@ export class WhatsAppVoiceChangerService {
 				filename: 'clone.wav',
 				contentType: 'audio/wav',
 			});
-			const uploaded = await axios.post(`${MINIMAX_API}/v1/files/upload`, upload, {
+			const uploaded = await axios.post(minimaxApiPath('/v1/files/upload', groupId), upload, {
 				headers: { ...upload.getHeaders(), Authorization: `Bearer ${apiKey}` },
 				timeout: 90_000,
 				maxBodyLength: Infinity,
@@ -528,16 +532,17 @@ export class WhatsAppVoiceChangerService {
 			if (fileId == null) throw new BadGatewayException('MiniMax did not return a file id');
 			const voiceId = minimaxVoiceIdFromName(name);
 			const cloned = await axios.post(
-				`${MINIMAX_API}/v1/voice_clone`,
+				minimaxApiPath('/v1/voice_clone', groupId),
 				{
 					file_id: fileId,
 					voice_id: voiceId,
-					model: MINIMAX_TTS_MODEL,
+					model: speechModel,
+					text: MINIMAX_CLONE_PREVIEW_TEXT,
 					need_noise_reduction: true,
 					need_volumn_normalization: true,
 				},
 				{
-					headers: { Authorization: `Bearer ${apiKey}` },
+					headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
 					timeout: 120_000,
 				},
 			);
@@ -632,11 +637,13 @@ export class WhatsAppVoiceChangerService {
 			throw new BadRequestException('Clone a MiniMax voice first, then convert a note.');
 		}
 		const text = await this.transcribeSpeech(userId, file);
+		const speechModel = resolveMiniMaxSpeechModel();
+		const groupId = resolveMiniMaxGroupId();
 		try {
 			const response = await axios.post(
-				`${MINIMAX_API}/v1/t2a_v2`,
+				minimaxApiPath('/v1/t2a_v2', groupId),
 				{
-					model: MINIMAX_TTS_MODEL,
+					model: speechModel,
 					text: text.slice(0, 4000),
 					stream: false,
 					language_boost: 'auto',
@@ -645,7 +652,7 @@ export class WhatsAppVoiceChangerService {
 					audio_setting: { sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 1 },
 				},
 				{
-					headers: { Authorization: `Bearer ${apiKey}` },
+					headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
 					timeout: 90_000,
 				},
 			);
@@ -717,11 +724,12 @@ export class WhatsAppVoiceChangerService {
 	}
 
 	private async listMiniMaxVoices(apiKey: string) {
+		const groupId = resolveMiniMaxGroupId();
 		const response = await axios.post(
-			`${MINIMAX_API}/v1/get_voice`,
+			minimaxApiPath('/v1/get_voice', groupId),
 			{ voice_type: 'voice_cloning' },
 			{
-				headers: { Authorization: `Bearer ${apiKey}` },
+				headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
 				timeout: 20_000,
 			},
 		);
@@ -745,6 +753,11 @@ export class WhatsAppVoiceChangerService {
 		const code = Number((payload as any)?.base_resp?.status_code);
 		if (Number.isFinite(code) && code !== 0) {
 			const message = String((payload as any)?.base_resp?.status_msg || fallback).trim();
+			if (code === 1008) {
+				throw new BadRequestException(
+					'MiniMax account has insufficient balance for voice cloning with the current speech model. Add credits at platform.minimax.io, or use a Coding Plan key (speech-2.8-hd). If your key is legacy, set MINIMAX_GROUP_ID on the server.',
+				);
+			}
 			throw new BadGatewayException(`${fallback}: ${message.slice(0, 220)}`);
 		}
 	}

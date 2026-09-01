@@ -1,4 +1,4 @@
-import { atempoChain, ffmpegPitchFilter, resolveFfmpegPreset, resolveGroqSpeech } from './whatsapp-voice-changer';
+import { atempoChain, ffmpegPitchFilter, minimaxApiPath, resolveFfmpegPreset, resolveGroqSpeech } from './whatsapp-voice-changer';
 
 describe('resolveGroqSpeech', () => {
 	it('keeps Arabic text on an Arabic Orpheus voice and model', () => {
@@ -57,5 +57,26 @@ describe('resolveFfmpegPreset', () => {
 		expect(resolveFfmpegPreset('deeper').pitchSemitones).toBe(-6);
 		expect(resolveFfmpegPreset('custom', 3).pitchSemitones).toBe(3);
 		expect(resolveFfmpegPreset('custom', 30).pitchSemitones).toBe(12);
+	});
+});
+
+describe('minimaxApiPath', () => {
+	const previous = process.env.MINIMAX_GROUP_ID;
+
+	afterEach(() => {
+		if (previous == null) delete process.env.MINIMAX_GROUP_ID;
+		else process.env.MINIMAX_GROUP_ID = previous;
+	});
+
+	it('appends GroupId when configured', () => {
+		process.env.MINIMAX_GROUP_ID = '12345';
+		expect(minimaxApiPath('/v1/voice_clone')).toBe(
+			'https://api.minimax.io/v1/voice_clone?GroupId=12345',
+		);
+	});
+
+	it('leaves the path unchanged without GroupId', () => {
+		delete process.env.MINIMAX_GROUP_ID;
+		expect(minimaxApiPath('/v1/t2a_v2')).toBe('https://api.minimax.io/v1/t2a_v2');
 	});
 });

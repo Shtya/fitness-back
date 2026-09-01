@@ -123,9 +123,9 @@ export const VOICE_CHANGER_CATALOG: VoiceChangerProviderCatalog[] = [
 		label: 'MiniMax',
 		labelAr: 'MiniMax',
 		description:
-			'Clone from about 10 seconds of audio. Free plan includes clone slots and monthly credits. Playback transcribes then speaks; save Groq for Arabic notes.',
+			'Clone from about 10 seconds of audio. Uses speech-2.8-hd (Coding Plan compatible). Playback transcribes then speaks; save Groq for Arabic notes.',
 		descriptionAr:
-			'استنساخ من حوالي 10 ثواني. الخطة المجانية فيها خانات clone ورصيد شهري. التشغيل بيفرغ ثم ينطق؛ احفظ Groq للعربي.',
+			'استنساخ من حوالي 10 ثواني. يستخدم speech-2.8-hd (متوافق مع Coding Plan). التشغيل بيفرغ ثم ينطق؛ احفظ Groq للعربي.',
 		keyUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key',
 		keyHint:
 			'platform.minimax.io → API Keys. About 10 seconds of clean speech. A Groq key transcribes the WhatsApp note first.',
@@ -305,7 +305,28 @@ export function ffmpegPitchFilter(semitones: number, extraFilters: string[] = []
 export const FISH_AUDIO_API = 'https://api.fish.audio';
 export const FISH_AUDIO_TTS_MODEL = 's2.1-pro-free';
 export const MINIMAX_API = 'https://api.minimax.io';
-export const MINIMAX_TTS_MODEL = 'speech-2.6-hd';
+/** speech-2.6-hd returns 1008/2056 on Coding Plan keys; 2.8-hd is the current default. */
+export const MINIMAX_TTS_MODEL = 'speech-2.8-hd';
+export const MINIMAX_CLONE_PREVIEW_TEXT =
+	'This is a short voice preview to verify the cloned voice sounds natural and clear.';
+
+export function resolveMiniMaxSpeechModel() {
+	const configured = String(process.env.MINIMAX_TTS_MODEL || '').trim();
+	return configured || MINIMAX_TTS_MODEL;
+}
+
+export function resolveMiniMaxGroupId() {
+	return String(process.env.MINIMAX_GROUP_ID || '').trim();
+}
+
+export function minimaxApiPath(path: string, groupId?: string | null) {
+	const normalized = path.startsWith('/') ? path : `/${path}`;
+	const base = `${MINIMAX_API}${normalized}`;
+	const gid = String(groupId ?? resolveMiniMaxGroupId()).trim();
+	if (!gid) return base;
+	const separator = base.includes('?') ? '&' : '?';
+	return `${base}${separator}GroupId=${encodeURIComponent(gid)}`;
+}
 
 export function minimaxVoiceIdFromName(name: string) {
 	const slug = String(name || 'voice')

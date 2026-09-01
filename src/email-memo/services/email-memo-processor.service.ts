@@ -42,7 +42,7 @@ function matchList(values: string[] = [], haystack: string) {
 function normalizeDeliveryDestination(value?: string | null) {
 	const dest = String(value || 'in_site').trim().toLowerCase();
 	if (dest === 'in_site' || dest === 'both' || dest === 'whatsapp') return dest;
-	return 'whatsapp';
+	return 'in_site';
 }
 
 function wantsWhatsAppDelivery(settings: EmailMemoNotificationSettings, forceSend = false) {
@@ -825,8 +825,14 @@ export class EmailMemoProcessorService {
 		const settings = await this.settings.getOrCreate(userId);
 		const take = Math.min(Math.max(Number(opts.limit) || 100, 1), 150);
 		const ids = (opts.ids || []).map((id) => String(id || '').trim()).filter(Boolean).slice(0, 150);
+		const forceSend = ids.length > 0;
+
+		if (wantsInSiteDelivery(settings)) {
+			await this.inSiteInbox.ensurePinnedInbox(userId).catch(() => undefined);
+		}
 
 		this.emitSendProgress(userId, { phase: 'collect', current: 0, total: 0 });
+		try {
 		if (!ids.length) {
 			const connections = await this.gmail.listConnectedForUser(userId);
 			for (const connection of connections) {
@@ -855,14 +861,17 @@ export class EmailMemoProcessorService {
 				skipped += 1;
 				continue;
 			}
-			if (!row.receivedAt || row.receivedAt.getTime() < start.getTime()) {
+			if (!forceSend && (!row.receivedAt || row.receivedAt.getTime() < start.getTime())) {
 				skipped += 1;
 				continue;
 			}
+			if (forceSend && row.skipReason === 'old_email') {
+				row.skipReason = null;
+			}
 			if (
-				row.skipReason === 'old_email' ||
 				row.skipReason === 'excluded_sender' ||
-				row.skipReason === 'self_sent'
+				row.skipReason === 'self_sent' ||
+				(!forceSend && row.skipReason === 'old_email')
 			) {
 				skipped += 1;
 				continue;
@@ -881,6 +890,14 @@ export class EmailMemoProcessorService {
 		const ready: Array<{ row: EmailMemoGmailMessage; memo: EmailMemoAiMemo }> = [];
 		for (let i = 0; i < rows.length; i += 1) {
 			const row = rows[i];
+			this.emitSendProgress(userId, {
+				phase: 'memo',
+				current: i,
+				total,
+				id: row.id,
+				subject: row.subject,
+				status: row.status,
+			});
 			try {
 				const memo = await this.ensureMemo(row, settings);
 				this.emitSendProgress(userId, {
@@ -940,7 +957,7 @@ export class EmailMemoProcessorService {
 				continue;
 			}
 			try {
-				await this.deliver(latest, item.memo, settings);
+				await this.deliver(latest, item.memo, settings, { forceSend: true });
 				const fresh = await this.messages.findOne({ where: { id: latest.id } });
 				if (fresh?.status === EmailMemoMessageStatus.SENT) sent += 1;
 				else skipped += 1;
@@ -980,6 +997,20 @@ export class EmailMemoProcessorService {
 		const result = { sent, failed, skipped, processed: rows.length, total };
 		this.emitSendProgress(userId, { phase: 'done', ...result });
 		return result;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.logger.error(`Send now failed for ${userId}: ${message}`);
+			this.emitSendProgress(userId, {
+				phase: 'done',
+				sent: 0,
+				failed: 1,
+				skipped: 0,
+				processed: 0,
+				total: 0,
+				error: message,
+			});
+			throw error;
+		}
 	}
 
 	private emitSendProgress(userId: string, payload: Record<string, unknown>) {
