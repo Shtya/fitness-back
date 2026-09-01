@@ -702,11 +702,16 @@ export class TranscriptionService {
 
 	private extractEnhancedText(reply: unknown, fallback: string) {
 		const parsed = this.asObject(this.tryParseJson(reply));
-		const fromJson = String(parsed.enhancedText || '').trim();
+		const fromJson = String(
+			parsed.enhancedText || parsed.text || parsed.correctedText || parsed.result || '',
+		).trim();
 		if (fromJson) {
 			return {
 				enhancedText: fromJson,
-				changesSummary: this.asStringArray(parsed.changesSummary, 12),
+				changesSummary: this.asStringArray(
+					parsed.changesSummary || parsed.changes || parsed.summary,
+					12,
+				),
 			};
 		}
 		const raw = String(reply || '').trim();
@@ -762,48 +767,30 @@ ${before.slice(0, 60_000)}`;
 		let model: string | null = null;
 		let usedLocalFallback = false;
 
-		const enhanceProviders = ['llm7-free', 'pollinations-free'] as const;
-		const preferredProvider =
-			dto?.provider && enhanceProviders.includes(dto.provider as typeof enhanceProviders[number])
-				? dto.provider
-				: 'llm7-free';
-		const enhanceProviderOrder = [
-			preferredProvider,
-			...enhanceProviders.filter((name) => name !== preferredProvider),
-		];
-		const enhanceMessages = [
-			{ role: 'system', content: system },
-			{ role: 'user', content: userMessage },
+		const enhanceProviders = [
+			'llm7-free',
+			'pollinations-free',
+			'browser-chatgpt',
 		] as const;
+		const preferredProvider =
+			dto?.provider &&
+			enhanceProviders.includes(dto.provider as (typeof enhanceProviders)[number])
+				? dto.provider
+				: undefined;
 
 		try {
-			let ai: Awaited<ReturnType<AiFreeService['chat']>> | null = null;
-			let lastError: unknown;
-			for (const providerName of enhanceProviderOrder) {
-				try {
-					ai = await this.aiFree.chat(user, {
-						messages: [...enhanceMessages],
-						allowFallback: false,
-						useProjectKnowledge: false,
-						provider: providerName,
-						maxTokens: 4096,
-						httpTimeoutMs: 22_000,
-						excludeProviders: ['browser-chatgpt'],
-						feature: 'transcript-enhance',
-					} as any);
-					break;
-				} catch (error) {
-					lastError = error;
-					this.logger.warn(
-						`Transcription enhance provider ${providerName} failed for ${id}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
-			}
-			if (!ai) {
-				throw lastError || new Error('All enhance providers failed');
-			}
+			const ai = await this.aiFree.chat(user, {
+				messages: [
+					{ role: 'system', content: system },
+					{ role: 'user', content: userMessage },
+				],
+				allowFallback: true,
+				useProjectKnowledge: false,
+				...(preferredProvider ? { provider: preferredProvider } : {}),
+				feature: 'transcription.enhance',
+				maxTokens: 4096,
+				httpTimeoutMs: 75_000,
+			} as any);
 
 			const extracted = this.extractEnhancedText(ai?.reply, before);
 			const translated = this.looksTranslated(before, extracted.enhancedText);
@@ -819,29 +806,21 @@ ${before.slice(0, 60_000)}`;
 			model = ai?.actualModel || null;
 		} catch (error) {
 			enhancedText = this.localEnhanceTranscript(before);
-			usedLocalFallback = enhancedText !== before;
-			if (!usedLocalFallback) {
-				this.logger.warn(
-					`Transcription enhance AI failed for ${id}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-				throw new BadGatewayException(
-					locale === 'ar'
-						? 'تعذر تحسين النص عبر الذكاء الاصطناعي حالياً. جرّب مرة أخرى بعد قليل.'
-						: 'Free AI enhance is temporarily unavailable. Try again shortly.',
-				);
-			}
+			usedLocalFallback = true;
 			changesSummary = [
-				locale === 'ar'
-					? 'تعذر الوصول لمزوّد الذكاء الاصطناعي؛ تم تنظيف المسافات وعلامات الترقيم محلياً.'
-					: 'Free AI was unavailable; applied local spacing and punctuation cleanup.',
+				enhancedText !== before
+					? locale === 'ar'
+						? 'تعذر الوصول لمزوّد الذكاء الاصطناعي؛ تم تنظيف المسافات وعلامات الترقيم محلياً.'
+						: 'Free AI was unavailable; applied local spacing and punctuation cleanup.'
+					: locale === 'ar'
+						? 'تعذر الوصول لمزوّد الذكاء الاصطناعي حالياً. جرّب مرة أخرى بعد قليل.'
+						: 'Free AI enhance is temporarily unavailable. Try again shortly.',
 			];
 			provider = 'local-fallback';
 			this.logger.warn(
-				`Transcription enhance AI failed for ${id}; used local cleanup: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
+				`Transcription enhance AI failed for ${id}; ${
+					enhancedText !== before ? 'used local cleanup' : 'returned original text'
+				}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 
