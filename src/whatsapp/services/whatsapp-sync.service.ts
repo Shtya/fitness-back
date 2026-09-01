@@ -66,9 +66,13 @@ import {
 	resolveWhatsAppContactLabel,
 } from '../utils/whatsapp-contact-name';
 import {
+	contactSliceFromProviderRaw,
 	enrichContactMessageNormalized,
 	extractSharedContactFromRaw,
+	isContactMessageType,
 	looksLikeWhatsAppJid,
+	mergeContactIntoPersistableRaw,
+	needsContactHydration,
 } from '../utils/whatsapp-contact';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
@@ -357,9 +361,10 @@ function needsLocationHydration(message: WhatsAppMessage | null | undefined) {
 }
 
 function persistableMessageRaw(normalized: NormalizedWhatsAppMessage, currentRaw?: any) {
-	const location = normalized.location || extractWhatsAppLocation(normalized);
-	const base = safeProviderMetadata(normalized.raw) || currentRaw || null;
-	return mergeLocationIntoRaw(base, location);
+	const enriched = enrichContactMessageNormalized(normalized);
+	const location = enriched.location || extractWhatsAppLocation(enriched);
+	const base = safeProviderMetadata(enriched.raw) || currentRaw || null;
+	return mergeContactIntoPersistableRaw(mergeLocationIntoRaw(base, location), enriched);
 }
 
 function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -550,6 +555,7 @@ function safeProviderMetadata(raw: any) {
 		lng: raw.lng ?? raw.longitude ?? undefined,
 		loc: raw.loc || undefined,
 		comment: raw.comment || undefined,
+		...contactSliceFromProviderRaw(raw),
 	};
 }
 
@@ -2328,10 +2334,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const shouldWriteLocation =
 				Boolean(normalized.location || extractWhatsAppLocation(normalized)) &&
 				needsLocationHydration(existing);
-			if (nextRaw && (nextScore > existingScore || shouldWriteLocation)) {
-				await this.messageRepo.update(existing.id, { raw: nextRaw } as any);
+			const existingShared = extractSharedContactFromRaw((existing as any).raw, existing.text);
+			const nextShared = extractSharedContactFromRaw(nextRaw, normalized.text);
+			const shouldWriteContact =
+				Boolean(nextShared?.phones?.length) &&
+				!existingShared?.phones?.length;
+			if (nextRaw && (nextScore > existingScore || shouldWriteLocation || shouldWriteContact)) {
+				const updates: Record<string, unknown> = { raw: nextRaw };
+				if (shouldWriteContact || isContactMessageType(normalized.type)) {
+					updates.type = 'contact';
+					const text = String(existing.text || '').trim();
+					if (nextShared?.displayName && (!text || looksLikeWhatsAppJid(text))) {
+						updates.text = nextShared.displayName;
+					}
+				}
+				await this.messageRepo.update(existing.id, updates as any);
 				(existing as any).raw = nextRaw;
-				await this.attachmentRepo
+				if (updates.type) existing.type = 'contact';
+				if (typeof updates.text === 'string') existing.text = updates.text;
+				if (nextScore > existingScore) {
+					await this.attachmentRepo
 					.createQueryBuilder()
 					.update()
 					.set({ downloadStatus: 'pending', storagePath: null })
@@ -2342,6 +2364,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					)
 					.execute()
 					.catch(() => undefined);
+				}
 			}
 			// Prefer CRM-declared media type (image/voice) over a generic document upsert.
 			if (normalized.attachments?.length && existing.attachments?.length) {
@@ -3855,6 +3878,72 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	private async hydrateContactsFromProvider(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+		options: { fetchLive?: boolean } = {},
+	) {
+		const missing = (messages || []).filter(message => needsContactHydration(message));
+		if (!missing.length) return;
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (!provider) return;
+		const conversationChatId = String(conversation.providerChatId || '').trim();
+		for (const message of missing) {
+			try {
+				let live =
+					typeof provider.findMessage === 'function'
+						? provider.findMessage(message.providerMessageId)
+						: null;
+				let enriched = live ? enrichContactMessageNormalized(live) : null;
+				let shared = enriched
+					? extractSharedContactFromRaw(enriched.raw, enriched.text)
+					: null;
+				if (
+					!shared?.phones?.length &&
+					options.fetchLive &&
+					typeof provider.fetchMessage === 'function'
+				) {
+					const chatId =
+						String(
+							(message as any)?.raw?.from ||
+								(message as any)?.raw?.key?.remoteJid ||
+								'',
+						).trim() || conversationChatId;
+					if (chatId && message.providerMessageId) {
+						live = await provider.fetchMessage(chatId, message.providerMessageId);
+						enriched = live ? enrichContactMessageNormalized(live) : null;
+						shared = enriched
+							? extractSharedContactFromRaw(enriched.raw, enriched.text)
+							: null;
+					}
+				}
+				if (!shared?.phones?.length) continue;
+				const nextRaw = mergeContactIntoPersistableRaw(
+					(message as any).raw,
+					enriched || live || {},
+				);
+				const updates: Record<string, unknown> = {
+					raw: nextRaw,
+					type: 'contact',
+				};
+				const text = String(message.text || '').trim();
+				if (!text || looksLikeWhatsAppJid(text)) {
+					updates.text = shared.displayName;
+				}
+				await this.messageRepo.update(message.id, updates as any).catch(() => undefined);
+				(message as any).raw = nextRaw;
+				message.type = 'contact';
+				if (typeof updates.text === 'string') message.text = updates.text;
+			} catch (error) {
+				this.logger.warn(
+					`Could not hydrate WhatsApp contact ${message.providerMessageId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
 	private attachMessageLocations(messages: WhatsAppMessage[]) {
 		for (const message of messages || []) {
 			const location = extractWhatsAppLocation({
@@ -4204,6 +4293,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	) {
 		this.attachMediaPreviews(messages);
 		await this.hydrateLocationsFromProvider(conversation, messages);
+		await this.hydrateContactsFromProvider(conversation, messages, { fetchLive: true });
 		this.attachMessageLocations(messages);
 		this.attachSharedContacts(messages);
 		await this.decorateGroupMessages(conversation, messages);
@@ -5152,9 +5242,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			};
 		}
 		// If DB still empty after persist attempts, serve linked-device payload directly.
+		const liveItems = this.mapLiveMessagesForApi(conversationId, messages) as any;
+		this.attachSharedContacts(liveItems);
 		return {
 			supported: true,
-			items: this.mapLiveMessagesForApi(conversationId, messages),
+			items: liveItems,
 			hasMore: nextHasMore,
 			source: 'linked_device',
 			syncReason: 'linked_device',

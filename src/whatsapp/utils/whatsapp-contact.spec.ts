@@ -3,6 +3,8 @@ import {
 	extractSharedContactFromRaw,
 	formatPhoneForDisplay,
 	isContactMessageType,
+	mergeContactIntoPersistableRaw,
+	needsContactHydration,
 	parseVcardPhones,
 } from './whatsapp-contact';
 
@@ -87,5 +89,41 @@ describe('whatsapp-contact', () => {
 				body: 'على تلاته كده تاكل ولا ايه',
 			}),
 		).toBeNull();
+	});
+
+	it('persists shared contact fields into stored raw', () => {
+		const persisted = mergeContactIntoPersistableRaw(null, {
+			type: 'vcard',
+			text: 'خالو 😍',
+			raw: {
+				vcardFormattedName: 'خالو 😍',
+				vcard: 'BEGIN:VCARD\nFN:خالو 😍\nTEL;type=CELL;waid=201090998111:+20 10 9099 8111\nEND:VCARD',
+			},
+		});
+		expect(persisted?.sharedContact?.displayName).toBe('خالو 😍');
+		expect(persisted?.vcard).toContain('BEGIN:VCARD');
+		expect(persisted?.sharedContact?.phones[0]?.formatted).toBe('+20 10 9099 8111');
+	});
+
+	it('flags contact messages that still need provider hydration', () => {
+		expect(
+			needsContactHydration({
+				type: 'contact',
+				text: 'خالو 😍',
+				raw: { body: 'خالو 😍' },
+			}),
+		).toBe(true);
+		expect(
+			needsContactHydration({
+				type: 'contact',
+				text: 'خالو 😍',
+				raw: {
+					sharedContact: {
+						displayName: 'خالو 😍',
+						phones: [{ formatted: '+20 10 9099 8111', phone: '+20 10 9099 8111' }],
+					},
+				},
+			}),
+		).toBe(false);
 	});
 });

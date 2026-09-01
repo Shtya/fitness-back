@@ -227,3 +227,49 @@ export function enrichContactMessageNormalized<T extends { type?: string; text?:
 		raw: nextRaw,
 	};
 }
+
+/** Provider fields required to re-render or re-parse a shared contact after DB persist. */
+export function contactSliceFromProviderRaw(raw: unknown): Record<string, unknown> {
+	if (!raw || typeof raw !== 'object') return {};
+	const node = raw as Record<string, any>;
+	const slice: Record<string, unknown> = {};
+	if (node.sharedContact) slice.sharedContact = node.sharedContact;
+	if (node.vcard) slice.vcard = node.vcard;
+	if (node.vcardFormattedName) slice.vcardFormattedName = node.vcardFormattedName;
+	if (Array.isArray(node.vcardList) && node.vcardList.length) slice.vcardList = node.vcardList;
+	if (node.contactMessage) slice.contactMessage = node.contactMessage;
+	if (node.contactsArrayMessage) slice.contactsArrayMessage = node.contactsArrayMessage;
+	if (node.contact) slice.contact = node.contact;
+	if (node.message?.contactMessage || node.message?.contactsArrayMessage) {
+		slice.message = {
+			...(typeof node.message === 'object' && node.message ? node.message : {}),
+			...(node.message?.contactMessage ? { contactMessage: node.message.contactMessage } : {}),
+			...(node.message?.contactsArrayMessage
+				? { contactsArrayMessage: node.message.contactsArrayMessage }
+				: {}),
+		};
+	}
+	return slice;
+}
+
+export function mergeContactIntoPersistableRaw(
+	base: Record<string, any> | null,
+	normalized: { type?: string; text?: string | null; raw?: any },
+): Record<string, any> | null {
+	const enriched = enrichContactMessageNormalized(normalized);
+	const shared = extractSharedContactFromRaw(enriched.raw, enriched.text);
+	const slice = contactSliceFromProviderRaw(enriched.raw);
+	if (shared) slice.sharedContact = shared;
+	if (!Object.keys(slice).length) return base;
+	return { ...(base || {}), ...slice };
+}
+
+export function needsContactHydration(
+	message: { type?: string; text?: string | null; raw?: unknown } | null | undefined,
+): boolean {
+	if (!message) return false;
+	if (extractSharedContactFromRaw(message.raw, message.text)?.phones?.length) return false;
+	const type = String(message.type || '').toLowerCase();
+	if (isContactMessageType(type) || type === 'contact') return true;
+	return Boolean(contactSliceFromProviderRaw(message.raw).vcard);
+}

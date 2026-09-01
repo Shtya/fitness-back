@@ -207,6 +207,31 @@ export function sanitizeBaileysWaMessage(raw: any) {
 			}
 			return baileysEnvelope(source, message);
 		}
+		const contactMessage = content.contactMessage
+			? {
+					displayName: content.contactMessage.displayName,
+					vcard: content.contactMessage.vcard,
+				}
+			: null;
+		const contactsArrayMessage = content.contactsArrayMessage
+			? {
+					displayName: content.contactsArrayMessage.displayName,
+					contacts: (content.contactsArrayMessage.contacts || []).map((entry: any) => ({
+						displayName: entry?.displayName,
+						vcard: entry?.vcard,
+					})),
+				}
+			: null;
+		if (contactMessage || contactsArrayMessage) {
+			const message: Record<string, unknown> = {
+				...(contactMessage ? { contactMessage } : {}),
+				...(contactsArrayMessage ? { contactsArrayMessage } : {}),
+			};
+			if (source.message.ephemeralMessage) {
+				return baileysEnvelope(source, { ephemeralMessage: { message } });
+			}
+			return baileysEnvelope(source, message);
+		}
 		const contextInfo = sanitizeContextInfo(contextInfoOf(content));
 		const message: Record<string, unknown> = {};
 		if (content.extendedTextMessage) {

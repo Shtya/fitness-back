@@ -546,9 +546,17 @@ export class WhatsAppConversationsController {
 			}),
 			limits: { fileSize: 64 * 1024 * 1024 },
 			fileFilter: (_req, file, callback) => {
-				const mime = String(file.mimetype || '')
+				const originalName = String(file.originalname || '').toLowerCase();
+				let mime = String(file.mimetype || '')
 					.toLowerCase()
 					.replace(/\s+/g, '');
+				if ((!mime || mime === 'application/octet-stream') && /\.(jpe?g|png|webp|gif)$/i.test(originalName)) {
+					if (/\.png$/i.test(originalName)) mime = 'image/png';
+					else if (/\.webp$/i.test(originalName)) mime = 'image/webp';
+					else if (/\.gif$/i.test(originalName)) mime = 'image/gif';
+					else mime = 'image/jpeg';
+					file.mimetype = mime;
+				}
 				const allowed =
 					allowedMediaTypes.has(file.mimetype) ||
 					allowedMediaTypes.has(mime) ||

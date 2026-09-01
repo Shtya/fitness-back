@@ -121,4 +121,24 @@ describe('sanitizeBaileysWaMessage', () => {
 		expect(Number.isNaN(sanitized?.message?.locationMessage?.degreesLongitude)).toBe(false);
 		expect(sanitized?.message?.locationMessage?.name).toBe('Cairo');
 	});
+
+	it('keeps contactMessage vcard payload for persistence', () => {
+		const sanitized = sanitizeBaileysWaMessage({
+			key: {
+				remoteJid: '201000000000@s.whatsapp.net',
+				id: 'contact-1',
+				fromMe: false,
+			},
+			messageTimestamp: 1710000004,
+			message: {
+				contactMessage: {
+					displayName: 'خالو 😍',
+					vcard: 'BEGIN:VCARD\nFN:خالو 😍\nTEL;type=CELL;waid=201090998111:+20 10 9099 8111\nEND:VCARD',
+				},
+			},
+		}) as any;
+
+		expect(sanitized?.message?.contactMessage?.displayName).toBe('خالو 😍');
+		expect(sanitized?.message?.contactMessage?.vcard).toContain('BEGIN:VCARD');
+	});
 });
