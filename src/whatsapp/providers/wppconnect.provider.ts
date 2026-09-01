@@ -106,6 +106,14 @@ function normalizeMessage(message: any): NormalizedWhatsAppMessage {
 	const type = String(message?.type || (message?.isMedia ? 'document' : 'text')).toLowerCase();
 	const mediaTypes = new Set(['image', 'video', 'audio', 'ptt', 'document', 'sticker']);
 	let normalizedType = type === 'chat' ? 'text' : type === 'ptt' ? 'audio' : type;
+	if (
+		!isContactMessageType(normalizedType) &&
+		(message?.vcard ||
+			message?.vcardFormattedName ||
+			(Array.isArray(message?.vcardList) && message.vcardList.length))
+	) {
+		normalizedType = 'contact';
+	}
 	if (isContactMessageType(normalizedType)) normalizedType = 'contact';
 
 	const reliableTimestamp = whatsAppTimestampToDate(message?.timestamp ?? message?.t);
@@ -3242,11 +3250,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 									if (typeof status.loadStatusMsgs === 'function') {
 										await status.loadStatusMsgs();
 									} else if (typeof status.loadMore === 'function') {
-										await status.loadMore(50);
+										await status.loadMore(80);
 									}
 								})(),
 								new Promise((_, reject) =>
-									setTimeout(() => reject(new Error('status load timeout')), 2500),
+									setTimeout(() => reject(new Error('status load timeout')), 4500),
 								),
 							]);
 							messages = readMessages(status);

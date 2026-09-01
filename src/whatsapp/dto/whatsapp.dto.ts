@@ -76,6 +76,11 @@ export class UpdateWhatsAppPrivacySettingsDto {
 	readReceiptMode: 'on_open' | 'on_reply' | 'manual' | 'never';
 }
 
+export class UpdateWhatsAppNotificationPreferencesDto {
+	@IsBoolean()
+	notificationsEnabled: boolean;
+}
+
 export class SendWhatsAppMessageDto {
 	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document', 'sticker', 'contact'])
 	type: string;

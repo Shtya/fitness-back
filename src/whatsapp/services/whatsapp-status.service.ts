@@ -582,22 +582,43 @@ export class WhatsAppStatusService {
 			throw new BadRequestException('Status media download is not supported');
 		}
 		let data: any;
+		let lastDownloadError: any = null;
 		try {
 			data =
 				typeof provider.downloadStatus === 'function'
 					? await provider.downloadStatus(status.providerStatusId, status.senderWaId)
 					: await provider.downloadMedia(status.providerStatusId);
 		} catch (error: any) {
+			lastDownloadError = error;
 			const detail = String(error?.message || error || '');
-			// Do NOT delete the DB row here. Thumbnail prefetch and transient WhatsApp
-			// store misses ("Status message not found…") would wipe stories that still
-			// appear in the list, causing "WhatsApp status not found" on open.
-			// Expired/deleted stories are cleaned up by status refresh instead.
-			throw new BadRequestException(
-				detail && detail !== 'Object'
-					? detail
-					: 'Status media is unavailable from WhatsApp. Refresh stories and try again.',
-			);
+			const recoverable =
+				/session cache/i.test(detail) ||
+				/not found in whatsapp store/i.test(detail) ||
+				/unavailable from whatsapp/i.test(detail);
+			if (recoverable) {
+				// One refresh pass may hydrate the provider store before retrying download.
+				try {
+					await this.syncFromProvider(accountId);
+					data =
+						typeof provider.downloadStatus === 'function'
+							? await provider.downloadStatus(
+									status.providerStatusId,
+									status.senderWaId,
+								)
+							: await provider.downloadMedia(status.providerStatusId);
+					lastDownloadError = null;
+				} catch (retryError: any) {
+					lastDownloadError = retryError;
+				}
+			}
+			if (lastDownloadError) {
+				const retryDetail = String(lastDownloadError?.message || lastDownloadError || '');
+				throw new BadRequestException(
+					retryDetail && retryDetail !== 'Object'
+						? retryDetail
+						: 'Status media is unavailable from WhatsApp. Refresh stories and try again.',
+				);
+			}
 		}
 		let buffer: Buffer;
 		try {

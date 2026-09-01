@@ -978,6 +978,108 @@ export class BaileysProvider implements WhatsAppProvider {
 		return null;
 	}
 
+	private extractStatusMessageIds(providerStatusId: string): string[] {
+		const id = String(providerStatusId || '').trim();
+		if (!id) return [];
+		const ids = new Set<string>();
+		ids.add(id);
+		const statusPart = id.match(/_(3A[0-9A-Fa-f]+)(?:_|$)/i)?.[1];
+		if (statusPart) ids.add(statusPart);
+		const afterBroadcast = id.split('status@broadcast_')[1];
+		if (afterBroadcast) {
+			const first = afterBroadcast.split('_')[0];
+			if (first && /^3A[0-9A-Fa-f]+$/i.test(first)) ids.add(first);
+		}
+		const bare = id.split('_').pop();
+		if (
+			bare &&
+			(/^3A[0-9A-Fa-f]+$/i.test(bare) || /^[0-9A-Fa-f]{16,}$/i.test(bare))
+		) {
+			ids.add(bare);
+		}
+		return [...ids];
+	}
+
+	private parseStatusProviderKey(providerStatusId: string, senderWaId?: string | null) {
+		const id = String(providerStatusId || '').trim();
+		const fromMe = id.startsWith('true_');
+		let participant = jidOf(senderWaId) || '';
+		if (!participant) {
+			const tail = id.match(/status@broadcast_(?:[^_]+_)?(.+)$/i)?.[1];
+			if (tail && tail.includes('@')) {
+				participant = jidOf(tail.includes('_') ? tail.split('_').pop() : tail) || '';
+			}
+		}
+		const messageIds = this.extractStatusMessageIds(id);
+		return { fromMe, participant, messageIds };
+	}
+
+	private async hydrateStatusRaw(
+		providerStatusId: string,
+		senderWaId?: string | null,
+	): Promise<any | null> {
+		let raw = this.resolveStatusRaw(providerStatusId, senderWaId);
+		if (raw?.message) return raw;
+
+		const { fromMe, participant, messageIds } = this.parseStatusProviderKey(
+			providerStatusId,
+			senderWaId,
+		);
+		const sock = this.socket;
+		if (sock && this.state === 'connected' && typeof sock.loadMessage === 'function') {
+			for (const messageId of messageIds) {
+				if (!messageId || messageId.includes('@')) continue;
+				try {
+					const loaded = await sock.loadMessage('status@broadcast', messageId);
+					if (loaded?.message) {
+						this.rememberStatus(loaded);
+						raw =
+							this.resolveStatusRaw(providerStatusId, senderWaId) ||
+							this.statusRawById.get(this.statusSerializedId(loaded)) ||
+							loaded;
+						if (raw?.message) return raw;
+					}
+				} catch {
+					/* try next id shape */
+				}
+			}
+		}
+
+		for (const messageId of messageIds) {
+			const cached = this.statusRawById.get(messageId);
+			if (!cached?.message) continue;
+			if (participant) {
+				const cachedParticipant = jidOf(cached?.key?.participant);
+				if (cachedParticipant && cachedParticipant !== participant) continue;
+			}
+			return cached;
+		}
+
+		if (sock?.requestPlaceholderResend && messageIds.length) {
+			for (const messageId of messageIds) {
+				if (!messageId || messageId.includes('@')) continue;
+				try {
+					await sock.requestPlaceholderResend({
+						remoteJid: 'status@broadcast',
+						id: messageId,
+						fromMe,
+						participant: participant || undefined,
+					});
+					await waitMs(2500);
+					raw =
+						this.resolveStatusRaw(providerStatusId, senderWaId) ||
+						this.statusRawById.get(messageId) ||
+						null;
+					if (raw?.message) return raw;
+				} catch {
+					/* try next id */
+				}
+			}
+		}
+
+		return null;
+	}
+
 	/** Ensure every chat that has messages is visible in getChats. */
 	private ensureChatsFromMessages() {
 		for (const chatId of this.messagesByChat.keys()) {
@@ -2460,7 +2562,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {
-		const raw = this.resolveStatusRaw(providerStatusId, senderWaId);
+		let raw = await this.hydrateStatusRaw(providerStatusId, senderWaId);
 		if (!raw?.message) {
 			throw new Error('Status media is not available in the current session cache');
 		}

@@ -21,6 +21,7 @@ import {
 	mergeWhatsAppPrivacySettings,
 	WhatsAppPrivacySettings,
 } from '../utils/whatsapp-privacy';
+import { WhatsAppNotificationPreferences } from '../utils/whatsapp-notification-preferences';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -104,6 +105,11 @@ export class WhatsAppAccountsService {
 						canManage: Boolean(access.canManage),
 						canAssign: Boolean(access.canAssign),
 						canTransfer: Boolean(access.canTransfer),
+						notificationsEnabled:
+							typeof (access as { notificationsEnabled?: boolean }).notificationsEnabled ===
+							'boolean'
+								? (access as { notificationsEnabled: boolean }).notificationsEnabled
+								: true,
 					},
 				});
 			} catch {
@@ -421,6 +427,31 @@ export class WhatsAppAccountsService {
 			metadata: settings,
 		});
 		return getWhatsAppPrivacySettings(account);
+	}
+
+	async getNotificationPreferences(user: User, accountId: string) {
+		return this.accessService.getNotificationPreferences(user, accountId);
+	}
+
+	async updateNotificationPreferences(
+		user: User,
+		accountId: string,
+		settings: WhatsAppNotificationPreferences,
+	) {
+		const saved = await this.accessService.updateNotificationPreferences(
+			user,
+			accountId,
+			settings,
+		);
+		await this.audit.write({
+			actorUserId: user.id,
+			accountId,
+			action: 'whatsapp.account.notification_preferences_updated',
+			targetType: 'WhatsAppAccountAccess',
+			targetId: accountId,
+			metadata: saved,
+		});
+		return saved;
 	}
 
 	async listEligibleStaff(user: User) {

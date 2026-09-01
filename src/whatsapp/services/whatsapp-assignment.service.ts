@@ -128,14 +128,20 @@ export class WhatsAppAssignmentService {
 		);
 		if (target) {
 			this.gateway.emitToUser(target.id, 'whatsapp:assignment', payload);
-			await this.notifications.create({
-				type: NotificationType.WHATSAPP_ASSIGNMENT,
-				title: 'WhatsApp conversation assigned',
-				message: `A WhatsApp conversation was assigned to ${target.name}`,
-				data: payload,
-				audience: NotificationAudience.USER,
-				userId: target.id,
-			});
+			const enabledRecipients = await this.access.filterNotificationEnabledRecipients(
+				conversation.accountId,
+				[target.id],
+			);
+			if (enabledRecipients.length) {
+				await this.notifications.create({
+					type: NotificationType.WHATSAPP_ASSIGNMENT,
+					title: 'WhatsApp conversation assigned',
+					message: `A WhatsApp conversation was assigned to ${target.name}`,
+					data: payload,
+					audience: NotificationAudience.USER,
+					userId: target.id,
+				});
+			}
 		}
 
 		await this.audit.write({

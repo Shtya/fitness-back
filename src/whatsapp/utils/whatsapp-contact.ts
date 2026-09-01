@@ -214,7 +214,6 @@ export function extractSharedContactFromRaw(
 export function enrichContactMessageNormalized<T extends { type?: string; text?: string | null; raw?: any }>(
 	message: T,
 ): T {
-	if (!isContactMessageType(message.type)) return message;
 	const shared = extractSharedContactFromRaw(message.raw, message.text);
 	if (!shared) return message;
 	const nextRaw =

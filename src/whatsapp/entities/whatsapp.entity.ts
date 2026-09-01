@@ -120,6 +120,9 @@ export class WhatsAppAccountAccess extends CoreEntity {
 
 	@Column({ name: 'can_transfer', type: 'boolean', default: false })
 	canTransfer: boolean;
+
+	@Column({ name: 'notifications_enabled', type: 'boolean', default: true })
+	notificationsEnabled: boolean;
 }
 
 @Entity('whatsapp_provider_sessions')

@@ -68,7 +68,6 @@ import {
 import {
 	enrichContactMessageNormalized,
 	extractSharedContactFromRaw,
-	isContactMessageType,
 	looksLikeWhatsAppJid,
 } from '../utils/whatsapp-contact';
 
@@ -2591,7 +2590,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				recipientIds,
 				conversation,
 			);
-			if (unmutedRecipientIds.length) {
+			const enabledRecipientIds = await this.access.filterNotificationEnabledRecipients(
+				accountId,
+				unmutedRecipientIds,
+			);
+			if (enabledRecipientIds.length) {
 				const title =
 					conversation.group?.subject ||
 					conversation.contact?.name ||
@@ -2608,7 +2611,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 							? 'Voice message'
 							: `New ${normalized.type || 'message'}`);
 				await Promise.all(
-					unmutedRecipientIds.map((userId) =>
+					enabledRecipientIds.map((userId) =>
 						this.notifications.create({
 							type: NotificationType.WHATSAPP_MESSAGE,
 							title,
@@ -3865,7 +3868,6 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	private attachSharedContacts(messages: WhatsAppMessage[]) {
 		for (const message of messages || []) {
-			if (!isContactMessageType(message.type)) continue;
 			const enriched = enrichContactMessageNormalized({
 				type: message.type,
 				text: message.text,
@@ -3874,7 +3876,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const shared = extractSharedContactFromRaw((enriched as any).raw, message.text);
 			if (!shared) continue;
 			(message as any).sharedContact = shared;
-			if ((message as any).raw && typeof (message as any).raw === 'object') {
+			if ((enriched as any).raw && typeof (enriched as any).raw === 'object') {
+				(message as any).raw = (enriched as any).raw;
+			} else if ((message as any).raw && typeof (message as any).raw === 'object') {
 				(message as any).raw = { ...(message as any).raw, sharedContact: shared };
 			}
 			message.type = 'contact';

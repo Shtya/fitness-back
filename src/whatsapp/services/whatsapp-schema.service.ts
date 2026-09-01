@@ -25,6 +25,7 @@ const OPTIONAL_TABLES = [
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_muted boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS muted_until timestamptz`,
+	`ALTER TABLE whatsapp_account_access ADD COLUMN IF NOT EXISTS notifications_enabled boolean NOT NULL DEFAULT true`,
 	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity
 		ON whatsapp_conversation_preferences (account_id, provider_chat_id)`,

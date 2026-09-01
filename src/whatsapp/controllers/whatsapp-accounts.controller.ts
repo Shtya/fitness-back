@@ -16,6 +16,7 @@ import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
 	CreateWhatsAppAccountDto,
 	UpdateWhatsAppAccountAccessDto,
+	UpdateWhatsAppNotificationPreferencesDto,
 	UpdateWhatsAppPrivacySettingsDto,
 } from '../dto/whatsapp.dto';
 import { WhatsAppAccountsService } from '../services/whatsapp-accounts.service';
@@ -90,5 +91,21 @@ export class WhatsAppAccountsController {
 		@Body() body: UpdateWhatsAppPrivacySettingsDto,
 	) {
 		return this.accounts.updatePrivacySettings(req.user, accountId, body);
+	}
+
+	@Get(':accountId/notification-preferences')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	getNotificationPreferences(@Req() req: any, @Param('accountId') accountId: string) {
+		return this.accounts.getNotificationPreferences(req.user, accountId);
+	}
+
+	@Put(':accountId/notification-preferences')
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
+	updateNotificationPreferences(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: UpdateWhatsAppNotificationPreferencesDto,
+	) {
+		return this.accounts.updateNotificationPreferences(req.user, accountId, body);
 	}
 }

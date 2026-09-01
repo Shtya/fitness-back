@@ -64,6 +64,22 @@ describe('whatsapp-contact', () => {
 		expect(formatPhoneForDisplay('+20 10 9099 8111')).toBe('+20 10 9099 8111');
 	});
 
+	it('enriches contact payload even when type is text', () => {
+		const enriched = enrichContactMessageNormalized({
+			type: 'text',
+			text: 'خالو 😍',
+			raw: {
+				type: 'chat',
+				body: 'خالو 😍',
+				vcardFormattedName: 'خالو 😍',
+				vcard: 'BEGIN:VCARD\nFN:خالو 😍\nTEL;type=CELL;waid=201090998111:+20 10 9099 8111\nEND:VCARD',
+			},
+		});
+		expect(enriched.type).toBe('contact');
+		expect(enriched.text).toBe('خالو 😍');
+		expect((enriched.raw as any).sharedContact.phones[0].formatted).toBe('+20 10 9099 8111');
+	});
+
 	it('ignores plain chat text without vcard payload', () => {
 		expect(
 			extractSharedContactFromRaw({

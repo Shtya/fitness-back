@@ -7,6 +7,11 @@ import {
 	WhatsAppAccountAccess,
 	WhatsAppConversation,
 } from '../entities/whatsapp.entity';
+import {
+	getWhatsAppNotificationPreferences,
+	userAllowsWhatsAppNotifications,
+	WhatsAppNotificationPreferences,
+} from '../utils/whatsapp-notification-preferences';
 
 export type WhatsAppAccountPermission =
 	| 'canView'
@@ -36,7 +41,7 @@ export class WhatsAppAccessService {
 		);
 	}
 
-	private fullAccess(account: WhatsAppAccount) {
+	private fullAccess(account: WhatsAppAccount, access?: WhatsAppAccountAccess | null) {
 		return {
 			account,
 			canView: true,
@@ -44,6 +49,10 @@ export class WhatsAppAccessService {
 			canManage: true,
 			canAssign: true,
 			canTransfer: true,
+			notificationsEnabled:
+				typeof access?.notificationsEnabled === 'boolean'
+					? access.notificationsEnabled
+					: true,
 		};
 	}
 
@@ -69,7 +78,10 @@ export class WhatsAppAccessService {
 		});
 		if (!account) throw new NotFoundException('WhatsApp account not found');
 		if (account.ownerAdminId === user.id) {
-			return this.fullAccess(account);
+			const ownerAccess = await this.accessRepo.findOne({
+				where: { accountId, userId: user.id },
+			});
+			return this.fullAccess(account, ownerAccess);
 		}
 		if (!this.isEligibleStaff(user)) {
 			throw new ForbiddenException('WhatsApp account access denied');
@@ -191,6 +203,56 @@ export class WhatsAppAccessService {
 					.filter(Boolean),
 			]),
 		];
+	}
+
+	async getNotificationPreferences(
+		user: User,
+		accountId: string,
+	): Promise<WhatsAppNotificationPreferences> {
+		const access = await this.getAccountAccess(user, accountId);
+		return getWhatsAppNotificationPreferences(access);
+	}
+
+	async updateNotificationPreferences(
+		user: User,
+		accountId: string,
+		settings: WhatsAppNotificationPreferences,
+	): Promise<WhatsAppNotificationPreferences> {
+		const access = await this.getAccountAccess(user, accountId);
+		let row = await this.accessRepo.findOne({
+			where: { accountId, userId: user.id },
+		});
+		if (!row) {
+			row = this.accessRepo.create({
+				accountId,
+				userId: user.id,
+				canView: Boolean(access.canView),
+				canUse: Boolean(access.canUse),
+				canManage: Boolean(access.canManage),
+				canAssign: Boolean(access.canAssign),
+				canTransfer: Boolean(access.canTransfer),
+				notificationsEnabled: settings.notificationsEnabled,
+			});
+		} else {
+			row.notificationsEnabled = settings.notificationsEnabled;
+		}
+		await this.accessRepo.save(row);
+		return getWhatsAppNotificationPreferences(row);
+	}
+
+	async filterNotificationEnabledRecipients(
+		accountId: string,
+		userIds: string[],
+	): Promise<string[]> {
+		const ids = [
+			...new Set((userIds || []).map((id) => String(id || '').trim()).filter(Boolean)),
+		];
+		if (!ids.length) return [];
+		const rows = await this.accessRepo.find({
+			where: { accountId, userId: In(ids) },
+		});
+		const byUser = new Map(rows.map((row) => [String(row.userId), row]));
+		return ids.filter((userId) => userAllowsWhatsAppNotifications(byUser.get(userId)));
 	}
 
 	async replaceAccountAccess(

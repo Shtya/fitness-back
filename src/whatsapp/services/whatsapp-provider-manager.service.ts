@@ -33,6 +33,7 @@ import {
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { WhatsAppSessionService } from './whatsapp-session.service';
+import { userAllowsWhatsAppNotifications } from '../utils/whatsapp-notification-preferences';
 
 @Injectable()
 export class WhatsAppProviderManagerService
@@ -476,8 +477,11 @@ export class WhatsAppProviderManagerService
 			const recipients = await this.accessRepo.find({
 				where: { accountId, canManage: true },
 			});
+			const enabledRecipients = recipients.filter((recipient) =>
+				userAllowsWhatsAppNotifications(recipient),
+			);
 			await Promise.allSettled(
-				recipients.map(recipient =>
+				enabledRecipients.map(recipient =>
 					this.notifications.create({
 						type: NotificationType.WHATSAPP_CONNECTION,
 						title: 'WhatsApp needs a new QR scan',
@@ -598,8 +602,11 @@ export class WhatsAppProviderManagerService
 					const recipients = await this.accessRepo.find({
 						where: { accountId, canManage: true },
 					});
+					const enabledRecipients = recipients.filter((recipient) =>
+						userAllowsWhatsAppNotifications(recipient),
+					);
 					await Promise.allSettled(
-						recipients.map(recipient =>
+						enabledRecipients.map(recipient =>
 							this.notifications.create({
 								type: NotificationType.WHATSAPP_CONNECTION,
 								title: 'WhatsApp connection changed',
