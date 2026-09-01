@@ -569,6 +569,45 @@ export class WhatsAppStatus extends CoreEntity {
 	mediaPath: string | null;
 }
 
+@Entity('whatsapp_status_history')
+@Unique('uq_whatsapp_status_history_account_provider', ['accountId', 'providerStatusId'])
+export class WhatsAppStatusHistory extends CoreEntity {
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@ManyToOne(() => WhatsAppAccount, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount;
+
+	@Column({ name: 'provider_status_id', type: 'varchar', length: 300 })
+	providerStatusId: string;
+
+	@Column({ name: 'sender_wa_id', type: 'varchar', length: 160, nullable: true })
+	senderWaId: string | null;
+
+	@Column({ type: 'varchar', length: 40 })
+	type: string;
+
+	@Column({ type: 'text', nullable: true })
+	caption: string | null;
+
+	@Column({ name: 'is_own', type: 'boolean', default: false })
+	isOwn: boolean;
+
+	@Column({ name: 'published_at', type: 'timestamptz' })
+	publishedAt: Date;
+
+	@Column({ name: 'expires_at', type: 'timestamptz', nullable: true })
+	expiresAt: Date | null;
+
+	@Column({ name: 'media_path', type: 'varchar', length: 1024, nullable: true })
+	mediaPath: string | null;
+
+	@Column({ name: 'archived_at', type: 'timestamptz' })
+	archivedAt: Date;
+}
+
 @Entity('whatsapp_connection_logs')
 export class WhatsAppConnectionLog extends CoreEntity {
 	@Index()

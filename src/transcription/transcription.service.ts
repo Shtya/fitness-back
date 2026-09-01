@@ -442,9 +442,58 @@ export class TranscriptionService {
 		}
 	}
 
+	private async firstAvailableCloudProvider(): Promise<CloudProvider | null> {
+		for (const provider of CLOUD_PROVIDERS) {
+			try {
+				const key = await this.resolveProviderApiKey(provider);
+				if (key) return provider;
+			} catch {
+				// Skip providers with broken stored keys.
+			}
+		}
+		return null;
+	}
+
+	private defaultTranscriptionProvider(): 'local' | CloudProvider {
+		const configured = this.config.get<string>('TRANSCRIPTION_DEFAULT_PROVIDER')?.trim().toLowerCase();
+		if (configured && ['local', ...CLOUD_PROVIDERS].includes(configured)) {
+			return configured as 'local' | CloudProvider;
+		}
+		return 'groq';
+	}
+
+	private isLocalTranscriptionUnavailable(error: unknown) {
+		const code = String((error as { code?: string })?.code || '');
+		if (['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT'].includes(code)) {
+			return true;
+		}
+		const message = this.serviceError(error, '');
+		return /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|connect ECONNREFUSED|Local transcription failed: connect/i.test(
+			message,
+		);
+	}
+
+	private async runTranscriptionProvider(
+		provider: 'local' | CloudProvider,
+		file: AudioUpload,
+		language: string,
+		customVocabulary?: string,
+	): Promise<WhisperResponse> {
+		switch (provider) {
+			case 'groq':
+				return this.transcribeGroq(file, language, customVocabulary);
+			case 'deepgram':
+				return this.transcribeDeepgram(file);
+			case 'assemblyai':
+				return this.transcribeAssemblyAI(file, language);
+			default:
+				return this.transcribeLocal(file, language, customVocabulary);
+		}
+	}
+
 	async transcribe(userId: string, file: AudioUpload, dto: CreateTranscriptionDto) {
 		const language = dto?.language || 'auto';
-		const provider = dto?.provider || 'local';
+		const provider = dto?.provider || this.defaultTranscriptionProvider();
 		const customVocabulary = dto?.customVocabulary?.trim() || undefined;
 		if (!['auto', 'ar', 'en'].includes(language)) {
 			await unlink(file.path).catch(() => {});
@@ -462,19 +511,32 @@ export class TranscriptionService {
 		}
 
 		let result: WhisperResponse;
+		let usedProvider = provider;
 		try {
-			switch (provider) {
-				case 'groq':
-					result = await this.transcribeGroq(file, language, customVocabulary);
-					break;
-				case 'deepgram':
-					result = await this.transcribeDeepgram(file);
-					break;
-				case 'assemblyai':
-					result = await this.transcribeAssemblyAI(file, language);
-					break;
-				default:
-					result = await this.transcribeLocal(file, language, customVocabulary);
+			try {
+				result = await this.runTranscriptionProvider(
+					provider as 'local' | CloudProvider,
+					file,
+					language,
+					customVocabulary,
+				);
+			} catch (error) {
+				if (provider === 'local' && this.isLocalTranscriptionUnavailable(error)) {
+					const fallback = await this.firstAvailableCloudProvider();
+					if (!fallback) throw error;
+					this.logger.warn(
+						`Local whisper unavailable at ${this.config.get<string>('TRANSCRIPTION_SERVICE_URL') || 'http://127.0.0.1:8000'}; falling back to ${fallback}`,
+					);
+					result = await this.runTranscriptionProvider(
+						fallback,
+						file,
+						language,
+						customVocabulary,
+					);
+					usedProvider = fallback;
+				} else {
+					throw error;
+				}
 			}
 		} finally {
 			await unlink(file.path).catch(() => {});
@@ -488,7 +550,7 @@ export class TranscriptionService {
 		const record = this.transcriptionRepo.create({
 			userId,
 			originalFileName: file.originalname,
-			provider,
+			provider: usedProvider,
 			text: result.text,
 			requestedLanguage: language,
 			detectedLanguage: result.language || null,

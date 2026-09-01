@@ -10,7 +10,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { In, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
-import { WhatsAppContact, WhatsAppStatus } from '../entities/whatsapp.entity';
+import { WhatsAppContact, WhatsAppStatus, WhatsAppStatusHistory } from '../entities/whatsapp.entity';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -35,41 +35,14 @@ function statusId(item: any) {
 	);
 }
 
-function statusIdentityKeys(value: unknown): string[] {
-	const text = String(value || '').trim();
-	if (!text) return [];
-	const keys = new Set<string>([text.toLowerCase()]);
-	const broadcastMatch = text.match(/status@broadcast_([^_]+)/i);
-	if (broadcastMatch?.[1]) keys.add(broadcastMatch[1].toLowerCase());
-	const hexMatch = text.match(/_([0-9A-Fa-f]{10,}|3A[0-9A-Fa-f]+)(?:_|$)/);
-	if (hexMatch?.[1]) keys.add(hexMatch[1].toLowerCase());
-	const parts = text.split('_').filter(Boolean);
-	const bare = parts.length ? parts[parts.length - 1] : text;
-	// Prefer the WhatsApp status message id segment when present.
-	const statusPart = parts.find(part => /^3A[0-9A-Fa-f]+$/i.test(part) || /^[0-9A-Fa-f]{16,}$/i.test(part));
-	if (statusPart) keys.add(statusPart.toLowerCase());
-	if (/^[0-9A-Fa-f]{10,}$/i.test(bare) || /^3A[0-9A-Fa-f]+$/i.test(bare)) {
-		keys.add(bare.toLowerCase());
-	}
-	if (/^\d+$/.test(text)) keys.add(text);
-	return [...keys];
-}
-
-function preferStatusId(current: string, candidate: string) {
-	const currentScore =
-		(current.includes('status@broadcast') ? 2 : 0) + (current.includes('@') ? 1 : 0) + current.length;
-	const candidateScore =
-		(candidate.includes('status@broadcast') ? 2 : 0) +
-		(candidate.includes('@') ? 1 : 0) +
-		candidate.length;
-	return candidateScore >= currentScore ? candidate : current;
-}
-
 function normalizeStatusType(value: unknown) {
 	const type = String(value || 'text').toLowerCase();
 	if (type === 'chat') return 'text';
 	return type || 'text';
 }
+
+type StatusRow = WhatsAppStatus | WhatsAppStatusHistory;
+type StatusRowSource = 'active' | 'history';
 
 @Injectable()
 
@@ -79,6 +52,8 @@ export class WhatsAppStatusService {
 	constructor(
 		@InjectRepository(WhatsAppStatus)
 		private readonly repo: Repository<WhatsAppStatus>,
+		@InjectRepository(WhatsAppStatusHistory)
+		private readonly historyRepo: Repository<WhatsAppStatusHistory>,
 		@InjectRepository(WhatsAppContact)
 		private readonly contactRepo: Repository<WhatsAppContact>,
 		private readonly access: WhatsAppAccessService,
@@ -162,14 +137,37 @@ export class WhatsAppStatusService {
 		}
 	}
 
+	private async archiveStatusRow(row: StatusRow) {
+		await this.historyRepo.upsert(
+			{
+				accountId: row.accountId,
+				providerStatusId: row.providerStatusId,
+				senderWaId: row.senderWaId,
+				type: row.type,
+				caption: row.caption,
+				isOwn: row.isOwn,
+				publishedAt: row.publishedAt,
+				expiresAt: row.expiresAt,
+				mediaPath: row.mediaPath,
+				archivedAt: new Date(),
+			},
+			['accountId', 'providerStatusId'],
+		);
+	}
+
 	private async pruneExpiredStatuses(accountId: string) {
-		await this.repo
-			.createQueryBuilder()
-			.delete()
-			.where('accountId = :accountId', { accountId })
-			.andWhere('expiresAt IS NOT NULL')
-			.andWhere('expiresAt <= :now', { now: new Date() })
-			.execute();
+		const expired = await this.repo
+			.createQueryBuilder('status')
+			.where('status.accountId = :accountId', { accountId })
+			.andWhere('status.expiresAt IS NOT NULL')
+			.andWhere('status.expiresAt <= :now', { now: new Date() })
+			.getMany();
+		for (const row of expired) {
+			await this.archiveStatusRow(row);
+		}
+		if (expired.length) {
+			await this.repo.delete(expired.map(row => row.id));
+		}
 	}
 
 	private async upsertProviderStatuses(
@@ -181,19 +179,15 @@ export class WhatsAppStatusService {
 		const existingActiveCount = existingRows.filter(
 			row => !row.expiresAt || row.expiresAt > new Date(),
 		).length;
-		const byIdentity = new Map<string, (typeof existingRows)[number]>();
-		for (const row of existingRows) {
-			for (const key of statusIdentityKeys(row.providerStatusId)) {
-				if (!byIdentity.has(key)) byIdentity.set(key, row);
-			}
-		}
+		const byProviderId = new Map(
+			existingRows.map(row => [row.providerStatusId, row] as const),
+		);
 
-		const refreshedIds: string[] = [];
-		const touchedIds = new Set<string>();
+		const refreshedProviderIds = new Set<string>();
 		for (const item of statuses || []) {
 			const id = statusId(item);
 			if (!id) continue;
-			refreshedIds.push(id);
+			refreshedProviderIds.add(id);
 			const senderWaId =
 				item?.author?._serialized ||
 				item?.from?._serialized ||
@@ -203,7 +197,6 @@ export class WhatsAppStatusService {
 				item?.contactName || item?.notifyName || item?.sender?.pushname || '',
 			).trim();
 			if (senderWaId && contactName && !isWeakWhatsAppContactName(contactName, senderWaId)) {
-				// Prefer any stronger name already collected in this refresh batch.
 				const previous = contactNames.get(senderWaId);
 				contactNames.set(
 					senderWaId,
@@ -232,104 +225,57 @@ export class WhatsAppStatusService {
 			const publishedAt =
 				whatsAppTimestampToDate(item?.timestamp ?? item?.t) || new Date();
 			const providerType = normalizeStatusType(item?.type);
-			const identity = statusIdentityKeys(id);
-			let existing =
-				existingRows.find(row => row.providerStatusId === id) ||
-				identity.map(key => byIdentity.get(key)).find(Boolean) ||
-				null;
+			const payload = {
+				senderWaId,
+				type: providerType,
+				caption: item?.caption || item?.body || null,
+				isOwn: Boolean(item?.fromMe || item?.isOwn),
+				publishedAt,
+				expiresAt: new Date(publishedAt.getTime() + 24 * 60 * 60 * 1000),
+			};
 
+			const existing = byProviderId.get(id);
 			if (existing) {
-				if (touchedIds.has(existing.id)) {
-					// Same status already updated via another id shape in this batch.
-					continue;
-				}
-				touchedIds.add(existing.id);
-				const nextProviderId = preferStatusId(existing.providerStatusId, id);
-				existing.providerStatusId = nextProviderId;
-				existing.senderWaId = senderWaId;
-				existing.type = providerType;
-				existing.caption = item?.caption || item?.body || existing.caption;
-				existing.isOwn = Boolean(item?.fromMe || item?.isOwn);
-				existing.publishedAt = publishedAt;
-				existing.expiresAt = new Date(publishedAt.getTime() + 24 * 60 * 60 * 1000);
+				Object.assign(existing, payload);
 				await this.repo.save(existing);
-				for (const key of statusIdentityKeys(nextProviderId)) {
-					byIdentity.set(key, existing);
-				}
+				await this.archiveStatusRow(existing);
 			} else {
 				const created = await this.repo.save(
 					this.repo.create({
 						accountId,
 						providerStatusId: id,
-						senderWaId,
-						type: providerType,
-						caption: item?.caption || item?.body || null,
-						isOwn: Boolean(item?.fromMe || item?.isOwn),
-						publishedAt,
-						expiresAt: new Date(publishedAt.getTime() + 24 * 60 * 60 * 1000),
+						...payload,
 						mediaPath: null,
 					}),
 				);
-				touchedIds.add(created.id);
+				byProviderId.set(id, created);
 				existingRows.push(created);
-				for (const key of statusIdentityKeys(id)) {
-					byIdentity.set(key, created);
-				}
+				await this.archiveStatusRow(created);
 			}
 		}
-		// Drop statuses that WhatsApp no longer returns (deleted / expired),
-		// and collapse any leftover duplicate identity rows.
-		// Never wipe the DB on a partial provider snapshot — that hides stories
-		// when StatusV3Store has not finished hydrating yet.
+
 		const allowStalePrune =
-			refreshedIds.length > 0 &&
+			refreshedProviderIds.size > 0 &&
 			(existingActiveCount === 0 ||
-				refreshedIds.length >= Math.max(3, Math.ceil(existingActiveCount * 0.65)));
-		if (Array.isArray(statuses) && refreshedIds.length > 0 && allowStalePrune) {
-			const refreshedKeys = new Set<string>();
-			for (const id of refreshedIds) {
-				for (const key of statusIdentityKeys(id)) refreshedKeys.add(key);
+				refreshedProviderIds.size >= Math.max(3, Math.ceil(existingActiveCount * 0.65)));
+		if (allowStalePrune) {
+			const stale = existingRows.filter(
+				row =>
+					(!row.expiresAt || row.expiresAt > new Date()) &&
+					!refreshedProviderIds.has(row.providerStatusId),
+			);
+			for (const row of stale) {
+				await this.archiveStatusRow(row);
 			}
-			const keepByIdentity = new Map<string, string>();
-			const staleIds: string[] = [];
-			const latestRows = await this.repo.find({ where: { accountId } });
-			for (const row of latestRows) {
-				const rowKeys = statusIdentityKeys(row.providerStatusId);
-				const stillPresent = rowKeys.some(key => refreshedKeys.has(key));
-				if (!stillPresent) {
-					staleIds.push(row.id);
-					continue;
-				}
-				const primaryKey = rowKeys.find(key => refreshedKeys.has(key)) || rowKeys[0];
-				const keptId = keepByIdentity.get(primaryKey);
-				if (!keptId) {
-					keepByIdentity.set(primaryKey, row.id);
-					continue;
-				}
-				// Duplicate identity: keep the preferred provider id row.
-				const kept = latestRows.find(item => item.id === keptId);
-				if (!kept) {
-					keepByIdentity.set(primaryKey, row.id);
-					continue;
-				}
-				const preferRow =
-					preferStatusId(kept.providerStatusId, row.providerStatusId) ===
-					row.providerStatusId
-						? row
-						: kept;
-				const dropId = preferRow.id === row.id ? kept.id : row.id;
-				staleIds.push(dropId);
-				keepByIdentity.set(primaryKey, preferRow.id);
+			if (stale.length) {
+				await this.repo.delete(stale.map(row => row.id));
 			}
-			if (staleIds.length) {
-				await this.repo.delete([...new Set(staleIds)]);
-			}
-		} else if (refreshedIds.length > 0 && existingActiveCount > refreshedIds.length) {
+		} else if (refreshedProviderIds.size > 0 && existingActiveCount > refreshedProviderIds.size) {
 			this.logger.debug(
-				`Status sync ${accountId}: skipped stale prune (provider=${refreshedIds.length} dbActive=${existingActiveCount})`,
+				`Status sync ${accountId}: skipped stale prune (provider=${refreshedProviderIds.size} dbActive=${existingActiveCount})`,
 			);
 		}
-		return refreshedIds.length;
+		return refreshedProviderIds.size;
 	}
 
 	async list(user: User, accountId: string, refresh = false, debug = false) {
@@ -359,16 +305,20 @@ export class WhatsAppStatusService {
 			.take(500)
 			.getMany();
 		const dedupedItems: typeof items = [];
-		const seenIdentity = new Set<string>();
+		const seenProviderIds = new Set<string>();
+		const seenRowIds = new Set<string>();
 		for (const item of items) {
-			const keys = statusIdentityKeys(item.providerStatusId);
-			const primary = keys[0] || item.id;
-			if (keys.some(key => seenIdentity.has(key))) {
-				if (debug) excluded.push({ id: item.id, reason: 'duplicate_identity' });
+			const providerKey = String(item.providerStatusId || '').trim().toLowerCase();
+			if (providerKey && seenProviderIds.has(providerKey)) {
+				if (debug) excluded.push({ id: item.id, reason: 'duplicate_provider_id' });
 				continue;
 			}
-			for (const key of keys) seenIdentity.add(key);
-			seenIdentity.add(primary);
+			if (seenRowIds.has(item.id)) {
+				if (debug) excluded.push({ id: item.id, reason: 'duplicate_row_id' });
+				continue;
+			}
+			if (providerKey) seenProviderIds.add(providerKey);
+			seenRowIds.add(item.id);
 			dedupedItems.push(item);
 		}
 		const senderIds = [
@@ -452,6 +402,70 @@ export class WhatsAppStatusService {
 				: {}),
 		};
 	}
+
+	async listHistory(user: User, accountId: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canView');
+		const historyCount = await this.historyRepo.count({ where: { accountId } });
+		if (!historyCount) {
+			const activeRows = await this.repo.find({ where: { accountId }, take: 500 });
+			for (const row of activeRows) {
+				await this.archiveStatusRow(row);
+			}
+		}
+		const items = await this.historyRepo
+			.createQueryBuilder('status')
+			.where('status.accountId = :accountId', { accountId })
+			.orderBy('status.publishedAt', 'DESC')
+			.take(5000)
+			.getMany();
+		const contactNames = new Map<string, string>();
+		const senderIds = [
+			...new Set(items.map(item => item.senderWaId).filter(Boolean) as string[]),
+		];
+		const contactAvatars = new Map<string, string>();
+		if (senderIds.length) {
+			const contacts = await this.contactRepo.find({
+				where: { accountId, waId: In(senderIds) },
+			});
+			for (const contact of contacts) {
+				const phone = contact.phoneNumber;
+				if (contact.avatarUrl) {
+					contactAvatars.set(contact.waId, contact.avatarUrl);
+				}
+				if (
+					contact.name &&
+					!isWeakWhatsAppContactName(contact.name, contact.waId, phone)
+				) {
+					contactNames.set(contact.waId, contact.name);
+					continue;
+				}
+				if (!contactNames.has(contact.waId) && contact.name) {
+					contactNames.set(contact.waId, contact.name);
+				}
+			}
+		}
+		const mapped = items
+			.map(item => {
+				const fromMap = item.senderWaId ? contactNames.get(item.senderWaId) : null;
+				const phoneHint = item.senderWaId
+					? String(item.senderWaId).replace(/@.*$/, '').replace(/\D/g, '')
+					: '';
+				const contactName = item.isOwn
+					? fromMap || 'You'
+					: fromMap || (phoneHint.length >= 8 ? `+${phoneHint}` : null);
+				return {
+					...item,
+					contactName,
+					contactAvatarUrl: item.senderWaId
+						? contactAvatars.get(item.senderWaId) || null
+						: null,
+					isHistory: true,
+				};
+			})
+			.filter(item => item.isOwn || item.senderWaId);
+		return { items: mapped };
+	}
+
 	async publish(
 		user: User,
 		accountId: string,
@@ -523,29 +537,59 @@ export class WhatsAppStatusService {
 		await provider.viewStatus(statusProviderId, senderWaId);
 		return { ok: true };
 	}
-	private async findStatusRow(accountId: string, statusIdValue: string) {
+	private async findStatusRow(
+		accountId: string,
+		statusIdValue: string,
+		options?: { historyOnly?: boolean },
+	): Promise<{ row: StatusRow; source: StatusRowSource } | null> {
 		const id = String(statusIdValue || '').trim();
 		if (!id) return null;
-		const byPk = await this.repo.findOne({ where: { id, accountId } });
-		if (byPk) return byPk;
-		const byProvider = await this.repo.findOne({
-			where: { providerStatusId: id, accountId },
-		});
-		if (byProvider) return byProvider;
-		const keys = new Set(statusIdentityKeys(id));
-		if (!keys.size) return null;
-		const rows = await this.repo.find({ where: { accountId } });
-		return (
-			rows.find(row =>
-				statusIdentityKeys(row.providerStatusId).some(key => keys.has(key)),
-			) || null
-		);
+
+		const lookupHistory = async () => {
+			const byPk = await this.historyRepo.findOne({ where: { id, accountId } });
+			if (byPk) return { row: byPk, source: 'history' as const };
+			const byProvider = await this.historyRepo.findOne({
+				where: { providerStatusId: id, accountId },
+			});
+			if (byProvider) return { row: byProvider, source: 'history' as const };
+			return null;
+		};
+
+		const lookupActive = async () => {
+			const byPk = await this.repo.findOne({ where: { id, accountId } });
+			if (byPk) return { row: byPk, source: 'active' as const };
+			const byProvider = await this.repo.findOne({
+				where: { providerStatusId: id, accountId },
+			});
+			if (byProvider) return { row: byProvider, source: 'active' as const };
+			return null;
+		};
+
+		if (options?.historyOnly) return lookupHistory();
+		const active = await lookupActive();
+		if (active) return active;
+		return lookupHistory();
 	}
 
-	async resolveContent(user: User, accountId: string, statusIdValue: string) {
+	async resolveContent(
+		user: User,
+		accountId: string,
+		statusIdValue: string,
+		options?: { history?: boolean },
+	) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
-		const status = await this.findStatusRow(accountId, statusIdValue);
-		if (!status) throw new NotFoundException('WhatsApp status not found');
+		const found = await this.findStatusRow(accountId, statusIdValue, {
+			historyOnly: options?.history,
+		});
+		if (!found) throw new NotFoundException('WhatsApp status not found');
+		return this.resolveStatusMedia(found.row, found.source, accountId);
+	}
+
+	private async resolveStatusMedia(
+		status: StatusRow,
+		source: StatusRowSource,
+		accountId: string,
+	) {
 		if (normalizeStatusType(status.type) === 'text') {
 			throw new BadRequestException('Text status does not have media content');
 		}
@@ -571,11 +615,20 @@ export class WhatsAppStatusService {
 					}
 					await fs.unlink(cached).catch(() => undefined);
 					status.mediaPath = null;
-					await this.repo.save(status);
+					if (source === 'history') {
+						await this.historyRepo.save(status as WhatsAppStatusHistory);
+					} else {
+						await this.repo.save(status as WhatsAppStatus);
+					}
 				} catch {
 					// Download again when a stale DB path points to a removed file.
 				}
 			}
+		}
+		if (source === 'history') {
+			throw new BadRequestException(
+				'Archived story media is no longer available. It was not saved before expiry.',
+			);
 		}
 		const provider = this.provider(accountId);
 		if (!provider.capabilities.mediaDownload) {
@@ -596,7 +649,6 @@ export class WhatsAppStatusService {
 				/not found in whatsapp store/i.test(detail) ||
 				/unavailable from whatsapp/i.test(detail);
 			if (recoverable) {
-				// One refresh pass may hydrate the provider store before retrying download.
 				try {
 					await this.syncFromProvider(accountId);
 					data =
@@ -646,7 +698,6 @@ export class WhatsAppStatusService {
 				'Full status media is unavailable from WhatsApp (got thumbnail only). Refresh stories and try again.',
 			);
 		}
-		// Persist the real media type so the viewer and thumbnails use the correct decoder.
 		if (detectedMime.startsWith('video/') && !String(status.type).toLowerCase().includes('video')) {
 			status.type = 'video';
 		} else if (
@@ -670,7 +721,9 @@ export class WhatsAppStatusService {
 		const absolutePath = path.join(folder, `${status.id}${extension}`);
 		await fs.writeFile(absolutePath, buffer);
 		status.mediaPath = path.relative(process.cwd(), absolutePath).replace(/\\/g, '/');
-		await this.repo.save(status);
+		const active = status as WhatsAppStatus;
+		await this.repo.save(active);
+		await this.archiveStatusRow(active);
 		return { absolutePath, mimeType, fileName: path.basename(absolutePath) };
 	}
 	private detectMediaMime(buffer: Buffer): string | null {

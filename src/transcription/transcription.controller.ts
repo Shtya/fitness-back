@@ -41,7 +41,6 @@ export class TranscriptionController {
 	constructor(private readonly transcriptionService: TranscriptionService) {}
 
 	@Get('providers/:provider/credential')
-	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	credentialStatus(@Param('provider') provider: string) {
 		return this.transcriptionService.credentialStatus(provider);
 	}

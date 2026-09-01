@@ -46,6 +46,31 @@ export class WhatsAppStatusController {
 		return this.statuses.publish(req.user, accountId, body);
 	}
 
+	@Get('history')
+	listHistory(@Req() req: any, @Param('accountId') accountId: string) {
+		return this.statuses.listHistory(req.user, accountId);
+	}
+
+	@Get('history/:statusId/content')
+	async historyContent(
+		@Req() req: any,
+		@Res({ passthrough: true }) res: Response,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+	) {
+		const file = await this.statuses.resolveContent(req.user, accountId, statusId, {
+			history: true,
+		});
+		res.setHeader('X-Content-Type-Options', 'nosniff');
+		res.setHeader('Content-Type', file.mimeType);
+		res.setHeader('Cache-Control', 'private, max-age=3600');
+		res.setHeader(
+			'Content-Disposition',
+			`inline; filename="${encodeURIComponent(file.fileName)}"`,
+		);
+		return new StreamableFile(createReadStream(file.absolutePath));
+	}
+
 	@Post(':providerStatusId/view')
 	view(
 		@Req() req: any,

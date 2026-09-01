@@ -14,6 +14,7 @@ import {
 	WhatsAppConversation,
 	WhatsAppGroup,
 	WhatsAppStatus,
+	WhatsAppStatusHistory,
 } from '../entities/whatsapp.entity';
 import { forceReleaseWppBrowserProfile } from '../utils/whatsapp-browser-profile';
 import {
@@ -177,6 +178,7 @@ export class WhatsAppAccountsService {
 			await manager.delete(WhatsAppContact, { accountId });
 			await manager.delete(WhatsAppGroup, { accountId });
 			await manager.delete(WhatsAppStatus, { accountId });
+			await manager.delete(WhatsAppStatusHistory, { accountId });
 			await manager.delete(WhatsAppAccountAccess, { accountId });
 			await manager.delete(WhatsAppAccount, { id: accountId });
 		});
@@ -223,6 +225,7 @@ export class WhatsAppAccountsService {
 			await manager.delete(WhatsAppContact, { accountId });
 			await manager.delete(WhatsAppGroup, { accountId });
 			await manager.delete(WhatsAppStatus, { accountId });
+			await manager.delete(WhatsAppStatusHistory, { accountId });
 			await manager.delete(WhatsAppConnectionLog, { accountId });
 			await manager.update(WhatsAppAccount, accountId, {
 				lastError: null,
