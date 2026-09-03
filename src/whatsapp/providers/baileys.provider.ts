@@ -2696,7 +2696,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	async getStatuses() {
 		this.pruneExpiredStatuses();
 		const items = [...this.statusesById.values()];
-		this.logger.log(
+		this.logger.debug(
 			`Baileys status cache for ${this.accountId}: ${items.length} active item(s)`,
 		);
 		return items;

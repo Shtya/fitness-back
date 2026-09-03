@@ -128,6 +128,11 @@ export class WhatsAppStatusService {
 			this.logger.log(
 				`Status sync ${accountId}: provider=${list.length} upserted=${upserted}`,
 			);
+			// Persist media while Baileys still has the raw message in RAM.
+			// Metadata-only rows are unplayable after process restart / cache eviction.
+			if (list.length) {
+				await this.prefetchLiveStatusMedia(accountId, list);
+			}
 			return {
 				providerCount: list.length,
 				upserted,
@@ -140,6 +145,58 @@ export class WhatsAppStatusService {
 				}`,
 			);
 			return { providerCount: 0, upserted: 0, hint: 'whatsapp_stories_sync_failed' };
+		}
+	}
+
+	/**
+	 * Download + disk-cache media for statuses currently in the provider session.
+	 * Without this, CRM only stores metadata and playback dies with "session cache".
+	 */
+	private async prefetchLiveStatusMedia(accountId: string, statuses: any[]) {
+		for (const item of statuses || []) {
+			const providerStatusId = statusId(item);
+			if (!providerStatusId) continue;
+			const type = normalizeStatusType(item?.type);
+			if (type === 'text') continue;
+			const row = await this.repo.findOne({
+				where: { accountId, providerStatusId },
+			});
+			if (!row || row.mediaPath) continue;
+			try {
+				await this.resolveStatusMedia(row, 'active', accountId, {
+					allowSyncRetry: false,
+				});
+			} catch (error) {
+				this.logger.debug(
+					`Prefetch skipped for ${providerStatusId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
+	/** Live providerStatusIds currently held in the Baileys/WPP RAM cache. */
+	private async liveProviderStatusIds(accountId: string): Promise<{
+		ids: Set<string>;
+		fetched: boolean;
+		count: number;
+	}> {
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected' || !provider.capabilities.statusFetch) {
+			return { ids: new Set(), fetched: false, count: 0 };
+		}
+		try {
+			const statuses = await provider.getStatuses();
+			const list = Array.isArray(statuses) ? statuses : [];
+			const ids = new Set<string>();
+			for (const item of list) {
+				const id = statusId(item);
+				if (id) ids.add(id);
+			}
+			return { ids, fetched: true, count: list.length };
+		} catch {
+			return { ids: new Set(), fetched: false, count: 0 };
 		}
 	}
 
@@ -303,6 +360,12 @@ export class WhatsAppStatusService {
 			providerState = provider?.getState() || providerState;
 			sessionReady = providerState === 'connected';
 		}
+
+		const live = await this.liveProviderStatusIds(accountId);
+		if (live.fetched) {
+			providerCount = Math.max(providerCount, live.count);
+		}
+
 		const items = await this.repo
 			.createQueryBuilder('status')
 			.where('status.accountId = :accountId', { accountId })
@@ -363,18 +426,33 @@ export class WhatsAppStatusService {
 					? fromMap || 'You'
 					: fromMap ||
 						(phoneHint.length >= 8 ? `+${phoneHint}` : null);
+				const inSession = live.ids.has(String(item.providerStatusId || '').trim());
+				const isText = normalizeStatusType(item.type) === 'text';
+				const hasDiskMedia = Boolean(String(item.mediaPath || '').trim());
+				const mediaReady = isText || hasDiskMedia || inSession;
 				return {
 					...item,
 					contactName,
 					contactAvatarUrl: item.senderWaId
 						? contactAvatars.get(item.senderWaId) || null
 						: null,
+					mediaReady,
+					inSession,
 				};
 			})
 			.filter(item => {
-				if (item.isOwn) return true;
-				if (!item.senderWaId) {
+				if (item.isOwn && normalizeStatusType(item.type) === 'text') return true;
+				if (!item.senderWaId && !item.isOwn) {
 					if (debug) excluded.push({ id: item.id, reason: 'missing_sender' });
+					return false;
+				}
+				// Hide metadata-only media stories that are no longer in the live
+				// Baileys cache and were never downloaded to disk. Refresh cannot
+				// resurrect those — they only produce "session cache" errors.
+				if (!item.mediaReady) {
+					if (debug) {
+						excluded.push({ id: item.id, reason: 'no_media_and_not_in_session' });
+					}
 					return false;
 				}
 				return true;
@@ -402,6 +480,7 @@ export class WhatsAppStatusService {
 							dbCount: items.length,
 							dedupedCount: dedupedItems.length,
 							apiCount: mapped.length,
+							liveCount: live.count,
 							excluded,
 						},
 					}
@@ -600,10 +679,12 @@ export class WhatsAppStatusService {
 		status: StatusRow,
 		source: StatusRowSource,
 		accountId: string,
+		options?: { allowSyncRetry?: boolean },
 	) {
 		if (normalizeStatusType(status.type) === 'text') {
 			throw new BadRequestException('Text status does not have media content');
 		}
+		const allowSyncRetry = options?.allowSyncRetry !== false;
 		const root = path.resolve(
 			process.env.WHATSAPP_MEDIA_ROOT ||
 				path.join(process.cwd(), 'storage', 'whatsapp-media'),
@@ -673,9 +754,10 @@ export class WhatsAppStatusService {
 			lastDownloadError = error;
 			const detail = String(error?.message || error || '');
 			const recoverable =
-				/session cache/i.test(detail) ||
-				/not found in whatsapp store/i.test(detail) ||
-				/unavailable from whatsapp/i.test(detail);
+				allowSyncRetry &&
+				(/session cache/i.test(detail) ||
+					/not found in whatsapp store/i.test(detail) ||
+					/unavailable from whatsapp/i.test(detail));
 			if (recoverable) {
 				try {
 					await this.syncFromProvider(accountId);
@@ -693,6 +775,11 @@ export class WhatsAppStatusService {
 			}
 			if (lastDownloadError) {
 				const retryDetail = String(lastDownloadError?.message || lastDownloadError || '');
+				if (/session cache/i.test(retryDetail)) {
+					throw new BadRequestException(
+						'This story is no longer in the live WhatsApp session and was not saved to disk when it arrived. Open a newly posted story, or wait for the next status from this contact.',
+					);
+				}
 				throw new BadRequestException(
 					retryDetail && retryDetail !== 'Object'
 						? retryDetail
