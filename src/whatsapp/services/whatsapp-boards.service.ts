@@ -279,8 +279,12 @@ export class WhatsAppBoardsService {
 		if (body.isCompleted != null) card.isCompleted = body.isCompleted;
 		if (body.labels) card.labels = body.labels;
 		if (body.checklist) card.checklist = body.checklist;
-		if (body.comments) card.comments = body.comments;
-		if (body.attachments) card.attachments = body.attachments;
+		if (body.comments) {
+			card.comments = Array.isArray(body.comments) ? body.comments.slice(0, 200) : [];
+		}
+		if (body.attachments) {
+			card.attachments = Array.isArray(body.attachments) ? body.attachments.slice(0, 50) : [];
+		}
 		if (body.coverImageUrl !== undefined) card.coverImageUrl = body.coverImageUrl;
 		await this.cardRepo.save(card);
 		const links = await this.linkRepo.find({ where: { cardId: card.id } });

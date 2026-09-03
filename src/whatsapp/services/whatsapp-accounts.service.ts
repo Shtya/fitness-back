@@ -78,6 +78,15 @@ export class WhatsAppAccountsService {
 		for (const account of accounts) {
 			try {
 				const access = await this.accessService.getAccountAccess(user, account.id);
+				const liveState = String(
+					this.providers.getProviderState(account.id) || '',
+				).toLowerCase();
+				const dbStatus = String(account.status || '').toLowerCase();
+				// Prefer live provider when the process has an in-memory session.
+				const status =
+					liveState && liveState !== 'disconnected'
+						? liveState
+						: dbStatus || 'disconnected';
 				items.push({
 					id: account.id,
 					label: account.label,
@@ -90,8 +99,13 @@ export class WhatsAppAccountsService {
 								? 'qr'
 								: null,
 					providerName: account.providerName,
-					status: account.status,
-					syncPhase: resolveWhatsAppSyncPhase(account),
+					status,
+					dbStatus,
+					liveStatus: liveState || null,
+					syncPhase: resolveWhatsAppSyncPhase({
+						...account,
+						status: status as WhatsAppAccountStatus,
+					}),
 					initialHydratedAt: account.initialHydratedAt || null,
 					lastHistorySyncAt: account.lastHistorySyncAt || null,
 					lastConnectedAt: account.lastConnectedAt,

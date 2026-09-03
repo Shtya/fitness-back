@@ -230,7 +230,11 @@ export class WhatsAppConversationsController {
 		@Param('accountId') accountId: string,
 		@Query('limit') limit = '500',
 	) {
-		return this.sync.syncChats(req.user, accountId, Number(limit));
+		return this.sync.syncChats(
+			req.user,
+			accountId,
+			Math.min(Math.max(Number(limit) || 500, 1), 2000),
+		);
 	}
 
 	@Get('accounts/:accountId/groups')
@@ -269,7 +273,7 @@ export class WhatsAppConversationsController {
 		const onlyImportant = ['1', 'true', 'yes'].includes(
 			String(starredOnly || importantOnly || '').toLowerCase(),
 		);
-		return this.sync.listMessages(req.user, conversationId, before, Number(limit), {
+		return this.sync.listMessages(req.user, conversationId, before, Math.min(Math.max(Number(limit) || 100, 1), 500), {
 			allowLivePull: allowLivePull && !onlyImportant && !String(q || '').trim(),
 			starredOnly: onlyImportant,
 			search: String(q || '').trim() || undefined,
@@ -653,15 +657,20 @@ export class WhatsAppConversationsController {
 		@Body() body: DeleteWhatsAppPendingUploadDto,
 	) {
 		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
-		if (!body.fileId) throw new BadRequestException('Media fileId is required');
+		const fileId = String(body.fileId || '').trim().replace(/\\/g, '/');
+		if (!fileId) throw new BadRequestException('Media fileId is required');
+		if (fileId.includes('..') || path.isAbsolute(fileId) || fileId.startsWith('/')) {
+			throw new BadRequestException('Invalid media fileId');
+		}
 		const userRoot = path.resolve(
 			mediaRoot(),
 			'outgoing',
 			String(accountId),
 			String(req.user?.id || 'invalid'),
 		);
-		const filePath = path.resolve(mediaRoot(), body.fileId);
-		if (filePath !== userRoot && !filePath.startsWith(`${userRoot}${path.sep}`)) {
+		const filePath = path.resolve(mediaRoot(), fileId);
+		// Must be a file *inside* the user outgoing folder — never the folder itself.
+		if (!filePath.startsWith(`${userRoot}${path.sep}`)) {
 			throw new BadRequestException('Invalid media fileId');
 		}
 		await fs.promises.rm(filePath, { force: true });

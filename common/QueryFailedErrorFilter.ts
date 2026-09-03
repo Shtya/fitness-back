@@ -78,6 +78,22 @@ export class QueryFailedErrorFilter implements ExceptionFilter {
       return;
     }
 
+    if (code === '22P02') {
+      this.logger.warn(driverMessage);
+      response.status(HttpStatus.BAD_REQUEST).json(
+        this.withDetails(
+          {
+            statusCode: HttpStatus.BAD_REQUEST,
+            message:
+              'Invalid story id. Refresh stories and open the story again.',
+            error: 'Invalid Identifier',
+          },
+          driverMessage,
+        ),
+      );
+      return;
+    }
+
     this.logger.error(driverMessage);
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json(
       this.withDetails(

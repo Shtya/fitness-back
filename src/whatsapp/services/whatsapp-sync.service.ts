@@ -52,6 +52,7 @@ import {
 } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
+import { WhatsAppContactPresenceService } from './whatsapp-contact-presence.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { WhatsAppStatusService } from './whatsapp-status.service';
 import {
@@ -370,14 +371,19 @@ function persistableMessageRaw(normalized: NormalizedWhatsAppMessage, currentRaw
 	return mergeContactIntoPersistableRaw(mergeLocationIntoRaw(base, location), enriched);
 }
 
+function defaultPhoneCountryCode(): string {
+	const raw = String(process.env.WHATSAPP_DEFAULT_COUNTRY_CODE || '20').replace(/\D/g, '');
+	return raw || '20';
+}
+
 function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
 	const da = String(a || '').replace(/\D/g, '');
 	const db = String(b || '').replace(/\D/g, '');
 	if (!da || !db) return false;
 	if (da === db) return true;
-	// Egypt local 01xxxxxxxxx ↔ 201xxxxxxxxx
-	if (da.startsWith('0') && db === `20${da.slice(1)}`) return true;
-	if (db.startsWith('0') && da === `20${db.slice(1)}`) return true;
+	const cc = defaultPhoneCountryCode();
+	if (da.startsWith('0') && db === `${cc}${da.slice(1)}`) return true;
+	if (db.startsWith('0') && da === `${cc}${db.slice(1)}`) return true;
 	if (da.length >= 9 && db.length >= 9) {
 		const aTail = da.slice(-9);
 		const bTail = db.slice(-9);
@@ -637,6 +643,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		private readonly audit: WhatsAppAuditService,
 		private readonly notifications: NotificationService,
 		private readonly statusService: WhatsAppStatusService,
+		private readonly contactPresence: WhatsAppContactPresenceService,
 		@InjectRepository(WhatsAppConversationPreference)
 		private readonly preferenceRepo: Repository<WhatsAppConversationPreference>,
 	) {}
@@ -863,11 +870,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (!chatId || !isSupportedInboxChatId(chatId)) return;
 			const conversation = await this.conversationRepo.findOne({
 				where: { accountId, providerChatId: chatId },
+				relations: ['contact'],
 			});
 			if (!conversation) return;
 			const state = String(event.payload?.state || 'unavailable');
 			const typing = state === 'composing' || state === 'recording';
-			this.gateway.emitAccountEvent(accountId, 'presence', {
+			const presencePayload = {
 				conversationId: conversation.id,
 				chatId,
 				state,
@@ -875,18 +883,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				typing,
 				recording: state === 'recording',
 				t: event.payload?.t || Date.now(),
-			});
+				senderName: String(event.payload?.senderName || ''),
+				lastSeen: Number(event.payload?.lastSeen || 0),
+			};
+			this.contactPresence.applyPresenceEvent(accountId, conversation, presencePayload);
+			this.gateway.emitAccountEvent(accountId, 'presence', presencePayload);
 			this.gateway.emitConversationEvent(
 				conversation.id,
 				'presence',
-				{
-					conversationId: conversation.id,
-					state,
-					isOnline: Boolean(event.payload?.isOnline),
-					typing,
-					recording: state === 'recording',
-					t: event.payload?.t || Date.now(),
-				},
+				presencePayload,
 				accountId,
 			);
 			return;
@@ -894,7 +899,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'connection' && event.status === 'connected') {
 			this.startInboxReconciliation(accountId);
 			void this.scheduleBootstrap(accountId);
+			void this.contactPresence
+				.subscribeRecentDirectChats(accountId, 120, true)
+				.catch(() => undefined);
 		} else if (event.type === 'connection') {
+			this.contactPresence.clearAccount(accountId);
 			this.stopInboxReconciliation(accountId);
 			if (!this.bootstrapping.has(accountId)) {
 				/* ignore */
@@ -3329,7 +3338,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const lastMessageByConversationId = new Map(
 			lastMessages.map((message) => [message.conversationId, message]),
 		);
-		return {
+		const result = {
 			items: items.map((item) => {
 				const preference =
 					preferenceByConversationId.get(item.id) ||
@@ -3371,6 +3380,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			scope: canSeeAll ? 'all' : 'assigned',
 			archivedCount: await this.countArchivedConversations(user.id, accountId, inboxKind),
 		};
+		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
+			void this.contactPresence.subscribeRecentDirectChats(accountId).catch(() => undefined);
+		}
+		return result;
 	}
 
 	async setConversationFavorite(user: User, conversationId: string, isFavorite: boolean) {
@@ -4829,17 +4842,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async starMessage(user: User, conversationId: string, messageId: string, isStarred: boolean) {
 		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
-		try {
-			await provider.starMessage?.(message.providerMessageId, isStarred);
-		} catch (error) {
-			this.logger.warn(
-				`Provider starMessage failed for ${messageId}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+		// Important/star is always stored in our DB. Provider sync is best-effort only.
+		let syncedToWhatsApp = false;
+		if (typeof provider.starMessage === 'function') {
+			try {
+				const result = await provider.starMessage(message.providerMessageId, isStarred);
+				syncedToWhatsApp = result == null ? true : Boolean(result?.ok !== false);
+			} catch (error) {
+				this.logger.warn(
+					`Provider starMessage failed for ${messageId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
 		}
 		await this.messageRepo.update(message.id, { isStarred });
-		const result = { messageId, changes: { isStarred } };
+		const result = {
+			messageId,
+			changes: { isStarred },
+			localOnly: !syncedToWhatsApp,
+		};
 		this.gateway.emitConversationEvent(
 			conversationId,
 			'message_updated',
@@ -4851,10 +4873,27 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async pinMessage(user: User, conversationId: string, messageId: string, isPinned: boolean) {
 		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
-		await provider.pinMessage(message.providerMessageId, isPinned);
+		// Pin in our inbox is local. Provider pin is best-effort (Baileys currently unsupported).
+		let syncedToWhatsApp = false;
+		if (typeof provider.pinMessage === 'function') {
+			try {
+				const result = await provider.pinMessage(message.providerMessageId, isPinned);
+				syncedToWhatsApp = result == null ? true : Boolean(result?.ok !== false);
+			} catch (error) {
+				this.logger.warn(
+					`Provider pinMessage failed for ${messageId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
 		const pinnedUntil = isPinned ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) : null;
 		await this.messageRepo.update(message.id, { isPinned, pinnedUntil });
-		const result = { messageId, changes: { isPinned, pinnedUntil } };
+		const result = {
+			messageId,
+			changes: { isPinned, pinnedUntil },
+			localOnly: !syncedToWhatsApp,
+		};
 		this.gateway.emitConversationEvent(
 			conversationId,
 			'message_updated',
@@ -5856,6 +5895,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { accountId },
 			relations: ['participants'],
 			order: { subject: 'ASC' },
+			take: 500,
 		});
 		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
 		const conversations = groups.length
@@ -6261,33 +6301,67 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	/** HMAC media tokens already proved access at issue time — Range requests must
-	 *  not reload the user or re-run visibility on every byte slice. */
+	 *  not reload the user or re-run visibility on every byte slice. Stale
+	 *  "downloaded" rows with missing local files are repaired here so local/dev
+	 *  (DB restored without uploads/) can re-pull once WhatsApp is connected. */
 	async resolveDownloadedAttachment(attachmentId: string) {
 		const attachment = await this.attachmentRepo.findOne({
 			where: { id: attachmentId },
+			relations: ['message'],
 		});
-		if (!attachment?.storagePath || attachment.downloadStatus !== 'downloaded') {
+		if (!attachment) throw new NotFoundException('WhatsApp attachment not found');
+
+		const resolveExisting = async () => {
+			if (!attachment.storagePath || attachment.downloadStatus !== 'downloaded') {
+				return null;
+			}
+			const absolutePath = path.resolve(
+				process.cwd(),
+				String(attachment.storagePath).replace(/^\/+/, ''),
+			);
+			const privateRoot = path.resolve(
+				process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+			);
+			const legacyRoot = path.resolve(path.join(process.cwd(), 'uploads', 'whatsapp-media'));
+			if (
+				![privateRoot, legacyRoot].some(
+					(root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`),
+				)
+			) {
+				return null;
+			}
+			try {
+				await fs.access(absolutePath);
+				return {
+					absolutePath,
+					mimeType: attachment.mimeType || 'application/octet-stream',
+					fileName: attachment.fileName || path.basename(absolutePath),
+				};
+			} catch {
+				attachment.storagePath = null;
+				attachment.downloadStatus = 'pending';
+				await this.attachmentRepo.save(attachment);
+				return null;
+			}
+		};
+
+		const existing = await resolveExisting();
+		if (existing) return existing;
+
+		const downloaded = await this.downloadAttachmentInternal(attachment, {
+			reconnectWaitMs: 0,
+		});
+		if (!downloaded?.ok || !downloaded.path) {
 			throw new BadRequestException('WhatsApp media is not available');
 		}
 		const absolutePath = path.resolve(
 			process.cwd(),
-			String(attachment.storagePath).replace(/^\/+/, ''),
+			String(downloaded.path).replace(/^\/+/, ''),
 		);
-		const privateRoot = path.resolve(
-			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
-		);
-		const legacyRoot = path.resolve(path.join(process.cwd(), 'uploads', 'whatsapp-media'));
-		if (
-			![privateRoot, legacyRoot].some(
-				(root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`),
-			)
-		) {
-			throw new BadRequestException('Invalid WhatsApp media storage path');
-		}
 		await fs.access(absolutePath);
 		return {
 			absolutePath,
-			mimeType: attachment.mimeType || 'application/octet-stream',
+			mimeType: downloaded.mimeType || attachment.mimeType || 'application/octet-stream',
 			fileName: attachment.fileName || path.basename(absolutePath),
 		};
 	}

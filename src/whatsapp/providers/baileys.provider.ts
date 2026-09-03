@@ -25,6 +25,36 @@ import { enrichContactMessageNormalized } from '../utils/whatsapp-contact';
 
 type BaileysSocket = any;
 
+/** Soft caps so long-lived Baileys sessions do not grow RAM without bound. */
+const CACHE_MAX = {
+	chats: 5_000,
+	contacts: 8_000,
+	lidToPn: 8_000,
+	groupSubject: 2_000,
+	newsletterName: 1_000,
+	avatarUrl: 2_000,
+	messagesByChat: 2_000,
+	rawByMessageId: 4_000,
+	reactions: 4_000,
+	perChatMessages: 500,
+	statuses: 2_000,
+	statusRaw: 2_000,
+	historyMessageIds: 20_000,
+	historyMessageIdsKeep: 15_000,
+} as const;
+
+/** Drop oldest Map entries (insertion order) until size <= max. */
+function trimMapToMax<K, V>(map: Map<K, V>, max: number) {
+	if (map.size <= max) return;
+	const drop = map.size - max;
+	let i = 0;
+	for (const key of map.keys()) {
+		map.delete(key);
+		i += 1;
+		if (i >= drop) break;
+	}
+}
+
 const sessionRoot = () =>
 	path.resolve(
 		process.env.WHATSAPP_BAILEYS_DIR ||
@@ -583,9 +613,16 @@ export class BaileysProvider implements WhatsAppProvider {
 		const key = String(id || '').trim();
 		if (!key) return;
 		this.recentHistoryMessageIds.add(key);
-		if (this.recentHistoryMessageIds.size > 20_000) {
-			this.recentHistoryMessageIds.clear();
-			this.recentHistoryMessageIds.add(key);
+		// Evict oldest ids only — never wipe the whole set (that re-opens duplicates).
+		if (this.recentHistoryMessageIds.size > CACHE_MAX.historyMessageIds) {
+			const drop =
+				this.recentHistoryMessageIds.size - CACHE_MAX.historyMessageIdsKeep;
+			let i = 0;
+			for (const old of this.recentHistoryMessageIds) {
+				this.recentHistoryMessageIds.delete(old);
+				i += 1;
+				if (i >= drop) break;
+			}
 		}
 	}
 
@@ -610,7 +647,10 @@ export class BaileysProvider implements WhatsAppProvider {
 						: patchedName || prev.name || null,
 			id: { _serialized: chatId },
 		};
+		// Refresh insertion order for LRU-ish trim (delete+set).
+		if (this.chats.has(chatId)) this.chats.delete(chatId);
 		this.chats.set(chatId, next);
+		trimMapToMax(this.chats, CACHE_MAX.chats);
 	}
 
 	private rememberLidMapping(lid: string | null | undefined, pn: string | null | undefined) {
@@ -619,9 +659,14 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!lidId || !pnRaw) return;
 		const digits = pnRaw.includes('@') ? pnRaw.split('@')[0].split(':')[0] : pnRaw.replace(/\D/g, '');
 		if (!digits) return;
+		if (this.lidToPn.has(lidId)) this.lidToPn.delete(lidId);
 		this.lidToPn.set(lidId, digits);
 		const hosted = lidId.replace(/@lid$/i, '@hosted.lid');
-		if (hosted !== lidId) this.lidToPn.set(hosted, digits);
+		if (hosted !== lidId) {
+			if (this.lidToPn.has(hosted)) this.lidToPn.delete(hosted);
+			this.lidToPn.set(hosted, digits);
+		}
+		trimMapToMax(this.lidToPn, CACHE_MAX.lidToPn);
 	}
 
 	private rememberContact(contact: any) {
@@ -654,6 +699,7 @@ export class BaileysProvider implements WhatsAppProvider {
 					? prev.name
 					: null);
 			const nextNotify = pushRaw || prev.notify || null;
+			if (this.contacts.has(key)) this.contacts.delete(key);
 			this.contacts.set(key, {
 				...prev,
 				id: key,
@@ -671,6 +717,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			merge(`${phoneDigits}@s.whatsapp.net`);
 		}
 		if (lid && phoneDigits) this.rememberLidMapping(lid, phoneDigits);
+		trimMapToMax(this.contacts, CACHE_MAX.contacts);
 	}
 
 	private contactDisplayName(chatId: string): string | null {
@@ -707,10 +754,17 @@ export class BaileysProvider implements WhatsAppProvider {
 			const meta = await this.socket.groupMetadata(id);
 			const subject = String(meta?.subject || '').trim() || null;
 			this.groupSubjectCache.set(id, subject);
+			trimMapToMax(this.groupSubjectCache, CACHE_MAX.groupSubject);
 			if (subject) this.rememberChat(id, { name: subject });
 			return subject;
-		} catch {
+		} catch (error) {
+			this.logger.debug(
+				`groupMetadata failed for ${this.accountId}/${id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
 			this.groupSubjectCache.set(id, null);
+			trimMapToMax(this.groupSubjectCache, CACHE_MAX.groupSubject);
 			return null;
 		}
 	}
@@ -759,6 +813,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				/* keep fallbacks below */
 			}
 			this.newsletterNameCache.set(id, name);
+			trimMapToMax(this.newsletterNameCache, CACHE_MAX.newsletterName);
 			if (name) {
 				this.rememberChat(id, { name });
 				this.rememberContact({ id, name, verifiedName: name });
@@ -768,11 +823,17 @@ export class BaileysProvider implements WhatsAppProvider {
 			try {
 				const jid = toBaileysJid(id) || id;
 				pictureUrl = String((await this.socket.profilePictureUrl(jid, 'preview')) || '').trim() || null;
-			} catch {
+			} catch (error) {
+				this.logger.debug(
+					`profilePictureUrl failed for ${this.accountId}/${id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
 				pictureUrl = pictureUrl || null;
 			}
 		}
 		this.avatarUrlCache.set(id, { url: pictureUrl, at: Date.now() });
+		trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
 		this.attachChatPicture(id, pictureUrl);
 		return { name, pictureUrl };
 	}
@@ -783,31 +844,28 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!bucket) {
 			bucket = new Map();
 			this.messagesByChat.set(normalized.chatId, bucket);
+		} else {
+			// Touch chat bucket for LRU-ish eviction of whole chats.
+			this.messagesByChat.delete(normalized.chatId);
+			this.messagesByChat.set(normalized.chatId, bucket);
 		}
 		bucket.set(normalized.providerMessageId, normalized);
 		if (rawMessage?.message) {
 			this.rawByMessageId.set(normalized.providerMessageId, rawMessage);
 		}
 		// Cap per-chat memory so long-lived sessions do not grow forever.
-		if (bucket.size > 500) {
-			const keys = [...bucket.keys()].slice(0, bucket.size - 500);
+		const perChatMax = CACHE_MAX.perChatMessages;
+		if (bucket.size > perChatMax) {
+			const keys = [...bucket.keys()].slice(0, bucket.size - perChatMax);
 			for (const key of keys) {
 				bucket.delete(key);
 				this.rawByMessageId.delete(key);
 				this.reactionsByMessageId.delete(key);
 			}
 		}
-		if (this.rawByMessageId.size > 4000) {
-			const keys = [...this.rawByMessageId.keys()].slice(0, this.rawByMessageId.size - 4000);
-			for (const key of keys) this.rawByMessageId.delete(key);
-		}
-		if (this.reactionsByMessageId.size > 4000) {
-			const keys = [...this.reactionsByMessageId.keys()].slice(
-				0,
-				this.reactionsByMessageId.size - 4000,
-			);
-			for (const key of keys) this.reactionsByMessageId.delete(key);
-		}
+		trimMapToMax(this.messagesByChat, CACHE_MAX.messagesByChat);
+		trimMapToMax(this.rawByMessageId, CACHE_MAX.rawByMessageId);
+		trimMapToMax(this.reactionsByMessageId, CACHE_MAX.reactions);
 		if (normalized.contactName && !normalized.fromMe) {
 			const contactId = normalized.chatId.endsWith('@g.us')
 				? normalized.senderWaId || normalized.chatId
@@ -833,7 +891,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		const prevUnread = Number(this.chats.get(normalized.chatId)?.unreadCount) || 0;
 		let nextUnread = prevUnread;
 		if (!fromHistory && !normalized.fromMe) nextUnread = prevUnread + 1;
-		if (!fromHistory && normalized.fromMe) nextUnread = 0;
+		// Outbound send must not wipe unreads — only an explicit mark-read does that.
 		this.rememberChat(normalized.chatId, {
 			t: Math.floor(ts / 1000),
 			name: nextName,
@@ -895,8 +953,11 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (messageId) this.statusRawById.delete(messageId);
 			}
 		}
-		if (this.statusesById.size > 2000) {
-			const extra = [...this.statusesById.keys()].slice(0, this.statusesById.size - 2000);
+		if (this.statusesById.size > CACHE_MAX.statuses) {
+			const extra = [...this.statusesById.keys()].slice(
+				0,
+				this.statusesById.size - CACHE_MAX.statuses,
+			);
 			for (const id of extra) {
 				const item = this.statusesById.get(id);
 				this.statusesById.delete(id);
@@ -905,6 +966,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (messageId) this.statusRawById.delete(messageId);
 			}
 		}
+		trimMapToMax(this.statusRawById, CACHE_MAX.statusRaw);
 	}
 
 	private rememberStatus(raw: any): boolean {
@@ -1631,6 +1693,18 @@ export class BaileysProvider implements WhatsAppProvider {
 			else if (lastKnown === 'available' || lastKnown === 'online') state = 'available';
 			else if (lastKnown === 'unavailable' || lastKnown === 'offline') state = 'unavailable';
 			const isOnline = state === 'available' || state === 'composing' || state === 'recording';
+
+			// Resolve sender display name (useful for group "X is typing")
+			const senderJid = firstKey ? normalizeInboxJid(jidOf(firstKey) || firstKey) : '';
+			const senderName =
+				(senderJid && senderJid !== chatId ? this.contactDisplayName(senderJid) : null) || '';
+
+			// Baileys may report lastSeen as epoch seconds in the presence object
+			const rawLastSeen = Number(first?.lastSeen || first?.t || 0);
+			const lastSeen = rawLastSeen > 0
+				? (rawLastSeen < 1e12 ? rawLastSeen * 1000 : rawLastSeen)
+				: 0;
+
 			this.emit({
 				type: 'presence',
 				payload: {
@@ -1639,6 +1713,8 @@ export class BaileysProvider implements WhatsAppProvider {
 					isGroup: chatId.endsWith('@g.us'),
 					state,
 					t: Date.now(),
+					senderName,
+					lastSeen,
 				},
 			});
 		});
@@ -1928,9 +2004,16 @@ export class BaileysProvider implements WhatsAppProvider {
 			const url = await this.socket.profilePictureUrl(jid, 'preview');
 			const next = String(url || '').trim() || null;
 			this.avatarUrlCache.set(id, { url: next, at: Date.now() });
+			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
 			return next;
-		} catch {
+		} catch (error) {
+			this.logger.debug(
+				`profilePictureUrl failed for ${this.accountId}/${id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
 			this.avatarUrlCache.set(id, { url: null, at: Date.now() });
+			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
 			return cached?.url || null;
 		}
 	}

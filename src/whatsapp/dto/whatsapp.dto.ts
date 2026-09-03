@@ -22,7 +22,7 @@ export class CreateWhatsAppAccountDto {
 	label: string;
 
 	@IsOptional()
-	@IsIn(['wppconnect'])
+	@IsIn(['baileys', 'wppconnect'])
 	providerName?: string;
 }
 
@@ -81,6 +81,24 @@ export class UpdateWhatsAppNotificationPreferencesDto {
 	notificationsEnabled: boolean;
 }
 
+/** Must be declared before SendWhatsAppMessageDto — emitDecoratorMetadata reads the type eagerly. */
+export class WhatsAppContactPayloadDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	displayName?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(32)
+	phoneNumber?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	waId?: string;
+}
+
 export class SendWhatsAppMessageDto {
 	@IsIn(['text', 'image', 'video', 'audio', 'voice', 'document', 'sticker', 'contact'])
 	type: string;
@@ -106,7 +124,9 @@ export class SendWhatsAppMessageDto {
 	clientMessageId?: string;
 
 	@IsOptional()
-	contact?: { displayName?: string; phoneNumber?: string; waId?: string };
+	@ValidateNested()
+	@Type(() => WhatsAppContactPayloadDto)
+	contact?: WhatsAppContactPayloadDto;
 }
 
 export class EditWhatsAppMessageDto {
@@ -233,6 +253,50 @@ export class SaveWhatsAppVoiceChangerCredentialDto {
 	@MinLength(8)
 	@MaxLength(500)
 	apiKey: string;
+}
+
+export class CloneWhatsAppVoiceDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	name?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(16)
+	consent?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	cloneProvider?: string;
+}
+
+export class TransformWhatsAppVoiceDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	provider?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	preset?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(16)
+	pitchSemitones?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	voiceId?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	apiKey?: string;
 }
 
 /*

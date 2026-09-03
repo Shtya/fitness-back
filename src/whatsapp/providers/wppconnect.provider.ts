@@ -447,6 +447,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 			this.client.onPresenceChanged((presence: any) => {
 				const chatId = serializedId(presence?.id) || String(presence?.id || '');
 				if (!chatId) return;
+
+				// Try to extract sender name from participant list for groups
+				const participants = Array.isArray(presence?.participants) ? presence.participants : [];
+				const firstParticipant = participants[0];
+				const senderName = String(firstParticipant?.name || firstParticipant?.shortName || '');
+
 				this.emit({
 					type: 'presence',
 					payload: {
@@ -455,9 +461,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 						isGroup: Boolean(presence?.isGroup),
 						state: String(presence?.state || 'unavailable'),
 						t: Number(presence?.t) || Date.now(),
-						participants: Array.isArray(presence?.participants)
-							? presence.participants
-							: undefined,
+						participants: participants.length ? participants : undefined,
+						senderName,
+						lastSeen: Number(presence?.lastSeen || 0),
 					},
 				});
 			});

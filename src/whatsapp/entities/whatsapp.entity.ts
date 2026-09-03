@@ -311,6 +311,7 @@ export class WhatsAppConversationAssignment extends CoreEntity {
 	@JoinColumn({ name: 'conversation_id' })
 	conversation: WhatsAppConversation;
 
+	@Index()
 	@Column({ name: 'assigned_user_id', type: 'uuid', nullable: true })
 	assignedUserId: string | null;
 
@@ -337,6 +338,7 @@ export class WhatsAppConversationAssignment extends CoreEntity {
 
 @Entity('whatsapp_conversation_preferences')
 @Unique('uq_whatsapp_conversation_preference', ['conversationId', 'userId'])
+@Unique('uq_wa_conv_pref_account_chat_user', ['accountId', 'providerChatId', 'userId'])
 export class WhatsAppConversationPreference extends CoreEntity {
 	@Index()
 	@Column({ name: 'conversation_id', type: 'uuid', nullable: true })
@@ -415,6 +417,7 @@ export class WhatsAppMessage extends CoreEntity {
 	})
 	direction: WhatsAppMessageDirection;
 
+	@Index()
 	@Column({ name: 'sender_wa_id', type: 'varchar', length: 160, nullable: true })
 	senderWaId: string | null;
 

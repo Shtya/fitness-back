@@ -90,8 +90,17 @@ export class WhatsAppProviderManagerService
 	}
 
 	private async acquireLock(accountId: string): Promise<boolean> {
+		const failClosed =
+			String(process.env.WHATSAPP_LOCK_FAIL_CLOSED || '').toLowerCase() === 'true' ||
+			String(process.env.WHATSAPP_MULTI_INSTANCE || '').toLowerCase() === 'true';
 		if (!(await this.redis.isAvailable())) {
 			this.warnRedisUnavailableOnce();
+			if (failClosed) {
+				this.logger.error(
+					`Redis unavailable — refusing WhatsApp lock for ${accountId} (WHATSAPP_LOCK_FAIL_CLOSED / MULTI_INSTANCE)`,
+				);
+				return false;
+			}
 			return true;
 		}
 		try {
@@ -106,13 +115,12 @@ export class WhatsAppProviderManagerService
 			const current = await client.get(key);
 			return current === this.instanceId;
 		} catch (error) {
-			// Redis being unreachable must not block WhatsApp entirely on a
-			// single-instance deployment — fail open, but log loudly.
 			this.logger.error(
 				`Could not acquire WhatsApp connection lock for ${accountId}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
+			if (failClosed) return false;
 			return true;
 		}
 	}
@@ -336,6 +344,16 @@ export class WhatsAppProviderManagerService
 		}
 		account.providerName = providerName;
 		const provider = this.createProvider(account);
+		const capabilitySnapshot = {
+			...nextCapabilities,
+			...(provider.capabilities || {}),
+		};
+		if (JSON.stringify(capabilitySnapshot) !== JSON.stringify(account.providerCapabilities || {})) {
+			await this.accountRepo.update(accountId, {
+				providerCapabilities: capabilitySnapshot,
+			});
+			account.providerCapabilities = capabilitySnapshot;
+		}
 		provider.onEvent(event => this.handleEvent(accountId, event));
 		this.providers.set(accountId, provider);
 		this.connectStartedAt.set(accountId, Date.now());
@@ -924,6 +942,7 @@ export class WhatsAppProviderManagerService
 				]),
 			},
 		});
+		let restoreIndex = 0;
 		for (const account of accounts) {
 			const providerName = this.resolveProviderName(account);
 			const shouldRestore =
@@ -934,9 +953,13 @@ export class WhatsAppProviderManagerService
 				].includes(account.status) ||
 				(await this.sessions.hasActiveSession(account.id, providerName));
 			if (!shouldRestore) continue;
-			this.connect(account.id).catch(error =>
-				this.logger.error(`Failed to restore WhatsApp account ${account.id}`, error),
-			);
+			const delayMs = restoreIndex * 1500 + Math.floor(Math.random() * 750);
+			restoreIndex += 1;
+			setTimeout(() => {
+				this.connect(account.id).catch(error =>
+					this.logger.error(`Failed to restore WhatsApp account ${account.id}`, error),
+				);
+			}, delayMs);
 		}
 	}
 

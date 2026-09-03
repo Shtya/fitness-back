@@ -54,6 +54,12 @@ describe('WhatsAppSyncService queue and realtime coalescing', () => {
 			audit as any,
 			{} as any, // notifications
 			{ syncFromProvider: jest.fn().mockResolvedValue({ synced: 0 }) } as any, // statusService
+			{
+				applyPresenceEvent: jest.fn(),
+				subscribeRecentDirectChats: jest.fn().mockResolvedValue({ ok: true }),
+				clearAccount: jest.fn(),
+				listOnline: jest.fn().mockReturnValue({ items: [] }),
+			} as any, // contactPresence
 			{} as any, // preferenceRepo
 		);
 		return { service, gateway, conversationRepo, access, providers, audit };

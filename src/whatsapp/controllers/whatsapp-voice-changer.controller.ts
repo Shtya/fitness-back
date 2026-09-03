@@ -24,6 +24,8 @@ import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
 	SaveWhatsAppVoiceChangerCredentialDto,
 	SaveWhatsAppVoiceChangerSettingsDto,
+	CloneWhatsAppVoiceDto,
+	TransformWhatsAppVoiceDto,
 } from '../dto/whatsapp.dto';
 import {
 	VoiceChangerUpload,
@@ -85,7 +87,7 @@ export class WhatsAppVoiceChangerController {
 	async cloneVoice(
 		@Req() req: any,
 		@UploadedFiles() files: VoiceChangerUpload[],
-		@Body() body: { name?: string; consent?: string; cloneProvider?: string },
+		@Body() body: CloneWhatsAppVoiceDto,
 	) {
 		const samples = files || [];
 		try {
@@ -125,14 +127,7 @@ export class WhatsAppVoiceChangerController {
 	async transform(
 		@Req() req: any,
 		@UploadedFile() file: VoiceChangerUpload,
-		@Body()
-		body: {
-			provider?: string;
-			preset?: string;
-			pitchSemitones?: string;
-			voiceId?: string;
-			apiKey?: string;
-		},
+		@Body() body: TransformWhatsAppVoiceDto,
 	) {
 		if (!file) throw new BadRequestException('Audio file is required');
 		try {

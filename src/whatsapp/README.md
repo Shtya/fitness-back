@@ -1,6 +1,8 @@
 # Sobha Fit WhatsApp module
 
-Default runtime provider is **Baileys** (WhatsApp Web multi-device). WPPConnect remains an optional fallback, not the production default.
+Default runtime provider is **Baileys** (WhatsApp Web multi-device).
+
+**WPPConnect is legacy.** Keep the provider in the repo only as an optional fallback. New work must target Baileys. Do not start WPPConnect unless `WHATSAPP_PROVIDER=wppconnect` is set explicitly for a migration/debug session. Accounts are migrated to the configured provider on boot.
 
 ## Runtime requirements
 
@@ -10,6 +12,8 @@ Default runtime provider is **Baileys** (WhatsApp Web multi-device). WPPConnect 
 - A 32-byte Base64 key in `WHATSAPP_SESSION_ENCRYPTION_KEY`
 - Baileys session files under `WHATSAPP_BAILEYS_DIR` (or `tokens/baileys`)
 - Do **not** run the WhatsApp process on Vercel serverless (needs a persistent VPS/PM2 process)
+
+Multi-instance: set `WHATSAPP_LOCK_FAIL_CLOSED=true` or `WHATSAPP_MULTI_INSTANCE=true` so a Redis outage cannot open the same WhatsApp session on two servers. Phone matching for local `0…` numbers uses `WHATSAPP_DEFAULT_COUNTRY_CODE` (default `20`). Socket CORS uses `CORS_ORIGIN` / `WHATSAPP_WS_CORS_ORIGIN` in production.
 
 New schema changes should go through SQL migrations. `WhatsAppSchemaService` only applies a small `IF NOT EXISTS` safety net for already-deployed databases.
 

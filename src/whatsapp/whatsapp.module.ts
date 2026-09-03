@@ -5,6 +5,7 @@ import { User } from '../../entities/global.entity';
 import { NotificationModule } from '../notification/notification.module';
 import { RedisModule } from '../redis/redis.module';
 import { WhatsAppAccountsController } from './controllers/whatsapp-accounts.controller';
+import { WhatsAppPresenceController } from './controllers/whatsapp-presence.controller';
 import { WhatsAppAssignmentsController } from './controllers/whatsapp-assignments.controller';
 import { WhatsAppConnectionController } from './controllers/whatsapp-connection.controller';
 import { WhatsAppConversationsController } from './controllers/whatsapp-conversations.controller';
@@ -61,6 +62,7 @@ import { WhatsAppProviderManagerService } from './services/whatsapp-provider-man
 import { WhatsAppGateway } from './gateways/whatsapp.gateway';
 import { WhatsAppAssignmentService } from './services/whatsapp-assignment.service';
 import { WhatsAppSyncService } from './services/whatsapp-sync.service';
+import { WhatsAppContactPresenceService } from './services/whatsapp-contact-presence.service';
 import { WhatsAppStatusService } from './services/whatsapp-status.service';
 import { WhatsAppReportsService } from './services/whatsapp-reports.service';
 import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
@@ -123,6 +125,7 @@ export const WHATSAPP_ENTITIES = [
 	],
 	controllers: [
 		WhatsAppAccountsController,
+		WhatsAppPresenceController,
 		WhatsAppAssignmentsController,
 		WhatsAppConnectionController,
 		WhatsAppConversationsController,
@@ -143,6 +146,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppGateway,
 		WhatsAppProviderManagerService,
 		WhatsAppSyncService,
+		WhatsAppContactPresenceService,
 		WhatsAppAssignmentService,
 		WhatsAppStatusService,
 		WhatsAppReportsService,

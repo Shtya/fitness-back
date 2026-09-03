@@ -41,6 +41,12 @@ function normalizeStatusType(value: unknown) {
 	return type || 'text';
 }
 
+function isUuid(value: unknown) {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+		String(value || '').trim(),
+	);
+}
+
 type StatusRow = WhatsAppStatus | WhatsAppStatusHistory;
 type StatusRowSource = 'active' | 'history';
 
@@ -544,10 +550,13 @@ export class WhatsAppStatusService {
 	): Promise<{ row: StatusRow; source: StatusRowSource } | null> {
 		const id = String(statusIdValue || '').trim();
 		if (!id) return null;
+		if (!isUuid(accountId)) return null;
 
 		const lookupHistory = async () => {
-			const byPk = await this.historyRepo.findOne({ where: { id, accountId } });
-			if (byPk) return { row: byPk, source: 'history' as const };
+			if (isUuid(id)) {
+				const byPk = await this.historyRepo.findOne({ where: { id, accountId } });
+				if (byPk) return { row: byPk, source: 'history' as const };
+			}
 			const byProvider = await this.historyRepo.findOne({
 				where: { providerStatusId: id, accountId },
 			});
@@ -556,8 +565,10 @@ export class WhatsAppStatusService {
 		};
 
 		const lookupActive = async () => {
-			const byPk = await this.repo.findOne({ where: { id, accountId } });
-			if (byPk) return { row: byPk, source: 'active' as const };
+			if (isUuid(id)) {
+				const byPk = await this.repo.findOne({ where: { id, accountId } });
+				if (byPk) return { row: byPk, source: 'active' as const };
+			}
 			const byProvider = await this.repo.findOne({
 				where: { providerStatusId: id, accountId },
 			});
@@ -601,7 +612,16 @@ export class WhatsAppStatusService {
 		await fs.mkdir(folder, { recursive: true });
 		if (status.mediaPath) {
 			const cached = path.resolve(process.cwd(), status.mediaPath);
-			if (cached.startsWith(`${folder}${path.sep}`)) {
+			const allowedRoots = [
+				folder,
+				path.join(process.cwd(), 'uploads', 'whatsapp-media', 'statuses', accountId),
+				path.join(process.cwd(), 'storage', 'whatsapp-media', 'statuses', accountId),
+			].map(value => path.resolve(value));
+			const underAllowedRoot = allowedRoots.some(
+				rootPath =>
+					cached === rootPath || cached.startsWith(`${rootPath}${path.sep}`),
+			);
+			if (underAllowedRoot) {
 				try {
 					const cachedBuffer = await fs.readFile(cached);
 					const detectedMime =
@@ -630,7 +650,15 @@ export class WhatsAppStatusService {
 				'Archived story media is no longer available. It was not saved before expiry.',
 			);
 		}
-		const provider = this.provider(accountId);
+		let provider;
+		try {
+			provider = this.provider(accountId);
+		} catch (error) {
+			if (error instanceof BadRequestException) throw error;
+			throw new BadRequestException(
+				'WhatsApp account is not connected. Link the account, then open this story again.',
+			);
+		}
 		if (!provider.capabilities.mediaDownload) {
 			throw new BadRequestException('Status media download is not supported');
 		}

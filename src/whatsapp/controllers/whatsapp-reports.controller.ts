@@ -22,23 +22,25 @@ export class WhatsAppReportsController {
 	) {}
 
 	@Get('reports/summary')
-	summary(
+	async summary(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
 		@Query('from') from?: string,
 		@Query('to') to?: string,
 	) {
+		await this.access.assertAccountPermission(req.user, accountId, 'canView');
 		return this.reports.summary(req.user, accountId, from, to);
 	}
 
 	@Get('reports/staff/:userId')
-	staffDetail(
+	async staffDetail(
 		@Req() req: any,
 		@Param('accountId') accountId: string,
 		@Param('userId') userId: string,
 		@Query('from') from?: string,
 		@Query('to') to?: string,
 	) {
+		await this.access.assertAccountPermission(req.user, accountId, 'canView');
 		return this.reports.staffDetail(req.user, accountId, userId, from, to);
 	}
 

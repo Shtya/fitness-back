@@ -26,16 +26,47 @@ export interface ConversationEventScope {
 	shared?: boolean;
 }
 
+function resolveWhatsAppGatewayCorsOrigin(): boolean | string | string[] {
+	const raw =
+		process.env.WHATSAPP_WS_CORS_ORIGIN ||
+		process.env.CORS_ORIGIN ||
+		process.env.FRONTEND_URL ||
+		'';
+	const trimmed = String(raw).trim();
+	if (!trimmed || trimmed === '*') {
+		// Dev default: reflect request origin. Production should set CORS_ORIGIN.
+		if (process.env.NODE_ENV === 'production') {
+			return process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+		}
+		return true;
+	}
+	if (trimmed.includes(',')) {
+		return trimmed.split(',').map((part) => part.trim()).filter(Boolean);
+	}
+	return trimmed;
+}
+
 @WebSocketGateway({
 	namespace: '/whatsapp',
 	cors: {
-		origin: true,
+		origin: resolveWhatsAppGatewayCorsOrigin(),
 		credentials: true,
 	},
 })
 @Injectable()
 export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	private readonly logger = new Logger(WhatsAppGateway.name);
+	/** userId → live sockets currently in the WhatsApp workspace */
+	private readonly presence = new Map<
+		string,
+		{
+			userId: string;
+			name: string;
+			role: string | null;
+			socketIds: Set<string>;
+			lastSeenAt: number;
+		}
+	>();
 
 	@WebSocketServer()
 	server: Server;
@@ -81,6 +112,87 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		}
 	}
 
+	private presenceEntryFromUser(user: User) {
+		return {
+			userId: String(user.id),
+			name: String(user.name || user.email || 'User').trim() || 'User',
+			role: user.role ? String(user.role) : null,
+			socketIds: new Set<string>(),
+			lastSeenAt: Date.now(),
+		};
+	}
+
+	private listOnlinePresence(maxAgeMs = 15_000) {
+		const now = Date.now();
+		const items: Array<{
+			userId: string;
+			name: string;
+			role: string | null;
+			online: true;
+			lastSeenAt: number;
+		}> = [];
+		for (const entry of this.presence.values()) {
+			if (!entry.socketIds.size) continue;
+			if (now - entry.lastSeenAt > maxAgeMs) continue;
+			items.push({
+				userId: entry.userId,
+				name: entry.name,
+				role: entry.role,
+				online: true,
+				lastSeenAt: entry.lastSeenAt,
+			});
+		}
+		items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+		return items;
+	}
+
+	private broadcastPresence() {
+		const items = this.listOnlinePresence();
+		this.server?.to('whatsapp:presence').emit('whatsapp:presence', {
+			items,
+			at: new Date().toISOString(),
+		});
+	}
+
+	private registerPresence(client: Socket, user: User) {
+		const userId = String(user.id);
+		let entry = this.presence.get(userId);
+		if (!entry) {
+			entry = this.presenceEntryFromUser(user);
+			this.presence.set(userId, entry);
+		} else {
+			entry.name = String(user.name || user.email || entry.name).trim() || entry.name;
+			entry.role = user.role ? String(user.role) : entry.role;
+		}
+		entry.socketIds.add(client.id);
+		entry.lastSeenAt = Date.now();
+		client.data.presenceUserId = userId;
+		void client.join('whatsapp:presence');
+		this.broadcastPresence();
+	}
+
+	private unregisterPresence(client: Socket) {
+		const userId = String(client.data?.presenceUserId || client.data?.user?.id || '');
+		if (!userId) return;
+		const entry = this.presence.get(userId);
+		if (!entry) return;
+		entry.socketIds.delete(client.id);
+		if (!entry.socketIds.size) {
+			this.presence.delete(userId);
+		} else {
+			entry.lastSeenAt = Date.now();
+		}
+		this.broadcastPresence();
+	}
+
+	/** Snapshot for REST polling / initial paint. */
+	getOnlinePresence() {
+		return {
+			items: this.listOnlinePresence(),
+			at: new Date().toISOString(),
+		};
+	}
+
 	async handleConnection(client: Socket) {
 		const user = await this.resolveUser(client);
 		if (!user) {
@@ -89,10 +201,27 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		}
 		client.data.accountScopes = {};
 		client.join(`whatsapp:user:${user.id}`);
+		this.registerPresence(client, user);
 	}
 
 	handleDisconnect(client: Socket) {
+		this.unregisterPresence(client);
 		this.logger.debug(`WhatsApp socket disconnected: ${client.id}`);
+	}
+
+	@SubscribeMessage('whatsapp:presence:ping')
+	presencePing(@ConnectedSocket() client: Socket) {
+		const userId = String(client.data?.presenceUserId || client.data?.user?.id || '');
+		const entry = userId ? this.presence.get(userId) : null;
+		if (entry && entry.socketIds.has(client.id)) {
+			entry.lastSeenAt = Date.now();
+		}
+		return { ok: true, at: Date.now() };
+	}
+
+	@SubscribeMessage('whatsapp:presence:list')
+	presenceList() {
+		return this.getOnlinePresence();
 	}
 
 	@SubscribeMessage('whatsapp:account:watch')
