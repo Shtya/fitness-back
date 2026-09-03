@@ -2033,11 +2033,30 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!options) return null;
 		const jid = toBaileysJid(chatId);
 		if (options.quotedProviderMessageId) {
-			const stored = this.rawByMessageId.get(options.quotedProviderMessageId);
-			if (stored) return stored;
+			const quotedId = String(options.quotedProviderMessageId).trim();
+			const stored = this.rawByMessageId.get(quotedId);
+			if (stored?.key && stored?.message) return stored;
+			const remembered = this.findRememberedMessage(quotedId);
+			const fromMe = Boolean(remembered?.fromMe);
+			const chatJid = toBaileysJid(remembered?.chatId || chatId);
+			const isGroup = chatJid.endsWith('@g.us');
+			const participant =
+				!fromMe && isGroup && remembered?.senderWaId
+					? toBaileysJid(remembered.senderWaId)
+					: undefined;
+			const messageBody = options.embeddedQuote
+				? buildEmbeddedQuotedMessage(options.embeddedQuote)
+				: remembered?.text
+					? { conversation: String(remembered.text) }
+					: { conversation: ' ' };
 			return {
-				key: { remoteJid: jid, id: options.quotedProviderMessageId },
-				message: { conversation: '' },
+				key: {
+					remoteJid: chatJid,
+					id: quotedId,
+					fromMe,
+					...(participant ? { participant } : {}),
+				},
+				message: messageBody,
 			};
 		}
 		if (options.embeddedQuote) {
@@ -2053,15 +2072,36 @@ export class BaileysProvider implements WhatsAppProvider {
 		return null;
 	}
 
+	/** Seed in-memory raw for a quote target loaded from Postgres. */
+	primeQuotedRaw(providerMessageId: string, rawHint?: any) {
+		const id = String(providerMessageId || '').trim();
+		if (!id || !rawHint) return;
+		const revived =
+			reviveBaileysWaMessage(rawHint) ||
+			(rawHint?.key && rawHint?.message
+				? {
+						key: rawHint.key,
+						message: rawHint.message,
+						messageTimestamp: rawHint.messageTimestamp,
+					}
+				: null);
+		if (revived?.key && revived?.message) {
+			this.rawByMessageId.set(id, revived);
+		}
+	}
+
 	async sendText(chatId: string, text: string, quote?: string | WhatsAppSendQuoteOptions) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const jid = toBaileysJid(chatId);
-		const payload: any = { text };
+		const content = { text };
+		// Baileys expects `quoted` in the 3rd options arg — putting it on the
+		// content object is ignored, so WhatsApp receives a plain text message.
 		const quotedPayload = this.resolveQuotedPayload(chatId, quote);
-		if (quotedPayload) payload.quoted = quotedPayload;
-		const result = await this.socket.sendMessage(jid, payload);
+		const result = quotedPayload
+			? await this.socket.sendMessage(jid, content, { quoted: quotedPayload })
+			: await this.socket.sendMessage(jid, content);
 		const normalized = this.normalizeWaMessage(result);
 		if (normalized) this.rememberMessage(normalized, result);
 		return result;

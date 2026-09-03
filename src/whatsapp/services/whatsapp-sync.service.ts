@@ -5423,10 +5423,36 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
 		const provider = this.requireProvider(conversation.accountId);
+		let quoteForProvider: string | WhatsAppSendQuoteOptions | undefined = quote;
+		if (quotedProviderMessageId) {
+			const quotedRow = await this.messageRepo.findOne({
+				where: {
+					conversationId,
+					providerMessageId: quotedProviderMessageId,
+				},
+			});
+			if (quotedRow) {
+				const raw = (quotedRow as any).raw;
+				if (
+					raw &&
+					typeof (provider as any).primeQuotedRaw === 'function'
+				) {
+					(provider as any).primeQuotedRaw(quotedProviderMessageId, raw);
+				}
+				quoteForProvider = {
+					quotedProviderMessageId,
+					embeddedQuote:
+						(typeof quote === 'object' && quote?.embeddedQuote) || {
+							text: quotedRow.text,
+							type: quotedRow.type || 'text',
+						},
+				};
+			}
+		}
 		const result = await provider.sendText(
 			conversation.providerChatId,
 			text,
-			quote,
+			quoteForProvider,
 		);
 		const id =
 			providerMessageId(result) ||
@@ -5644,6 +5670,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		let result: unknown;
 		try {
+			if (input.quotedProviderMessageId) {
+				const quotedRow = await this.messageRepo.findOne({
+					where: {
+						conversationId,
+						providerMessageId: input.quotedProviderMessageId,
+					},
+				});
+				const raw = (quotedRow as any)?.raw;
+				if (raw && typeof (provider as any).primeQuotedRaw === 'function') {
+					(provider as any).primeQuotedRaw(input.quotedProviderMessageId, raw);
+				}
+			}
 			result = await provider.sendMedia(conversation.providerChatId, sendPath, {
 				caption: input.caption,
 				fileName: sendFileName,

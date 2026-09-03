@@ -403,5 +403,47 @@ describe('BaileysProvider message actions', () => {
 		);
 		expect(bucket.has('msg-del')).toBe(false);
 	});
+
+	it('sends text replies with quoted in Baileys options, not content', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockResolvedValue({
+			key: { remoteJid: '201000000001@s.whatsapp.net', id: 'reply-1', fromMe: true },
+			message: { conversation: 'done' },
+			messageTimestamp: Math.floor(Date.now() / 1000),
+		});
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage };
+		(provider as any).rawByMessageId.set('src-quote', {
+			key: {
+				remoteJid: '201000000001@s.whatsapp.net',
+				id: 'src-quote',
+				fromMe: false,
+			},
+			message: { conversation: 'Please update the report' },
+		});
+		(provider as any).normalizeWaMessage = () => ({
+			providerMessageId: 'reply-1',
+			chatId: '201000000001@c.us',
+			fromMe: true,
+			type: 'chat',
+			text: 'done',
+			timestamp: new Date(),
+		});
+		(provider as any).rememberMessage = jest.fn();
+
+		await provider.sendText('201000000001@c.us', 'done', 'src-quote');
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			'201000000001@s.whatsapp.net',
+			{ text: 'done' },
+			expect.objectContaining({
+				quoted: expect.objectContaining({
+					key: expect.objectContaining({ id: 'src-quote' }),
+				}),
+			}),
+		);
+		const contentArg = sendMessage.mock.calls[0][1];
+		expect(contentArg.quoted).toBeUndefined();
+	});
 });
 
