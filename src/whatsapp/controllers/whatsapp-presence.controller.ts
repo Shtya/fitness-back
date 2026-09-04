@@ -12,9 +12,16 @@ export class WhatsAppPresenceController {
 		private readonly access: WhatsAppAccessService,
 	) {}
 
-	/** WhatsApp contacts currently online (customer presence), scoped to one linked account. */
+	/**
+	 * WhatsApp contacts currently online (customer presence), scoped to one linked account.
+	 * Source of truth is Baileys/WPP presence events — never CRM activity.
+	 */
 	@Get('online')
-	async listOnline(@Req() req: any, @Query('accountId') accountId?: string) {
+	async listOnline(
+		@Req() req: any,
+		@Query('accountId') accountId?: string,
+		@Query('includeOffline') includeOffline?: string,
+	) {
 		const id = String(accountId || '').trim();
 		if (!id) {
 			return { accountId: null, items: [], at: new Date().toISOString() };
@@ -23,7 +30,14 @@ export class WhatsAppPresenceController {
 		if (!access.canView) {
 			throw new ForbiddenException('WhatsApp account access denied');
 		}
+		// Event-driven subscribe (throttled). Do not poll every contact.
 		void this.contactPresence.subscribeRecentDirectChats(id).catch(() => undefined);
-		return this.contactPresence.listOnline(id);
+		const wantOffline =
+			includeOffline === '1' ||
+			includeOffline === 'true' ||
+			includeOffline === 'yes';
+		return await this.contactPresence.listOnline(id, {
+			includeOffline: wantOffline,
+		});
 	}
 }

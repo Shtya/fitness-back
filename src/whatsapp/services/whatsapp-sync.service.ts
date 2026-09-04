@@ -868,16 +868,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'presence') {
 			const chatId = String(event.payload?.chatId || '');
 			if (!chatId || !isSupportedInboxChatId(chatId)) return;
-			const conversation = await this.conversationRepo.findOne({
-				where: { accountId, providerChatId: chatId },
-				relations: ['contact'],
-			});
+			let conversation =
+				(await this.conversationRepo.findOne({
+					where: { accountId, providerChatId: chatId },
+					relations: ['contact'],
+				})) || (await this.findDirectConversationAlias(accountId, chatId, null));
 			if (!conversation) return;
+			if (!conversation.contact) {
+				conversation =
+					(await this.conversationRepo.findOne({
+						where: { id: conversation.id },
+						relations: ['contact'],
+					})) || conversation;
+			}
 			const state = String(event.payload?.state || 'unavailable');
 			const typing = state === 'composing' || state === 'recording';
 			const presencePayload = {
 				conversationId: conversation.id,
-				chatId,
+				chatId: conversation.providerChatId || chatId,
 				state,
 				isOnline: Boolean(event.payload?.isOnline),
 				typing,

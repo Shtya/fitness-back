@@ -538,6 +538,8 @@ export class WhatsAppStatusService {
 				const contactName = item.isOwn
 					? fromMap || 'You'
 					: fromMap || (phoneHint.length >= 8 ? `+${phoneHint}` : null);
+				const isText = normalizeStatusType(item.type) === 'text';
+				const hasDiskMedia = Boolean(String(item.mediaPath || '').trim());
 				return {
 					...item,
 					contactName,
@@ -545,9 +547,14 @@ export class WhatsAppStatusService {
 						? contactAvatars.get(item.senderWaId) || null
 						: null,
 					isHistory: true,
+					mediaReady: isText || hasDiskMedia,
 				};
 			})
-			.filter(item => item.isOwn || item.senderWaId);
+			.filter(item => {
+				if (!(item.isOwn || item.senderWaId)) return false;
+				// History without saved media cannot be recovered after WhatsApp expiry.
+				return Boolean(item.mediaReady);
+			});
 		return { items: mapped };
 	}
 
@@ -726,65 +733,91 @@ export class WhatsAppStatusService {
 				}
 			}
 		}
+		let data: any = null;
 		if (source === 'history') {
-			throw new BadRequestException(
-				'Archived story media is no longer available. It was not saved before expiry.',
-			);
-		}
-		let provider;
-		try {
-			provider = this.provider(accountId);
-		} catch (error) {
-			if (error instanceof BadRequestException) throw error;
-			throw new BadRequestException(
-				'WhatsApp account is not connected. Link the account, then open this story again.',
-			);
-		}
-		if (!provider.capabilities.mediaDownload) {
-			throw new BadRequestException('Status media download is not supported');
-		}
-		let data: any;
-		let lastDownloadError: any = null;
-		try {
-			data =
-				typeof provider.downloadStatus === 'function'
-					? await provider.downloadStatus(status.providerStatusId, status.senderWaId)
-					: await provider.downloadMedia(status.providerStatusId);
-		} catch (error: any) {
-			lastDownloadError = error;
-			const detail = String(error?.message || error || '');
-			const recoverable =
-				allowSyncRetry &&
-				(/session cache/i.test(detail) ||
-					/not found in whatsapp store/i.test(detail) ||
-					/unavailable from whatsapp/i.test(detail));
-			if (recoverable) {
-				try {
-					await this.syncFromProvider(accountId);
-					data =
-						typeof provider.downloadStatus === 'function'
-							? await provider.downloadStatus(
-									status.providerStatusId,
-									status.senderWaId,
-								)
-							: await provider.downloadMedia(status.providerStatusId);
-					lastDownloadError = null;
-				} catch (retryError: any) {
-					lastDownloadError = retryError;
+			// Last chance: still in the live Baileys cache (rare for archived rows).
+			try {
+				const liveProvider = this.provider(accountId);
+				if (
+					!liveProvider.capabilities.mediaDownload ||
+					typeof liveProvider.downloadStatus !== 'function'
+				) {
+					throw new Error('unsupported');
 				}
+				data = await liveProvider.downloadStatus(
+					status.providerStatusId,
+					status.senderWaId,
+				);
+				const liveBuffer = decodeProviderMedia(data);
+				const liveMime =
+					this.detectMediaMime(liveBuffer) || this.statusMimeType(status.type);
+				if (
+					!liveBuffer.length ||
+					isIncompleteStatusMedia(liveBuffer, liveMime, status.type)
+				) {
+					throw new Error('empty');
+				}
+			} catch (error) {
+				if (error instanceof BadRequestException) throw error;
+				throw new BadRequestException(
+					'Archived story media is no longer available. It was not saved before expiry.',
+				);
 			}
-			if (lastDownloadError) {
-				const retryDetail = String(lastDownloadError?.message || lastDownloadError || '');
-				if (/session cache/i.test(retryDetail)) {
+		} else {
+			let provider;
+			try {
+				provider = this.provider(accountId);
+			} catch (error) {
+				if (error instanceof BadRequestException) throw error;
+				throw new BadRequestException(
+					'WhatsApp account is not connected. Link the account, then open this story again.',
+				);
+			}
+			if (!provider.capabilities.mediaDownload) {
+				throw new BadRequestException('Status media download is not supported');
+			}
+			let lastDownloadError: any = null;
+			try {
+				data =
+					typeof provider.downloadStatus === 'function'
+						? await provider.downloadStatus(status.providerStatusId, status.senderWaId)
+						: await provider.downloadMedia(status.providerStatusId);
+			} catch (error: any) {
+				lastDownloadError = error;
+				const detail = String(error?.message || error || '');
+				const recoverable =
+					allowSyncRetry &&
+					(/session cache/i.test(detail) ||
+						/not found in whatsapp store/i.test(detail) ||
+						/unavailable from whatsapp/i.test(detail));
+				if (recoverable) {
+					try {
+						await this.syncFromProvider(accountId);
+						data =
+							typeof provider.downloadStatus === 'function'
+								? await provider.downloadStatus(
+										status.providerStatusId,
+										status.senderWaId,
+									)
+								: await provider.downloadMedia(status.providerStatusId);
+						lastDownloadError = null;
+					} catch (retryError: any) {
+						lastDownloadError = retryError;
+					}
+				}
+				if (lastDownloadError) {
+					const retryDetail = String(lastDownloadError?.message || lastDownloadError || '');
+					if (/session cache/i.test(retryDetail)) {
+						throw new BadRequestException(
+							'This story is no longer in the live WhatsApp session and was not saved to disk when it arrived. Open a newly posted story, or wait for the next status from this contact.',
+						);
+					}
 					throw new BadRequestException(
-						'This story is no longer in the live WhatsApp session and was not saved to disk when it arrived. Open a newly posted story, or wait for the next status from this contact.',
+						retryDetail && retryDetail !== 'Object'
+							? retryDetail
+							: 'Status media is unavailable from WhatsApp. Refresh stories and try again.',
 					);
 				}
-				throw new BadRequestException(
-					retryDetail && retryDetail !== 'Object'
-						? retryDetail
-						: 'Status media is unavailable from WhatsApp. Refresh stories and try again.',
-				);
 			}
 		}
 		let buffer: Buffer;
@@ -836,9 +869,13 @@ export class WhatsAppStatusService {
 		const absolutePath = path.join(folder, `${status.id}${extension}`);
 		await fs.writeFile(absolutePath, buffer);
 		status.mediaPath = path.relative(process.cwd(), absolutePath).replace(/\\/g, '/');
-		const active = status as WhatsAppStatus;
-		await this.repo.save(active);
-		await this.archiveStatusRow(active);
+		if (source === 'history') {
+			await this.historyRepo.save(status as WhatsAppStatusHistory);
+		} else {
+			const active = status as WhatsAppStatus;
+			await this.repo.save(active);
+			await this.archiveStatusRow(active);
+		}
 		return { absolutePath, mimeType, fileName: path.basename(absolutePath) };
 	}
 	private detectMediaMime(buffer: Buffer): string | null {

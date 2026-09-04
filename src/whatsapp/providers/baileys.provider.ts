@@ -1687,11 +1687,24 @@ export class BaileysProvider implements WhatsAppProvider {
 			const lastKnown =
 				String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
 				String(update?.lastKnownPresence || '').toLowerCase();
+			// Empty payloads are common after subscribe; do not force offline.
+			if (!lastKnown) return;
+
 			let state = 'unavailable';
 			if (lastKnown === 'composing') state = 'composing';
 			else if (lastKnown === 'recording') state = 'recording';
-			else if (lastKnown === 'available' || lastKnown === 'online') state = 'available';
-			else if (lastKnown === 'unavailable' || lastKnown === 'offline') state = 'unavailable';
+			else if (
+				lastKnown === 'available' ||
+				lastKnown === 'online' ||
+				lastKnown === 'paused'
+			) {
+				// `paused` = stopped typing, still considered present in the chat.
+				state = 'available';
+			} else if (lastKnown === 'unavailable' || lastKnown === 'offline') {
+				state = 'unavailable';
+			} else {
+				return;
+			}
 			const isOnline = state === 'available' || state === 'composing' || state === 'recording';
 
 			// Resolve sender display name (useful for group "X is typing")
