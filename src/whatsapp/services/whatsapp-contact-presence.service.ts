@@ -83,12 +83,23 @@ export class WhatsAppContactPresenceService
 	private readonly lastRosterAt = new Map<string, number>();
 	private readonly subscribeInFlight = new Set<string>();
 	private pruneTimer: ReturnType<typeof setInterval> | null = null;
+	/** Debug counters (temporary — prove WA → Redis → Socket path). */
+	private presenceApplyCount = 0;
+	private readonly presenceEventsByAccount = new Map<string, number>();
 
-	/** Drop online if no refresh within this window. */
-	private readonly onlineTtlMs = 90_000;
+	/**
+	 * WhatsApp does NOT re-send `available` while someone stays online.
+	 * Only mark offline on explicit `unavailable` (or session clear).
+	 * Typing/recording may stop without an event — clear those quickly.
+	 */
+	private readonly typingTtlMs = 25_000;
+	/** Soft safety if the linked session never gets `unavailable` (hours). */
+	private readonly onlineStaleMs = 6 * 60 * 60_000;
 	/** Keep offline rows briefly so pinned contacts can still render as offline. */
 	private readonly offlineKeepMs = 30 * 60_000;
 	private readonly pruneEveryMs = 15_000;
+	/** Redis TTL for online rows (must outlive typical chat sessions). */
+	private readonly onlineRedisTtlSec = 6 * 60 * 60;
 
 	constructor(
 		@InjectRepository(WhatsAppConversation)
@@ -158,9 +169,10 @@ export class WhatsAppContactPresenceService
 	}
 
 	private async persist(entry: ContactPresenceItem) {
-		const ttlSec = entry.online || entry.typing || entry.recording
-			? Math.ceil(this.onlineTtlMs / 1000)
-			: Math.ceil(this.offlineKeepMs / 1000);
+		const ttlSec =
+			entry.online || entry.typing || entry.recording
+				? this.onlineRedisTtlSec
+				: Math.ceil(this.offlineKeepMs / 1000);
 		try {
 			await this.redis.set(
 				this.redisKey(entry.accountId, entry.conversationId),
@@ -173,10 +185,23 @@ export class WhatsAppContactPresenceService
 					this.redisIndexKey(entry.accountId),
 					entry.conversationId,
 				);
-				await client.expire(this.redisIndexKey(entry.accountId), ttlSec);
+				await client.expire(
+					this.redisIndexKey(entry.accountId),
+					Math.max(ttlSec, this.onlineRedisTtlSec),
+				);
 			}
-		} catch {
-			/* Redis optional */
+			this.logger.debug(
+				`[WHATSAPP PRESENCE] Redis SET key=${this.redisKey(
+					entry.accountId,
+					entry.conversationId,
+				)} online=${entry.online} status=${entry.status} ttlSec=${ttlSec}`,
+			);
+		} catch (error) {
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] Redis SET failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
 		}
 	}
 
@@ -204,7 +229,12 @@ export class WhatsAppContactPresenceService
 			t?: number;
 		},
 	) {
-		if (!this.isDirectChat(conversation)) return;
+		if (!this.isDirectChat(conversation)) {
+			this.logger.log(
+				`[WHATSAPP PRESENCE] DROP non-direct conversationId=${conversation?.id} chatId=${conversation?.providerChatId}`,
+			);
+			return;
+		}
 		const conversationId = String(conversation.id);
 		const mapKey = this.key(accountId, conversationId);
 		const state = String(payload?.state || 'unavailable').toLowerCase();
@@ -239,6 +269,23 @@ export class WhatsAppContactPresenceService
 
 		this.byConversation.set(mapKey, next);
 		void this.persist(next);
+
+		this.presenceApplyCount += 1;
+		this.presenceEventsByAccount.set(
+			accountId,
+			(this.presenceEventsByAccount.get(accountId) || 0) + 1,
+		);
+		this.logger.log(
+			`[WHATSAPP PRESENCE]\n` +
+				`  Session: ${accountId}\n` +
+				`  Conversation: ${conversationId}\n` +
+				`  JID: ${next.chatId}\n` +
+				`  Status: ${next.state}\n` +
+				`  Online: ${next.online}\n` +
+				`  LastSeen: ${next.lastSeen || 'n/a'}\n` +
+				`  Timestamp: ${new Date(updatedAt).toISOString()}\n` +
+				`  AppliedTotal: ${this.presenceApplyCount} (account=${this.presenceEventsByAccount.get(accountId)})`,
+		);
 
 		const changed =
 			!prev ||
@@ -337,14 +384,31 @@ export class WhatsAppContactPresenceService
 		if (changed) this.broadcast(accountId);
 	}
 
-	/** @returns true if any entry flipped from online → offline */
+	/** @returns true if any entry changed (typing clear / rare stale online / drop). */
 	private pruneMemory(accountId: string): boolean {
 		const now = Date.now();
-		let wentOffline = false;
+		let changed = false;
 		for (const [mapKey, entry] of this.byConversation) {
 			if (entry.accountId !== accountId) continue;
 			const age = now - entry.updatedAt;
-			if ((entry.online || entry.typing || entry.recording) && age > this.onlineTtlMs) {
+
+			// Typing indicators are short-lived; online itself is event-driven.
+			if ((entry.typing || entry.recording) && age > this.typingTtlMs) {
+				entry.typing = false;
+				entry.recording = false;
+				entry.status = entry.online ? 'online' : 'offline';
+				entry.state = entry.online ? 'available' : 'unavailable';
+				entry.updatedAt = now;
+				this.byConversation.set(mapKey, entry);
+				void this.persist(entry);
+				changed = true;
+			}
+
+			// Soft safety only — WhatsApp normally sends unavailable.
+			if (entry.online && age > this.onlineStaleMs) {
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Soft-stale online→offline session=${accountId} jid=${entry.chatId} ageMs=${age}`,
+				);
 				entry.online = false;
 				entry.status = 'offline';
 				entry.typing = false;
@@ -353,15 +417,17 @@ export class WhatsAppContactPresenceService
 				entry.updatedAt = now;
 				this.byConversation.set(mapKey, entry);
 				void this.persist(entry);
-				wentOffline = true;
+				changed = true;
 				continue;
 			}
+
 			if (!entry.online && !entry.typing && !entry.recording && age > this.offlineKeepMs) {
 				this.byConversation.delete(mapKey);
 				void this.removePersisted(accountId, entry.conversationId);
+				changed = true;
 			}
 		}
-		return wentOffline;
+		return changed;
 	}
 
 	private pruneAllAccounts() {
@@ -445,7 +511,6 @@ export class WhatsAppContactPresenceService
 			if (entry.accountId !== accountId) continue;
 			const age = now - entry.updatedAt;
 			const isLive = entry.online || entry.typing || entry.recording;
-			if (isLive && age > this.onlineTtlMs) continue;
 			if (!isLive && (!includeOffline || age > this.offlineKeepMs)) continue;
 			if (!includeOffline && !isLive) continue;
 			items.push(entry);
@@ -456,6 +521,9 @@ export class WhatsAppContactPresenceService
 			if (aLive !== bLive) return bLive - aLive;
 			return (b.updatedAt || 0) - (a.updatedAt || 0);
 		});
+		this.logger.log(
+			`[WHATSAPP PRESENCE] listOnline session=${accountId} live=${items.filter((i) => i.online || i.typing || i.recording).length} totalReturned=${items.length} appliedEvents=${this.presenceEventsByAccount.get(accountId) || 0}`,
+		);
 		return {
 			accountId,
 			items,
@@ -465,6 +533,12 @@ export class WhatsAppContactPresenceService
 
 	private broadcast(accountId: string) {
 		void this.listOnline(accountId, { includeOffline: true }).then((snapshot) => {
+			const live = (snapshot.items || []).filter(
+				(i) => i.online || i.typing || i.recording,
+			).length;
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Socket.IO emit online_contacts session=${accountId} live=${live} items=${snapshot.items?.length || 0}`,
+			);
 			this.gateway.emitAccountEvent(accountId, 'online_contacts', snapshot);
 		});
 	}
@@ -483,6 +557,13 @@ export class WhatsAppContactPresenceService
 		}
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected' || !provider.subscribePresence) {
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Subscribe blocked session=${accountId} provider=${Boolean(
+					provider,
+				)} state=${provider?.getState?.() || 'n/a'} hasSubscribe=${Boolean(
+					provider?.subscribePresence,
+				)}`,
+			);
 			return { ok: false, subscribed: 0 };
 		}
 
@@ -525,18 +606,21 @@ export class WhatsAppContactPresenceService
 			].filter(Boolean);
 			if (!chatIds.length) {
 				this.lastSubscribeAt.set(accountId, Date.now());
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Subscribe skipped — no direct chat JIDs session=${accountId}`,
+				);
 				return { ok: true, subscribed: 0 };
 			}
 
 			const subscribed = Number((await provider.subscribePresence(chatIds)) || 0);
 			this.lastSubscribeAt.set(accountId, Date.now());
-			this.logger.debug(
-				`Subscribed WA presence for ${subscribed || chatIds.length} jids on ${accountId}`,
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Subscribed session=${accountId} jids=${chatIds.length} ok=${subscribed || chatIds.length} sample=${chatIds.slice(0, 5).join(',')}`,
 			);
 			return { ok: true, subscribed: subscribed || chatIds.length };
 		} catch (error) {
-			this.logger.debug(
-				`Presence subscribe failed for ${accountId}: ${
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] Subscribe failed session=${accountId}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);

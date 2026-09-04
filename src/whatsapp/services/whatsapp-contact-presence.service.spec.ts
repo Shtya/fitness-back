@@ -137,7 +137,7 @@ describe('WhatsAppContactPresenceService', () => {
 		expect(snap.items[0].status).toBe('typing');
 	});
 
-	it('expires stale online presence without inventing new online', async () => {
+	it('keeps online until unavailable (WhatsApp does not re-ping available)', async () => {
 		jest.useFakeTimers();
 		const { service, gateway } = createService();
 		const now = Date.now();
@@ -149,7 +149,14 @@ describe('WhatsAppContactPresenceService', () => {
 		});
 		expect((await service.listOnline('acc-1')).items).toHaveLength(1);
 
-		jest.setSystemTime(now + 91_000);
+		// Still online after several minutes without another presence packet.
+		jest.setSystemTime(now + 5 * 60_000);
+		(service as any).pruneAllAccounts();
+		expect((await service.listOnline('acc-1')).items).toHaveLength(1);
+		expect((await service.listOnline('acc-1')).items[0].online).toBe(true);
+
+		// Soft-stale safety after many hours without any presence event.
+		jest.setSystemTime(now + 7 * 60 * 60_000);
 		(service as any).pruneAllAccounts();
 		const snap = await service.listOnline('acc-1');
 		expect(snap.items).toHaveLength(0);
@@ -158,6 +165,24 @@ describe('WhatsAppContactPresenceService', () => {
 			'online_contacts',
 			expect.any(Object),
 		);
+	});
+
+	it('clears typing after short TTL without clearing online', async () => {
+		jest.useFakeTimers();
+		const { service } = createService();
+		const now = Date.now();
+		jest.setSystemTime(now);
+		service.applyPresenceEvent('acc-1', directConversation() as any, {
+			state: 'composing',
+			t: now,
+		});
+		expect((await service.listOnline('acc-1')).items[0].typing).toBe(true);
+		jest.setSystemTime(now + 30_000);
+		(service as any).pruneAllAccounts();
+		const snap = await service.listOnline('acc-1');
+		expect(snap.items).toHaveLength(1);
+		expect(snap.items[0].typing).toBe(false);
+		expect(snap.items[0].online).toBe(true);
 	});
 
 	it('seedConversationRoster never marks contacts online', async () => {

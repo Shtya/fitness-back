@@ -1678,8 +1678,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		});
 
 		socket.ev.on('presence.update', (update: any) => {
-			const chatId = normalizeInboxJid(jidOf(update?.id) || String(update?.id || ''));
-			if (!chatId) return;
+			const rawId = String(update?.id || '');
+			const chatId = normalizeInboxJid(jidOf(update?.id) || rawId);
 			const presences =
 				update?.presences && typeof update.presences === 'object' ? update.presences : {};
 			const firstKey = Object.keys(presences)[0];
@@ -1687,8 +1687,19 @@ export class BaileysProvider implements WhatsAppProvider {
 			const lastKnown =
 				String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
 				String(update?.lastKnownPresence || '').toLowerCase();
+
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Baileys RAW session=${this.accountId} id=${rawId} jid=${chatId || 'empty'} lastKnown=${lastKnown || '(empty)'} participants=${Object.keys(presences).join(',') || 'none'} lastSeen=${first?.lastSeen ?? 'n/a'}`,
+			);
+
+			if (!chatId) return;
 			// Empty payloads are common after subscribe; do not force offline.
-			if (!lastKnown) return;
+			if (!lastKnown) {
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Baileys EMPTY (no lastKnownPresence) — waiting for real update session=${this.accountId} jid=${chatId}`,
+				);
+				return;
+			}
 
 			let state = 'unavailable';
 			if (lastKnown === 'composing') state = 'composing';
@@ -1703,6 +1714,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			} else if (lastKnown === 'unavailable' || lastKnown === 'offline') {
 				state = 'unavailable';
 			} else {
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Baileys UNKNOWN lastKnown=${lastKnown} session=${this.accountId} jid=${chatId}`,
+				);
 				return;
 			}
 			const isOnline = state === 'available' || state === 'composing' || state === 'recording';
@@ -1717,6 +1731,16 @@ export class BaileysProvider implements WhatsAppProvider {
 			const lastSeen = rawLastSeen > 0
 				? (rawLastSeen < 1e12 ? rawLastSeen * 1000 : rawLastSeen)
 				: 0;
+
+			this.logger.log(
+				`[WHATSAPP PRESENCE]\n` +
+					`  Session: ${this.accountId}\n` +
+					`  JID: ${chatId}\n` +
+					`  Status: ${state}\n` +
+					`  LastSeen: ${lastSeen || 'n/a'}\n` +
+					`  Timestamp: ${new Date().toISOString()}\n` +
+					`  Source: baileys.presence.update`,
+			);
 
 			this.emit({
 				type: 'presence',
@@ -2513,25 +2537,42 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async subscribePresence(chatId: string | string[]) {
-		if (!this.socket || this.state !== 'connected') return 0;
+		if (!this.socket || this.state !== 'connected') {
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Baileys subscribe skipped — not connected session=${this.accountId} state=${this.state}`,
+			);
+			return 0;
+		}
 		const ids = Array.isArray(chatId) ? chatId : [chatId];
+		const seen = new Set<string>();
 		let count = 0;
 		for (const raw of ids) {
 			const jid = toBaileysJid(String(raw || '').trim());
-			if (!jid) continue;
+			if (!jid || seen.has(jid)) continue;
+			seen.add(jid);
 			try {
 				if (typeof this.socket.presenceSubscribe === 'function') {
 					await this.socket.presenceSubscribe(jid);
 					count += 1;
+					if (count <= 8 || count % 25 === 0) {
+						this.logger.log(
+							`[WHATSAPP PRESENCE] Baileys presenceSubscribe ok session=${this.accountId} jid=${jid} n=${count}`,
+						);
+					}
+					// Avoid flooding WhatsApp with hundreds of subscribe nodes at once.
+					if (count % 15 === 0) await waitMs(40);
 				}
 			} catch (error) {
-				this.logger.debug(
-					`presenceSubscribe failed for ${this.accountId}/${jid}: ${
+				this.logger.warn(
+					`[WHATSAPP PRESENCE] Baileys presenceSubscribe failed session=${this.accountId} jid=${jid}: ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
 			}
 		}
+		this.logger.log(
+			`[WHATSAPP PRESENCE] Baileys subscribe done session=${this.accountId} unique=${seen.size} subscribed=${count}`,
+		);
 		return count;
 	}
 

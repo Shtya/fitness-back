@@ -452,6 +452,19 @@ export class WppConnectProvider implements WhatsAppProvider {
 				const participants = Array.isArray(presence?.participants) ? presence.participants : [];
 				const firstParticipant = participants[0];
 				const senderName = String(firstParticipant?.name || firstParticipant?.shortName || '');
+				const state = String(presence?.state || 'unavailable');
+				const lastSeen = Number(presence?.lastSeen || 0);
+
+				this.logger.log(
+					`[WHATSAPP PRESENCE]\n` +
+						`  Session: ${this.accountId}\n` +
+						`  JID: ${chatId}\n` +
+						`  Status: ${state}\n` +
+						`  Online: ${Boolean(presence?.isOnline)}\n` +
+						`  LastSeen: ${lastSeen || 'n/a'}\n` +
+						`  Timestamp: ${new Date().toISOString()}\n` +
+						`  Source: wpp.onPresenceChanged`,
+				);
 
 				this.emit({
 					type: 'presence',
@@ -459,14 +472,18 @@ export class WppConnectProvider implements WhatsAppProvider {
 						chatId,
 						isOnline: Boolean(presence?.isOnline),
 						isGroup: Boolean(presence?.isGroup),
-						state: String(presence?.state || 'unavailable'),
+						state,
 						t: Number(presence?.t) || Date.now(),
 						participants: participants.length ? participants : undefined,
 						senderName,
-						lastSeen: Number(presence?.lastSeen || 0),
+						lastSeen,
 					},
 				});
 			});
+		} else {
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] WPP onPresenceChanged missing — presence will not stream session=${this.accountId}`,
+			);
 		}
 		if (typeof this.client.onReactionMessage === 'function') {
 			this.client.onReactionMessage((reaction: any) => {
@@ -2356,12 +2373,22 @@ export class WppConnectProvider implements WhatsAppProvider {
 	}
 
 	async subscribePresence(chatId: string | string[]) {
-		if (!this.client || typeof this.client.subscribePresence !== 'function') return 0;
+		if (!this.client || typeof this.client.subscribePresence !== 'function') {
+			this.logger.log(
+				`[WHATSAPP PRESENCE] WPP subscribePresence unavailable session=${this.accountId}`,
+			);
+			return 0;
+		}
 		try {
-			return await this.client.subscribePresence(chatId);
+			const ids = Array.isArray(chatId) ? chatId : [chatId];
+			const result = await this.client.subscribePresence(ids);
+			this.logger.log(
+				`[WHATSAPP PRESENCE] WPP subscribePresence session=${this.accountId} requested=${ids.length} result=${result}`,
+			);
+			return result;
 		} catch (error) {
-			this.logger.debug(
-				`subscribePresence failed for ${this.accountId}: ${
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] WPP subscribePresence failed session=${this.accountId}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);

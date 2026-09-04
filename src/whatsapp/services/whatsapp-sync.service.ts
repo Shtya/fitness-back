@@ -52,7 +52,7 @@ import {
 } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
-import { WhatsAppContactPresenceService } from './whatsapp-contact-presence.service';
+import { WhatsAppContactPresenceService, expandPresenceSubscribeIds } from './whatsapp-contact-presence.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { WhatsAppStatusService } from './whatsapp-status.service';
 import {
@@ -867,13 +867,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		if (event.type === 'presence') {
 			const chatId = String(event.payload?.chatId || '');
-			if (!chatId || !isSupportedInboxChatId(chatId)) return;
+			if (!chatId || !isSupportedInboxChatId(chatId)) {
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Sync DROP unsupported chatId=${chatId || '(empty)'} session=${accountId}`,
+				);
+				return;
+			}
 			let conversation =
 				(await this.conversationRepo.findOne({
 					where: { accountId, providerChatId: chatId },
 					relations: ['contact'],
 				})) || (await this.findDirectConversationAlias(accountId, chatId, null));
-			if (!conversation) return;
+			if (!conversation) {
+				this.logger.warn(
+					`[WHATSAPP PRESENCE] Sync DROP unmatched JID (no conversation) session=${accountId} jid=${chatId} state=${event.payload?.state} isOnline=${event.payload?.isOnline}`,
+				);
+				return;
+			}
 			if (!conversation.contact) {
 				conversation =
 					(await this.conversationRepo.findOne({
@@ -894,6 +904,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				senderName: String(event.payload?.senderName || ''),
 				lastSeen: Number(event.payload?.lastSeen || 0),
 			};
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Sync APPLY session=${accountId} conv=${conversation.id} jid=${presencePayload.chatId} state=${state} isOnline=${presencePayload.isOnline}`,
+			);
 			this.contactPresence.applyPresenceEvent(accountId, conversation, presencePayload);
 			this.gateway.emitAccountEvent(accountId, 'presence', presencePayload);
 			this.gateway.emitConversationEvent(
@@ -907,9 +920,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'connection' && event.status === 'connected') {
 			this.startInboxReconciliation(accountId);
 			void this.scheduleBootstrap(accountId);
-			void this.contactPresence
-				.subscribeRecentDirectChats(accountId, 120, true)
-				.catch(() => undefined);
+			// Let the socket settle, then force presenceSubscribe for recent chats.
+			setTimeout(() => {
+				void this.contactPresence
+					.subscribeRecentDirectChats(accountId, 80, true)
+					.catch(() => undefined);
+			}, 2500);
 		} else if (event.type === 'connection') {
 			this.contactPresence.clearAccount(accountId);
 			this.stopInboxReconciliation(accountId);
@@ -3649,7 +3665,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async subscribeConversationPresence(conversation: WhatsAppConversation) {
 		const provider = this.providers.getProvider(conversation.accountId);
 		if (!provider?.subscribePresence || !conversation.providerChatId) return;
-		await provider.subscribePresence(conversation.providerChatId);
+		const ids = expandPresenceSubscribeIds(
+			String(conversation.providerChatId || '').trim(),
+			conversation.contact?.phoneNumber,
+		);
+		this.logger.log(
+			`[WHATSAPP PRESENCE] Open-chat subscribe session=${conversation.accountId} conv=${conversation.id} jids=${ids.join(',')}`,
+		);
+		await provider.subscribePresence(ids);
 	}
 
 	async sendConversationPresence(
