@@ -1,4 +1,8 @@
-import { decodeProviderMedia, isIncompleteStatusMedia } from './whatsapp-media-decode';
+import {
+	decodeProviderMedia,
+	isIncompleteChatImageDownload,
+	isIncompleteStatusMedia,
+} from './whatsapp-media-decode';
 
 describe('decodeProviderMedia', () => {
 	it('returns a Buffer payload without re-encoding it as base64', () => {
@@ -28,5 +32,39 @@ describe('isIncompleteStatusMedia', () => {
 
 	it('accepts a full-size image status', () => {
 		expect(isIncompleteStatusMedia(Buffer.alloc(40_000), 'image/jpeg', 'image')).toBe(false);
+	});
+});
+
+describe('isIncompleteChatImageDownload', () => {
+	it('rejects tiny image payloads', () => {
+		expect(
+			isIncompleteChatImageDownload(2_000, { type: 'image', mimeType: 'image/jpeg' }),
+		).toBe(true);
+	});
+
+	it('rejects a thumbnail-sized buffer when WhatsApp reported a large fileLength', () => {
+		expect(
+			isIncompleteChatImageDownload(10_000, {
+				type: 'image',
+				mimeType: 'image/jpeg',
+				fileSizeBytes: 180_000,
+			}),
+		).toBe(true);
+	});
+
+	it('never rejects stickers for being small', () => {
+		expect(
+			isIncompleteChatImageDownload(2_000, { type: 'sticker', mimeType: 'image/webp' }),
+		).toBe(false);
+	});
+
+	it('accepts a normal photo size', () => {
+		expect(
+			isIncompleteChatImageDownload(95_000, {
+				type: 'image',
+				mimeType: 'image/jpeg',
+				fileSizeBytes: 95_000,
+			}),
+		).toBe(false);
 	});
 });

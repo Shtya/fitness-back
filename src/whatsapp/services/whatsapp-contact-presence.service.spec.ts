@@ -32,6 +32,9 @@ describe('WhatsAppContactPresenceService', () => {
 		const conversationRepo = {
 			createQueryBuilder: jest.fn(),
 		};
+		const contactRepo = {
+			createQueryBuilder: jest.fn(),
+		};
 		const providers = {
 			getProvider: jest.fn(),
 		};
@@ -47,11 +50,12 @@ describe('WhatsAppContactPresenceService', () => {
 		};
 		const service = new WhatsAppContactPresenceService(
 			conversationRepo as any,
+			contactRepo as any,
 			providers as any,
 			gateway as any,
 			redis as any,
 		);
-		return { service, gateway, redis, providers, conversationRepo };
+		return { service, gateway, redis, providers, conversationRepo, contactRepo };
 	}
 
 	function directConversation(overrides: Record<string, any> = {}) {

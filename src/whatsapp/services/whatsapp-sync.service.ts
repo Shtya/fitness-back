@@ -43,7 +43,7 @@ import {
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
-import { decodeProviderMedia } from '../utils/whatsapp-media-decode';
+import { decodeProviderMedia, isIncompleteChatImageDownload } from '../utils/whatsapp-media-decode';
 import {
 	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
@@ -879,10 +879,37 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					relations: ['contact'],
 				})) || (await this.findDirectConversationAlias(accountId, chatId, null));
 			if (!conversation) {
-				this.logger.warn(
-					`[WHATSAPP PRESENCE] Sync DROP unmatched JID (no conversation) session=${accountId} jid=${chatId} state=${event.payload?.state} isOnline=${event.payload?.isOnline}`,
-				);
-				return;
+				const pendingState = String(event.payload?.state || 'unavailable').toLowerCase();
+				const pendingOnline =
+					Boolean(event.payload?.isOnline) ||
+					pendingState === 'available' ||
+					pendingState === 'composing' ||
+					pendingState === 'recording';
+				// Only create a stub chat for live presence — avoid flooding the inbox
+				// with offline address-book JIDs we subscribed to.
+				if (!pendingOnline) {
+					this.logger.log(
+						`[WHATSAPP PRESENCE] Sync SKIP unmatched offline jid=${chatId} session=${accountId}`,
+					);
+					return;
+				}
+				try {
+					const title =
+						String(event.payload?.senderName || '').trim() || null;
+					conversation = await this.ensureConversation(accountId, chatId, {
+						title,
+					});
+					this.logger.log(
+						`[WHATSAPP PRESENCE] Sync CREATE conversation for presence session=${accountId} jid=${chatId} conv=${conversation?.id}`,
+					);
+				} catch (error) {
+					this.logger.warn(
+						`[WHATSAPP PRESENCE] Sync DROP unmatched JID (ensure failed) session=${accountId} jid=${chatId} state=${event.payload?.state}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+					return;
+				}
 			}
 			if (!conversation.contact) {
 				conversation =
@@ -920,10 +947,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'connection' && event.status === 'connected') {
 			this.startInboxReconciliation(accountId);
 			void this.scheduleBootstrap(accountId);
-			// Let the socket settle, then force presenceSubscribe for recent chats.
+			// Let the socket settle, then force presenceSubscribe for chats + contacts.
 			setTimeout(() => {
 				void this.contactPresence
-					.subscribeRecentDirectChats(accountId, 80, true)
+					.subscribeRecentDirectChats(accountId, 200, true)
 					.catch(() => undefined);
 			}, 2500);
 		} else if (event.type === 'connection') {
@@ -2882,6 +2909,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		for (const chunk of chunkList(rows, CONTACT_SYNC_CHUNK)) {
 			await this.contactRepo.upsert(chunk, ['accountId', 'waId']);
 			count += chunk.length;
+		}
+		// Re-subscribe so address-book contacts (not only messaged chats) get presence.
+		if (count > 0) {
+			void this.contactPresence
+				.subscribeRecentDirectChats(accountId, 200, true)
+				.catch(() => undefined);
 		}
 		return { supported: true, count };
 	}
@@ -6097,6 +6130,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						if (kind === 'video' && !sniffVideoMime(head) && sniffImageMime(head)) {
 							throw new Error('Cached video is a thumbnail');
 						}
+						const expectedBytes =
+							Number(baileysRawMediaNode((attachment.message as any)?.raw)?.fileLength) ||
+							Number(attachment.fileSizeBytes) ||
+							0;
+						if (
+							kind === 'image' &&
+							isIncompleteChatImageDownload(stats.size, {
+								type: kind,
+								mimeType: attachment.mimeType,
+								fileSizeBytes: expectedBytes || attachment.fileSizeBytes,
+							})
+						) {
+							throw new Error('Cached image is a thumbnail');
+						}
 						if (
 							!attachment.mimeType ||
 							String(attachment.mimeType).includes('octet-stream')
@@ -6209,6 +6256,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					throw new Error('Provider returned a thumbnail instead of video');
 				}
 				if (videoMime) attachment.mimeType = videoMime;
+			}
+			const expectedImageBytes =
+				Number(baileysRawMediaNode(rawHint)?.fileLength) ||
+				Number(attachment.fileSizeBytes) ||
+				0;
+			if (
+				mediaKind === 'image' &&
+				isIncompleteChatImageDownload(buffer.length, {
+					type: mediaKind,
+					mimeType: attachment.mimeType || sniffImageMime(buffer),
+					fileSizeBytes: expectedImageBytes || attachment.fileSizeBytes,
+				})
+			) {
+				throw new Error('Provider returned a thumbnail instead of the full image');
 			}
 			const sniffedMime =
 				(audioType ? sniffAudioMime(buffer) : null) ||

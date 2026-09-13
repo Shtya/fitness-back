@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RedisService } from '../../redis/redis.service';
 import {
+	WhatsAppContact,
 	WhatsAppConversation,
 	WhatsAppConversationType,
 } from '../entities/whatsapp.entity';
@@ -62,6 +63,9 @@ export function expandPresenceSubscribeIds(
 	return [...ids];
 }
 
+/** Hard cap after alias expansion — Baileys rate-limits subscribe floods. */
+const PRESENCE_SUBSCRIBE_JID_CAP = 350;
+
 /**
  * Tracks WhatsApp *contact* presence from linked-device sessions
  * (Baileys `presence.update` / WPP `onPresenceChanged`).
@@ -71,6 +75,8 @@ export function expandPresenceSubscribeIds(
  * - WhatsApp only streams presence after `presenceSubscribe(jid)`.
  * - Privacy settings may hide online/last-seen for many contacts.
  * - This is never based on CRM open, DB rows, or last message alone.
+ * - Subscribe covers recent 1:1 chats **and** address-book contacts (capped),
+ *   not only people you already messaged.
  */
 @Injectable()
 export class WhatsAppContactPresenceService
@@ -104,6 +110,8 @@ export class WhatsAppContactPresenceService
 	constructor(
 		@InjectRepository(WhatsAppConversation)
 		private readonly conversationRepo: Repository<WhatsAppConversation>,
+		@InjectRepository(WhatsAppContact)
+		private readonly contactRepo: Repository<WhatsAppContact>,
 		private readonly providers: WhatsAppProviderManagerService,
 		private readonly gateway: WhatsAppGateway,
 		private readonly redis: RedisService,
@@ -543,11 +551,23 @@ export class WhatsAppContactPresenceService
 		});
 	}
 
+	private isPresenceEligibleJid(chatId: string) {
+		const id = String(chatId || '').trim().toLowerCase();
+		if (!id) return false;
+		if (id.endsWith('@g.us')) return false;
+		if (id.includes('@newsletter')) return false;
+		if (id.includes('@broadcast')) return false;
+		if (id.includes('status@')) return false;
+		if (id.includes('email-memo')) return false;
+		return true;
+	}
+
 	/**
-	 * Subscribe to WhatsApp presence for recent 1:1 chats.
+	 * Subscribe to WhatsApp presence for recent 1:1 chats **and** address-book contacts.
 	 * Required: Baileys only streams presence after `presenceSubscribe(jid)`.
+	 * Contacts without a prior chat are included so online is not limited to people you messaged.
 	 */
-	async subscribeRecentDirectChats(accountId: string, limit = 120, force = false) {
+	async subscribeRecentDirectChats(accountId: string, limit = 200, force = false) {
 		const last = this.lastSubscribeAt.get(accountId) || 0;
 		if (!force && Date.now() - last < 45_000) {
 			return { ok: true, subscribed: 0, skipped: true };
@@ -569,6 +589,9 @@ export class WhatsAppContactPresenceService
 
 		this.subscribeInFlight.add(accountId);
 		try {
+			const chatTake = Math.min(Math.max(Number(limit) || 200, 1), 300);
+			const contactTake = Math.min(Math.max(chatTake, 1), 300);
+
 			const rows = await this.conversationRepo
 				.createQueryBuilder('conversation')
 				.leftJoinAndSelect('conversation.contact', 'contact')
@@ -589,25 +612,46 @@ export class WhatsAppContactPresenceService
 					memo: '%email-memo%',
 				})
 				.orderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
-				.take(Math.min(Math.max(Number(limit) || 120, 1), 200))
+				.take(chatTake)
 				.getMany();
 
 			this.seedConversationRoster(accountId, rows, { broadcast: false });
 
-			const chatIds = [
-				...new Set(
-					rows.flatMap((row) =>
-						expandPresenceSubscribeIds(
-							String(row.providerChatId || '').trim(),
-							row.contact?.phoneNumber,
-						),
-					),
-				),
-			].filter(Boolean);
+			const contacts = await this.contactRepo
+				.createQueryBuilder('contact')
+				.where('contact.accountId = :accountId', { accountId })
+				.andWhere('LOWER(contact.waId) NOT LIKE :group', { group: '%@g.us%' })
+				.andWhere('LOWER(contact.waId) NOT LIKE :newsletter', {
+					newsletter: '%@newsletter%',
+				})
+				.andWhere('LOWER(contact.waId) NOT LIKE :broadcast', {
+					broadcast: '%@broadcast%',
+				})
+				.andWhere('LOWER(contact.waId) NOT LIKE :status', { status: '%status@%' })
+				.orderBy('contact.updated_at', 'DESC')
+				.take(contactTake)
+				.getMany();
+
+			const idSet = new Set<string>();
+			const pushIds = (raw: string, phoneHint?: string | null) => {
+				if (!this.isPresenceEligibleJid(raw)) return;
+				for (const id of expandPresenceSubscribeIds(raw, phoneHint)) {
+					if (this.isPresenceEligibleJid(id)) idSet.add(id);
+				}
+			};
+
+			for (const row of rows) {
+				pushIds(String(row.providerChatId || '').trim(), row.contact?.phoneNumber);
+			}
+			for (const contact of contacts) {
+				pushIds(String(contact.waId || '').trim(), contact.phoneNumber);
+			}
+
+			const chatIds = [...idSet].slice(0, PRESENCE_SUBSCRIBE_JID_CAP);
 			if (!chatIds.length) {
 				this.lastSubscribeAt.set(accountId, Date.now());
 				this.logger.log(
-					`[WHATSAPP PRESENCE] Subscribe skipped — no direct chat JIDs session=${accountId}`,
+					`[WHATSAPP PRESENCE] Subscribe skipped — no direct/contact JIDs session=${accountId}`,
 				);
 				return { ok: true, subscribed: 0 };
 			}
@@ -615,7 +659,7 @@ export class WhatsAppContactPresenceService
 			const subscribed = Number((await provider.subscribePresence(chatIds)) || 0);
 			this.lastSubscribeAt.set(accountId, Date.now());
 			this.logger.log(
-				`[WHATSAPP PRESENCE] Subscribed session=${accountId} jids=${chatIds.length} ok=${subscribed || chatIds.length} sample=${chatIds.slice(0, 5).join(',')}`,
+				`[WHATSAPP PRESENCE] Subscribed session=${accountId} chats=${rows.length} contactsDb=${contacts.length} jids=${chatIds.length} ok=${subscribed || chatIds.length} sample=${chatIds.slice(0, 5).join(',')}`,
 			);
 			return { ok: true, subscribed: subscribed || chatIds.length };
 		} catch (error) {
