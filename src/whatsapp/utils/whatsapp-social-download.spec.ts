@@ -4,6 +4,7 @@ import {
 	buildSocialDownloadArgs,
 	describeSocialDownloadFailure,
 	extractSocialVideoUrls,
+	lastSocialDownloadError,
 	normalizeSocialVideoUrl,
 	resolveSocialPathInsideRoot,
 	socialDownloadRelativePath,
@@ -164,9 +165,32 @@ describe('describeSocialDownloadFailure', () => {
 		expect(describeSocialDownloadFailure('ERROR: Video unavailable', 1)).toMatch(/no longer/i);
 	});
 
+	it('repeats the downloader\'s own reason instead of only an exit code', () => {
+		const message = describeSocialDownloadFailure(
+			'[TikTok] Extracting URL\nERROR: [TikTok] 7123: Unable to extract webpage; please report this issue on https://github.com/yt-dlp',
+			1,
+		);
+		expect(message).toContain('Unable to extract webpage');
+		expect(message).not.toMatch(/report this issue/i);
+		expect(message).not.toContain('exit 1');
+	});
+
 	it('falls back to a generic message with the exit code', () => {
 		expect(describeSocialDownloadFailure('something odd', 2)).toContain('exit 2');
 		expect(describeSocialDownloadFailure('', null)).not.toContain('exit');
+	});
+});
+
+describe('lastSocialDownloadError', () => {
+	it('takes the final ERROR line, without colour codes', () => {
+		expect(
+			lastSocialDownloadError('ERROR: first thing\n\u001b[0;31mERROR:\u001b[0m second thing'),
+		).toBe('second thing');
+	});
+
+	it('ignores progress noise and truncates a very long reason', () => {
+		expect(lastSocialDownloadError('[download] 12% of 3MiB')).toBe('');
+		expect(lastSocialDownloadError(`ERROR: ${'x'.repeat(400)}`)).toHaveLength(160);
 	});
 });
 

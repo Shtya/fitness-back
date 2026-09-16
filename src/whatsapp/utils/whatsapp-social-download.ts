@@ -21,7 +21,11 @@ const SOCIAL_VIDEO_HOSTS: { suffix: string; platform: SocialPlatform }[] = [
 ];
 
 export const MAX_SOCIAL_VIDEO_BYTES = 200 * 1024 * 1024;
-export const SOCIAL_DOWNLOAD_TIMEOUT_MS = 180_000;
+/**
+ * Generous on purpose: TikTok answers a JavaScript challenge before it hands over
+ * any format list, which on its own has been measured at over 90 seconds.
+ */
+export const SOCIAL_DOWNLOAD_TIMEOUT_MS = 300_000;
 
 /**
  * Validates the URL and returns its platform, or `null` if it is not a supported
@@ -129,6 +133,30 @@ export function buildSocialDownloadArgs(
 	];
 }
 
+/**
+ * The last `ERROR:` line yt-dlp printed, cleaned up for display.
+ *
+ * Without this the only thing left of a failure is the exit code, which says
+ * nothing: extractors break per-platform and per-post, so the reason has to travel
+ * back to whoever pressed the button.
+ */
+export function lastSocialDownloadError(stderr: string): string {
+	const lines = String(stderr || '')
+		// yt-dlp colours its output when it thinks it has a terminal.
+		.replace(/\u001b\[[0-9;]*m/g, '')
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => /^error:/i.test(line));
+	const last = lines[lines.length - 1];
+	if (!last) return '';
+	const detail = last
+		.replace(/^error:\s*/i, '')
+		// Bug-report boilerplate is noise for the person looking at a chat bubble.
+		.replace(/[;.]?\s*(please report this issue|confirm you are on the latest version)[\s\S]*$/i, '')
+		.trim();
+	return detail.length > 160 ? `${detail.slice(0, 157)}...` : detail;
+}
+
 /** Turns yt-dlp's stderr into something worth showing a user. */
 export function describeSocialDownloadFailure(stderr: string, exitCode: number | null): string {
 	const text = String(stderr || '').toLowerCase();
@@ -145,6 +173,8 @@ export function describeSocialDownloadFailure(stderr: string, exitCode: number |
 	if (text.includes('enoent')) {
 		return 'The video downloader is not installed on the server. Run "npm run yt-dlp:install" in backend, or set YTDLP_PATH.';
 	}
+	const detail = lastSocialDownloadError(stderr);
+	if (detail) return `Could not download this video: ${detail}`;
 	return `Could not download this video${exitCode == null ? '' : ` (exit ${exitCode})`}.`;
 }
 

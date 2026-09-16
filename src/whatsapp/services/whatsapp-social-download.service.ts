@@ -220,7 +220,13 @@ export class WhatsAppSocialDownloadService {
 				error?.stderr || error?.message || '',
 				typeof error?.exitCode === 'number' ? error.exitCode : null,
 			);
-			this.logger.warn(`social download failed row=${rowId}: ${error?.message || error}`);
+			// The downloader's own output is the only useful part of this failure; without
+			// it the log says "yt-dlp failed" and nobody can tell why.
+			this.logger.warn(
+				`social download failed row=${rowId} url=${url} exit=${
+					error?.exitCode ?? 'n/a'
+				}: ${error?.message || error}\n${String(error?.stderr || '').trim()}`,
+			);
 			await this.downloadRepo
 				.update(rowId, { status: 'failed', errorMessage: message, completedAt: new Date() })
 				.catch(() => undefined);
@@ -231,11 +237,21 @@ export class WhatsAppSocialDownloadService {
 
 	private spawnYtDlp(url: string, outputPath: string) {
 		return new Promise<void>((resolve, reject) => {
+			// `--ffmpeg-location` must be a path that exists: yt-dlp rejects a bare
+			// command name outright, even though `spawn` would have found it on PATH.
+			const ffmpeg = resolveFfmpeg();
+			const binary = resolveYtDlp();
 			const child = spawn(
-				resolveYtDlp(),
-				buildSocialDownloadArgs(url, outputPath, MAX_SOCIAL_VIDEO_BYTES, resolveFfmpeg()),
+				binary,
+				buildSocialDownloadArgs(
+					url,
+					outputPath,
+					MAX_SOCIAL_VIDEO_BYTES,
+					path.isAbsolute(ffmpeg) && existsSync(ffmpeg) ? ffmpeg : '',
+				),
 				{ windowsHide: true },
 			);
+			this.logger.debug(`social download spawn ${binary} url=${url}`);
 			let stderr = '';
 			let settled = false;
 			const finish = (error?: any) => {
@@ -252,6 +268,11 @@ export class WhatsAppSocialDownloadService {
 
 			child.stderr?.on('data', (chunk) => {
 				// Only the tail matters; yt-dlp can be very chatty on failure.
+				stderr = `${stderr}${chunk}`.slice(-2000);
+			});
+			// stdout is piped whether or not we read it, so it has to be drained: a full
+			// pipe buffer would block yt-dlp forever. Some extractor errors land here too.
+			child.stdout?.on('data', (chunk) => {
 				stderr = `${stderr}${chunk}`.slice(-2000);
 			});
 			child.on('error', (error) => finish(Object.assign(error, { stderr })));
