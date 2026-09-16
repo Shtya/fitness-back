@@ -9,17 +9,22 @@ import {
 	Put,
 	Query,
 	Req,
+	Res,
 	UploadedFile,
 	UseGuards,
 	UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { diskStorage } from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
-import { assertSendRateLimit } from '../utils/whatsapp-send-rate-limit';
+import {
+	assertSendRateLimit,
+	assertVoicePreviewRateLimit,
+} from '../utils/whatsapp-send-rate-limit';
 import {
 	CreateWhatsAppConversationNoteDto,
 	CreateWhatsAppMessageGroupDto,
@@ -39,10 +44,12 @@ import {
 	ShareWhatsAppMessagesAsOriginalDto,
 	ToggleWhatsAppMessageDto,
 	WhatsAppMessageGroupMessagesDto,
+	WhatsAppVoiceEditDto,
 } from '../dto/whatsapp.dto';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppMessageGroupsService } from '../services/whatsapp-message-groups.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
+import { WhatsAppVoiceEditorService } from '../services/whatsapp-voice-editor.service';
 import {
 	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
@@ -114,6 +121,7 @@ export class WhatsAppConversationsController {
 		private readonly sync: WhatsAppSyncService,
 		private readonly access: WhatsAppAccessService,
 		private readonly messageGroups: WhatsAppMessageGroupsService,
+		private readonly voiceEditor: WhatsAppVoiceEditorService,
 	) {}
 
 	@Get('unread')
@@ -682,17 +690,48 @@ export class WhatsAppConversationsController {
 		return this.sync.downloadAttachment(req.user, attachmentId);
 	}
 
+	/** Duration + available options, so the voice editor can open without guessing. */
+	@Get('attachments/:attachmentId/voice-edit')
+	voiceEditSource(@Req() req: any, @Param('attachmentId') attachmentId: string) {
+		return this.voiceEditor.describeSource(req.user, attachmentId);
+	}
+
+	/** Renders the edit and streams it back as mp3 so the user can hear it before sending. */
+	@Post('attachments/:attachmentId/voice-edit/preview')
+	async voiceEditPreview(
+		@Req() req: any,
+		@Res() res: Response,
+		@Param('attachmentId') attachmentId: string,
+		@Body() body: WhatsAppVoiceEditDto,
+	) {
+		assertVoicePreviewRateLimit(String(req.user?.id || ''));
+		const prepared = await this.voiceEditor.render(req.user, attachmentId, body, 'mp3');
+		try {
+			const audio = await fs.promises.readFile(prepared.filePath);
+			res.setHeader('Content-Type', prepared.mimeType);
+			res.setHeader('Content-Length', String(audio.length));
+			res.setHeader('Cache-Control', 'no-store');
+			res.end(audio);
+		} finally {
+			await prepared.cleanup();
+		}
+	}
+
 	@Post('conversations/:conversationId/attachments/:attachmentId/send-as-voice')
 	sendAttachmentAsVoice(
 		@Req() req: any,
 		@Param('conversationId') conversationId: string,
 		@Param('attachmentId') attachmentId: string,
-		@Body() body: { clientMessageId?: string },
+		@Body() body: WhatsAppVoiceEditDto,
 	) {
 		assertSendRateLimit(String(req.user?.id || ''));
-		return this.sync.sendVideoAsVoice(req.user, conversationId, attachmentId, {
-			clientMessageId: body?.clientMessageId,
-		});
+		return this.voiceEditor.send(
+			req.user,
+			conversationId,
+			attachmentId,
+			body,
+			body?.clientMessageId,
+		);
 	}
 
 	@Get('attachments/:attachmentId/signed-url')
@@ -700,8 +739,8 @@ export class WhatsAppConversationsController {
 		// Signing does not depend on the bytes being on disk, and the content route
 		// pulls from WhatsApp on demand. Awaiting the full download here meant the
 		// <video> element could not even mount until the whole file had landed.
-		await this.sync.assertAttachmentVisible(req.user, attachmentId);
-		this.sync.warmAttachment(req.user, attachmentId);
+		const attachment = await this.sync.assertAttachmentVisible(req.user, attachmentId);
+		this.sync.warmAttachment(req.user, attachmentId, attachment);
 		const signed = signMediaToken(attachmentId, String(req.user?.id || ''));
 		return {
 			url: signedMediaPath(attachmentId, signed.token),
@@ -723,8 +762,8 @@ export class WhatsAppConversationsController {
 		const items = await Promise.all(
 			ids.map(async (attachmentId) => {
 				try {
-					await this.sync.assertAttachmentVisible(req.user, attachmentId);
-					this.sync.warmAttachment(req.user, attachmentId);
+					const attachment = await this.sync.assertAttachmentVisible(req.user, attachmentId);
+					this.sync.warmAttachment(req.user, attachmentId, attachment);
 					const signed = signMediaToken(attachmentId, userId);
 					return {
 						attachmentId,

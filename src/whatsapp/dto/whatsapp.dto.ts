@@ -4,10 +4,12 @@ import {
 	IsBoolean,
 	IsIn,
 	IsInt,
+	IsNumber,
 	IsOptional,
 	IsString,
 	IsUUID,
 	Matches,
+	Max,
 	MaxLength,
 	Min,
 	MinLength,
@@ -366,6 +368,49 @@ export class DeleteWhatsAppPendingUploadDto {
 	@MinLength(1)
 	@MaxLength(400)
 	fileId: string;
+}
+
+/**
+ * Mini audio editor options for turning a video attachment into a voice note.
+ * The service clamps these against the real source duration; the bounds here
+ * only reject obvious junk before any FFmpeg work starts.
+ */
+export class WhatsAppVoiceEditDto {
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	@Max(86_400)
+	startSeconds?: number;
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	@Max(86_400)
+	endSeconds?: number;
+
+	/** Linear gain multiplier. */
+	@IsOptional()
+	@IsNumber()
+	@Min(0.25)
+	@Max(3)
+	gain?: number;
+
+	@IsOptional()
+	@IsBoolean()
+	noiseReduction?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	voiceEnhancement?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	removeBackgroundMusic?: boolean;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	clientMessageId?: string;
 }
 
 export class ViewWhatsAppStatusDto {

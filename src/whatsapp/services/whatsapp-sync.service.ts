@@ -6091,19 +6091,47 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 		});
 
-		// sendMedia only accepts files inside the caller's outgoing folder.
+		try {
+			return await this.sendVoiceFromFile(user, conversationId, converted.filePath, {
+				clientMessageId: options.clientMessageId,
+			});
+		} finally {
+			await converted.cleanup?.();
+		}
+	}
+
+	/**
+	 * Send an already-encoded OGG/Opus file as a voice note.
+	 *
+	 * `sendMedia` only accepts paths inside the caller's outgoing folder, so the
+	 * file is copied there first. Callers keep ownership of their own temp file.
+	 */
+	async sendVoiceFromFile(
+		user: User,
+		conversationId: string,
+		filePath: string,
+		options: { seconds?: number; clientMessageId?: string } = {},
+	) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
+
 		const root = path.resolve(
 			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
 		);
 		const outgoingDir = path.join(root, 'outgoing', String(conversation.accountId), String(user.id));
 		await fs.mkdir(outgoingDir, { recursive: true });
-		const seconds = Math.max(1, Math.round(await probeAudioSeconds(converted.filePath)) || 1);
+		const seconds =
+			options.seconds && options.seconds > 0
+				? Math.round(options.seconds)
+				: Math.max(1, Math.round(await probeAudioSeconds(filePath)) || 1);
 		const outgoingPath = path.join(
 			outgoingDir,
 			`voice-${seconds}s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`,
 		);
-		await fs.copyFile(converted.filePath, outgoingPath);
-		await converted.cleanup?.();
+		await fs.copyFile(filePath, outgoingPath);
 
 		try {
 			return await this.sendMedia(user, conversationId, {
@@ -6133,9 +6161,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	/**
 	 * Fire-and-forget pull so the file is already on disk by the time the browser
-	 * issues its first Range request. Callers must not await this.
+	 * issues its first Range request. Callers must not await this. Pass the
+	 * attachment from `assertAttachmentVisible` to skip already-cached media —
+	 * otherwise a batch of 60 signed URLs re-stats 60 files for nothing.
 	 */
-	warmAttachment(user: User, attachmentId: string) {
+	warmAttachment(user: User, attachmentId: string, attachment?: WhatsAppMessageAttachment) {
+		if (attachment?.storagePath && attachment.downloadStatus === 'downloaded') return;
 		void this.downloadAttachment(user, attachmentId).catch(() => undefined);
 	}
 
@@ -6523,9 +6554,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const existing = await resolveExisting();
 		if (existing) return existing;
 
-		const downloaded = await this.downloadAttachmentInternal(attachment, {
-			reconnectWaitMs: 0,
-		});
+		// The signed-URL routes kick a background warm-up, so a pull for this
+		// attachment is usually already running. Joining it avoids two writers on the
+		// same file and inherits its provider-reconnect tolerance; only start a fresh
+		// download (with no reconnect wait) when nothing is in flight.
+		const inFlight = this.attachmentDownloads.get(attachmentId);
+		const downloaded = inFlight
+			? await inFlight.catch(() => null)
+			: await this.downloadAttachmentInternal(attachment, { reconnectWaitMs: 0 });
 		if (!downloaded?.ok || !downloaded.path) {
 			throw new BadRequestException('WhatsApp media is not available');
 		}

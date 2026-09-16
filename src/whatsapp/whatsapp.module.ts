@@ -67,6 +67,7 @@ import { WhatsAppStatusService } from './services/whatsapp-status.service';
 import { WhatsAppReportsService } from './services/whatsapp-reports.service';
 import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
+import { WhatsAppVoiceEditorService } from './services/whatsapp-voice-editor.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 import { WhatsAppMessageGroupsService } from './services/whatsapp-message-groups.service';
 import { WhatsAppBoardsService } from './services/whatsapp-boards.service';
@@ -152,6 +153,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppReportsService,
 		WhatsAppSchemaService,
 		WhatsAppVoiceChangerService,
+		WhatsAppVoiceEditorService,
 		WhatsAppStickersService,
 		WhatsAppMessageGroupsService,
 		WhatsAppMessageSchedulesService,

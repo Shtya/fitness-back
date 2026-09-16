@@ -1284,6 +1284,60 @@ export class WhatsAppVoiceChangerService {
 		return value.slice(-4);
 	}
 
+	/** True when audio isolation (background-music removal) can run for this user. */
+	async hasElevenLabsKey(userId: string): Promise<boolean> {
+		return Boolean(await this.resolveApiKey(userId, 'elevenlabs').catch(() => null));
+	}
+
+	/**
+	 * ElevenLabs Audio Isolation: keeps speech, drops music and ambience. There is
+	 * no comparable local FFmpeg filter — a band-pass cannot separate a singer from
+	 * a backing track — so this is the one option that needs an API key.
+	 */
+	async isolateVoiceFile(userId: string, filePath: string): Promise<Buffer> {
+		const apiKey = await this.resolveApiKey(userId, 'elevenlabs');
+		if (!apiKey) {
+			throw new BadRequestException(
+				'Removing background music needs an ElevenLabs API key. Add one in voice changer settings, or turn this option off.',
+			);
+		}
+		const form = new FormData();
+		form.append('audio', createReadStream(filePath), {
+			filename: path.basename(filePath),
+			contentType: 'audio/mpeg',
+		});
+		try {
+			const { data } = await axios.post(
+				'https://api.elevenlabs.io/v1/audio-isolation',
+				form,
+				{
+					headers: { ...form.getHeaders(), 'xi-api-key': apiKey },
+					responseType: 'arraybuffer',
+					timeout: 180_000,
+				},
+			);
+			const buffer = Buffer.from(data);
+			if (!buffer.length) throw new Error('ElevenLabs returned empty audio');
+			return buffer;
+		} catch (error) {
+			throw new BadGatewayException(this.explainElevenLabsIsolationError(error));
+		}
+	}
+
+	private explainElevenLabsIsolationError(error: unknown): string {
+		const status = (error as any)?.response?.status;
+		if (status === 401 || status === 403) {
+			return 'The ElevenLabs API key was rejected for audio isolation. Check the key permissions in voice changer settings.';
+		}
+		if (status === 422) {
+			return 'ElevenLabs could not process this audio. Try a shorter selection.';
+		}
+		if (status === 429) {
+			return 'ElevenLabs rate limit or quota reached. Try again later, or turn off background-music removal.';
+		}
+		return 'Could not remove the background music through ElevenLabs. Try again, or turn the option off.';
+	}
+
 	private async resolveApiKey(userId: string, provider: string, override?: string | null) {
 		if (override?.trim()) return override.trim();
 		const keyProvider = this.credentialProvider(provider);

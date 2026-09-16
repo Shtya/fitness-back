@@ -1,5 +1,9 @@
 import { HttpException } from '@nestjs/common';
-import { assertSendRateLimit, resetSendRateLimit } from './whatsapp-send-rate-limit';
+import {
+	assertSendRateLimit,
+	assertVoicePreviewRateLimit,
+	resetSendRateLimit,
+} from './whatsapp-send-rate-limit';
 
 describe('assertSendRateLimit', () => {
 	const previous = process.env.WHATSAPP_ENFORCE_SEND_RATE_LIMIT;
@@ -40,5 +44,19 @@ describe('assertSendRateLimit', () => {
 			assertSendRateLimit('user-1', 1_000);
 		}
 		expect(() => assertSendRateLimit('user-1', 1_000 + 60_000)).not.toThrow();
+	});
+
+	it('caps voice previews well below the send cap', () => {
+		for (let i = 0; i < 12; i += 1) {
+			expect(() => assertVoicePreviewRateLimit('user-1', 1_000 + i)).not.toThrow();
+		}
+		expect(() => assertVoicePreviewRateLimit('user-1', 2_000)).toThrow(HttpException);
+	});
+
+	it('keeps preview and send budgets independent', () => {
+		for (let i = 0; i < 12; i += 1) {
+			assertVoicePreviewRateLimit('user-1', 1_000);
+		}
+		expect(() => assertSendRateLimit('user-1', 1_000)).not.toThrow();
 	});
 });

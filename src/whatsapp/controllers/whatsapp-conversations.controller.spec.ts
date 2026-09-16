@@ -17,15 +17,22 @@ describe('WhatsAppConversationsController', () => {
 		};
 		const access = { assertAccountPermission: jest.fn() };
 		const messageGroups = {};
+		const voiceEditor = {
+			describeSource: jest.fn().mockResolvedValue({ sourceSeconds: 30 }),
+			render: jest.fn(),
+			send: jest.fn().mockResolvedValue({ ok: true }),
+		};
 		return {
 			controller: new WhatsAppConversationsController(
 				sync as any,
 				access as any,
 				messageGroups as any,
+				voiceEditor as any,
 			),
 			sync,
 			access,
 			messageGroups,
+			voiceEditor,
 		};
 	}
 
