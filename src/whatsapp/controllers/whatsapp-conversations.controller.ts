@@ -682,13 +682,60 @@ export class WhatsAppConversationsController {
 		return this.sync.downloadAttachment(req.user, attachmentId);
 	}
 
+	@Post('conversations/:conversationId/attachments/:attachmentId/send-as-voice')
+	sendAttachmentAsVoice(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Param('attachmentId') attachmentId: string,
+		@Body() body: { clientMessageId?: string },
+	) {
+		assertSendRateLimit(String(req.user?.id || ''));
+		return this.sync.sendVideoAsVoice(req.user, conversationId, attachmentId, {
+			clientMessageId: body?.clientMessageId,
+		});
+	}
+
 	@Get('attachments/:attachmentId/signed-url')
 	async signedAttachmentUrl(@Req() req: any, @Param('attachmentId') attachmentId: string) {
-		await this.sync.downloadAttachment(req.user, attachmentId);
+		// Signing does not depend on the bytes being on disk, and the content route
+		// pulls from WhatsApp on demand. Awaiting the full download here meant the
+		// <video> element could not even mount until the whole file had landed.
+		await this.sync.assertAttachmentVisible(req.user, attachmentId);
+		this.sync.warmAttachment(req.user, attachmentId);
 		const signed = signMediaToken(attachmentId, String(req.user?.id || ''));
 		return {
 			url: signedMediaPath(attachmentId, signed.token),
 			expiresAt: signed.expiresAt,
 		};
+	}
+
+	/** One round trip for a screenful of media instead of one per bubble. */
+	@Post('attachments/signed-urls')
+	async signedAttachmentUrls(@Req() req: any, @Body() body: { attachmentIds?: string[] }) {
+		const ids = [
+			...new Set(
+				(Array.isArray(body?.attachmentIds) ? body.attachmentIds : [])
+					.map((id) => String(id || '').trim())
+					.filter(Boolean),
+			),
+		].slice(0, 60);
+		const userId = String(req.user?.id || '');
+		const items = await Promise.all(
+			ids.map(async (attachmentId) => {
+				try {
+					await this.sync.assertAttachmentVisible(req.user, attachmentId);
+					this.sync.warmAttachment(req.user, attachmentId);
+					const signed = signMediaToken(attachmentId, userId);
+					return {
+						attachmentId,
+						url: signedMediaPath(attachmentId, signed.token),
+						expiresAt: signed.expiresAt,
+					};
+				} catch {
+					return null;
+				}
+			}),
+		);
+		return { items: items.filter(Boolean) };
 	}
 }

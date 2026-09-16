@@ -48,6 +48,7 @@ import {
 	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
 	isValidWhatsAppVoiceOggFile,
+	probeAudioSeconds,
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 import { WhatsAppAccessService } from './whatsapp-access.service';
@@ -6056,6 +6057,88 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	/** Media that is not on disk is pulled through the single linked WhatsApp Web
 	 *  page. Concurrent requests for the same attachment (chat reopened, retry,
 	 *  bulk download) share one download instead of queueing duplicate work. */
+	/**
+	 * Re-send an existing video attachment's audio track as a WhatsApp voice note.
+	 * FFmpeg strips the video server-side and the result goes through the normal
+	 * `sendMedia` voice path, so PTT conversion, waveform and duration stay in one
+	 * place instead of being reimplemented in the browser.
+	 */
+	async sendVideoAsVoice(
+		user: User,
+		conversationId: string,
+		attachmentId: string,
+		options: { clientMessageId?: string } = {},
+	) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
+
+		const attachment = await this.assertAttachmentVisible(user, attachmentId);
+		if (!['video', 'audio', 'document'].includes(String(attachment.type || '').toLowerCase())) {
+			throw new BadRequestException('Only video or audio attachments can be sent as a voice note');
+		}
+
+		const source = await this.resolveAttachmentFile(user, attachmentId);
+		const converted = await ensureWhatsAppVoiceOgg(source.absolutePath, {
+			mimeType: source.mimeType,
+			fileName: source.fileName,
+		}).catch((error) => {
+			const detail = error instanceof Error ? error.message : String(error);
+			throw new BadRequestException(
+				`Could not extract audio from this video (${detail}). Ensure FFmpeg is installed on the server.`,
+			);
+		});
+
+		// sendMedia only accepts files inside the caller's outgoing folder.
+		const root = path.resolve(
+			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+		);
+		const outgoingDir = path.join(root, 'outgoing', String(conversation.accountId), String(user.id));
+		await fs.mkdir(outgoingDir, { recursive: true });
+		const seconds = Math.max(1, Math.round(await probeAudioSeconds(converted.filePath)) || 1);
+		const outgoingPath = path.join(
+			outgoingDir,
+			`voice-${seconds}s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`,
+		);
+		await fs.copyFile(converted.filePath, outgoingPath);
+		await converted.cleanup?.();
+
+		try {
+			return await this.sendMedia(user, conversationId, {
+				type: 'voice',
+				fileId: path.relative(root, outgoingPath).replace(/\\/g, '/'),
+				clientMessageId: options.clientMessageId,
+			});
+		} catch (error) {
+			await fs.rm(outgoingPath, { force: true }).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	/**
+	 * Access check only — no bytes. Lets the signed-URL routes authorise without
+	 * paying for a full provider download first.
+	 */
+	async assertAttachmentVisible(user: User, attachmentId: string) {
+		const attachment = await this.attachmentRepo.findOne({
+			where: { id: attachmentId },
+			relations: ['message'],
+		});
+		if (!attachment) throw new NotFoundException('WhatsApp attachment not found');
+		await this.assertConversationVisible(user, attachment.message.conversationId);
+		return attachment;
+	}
+
+	/**
+	 * Fire-and-forget pull so the file is already on disk by the time the browser
+	 * issues its first Range request. Callers must not await this.
+	 */
+	warmAttachment(user: User, attachmentId: string) {
+		void this.downloadAttachment(user, attachmentId).catch(() => undefined);
+	}
+
 	async downloadAttachment(user: User, attachmentId: string) {
 		const attachment = await this.attachmentRepo.findOne({
 			where: { id: attachmentId },
