@@ -101,8 +101,12 @@ export function buildSocialDownloadArgs(
 	url: string,
 	outputPath: string,
 	maxBytes = MAX_SOCIAL_VIDEO_BYTES,
+	ffmpegPath = '',
 ): string[] {
 	return [
+		// yt-dlp needs ffmpeg to merge separate audio/video streams. Point it at the
+		// binary this app already resolves instead of hoping one is on PATH.
+		...(ffmpegPath ? ['--ffmpeg-location', ffmpegPath] : []),
 		'--no-playlist',
 		'--no-warnings',
 		'--no-progress',
@@ -139,7 +143,7 @@ export function describeSocialDownloadFailure(stderr: string, exitCode: number |
 		return 'This video is too large to download.';
 	}
 	if (text.includes('enoent')) {
-		return 'The video downloader (yt-dlp) is not installed on the server. Set YTDLP_PATH.';
+		return 'The video downloader is not installed on the server. Run "npm run yt-dlp:install" in backend, or set YTDLP_PATH.';
 	}
 	return `Could not download this video${exitCode == null ? '' : ` (exit ${exitCode})`}.`;
 }

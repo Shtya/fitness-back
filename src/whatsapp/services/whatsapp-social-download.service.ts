@@ -1,13 +1,13 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
-import { promises as fs } from 'fs';
+import { existsSync, promises as fs } from 'fs';
 import * as path from 'path';
 import { Repository } from 'typeorm';
 import type { User } from '../../../entities/global.entity';
 import { WhatsAppMessage, WhatsAppSocialDownload } from '../entities/whatsapp.entity';
 import { WhatsAppSyncService } from './whatsapp-sync.service';
-import { probeAudioSeconds } from '../utils/whatsapp-voice-ogg';
+import { probeAudioSeconds, resolveFfmpeg } from '../utils/whatsapp-voice-ogg';
 import {
 	MAX_SOCIAL_VIDEO_BYTES,
 	SOCIAL_DOWNLOAD_TIMEOUT_MS,
@@ -27,9 +27,20 @@ function mediaRoot() {
 	);
 }
 
-/** Mirrors `resolveFfmpeg`: an explicit path wins, otherwise trust PATH. */
+/**
+ * Mirrors `resolveFfmpeg`: an explicit path wins, then the copy `npm run
+ * yt-dlp:install` provisions under `backend/tools/`, then whatever is on PATH.
+ */
 function resolveYtDlp(): string {
-	return process.env.YTDLP_PATH?.trim() || 'yt-dlp';
+	const fromEnv = process.env.YTDLP_PATH?.trim();
+	if (fromEnv) return fromEnv;
+	const bundled = path.join(
+		process.cwd(),
+		'tools',
+		process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp',
+	);
+	if (existsSync(bundled)) return bundled;
+	return 'yt-dlp';
 }
 
 /** How many downloads one user may have running at once. */
@@ -220,9 +231,11 @@ export class WhatsAppSocialDownloadService {
 
 	private spawnYtDlp(url: string, outputPath: string) {
 		return new Promise<void>((resolve, reject) => {
-			const child = spawn(resolveYtDlp(), buildSocialDownloadArgs(url, outputPath), {
-				windowsHide: true,
-			});
+			const child = spawn(
+				resolveYtDlp(),
+				buildSocialDownloadArgs(url, outputPath, MAX_SOCIAL_VIDEO_BYTES, resolveFfmpeg()),
+				{ windowsHide: true },
+			);
 			let stderr = '';
 			let settled = false;
 			const finish = (error?: any) => {

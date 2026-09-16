@@ -23,7 +23,9 @@
     "typeorm": "typeorm",
     "migration:generate": "npm run typeorm migration:generate -- -n",
     "migration:run": "npm run typeorm migration:run",
-    "migration:revert": "npm run typeorm migration:revert"
+    "migration:revert": "npm run typeorm migration:revert",
+    "yt-dlp:install": "node scripts/install-yt-dlp.mjs",
+    "postinstall": "node scripts/install-yt-dlp.mjs"
   },
   "dependencies": {
     "@faker-js/faker": "^9.9.0",

@@ -126,6 +126,19 @@ describe('buildSocialDownloadArgs', () => {
 		expect(args.indexOf(hostile)).toBe(args.length - 1);
 	});
 
+	it('points yt-dlp at the given ffmpeg, and omits the flag when there is none', () => {
+		const withFfmpeg = buildSocialDownloadArgs(
+			'https://fb.watch/a/',
+			'/tmp/out.mp4',
+			MAX_SOCIAL_VIDEO_BYTES,
+			'/opt/ffmpeg',
+		);
+		expect(withFfmpeg[withFfmpeg.indexOf('--ffmpeg-location') + 1]).toBe('/opt/ffmpeg');
+		expect(buildSocialDownloadArgs('https://fb.watch/a/', '/tmp/out.mp4')).not.toContain(
+			'--ffmpeg-location',
+		);
+	});
+
 	it('caps the download size and avoids playlists', () => {
 		const args = buildSocialDownloadArgs('https://fb.watch/a/', '/tmp/out.mp4');
 		expect(args).toContain('--no-playlist');
@@ -140,8 +153,10 @@ describe('describeSocialDownloadFailure', () => {
 		expect(describeSocialDownloadFailure('ERROR: login required to view', 1)).toMatch(/private/i);
 	});
 
-	it('explains a missing downloader', () => {
-		expect(describeSocialDownloadFailure('spawn ENOENT', null)).toMatch(/YTDLP_PATH/);
+	it('explains a missing downloader and names the command that fixes it', () => {
+		const message = describeSocialDownloadFailure('spawn ENOENT', null);
+		expect(message).toMatch(/yt-dlp:install/);
+		expect(message).toMatch(/YTDLP_PATH/);
 	});
 
 	it('explains an oversized video and an unavailable one', () => {

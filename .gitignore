@@ -54,6 +54,8 @@ pids
 /uploads/whatsapp-media/
 /storage/whatsapp-media/
 /tokens/
+# Provisioned by `npm run yt-dlp:install`, not source.
+/tools/
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
