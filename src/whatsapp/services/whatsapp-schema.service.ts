@@ -52,6 +52,28 @@ const OPTIONAL_TABLES = [
 		source_conversation_id uuid,
 		last_sent_at timestamptz
 	)`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_social_downloads (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		message_id uuid NOT NULL REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
+		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		source_url varchar(1024) NOT NULL,
+		platform varchar(20) NOT NULL,
+		status varchar(20) NOT NULL DEFAULT 'pending',
+		title varchar(200),
+		storage_path varchar(1024),
+		mime_type varchar(160),
+		file_size_bytes bigint,
+		duration_seconds int,
+		error_message text,
+		completed_at timestamptz
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_social_download_target
+		ON whatsapp_social_downloads (message_id, user_id, source_url)`,
+	`CREATE INDEX IF NOT EXISTS idx_whatsapp_social_downloads_message
+		ON whatsapp_social_downloads (message_id)`,
 	`ALTER TABLE whatsapp_account_access ADD COLUMN IF NOT EXISTS notifications_enabled boolean NOT NULL DEFAULT true`,
 	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity

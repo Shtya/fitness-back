@@ -7,6 +7,7 @@ import {
 	IsNumber,
 	IsOptional,
 	IsString,
+	IsUrl,
 	IsUUID,
 	Matches,
 	Max,
@@ -473,6 +474,16 @@ export class SendWhatsAppLibraryItemDto {
 	@IsString()
 	@MaxLength(120)
 	clientMessageId?: string;
+}
+
+export class StartWhatsAppSocialDownloadDto {
+	/**
+	 * The link to download. Validated as a URL here, then checked against the stored
+	 * message text in the service — this must never become an arbitrary fetch target.
+	 */
+	@IsUrl({ protocols: ['http', 'https'], require_protocol: true })
+	@MaxLength(1024)
+	url: string;
 }
 
 export class ViewWhatsAppStatusDto {

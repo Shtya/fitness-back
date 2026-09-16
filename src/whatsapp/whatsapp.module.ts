@@ -14,6 +14,7 @@ import { WhatsAppReportsController } from './controllers/whatsapp-reports.contro
 import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
 import { WhatsAppMediaLibraryController } from './controllers/whatsapp-media-library.controller';
+import { WhatsAppSocialDownloadController } from './controllers/whatsapp-social-download.controller';
 import { WhatsAppStickersController } from './controllers/whatsapp-stickers.controller';
 import { WhatsAppMessageSchedulesController } from './controllers/whatsapp-message-schedules.controller';
 import { WhatsAppBoardsController } from './controllers/whatsapp-boards.controller';
@@ -48,6 +49,7 @@ import {
 	WhatsAppChatMessageGroupItem,
 	WhatsAppMediaLibraryFolder,
 	WhatsAppMediaLibraryItem,
+	WhatsAppSocialDownload,
 	WhatsAppMessageSchedule,
 	WhatsAppMessageScheduleRecipient,
 	WhatsAppMessageScheduleRun,
@@ -72,6 +74,7 @@ import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
 import { WhatsAppVoiceChangerService } from './services/whatsapp-voice-changer.service';
 import { WhatsAppVoiceEditorService } from './services/whatsapp-voice-editor.service';
 import { WhatsAppMediaLibraryService } from './services/whatsapp-media-library.service';
+import { WhatsAppSocialDownloadService } from './services/whatsapp-social-download.service';
 import { WhatsAppStickersService } from './services/whatsapp-stickers.service';
 import { WhatsAppMessageGroupsService } from './services/whatsapp-message-groups.service';
 import { WhatsAppBoardsService } from './services/whatsapp-boards.service';
@@ -106,6 +109,7 @@ export const WHATSAPP_ENTITIES = [
 	WhatsAppChatMessageGroupItem,
 	WhatsAppMediaLibraryFolder,
 	WhatsAppMediaLibraryItem,
+	WhatsAppSocialDownload,
 	WhatsAppMessageSchedule,
 	WhatsAppMessageScheduleRecipient,
 	WhatsAppMessageScheduleRun,
@@ -141,6 +145,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppStatusController,
 		WhatsAppVoiceChangerController,
 		WhatsAppMediaLibraryController,
+		WhatsAppSocialDownloadController,
 		WhatsAppStickersController,
 		WhatsAppMessageSchedulesController,
 		WhatsAppBoardsController,
@@ -162,6 +167,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppVoiceChangerService,
 		WhatsAppVoiceEditorService,
 		WhatsAppMediaLibraryService,
+		WhatsAppSocialDownloadService,
 		WhatsAppStickersService,
 		WhatsAppMessageGroupsService,
 		WhatsAppMessageSchedulesService,

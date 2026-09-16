@@ -770,6 +770,64 @@ export class WhatsAppSavedSticker extends CoreEntity {
 }
 
 /**
+ * A video pulled from a TikTok / Instagram / Facebook link found in a message.
+ *
+ * One row per (message, user, normalized url) so reopening the chat shows the
+ * already-downloaded clip instead of fetching it again, and a failure keeps its
+ * reason around for the retry affordance.
+ */
+@Entity('whatsapp_social_downloads')
+@Index('idx_whatsapp_social_downloads_message', ['messageId'])
+@Unique('uq_whatsapp_social_download_target', ['messageId', 'userId', 'sourceUrl'])
+export class WhatsAppSocialDownload extends CoreEntity {
+	@Index()
+	@Column({ name: 'message_id', type: 'uuid' })
+	messageId: string;
+
+	@ManyToOne(() => WhatsAppMessage, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'message_id' })
+	message: WhatsAppMessage;
+
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ name: 'source_url', type: 'varchar', length: 1024 })
+	sourceUrl: string;
+
+	@Column({ type: 'varchar', length: 20 })
+	platform: string;
+
+	@Column({ type: 'varchar', length: 20, default: 'pending' })
+	status: 'pending' | 'ready' | 'failed';
+
+	@Column({ type: 'varchar', length: 200, nullable: true })
+	title: string | null;
+
+	@Column({ name: 'storage_path', type: 'varchar', length: 1024, nullable: true })
+	storagePath: string | null;
+
+	@Column({ name: 'mime_type', type: 'varchar', length: 160, nullable: true })
+	mimeType: string | null;
+
+	@Column({ name: 'file_size_bytes', type: 'bigint', nullable: true })
+	fileSizeBytes: string | null;
+
+	@Column({ name: 'duration_seconds', type: 'int', nullable: true })
+	durationSeconds: number | null;
+
+	@Column({ name: 'error_message', type: 'text', nullable: true })
+	errorMessage: string | null;
+
+	@Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
+	completedAt: Date | null;
+}
+
+/**
  * A user's folder inside the saved-media library.
  *
  * Deliberately not tied to a conversation or an account: the point of the library
