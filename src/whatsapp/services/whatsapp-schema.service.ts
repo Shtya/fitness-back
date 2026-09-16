@@ -25,6 +25,33 @@ const OPTIONAL_TABLES = [
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_muted boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS muted_until timestamptz`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_media_library_folders (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		name varchar(120) NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_media_library_items (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		folder_id uuid REFERENCES whatsapp_media_library_folders(id) ON DELETE SET NULL,
+		title varchar(200) NOT NULL,
+		media_type varchar(20) NOT NULL,
+		mime_type varchar(160) NOT NULL,
+		file_name varchar(300),
+		storage_path varchar(1024) NOT NULL,
+		file_size_bytes bigint,
+		duration_seconds int,
+		source varchar(20) NOT NULL DEFAULT 'attachment',
+		source_attachment_id uuid,
+		source_conversation_id uuid,
+		last_sent_at timestamptz
+	)`,
 	`ALTER TABLE whatsapp_account_access ADD COLUMN IF NOT EXISTS notifications_enabled boolean NOT NULL DEFAULT true`,
 	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity

@@ -13,6 +13,7 @@ import {
 	MaxLength,
 	Min,
 	MinLength,
+	ValidateIf,
 	ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -406,6 +407,67 @@ export class WhatsAppVoiceEditDto {
 	@IsOptional()
 	@IsBoolean()
 	removeBackgroundMusic?: boolean;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	clientMessageId?: string;
+}
+
+export class CreateWhatsAppLibraryFolderDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	name: string;
+}
+
+export class RenameWhatsAppLibraryFolderDto extends CreateWhatsAppLibraryFolderDto {}
+
+export class SaveWhatsAppLibraryAttachmentDto {
+	@IsUUID()
+	attachmentId: string;
+
+	@IsOptional()
+	@IsUUID()
+	folderId?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	title?: string;
+}
+
+/** Voice edit options plus where to file the result. */
+export class SaveWhatsAppLibraryVoiceEditDto extends WhatsAppVoiceEditDto {
+	@IsUUID()
+	attachmentId: string;
+
+	@IsOptional()
+	@IsUUID()
+	folderId?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	title?: string;
+}
+
+export class UpdateWhatsAppLibraryItemDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	title?: string;
+
+	/** `null` moves the item back to the library root. */
+	@IsOptional()
+	@ValidateIf((_, value) => value !== null)
+	@IsUUID()
+	folderId?: string | null;
+}
+
+export class SendWhatsAppLibraryItemDto {
+	@IsUUID()
+	conversationId: string;
 
 	@IsOptional()
 	@IsString()

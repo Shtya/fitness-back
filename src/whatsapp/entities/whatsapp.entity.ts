@@ -769,6 +769,90 @@ export class WhatsAppSavedSticker extends CoreEntity {
 	isAnimated: boolean;
 }
 
+/**
+ * A user's folder inside the saved-media library.
+ *
+ * Deliberately not tied to a conversation or an account: the point of the library
+ * is that a converted voice note outlives the chat it came from and can be sent
+ * to any conversation later.
+ */
+@Entity('whatsapp_media_library_folders')
+@Index('idx_whatsapp_media_library_folders_user', ['userId'])
+export class WhatsAppMediaLibraryFolder extends CoreEntity {
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ type: 'varchar', length: 120 })
+	name: string;
+}
+
+/**
+ * One saved asset. `storage_path` points at the library's own copy of the file, so
+ * clearing a chat or losing the original attachment does not break playback or
+ * re-sending.
+ */
+@Entity('whatsapp_media_library_items')
+@Index('idx_whatsapp_media_library_items_user', ['userId'])
+@Index('idx_whatsapp_media_library_items_folder', ['folderId'])
+export class WhatsAppMediaLibraryItem extends CoreEntity {
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	/** `null` means the library root ("Unsorted"). */
+	@Column({ name: 'folder_id', type: 'uuid', nullable: true })
+	folderId: string | null;
+
+	@ManyToOne(() => WhatsAppMediaLibraryFolder, { onDelete: 'SET NULL', nullable: true })
+	@JoinColumn({ name: 'folder_id' })
+	folder: WhatsAppMediaLibraryFolder | null;
+
+	@Column({ type: 'varchar', length: 200 })
+	title: string;
+
+	/** Send type: voice, audio, image, video, document, sticker. */
+	@Column({ name: 'media_type', type: 'varchar', length: 20 })
+	mediaType: string;
+
+	@Column({ name: 'mime_type', type: 'varchar', length: 160 })
+	mimeType: string;
+
+	@Column({ name: 'file_name', type: 'varchar', length: 300, nullable: true })
+	fileName: string | null;
+
+	@Column({ name: 'storage_path', type: 'varchar', length: 1024 })
+	storagePath: string;
+
+	@Column({ name: 'file_size_bytes', type: 'bigint', nullable: true })
+	fileSizeBytes: string | null;
+
+	@Column({ name: 'duration_seconds', type: 'int', nullable: true })
+	durationSeconds: number | null;
+
+	/** How it got here: `attachment` (saved as-is) or `voice_edit` (converted). */
+	@Column({ type: 'varchar', length: 20, default: 'attachment' })
+	source: string;
+
+	/** Provenance only — nullable and never used to resolve the file. */
+	@Column({ name: 'source_attachment_id', type: 'uuid', nullable: true })
+	sourceAttachmentId: string | null;
+
+	@Column({ name: 'source_conversation_id', type: 'uuid', nullable: true })
+	sourceConversationId: string | null;
+
+	@Column({ name: 'last_sent_at', type: 'timestamptz', nullable: true })
+	lastSentAt: Date | null;
+}
+
 @Entity('whatsapp_chat_message_groups')
 @Index('idx_whatsapp_chat_message_groups_conversation', ['conversationId'])
 export class WhatsAppChatMessageGroup extends CoreEntity {

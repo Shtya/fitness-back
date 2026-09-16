@@ -6112,6 +6112,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		filePath: string,
 		options: { seconds?: number; clientMessageId?: string } = {},
 	) {
+		const seconds =
+			options.seconds && options.seconds > 0
+				? Math.round(options.seconds)
+				: Math.max(1, Math.round(await probeAudioSeconds(filePath)) || 1);
+		return this.sendMediaFromFile(user, conversationId, filePath, {
+			type: 'voice',
+			fileName: `voice-${seconds}s.ogg`,
+			clientMessageId: options.clientMessageId,
+		});
+	}
+
+	/**
+	 * Send any file that already exists on the server as a WhatsApp message.
+	 *
+	 * `sendMedia` only accepts paths inside the caller's outgoing folder, so the file
+	 * is copied there first. The caller keeps ownership of the source file — this is
+	 * what lets the saved-media library re-send the same item repeatedly.
+	 */
+	async sendMediaFromFile(
+		user: User,
+		conversationId: string,
+		filePath: string,
+		options: { type: string; fileName?: string; clientMessageId?: string },
+	) {
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -6123,19 +6147,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 		const outgoingDir = path.join(root, 'outgoing', String(conversation.accountId), String(user.id));
 		await fs.mkdir(outgoingDir, { recursive: true });
-		const seconds =
-			options.seconds && options.seconds > 0
-				? Math.round(options.seconds)
-				: Math.max(1, Math.round(await probeAudioSeconds(filePath)) || 1);
+
+		const extension = path.extname(options.fileName || filePath) || '';
+		const safeBase = path
+			.basename(options.fileName || filePath, extension)
+			.replace(/[^a-zA-Z0-9._-]/g, '_')
+			.slice(0, 60);
 		const outgoingPath = path.join(
 			outgoingDir,
-			`voice-${seconds}s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`,
+			`${safeBase || 'media'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`,
 		);
 		await fs.copyFile(filePath, outgoingPath);
 
 		try {
 			return await this.sendMedia(user, conversationId, {
-				type: 'voice',
+				type: options.type as any,
 				fileId: path.relative(root, outgoingPath).replace(/\\/g, '/'),
 				clientMessageId: options.clientMessageId,
 			});
