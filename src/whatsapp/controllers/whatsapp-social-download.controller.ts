@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { createReadStream } from 'fs';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
+import { JwtOrMediaTokenGuard } from '../guards/jwt-or-media-token.guard';
 import { StartWhatsAppSocialDownloadDto } from '../dto/whatsapp.dto';
 import { WhatsAppSocialDownloadService } from '../services/whatsapp-social-download.service';
 
@@ -14,11 +15,11 @@ import { WhatsAppSocialDownloadService } from '../services/whatsapp-social-downl
  * infrastructure in this service, and yt-dlp routinely outlives an HTTP timeout, so
  * polling is what keeps the request short and the result durable across reloads.
  */
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('whatsapp')
 export class WhatsAppSocialDownloadController {
 	constructor(private readonly downloads: WhatsAppSocialDownloadService) {}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Post('conversations/:conversationId/messages/:messageId/social-download')
 	start(
 		@Req() req: any,
@@ -29,6 +30,7 @@ export class WhatsAppSocialDownloadController {
 		return this.downloads.start(req.user, conversationId, messageId, body.url);
 	}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Get('conversations/:conversationId/messages/:messageId/social-download')
 	status(
 		@Req() req: any,
@@ -38,7 +40,20 @@ export class WhatsAppSocialDownloadController {
 		return this.downloads.status(req.user, conversationId, messageId);
 	}
 
-	/** Inline playback. Supports Range so the player can seek without a full fetch. */
+	/** Every download in the thread, so reopening it restores the videos already fetched. */
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Get('conversations/:conversationId/social-downloads')
+	listForConversation(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.downloads.listForConversation(req.user, conversationId);
+	}
+
+	/**
+	 * Inline playback. Supports Range so the player can seek without a full fetch.
+	 *
+	 * Accepts a signed `?token=` as well as a bearer header, because the `<video>`
+	 * element that requests these bytes cannot set headers.
+	 */
+	@UseGuards(JwtOrMediaTokenGuard)
 	@Get('social-downloads/:downloadId/content')
 	async content(
 		@Req() req: Request & { user: any },
@@ -48,7 +63,7 @@ export class WhatsAppSocialDownloadController {
 		const file = await this.downloads.resolveFile(req.user, downloadId);
 		res.setHeader('Content-Type', file.mimeType);
 		res.setHeader('Accept-Ranges', 'bytes');
-		// Private: the response is per-user and the URL carries no signature.
+		// Private: the bytes belong to one user, and the signature in the URL expires.
 		res.setHeader('Cache-Control', 'private, max-age=600');
 
 		const range = String(req.headers.range || '');
@@ -73,6 +88,7 @@ export class WhatsAppSocialDownloadController {
 		createReadStream(file.absolutePath).pipe(res);
 	}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Delete('social-downloads/:downloadId')
 	remove(@Req() req: any, @Param('downloadId') downloadId: string) {
 		return this.downloads.remove(req.user, downloadId);

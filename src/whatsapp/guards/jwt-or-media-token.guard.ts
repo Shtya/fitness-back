@@ -21,8 +21,12 @@ export class JwtOrMediaTokenGuard extends AuthGuard('jwt') {
 		}
 		const token = String(request?.query?.token || '');
 		if (token) {
-			const attachmentId = String(request?.params?.attachmentId || '');
-			const parsed = verifyMediaToken(token, attachmentId);
+			// The token is bound to whichever resource the route addresses: an
+			// attachment, or a video downloaded from a social link.
+			const resourceId = String(
+				request?.params?.attachmentId || request?.params?.downloadId || '',
+			);
+			const parsed = verifyMediaToken(token, resourceId);
 			if (!parsed) {
 				throw new UnauthorizedException('Invalid or expired media token');
 			}

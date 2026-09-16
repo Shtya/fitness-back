@@ -8,16 +8,20 @@ import type { User } from '../../../entities/global.entity';
 import { WhatsAppMessage, WhatsAppSocialDownload } from '../entities/whatsapp.entity';
 import { WhatsAppSyncService } from './whatsapp-sync.service';
 import { probeAudioSeconds, resolveFfmpeg } from '../utils/whatsapp-voice-ogg';
+import { signMediaToken, signedSocialDownloadPath } from '../utils/whatsapp-media-signed-url';
 import {
 	MAX_SOCIAL_VIDEO_BYTES,
 	SOCIAL_DOWNLOAD_TIMEOUT_MS,
+	type SocialPlatform,
 	buildSocialDownloadArgs,
 	describeSocialDownloadFailure,
 	extractSocialVideoUrls,
+	isRetryableSocialDownloadFailure,
 	normalizeSocialVideoUrl,
 	resolveSocialPathInsideRoot,
 	socialDownloadRelativePath,
 	socialDownloadTitle,
+	socialRetryExtractorArgs,
 	socialVideoPlatform,
 } from '../utils/whatsapp-social-download';
 
@@ -45,6 +49,9 @@ function resolveYtDlp(): string {
 
 /** How many downloads one user may have running at once. */
 const MAX_CONCURRENT_PER_USER = 2;
+
+/** Playback URL lifetime. Long enough to outlive a working session in one thread. */
+const SOCIAL_URL_TTL_SECONDS = 6 * 60 * 60;
 
 /**
  * Downloads the video behind a TikTok / Instagram / Facebook link that arrived in a
@@ -100,6 +107,12 @@ export class WhatsAppSocialDownloadService {
 	}
 
 	private serialize(row: WhatsAppSocialDownload) {
+		// Signed rather than plain: the player element loads this itself and cannot
+		// attach the bearer token, so an unsigned path would simply come back 401.
+		// Longer-lived than an attachment token: a thread stays open for hours and
+		// nothing here re-signs mid-session, so a 15-minute URL would stop playing.
+		const signed =
+			row.status === 'ready' ? signMediaToken(row.id, row.userId, SOCIAL_URL_TTL_SECONDS) : null;
 		return {
 			id: row.id,
 			messageId: row.messageId,
@@ -111,7 +124,8 @@ export class WhatsAppSocialDownloadService {
 			durationSeconds: row.durationSeconds,
 			fileSizeBytes: row.fileSizeBytes ? Number(row.fileSizeBytes) : null,
 			errorMessage: row.errorMessage,
-			url: row.status === 'ready' ? `/whatsapp/social-downloads/${row.id}/content` : null,
+			url: signed ? signedSocialDownloadPath(row.id, signed.token) : null,
+			urlExpiresAt: signed?.expiresAt || null,
 		};
 	}
 
@@ -122,6 +136,25 @@ export class WhatsAppSocialDownloadService {
 			where: { messageId, userId: user.id },
 			order: { created_at: 'DESC' },
 		});
+		return { items: rows.map((row) => this.serialize(row)) };
+	}
+
+	/**
+	 * Every download this user has in a conversation, in one call.
+	 *
+	 * A thread can hold many social links, and the client needs all of their states
+	 * the moment it opens — asking per message would mean one request per link and a
+	 * downloaded video that only reappears after it is clicked again.
+	 */
+	async listForConversation(user: User, conversationId: string) {
+		await this.sync.assertConversationVisible(user, conversationId);
+		const rows = await this.downloadRepo
+			.createQueryBuilder('download')
+			.innerJoin(WhatsAppMessage, 'message', 'message.id = download.messageId')
+			.where('message.conversationId = :conversationId', { conversationId })
+			.andWhere('download.userId = :userId', { userId: user.id })
+			.orderBy('download.created_at', 'DESC')
+			.getMany();
 		return { items: rows.map((row) => this.serialize(row)) };
 	}
 
@@ -181,12 +214,17 @@ export class WhatsAppSocialDownloadService {
 		row = await this.downloadRepo.save(row);
 
 		// Deliberately not awaited: the HTTP response must not hold a yt-dlp run open.
-		void this.run(row.id, user.id, normalized);
+		void this.run(row.id, user.id, normalized, platform);
 		return this.serialize(row);
 	}
 
 	/** Runs yt-dlp and records the outcome. Never throws into the caller. */
-	private async run(rowId: string, userId: string, url: string) {
+	private async run(
+		rowId: string,
+		userId: string,
+		url: string,
+		platform: SocialPlatform,
+	) {
 		if (this.running.has(rowId)) return;
 		this.running.add(rowId);
 		const relativePath = socialDownloadRelativePath(userId);
@@ -194,7 +232,7 @@ export class WhatsAppSocialDownloadService {
 		try {
 			if (!absolutePath) throw new Error('Invalid social download storage path');
 			await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-			await this.spawnYtDlp(url, absolutePath);
+			await this.attemptDownload(url, absolutePath, platform);
 
 			const stat = await fs.stat(absolutePath);
 			if (!stat.size) throw new Error('Downloader produced an empty file');
@@ -235,7 +273,29 @@ export class WhatsAppSocialDownloadService {
 		}
 	}
 
-	private spawnYtDlp(url: string, outputPath: string) {
+	/**
+	 * One download, with a single fallback attempt.
+	 *
+	 * The fallback exists because TikTok's web page answers a bot check often enough
+	 * that a first failure says nothing about whether the video is reachable.
+	 */
+	private async attemptDownload(url: string, outputPath: string, platform: SocialPlatform) {
+		try {
+			await this.spawnYtDlp(url, outputPath);
+		} catch (error: any) {
+			const fallback = socialRetryExtractorArgs(
+				platform,
+				process.env.YTDLP_TIKTOK_API_HOSTNAME || undefined,
+			);
+			if (!fallback.length || !isRetryableSocialDownloadFailure(error?.stderr || '')) throw error;
+			this.logger.warn(`social download retrying url=${url} with ${fallback.join(' ')}`);
+			// A half-written file from the failed attempt would be appended to otherwise.
+			await fs.rm(outputPath, { force: true }).catch(() => undefined);
+			await this.spawnYtDlp(url, outputPath, fallback);
+		}
+	}
+
+	private spawnYtDlp(url: string, outputPath: string, extraArgs: string[] = []) {
 		return new Promise<void>((resolve, reject) => {
 			// `--ffmpeg-location` must be a path that exists: yt-dlp rejects a bare
 			// command name outright, even though `spawn` would have found it on PATH.
@@ -248,6 +308,7 @@ export class WhatsAppSocialDownloadService {
 					outputPath,
 					MAX_SOCIAL_VIDEO_BYTES,
 					path.isAbsolute(ffmpeg) && existsSync(ffmpeg) ? ffmpeg : '',
+					extraArgs,
 				),
 				{ windowsHide: true },
 			);

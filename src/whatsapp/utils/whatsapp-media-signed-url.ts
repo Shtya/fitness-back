@@ -85,3 +85,14 @@ export function verifyMediaToken(
 export function signedMediaPath(attachmentId: string, token: string): string {
 	return `/api/v1/whatsapp/attachments/${encodeURIComponent(attachmentId)}/content?token=${encodeURIComponent(token)}`;
 }
+
+/**
+ * Same scheme for a downloaded social video.
+ *
+ * A `<video>` element cannot send an Authorization header, so anything it loads has
+ * to carry its own proof in the URL — exactly the problem the attachment tokens
+ * already solve.
+ */
+export function signedSocialDownloadPath(downloadId: string, token: string): string {
+	return `/api/v1/whatsapp/social-downloads/${encodeURIComponent(downloadId)}/content?token=${encodeURIComponent(token)}`;
+}

@@ -106,11 +106,13 @@ export function buildSocialDownloadArgs(
 	outputPath: string,
 	maxBytes = MAX_SOCIAL_VIDEO_BYTES,
 	ffmpegPath = '',
+	extraArgs: string[] = [],
 ): string[] {
 	return [
 		// yt-dlp needs ffmpeg to merge separate audio/video streams. Point it at the
 		// binary this app already resolves instead of hoping one is on PATH.
 		...(ffmpegPath ? ['--ffmpeg-location', ffmpegPath] : []),
+		...extraArgs,
 		'--no-playlist',
 		'--no-warnings',
 		'--no-progress',
@@ -131,6 +133,49 @@ export function buildSocialDownloadArgs(
 		'--',
 		url,
 	];
+}
+
+/** TikTok's mobile API host, used to get around a bot-checked web page. */
+export const TIKTOK_API_HOSTNAME = 'api22-normal-c-useast2a.tiktokv.com';
+
+/**
+ * Extra arguments for a second attempt after the first one failed.
+ *
+ * TikTok's web page intermittently answers with a bot check instead of the video
+ * data ("Unexpected response from webpage request"). Asking the extractor to go
+ * through the mobile API instead is the documented way around it, and it only makes
+ * sense as a fallback because the normal path is the one TikTok keeps current.
+ */
+export function socialRetryExtractorArgs(
+	platform: SocialPlatform,
+	tiktokApiHostname = TIKTOK_API_HOSTNAME,
+): string[] {
+	if (platform !== 'tiktok' || !tiktokApiHostname) return [];
+	return ['--extractor-args', `tiktok:api_hostname=${tiktokApiHostname}`];
+}
+
+/**
+ * Whether a failure is worth a second attempt.
+ *
+ * A private post or a missing binary will fail identically every time, and retrying
+ * those just doubles how long the user stares at a spinner. Extractor hiccups and
+ * server-side errors are the ones that pass on their own.
+ */
+export function isRetryableSocialDownloadFailure(stderr: string): boolean {
+	const text = String(stderr || '').toLowerCase();
+	if (
+		text.includes('login required') ||
+		text.includes('not logged') ||
+		text.includes('cookies') ||
+		text.includes('enoent') ||
+		text.includes('max-filesize') ||
+		text.includes('video unavailable')
+	) {
+		return false;
+	}
+	return /unexpected response|unable to extract|http error 5\d\d|timed out|connection reset/.test(
+		text,
+	);
 }
 
 /**

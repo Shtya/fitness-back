@@ -2,6 +2,7 @@ import {
 	MEDIA_TOKEN_TTL_SECONDS,
 	signMediaToken,
 	signedMediaPath,
+	signedSocialDownloadPath,
 	verifyMediaToken,
 } from './whatsapp-media-signed-url';
 
@@ -52,5 +53,17 @@ describe('whatsapp-media-signed-url', () => {
 		expect(signedMediaPath('att/1', 'tok.en')).toBe(
 			'/api/v1/whatsapp/attachments/att%2F1/content?token=tok.en',
 		);
+	});
+
+	it('builds the same kind of path for a downloaded social video', () => {
+		expect(signedSocialDownloadPath('dl-1', 'tok.en')).toBe(
+			'/api/v1/whatsapp/social-downloads/dl-1/content?token=tok.en',
+		);
+	});
+
+	it('scopes a social token to its own download id', () => {
+		const signed = signMediaToken('dl-1', 'user-9');
+		expect(verifyMediaToken(signed.token, 'dl-1')?.userId).toBe('user-9');
+		expect(verifyMediaToken(signed.token, 'dl-2')).toBeNull();
 	});
 });

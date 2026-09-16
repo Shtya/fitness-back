@@ -1,11 +1,14 @@
 import * as path from 'path';
 import {
 	MAX_SOCIAL_VIDEO_BYTES,
+	TIKTOK_API_HOSTNAME,
 	buildSocialDownloadArgs,
 	describeSocialDownloadFailure,
 	extractSocialVideoUrls,
+	isRetryableSocialDownloadFailure,
 	lastSocialDownloadError,
 	normalizeSocialVideoUrl,
+	socialRetryExtractorArgs,
 	resolveSocialPathInsideRoot,
 	socialDownloadRelativePath,
 	socialDownloadTitle,
@@ -178,6 +181,51 @@ describe('describeSocialDownloadFailure', () => {
 	it('falls back to a generic message with the exit code', () => {
 		expect(describeSocialDownloadFailure('something odd', 2)).toContain('exit 2');
 		expect(describeSocialDownloadFailure('', null)).not.toContain('exit');
+	});
+});
+
+describe('socialRetryExtractorArgs', () => {
+	it('routes a TikTok retry through the mobile api host', () => {
+		expect(socialRetryExtractorArgs('tiktok')).toEqual([
+			'--extractor-args',
+			`tiktok:api_hostname=${TIKTOK_API_HOSTNAME}`,
+		]);
+		expect(socialRetryExtractorArgs('tiktok', 'api99.example.com')).toEqual([
+			'--extractor-args',
+			'tiktok:api_hostname=api99.example.com',
+		]);
+	});
+
+	it('has no fallback for the other platforms', () => {
+		expect(socialRetryExtractorArgs('facebook')).toEqual([]);
+		expect(socialRetryExtractorArgs('instagram')).toEqual([]);
+	});
+
+	it('lands in the argument list before the url', () => {
+		const args = buildSocialDownloadArgs(
+			'https://vt.tiktok.com/a/',
+			'/tmp/out.mp4',
+			MAX_SOCIAL_VIDEO_BYTES,
+			'',
+			socialRetryExtractorArgs('tiktok'),
+		);
+		expect(args.indexOf('--extractor-args')).toBeLessThan(args.indexOf('--'));
+	});
+});
+
+describe('isRetryableSocialDownloadFailure', () => {
+	it('retries the failures that pass on their own', () => {
+		expect(
+			isRetryableSocialDownloadFailure('ERROR: [TikTok] 7123: Unexpected response from webpage request'),
+		).toBe(true);
+		expect(isRetryableSocialDownloadFailure('ERROR: HTTP Error 503: Service Unavailable')).toBe(true);
+	});
+
+	it('does not retry a failure that will repeat', () => {
+		expect(isRetryableSocialDownloadFailure('ERROR: login required')).toBe(false);
+		expect(isRetryableSocialDownloadFailure('spawn ENOENT')).toBe(false);
+		expect(isRetryableSocialDownloadFailure('File is larger than max-filesize')).toBe(false);
+		expect(isRetryableSocialDownloadFailure('')).toBe(false);
 	});
 });
 
