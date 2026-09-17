@@ -21,6 +21,7 @@ import {
 	resolveVoiceSeconds,
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
+import { probeVideoMeta, renderVideoThumbnail } from '../utils/whatsapp-video-probe';
 import { enrichContactMessageNormalized } from '../utils/whatsapp-contact';
 
 type BaileysSocket = any;
@@ -2800,12 +2801,35 @@ export class BaileysProvider implements WhatsAppProvider {
 			const text = String(content || '').trim();
 			if (!text) throw new Error('A text status cannot be empty');
 			payload = { text };
-		} else if (type === 'image' || type === 'video') {
+		} else if (type === 'image') {
 			const buffer = await fs.readFile(content);
-			payload =
-				type === 'image'
-					? { image: buffer, caption: options.caption || undefined, mimetype: 'image/jpeg' }
-					: { video: buffer, caption: options.caption || undefined, mimetype: 'video/mp4' };
+			payload = {
+				image: buffer,
+				caption: options.caption || undefined,
+				mimetype: 'image/jpeg',
+			};
+		} else if (type === 'video') {
+			const buffer = await fs.readFile(content);
+			// The status viewer needs the length to schedule the clip, and shows the cover
+			// frame while it fetches. Baileys computes duration for audio only and sizes
+			// only images, so without this a status video goes out with no length at all.
+			const [meta, jpegThumbnail] = await Promise.all([
+				probeVideoMeta(content),
+				renderVideoThumbnail(content),
+			]);
+			payload = {
+				video: buffer,
+				caption: options.caption || undefined,
+				mimetype: 'video/mp4',
+				...(meta.seconds > 0 ? { seconds: Math.round(meta.seconds) } : {}),
+				...(meta.width && meta.height ? { width: meta.width, height: meta.height } : {}),
+				...(jpegThumbnail ? { jpegThumbnail } : {}),
+			};
+			if (!jpegThumbnail || !meta.seconds) {
+				this.logger.warn(
+					`Status video metadata incomplete for ${this.accountId} (seconds=${meta.seconds}, thumbnail=${Boolean(jpegThumbnail)}); check FFMPEG_PATH`,
+				);
+			}
 		} else {
 			throw new Error(`Unsupported status type: ${type}`);
 		}

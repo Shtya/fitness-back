@@ -1,6 +1,7 @@
 import * as path from 'path';
 import {
 	STORY_DEFAULT_PART_SECONDS,
+	STORY_MAX_LONG_EDGE,
 	STORY_MAX_PART_SECONDS,
 	STORY_MIN_PART_SECONDS,
 	buildStorySegmentFfmpegArgs,
@@ -34,8 +35,17 @@ describe('planStorySegments', () => {
 		expect(planStorySegments(STORY_DEFAULT_PART_SECONDS)).toHaveLength(1);
 	});
 
-	it('defaults to 90-second clips', () => {
-		expect(planStorySegments(200)).toEqual([
+	it('defaults to the length a status player accepts', () => {
+		expect(STORY_DEFAULT_PART_SECONDS).toBe(30);
+		expect(planStorySegments(70)).toEqual([
+			{ index: 0, startSeconds: 0, durationSeconds: 30 },
+			{ index: 1, startSeconds: 30, durationSeconds: 30 },
+			{ index: 2, startSeconds: 60, durationSeconds: 10 },
+		]);
+	});
+
+	it('honours a longer clip length when one is asked for', () => {
+		expect(planStorySegments(200, 90)).toEqual([
 			{ index: 0, startSeconds: 0, durationSeconds: 90 },
 			{ index: 1, startSeconds: 90, durationSeconds: 90 },
 			{ index: 2, startSeconds: 180, durationSeconds: 20 },
@@ -115,6 +125,24 @@ describe('buildStorySegmentFfmpegArgs', () => {
 		expect(args[args.indexOf('-c:v') + 1]).toBe('libx264');
 		expect(args[args.indexOf('-c:a') + 1]).toBe('aac');
 		expect(args).not.toContain('copy');
+	});
+
+	it('produces a clip a status player can decode and stream', () => {
+		const args = buildStorySegmentFfmpegArgs('/in.mp4', '/out.mp4', {
+			startSeconds: 0,
+			durationSeconds: 30,
+		});
+		expect(args[args.indexOf('-profile:v') + 1]).toBe('main');
+		expect(args[args.indexOf('-pix_fmt') + 1]).toBe('yuv420p');
+		expect(args[args.indexOf('-ar') + 1]).toBe('44100');
+		expect(args[args.indexOf('-movflags') + 1]).toBe('+faststart');
+		// Caps the long edge without enlarging a smaller video.
+		expect(args[args.indexOf('-vf') + 1]).toContain(`min(${STORY_MAX_LONG_EDGE},iw)`);
+		// A silent source must still cut, so the audio track is optional.
+		expect(args).toContain('0:a:0?');
+		// Data and subtitle tracks make a status unplayable.
+		expect(args).toContain('-sn');
+		expect(args).toContain('-dn');
 	});
 });
 

@@ -11,11 +11,16 @@ import * as path from 'path';
 /**
  * How long each clip is by default.
  *
- * Not a platform constant — WhatsApp's own limit has moved over time and differs
- * between clients, so the length is a choice the caller makes and this is only the
- * starting point.
+ * 30 seconds is what a WhatsApp client will actually play as a status — it is the
+ * length the app trims to, and the length it slices a longer video into. A clip past
+ * it uploads without complaint and then sits on "Waiting for this status update" on
+ * the viewer's phone, so this is the only value known to be safe. Longer lengths are
+ * still selectable for accounts whose client accepts them.
  */
-export const STORY_DEFAULT_PART_SECONDS = 90;
+export const STORY_DEFAULT_PART_SECONDS = 30;
+
+/** Above this a clip is no longer known to play as a status. */
+export const STORY_SAFE_PART_SECONDS = 30;
 
 /** The range a caller may ask for. Outside this the result stops being a story. */
 export const STORY_MIN_PART_SECONDS = 5;
@@ -87,13 +92,30 @@ export function planStorySegments(
 }
 
 /**
+ * Never enlarges the picture: the long side is capped, the short side follows at an
+ * even number of pixels. A status above this size is a slow download for the viewer
+ * and, on some clients, one that never finishes.
+ */
+export const STORY_MAX_LONG_EDGE = 1280;
+
+const STORY_SCALE_FILTER = [
+	`scale=w='if(gte(iw,ih),min(${STORY_MAX_LONG_EDGE},iw),-2)'`,
+	`h='if(gte(iw,ih),-2,min(${STORY_MAX_LONG_EDGE},ih))'`,
+].join(':');
+
+/**
  * FFmpeg arguments for cutting one clip out of a video.
  *
  * The cut re-encodes rather than copying streams. Copying is only frame-accurate on
- * a keyframe, so on an arbitrary 30-second boundary it produces a clip that opens on
- * a frozen or missing frame — the one thing the sequence must not do. `-crf 18`
- * keeps the result visually indistinguishable at the original resolution and frame
- * rate, and the audio is re-encoded to the AAC that WhatsApp accepts.
+ * a keyframe, so on an arbitrary boundary it produces a clip that opens on a frozen
+ * or missing frame — the one thing the sequence must not do.
+ *
+ * Everything past the cut exists so the clip looks like one the WhatsApp app itself
+ * produced: H.264 main profile at level 4.0 (what the status player is guaranteed to
+ * decode, unlike the high profile libx264 picks by default), 8-bit 4:2:0, capped
+ * frame rate and bitrate, a keyframe every second so the viewer can start
+ * immediately, and 44.1 kHz stereo AAC. Extra data and subtitle tracks are dropped
+ * because a status carrying them is refused outright.
  *
  * `-ss` before `-i` seeks by index and is fast; `-accurate_seek` keeps it exact.
  */
@@ -114,18 +136,45 @@ export function buildStorySegmentFfmpegArgs(
 		inputPath,
 		'-t',
 		String(Math.max(0.1, Number(segment.durationSeconds) || 0)),
+		'-map',
+		'0:v:0',
+		// Optional: a silent clip is still a valid story.
+		'-map',
+		'0:a:0?',
+		'-sn',
+		'-dn',
+		'-vf',
+		STORY_SCALE_FILTER,
 		'-c:v',
 		'libx264',
+		'-profile:v',
+		'main',
+		'-level:v',
+		'4.0',
 		'-preset',
 		'veryfast',
 		'-crf',
-		'18',
+		'23',
+		'-maxrate',
+		'3M',
+		'-bufsize',
+		'6M',
 		'-pix_fmt',
 		'yuv420p',
+		'-r',
+		'30',
+		'-g',
+		'30',
 		'-c:a',
 		'aac',
 		'-b:a',
 		'128k',
+		'-ar',
+		'44100',
+		'-ac',
+		'2',
+		'-avoid_negative_ts',
+		'make_zero',
 		// Story players stream from the start, so the index belongs at the front.
 		'-movflags',
 		'+faststart',
