@@ -505,6 +505,16 @@ export class PrepareWhatsAppStoryDto {
 	@IsString()
 	@MaxLength(700)
 	caption?: string;
+
+	/**
+	 * How long each clip may be. Chosen by the user, because the length a status
+	 * accepts is not the same on every WhatsApp client. Clamped in the service.
+	 */
+	@IsOptional()
+	@IsInt()
+	@Min(5)
+	@Max(180)
+	maxPartSeconds?: number;
 }
 
 export class ViewWhatsAppStatusDto {

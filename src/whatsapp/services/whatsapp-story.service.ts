@@ -19,9 +19,12 @@ import { WhatsAppSyncService } from './whatsapp-sync.service';
 import { probeAudioSeconds, runFfmpeg } from '../utils/whatsapp-voice-ogg';
 import { signMediaToken, signedStoryPartPath } from '../utils/whatsapp-media-signed-url';
 import {
-	STORY_MAX_SECONDS,
+	STORY_DEFAULT_PART_SECONDS,
+	STORY_MAX_PART_SECONDS,
+	STORY_MIN_PART_SECONDS,
 	buildStorySegmentFfmpegArgs,
 	describeStoryRejection,
+	normalizeStoryPartSeconds,
 	planStorySegments,
 	resolveStoryPathInsideRoot,
 	storyPartRelativePath,
@@ -72,7 +75,13 @@ export class WhatsAppStoryService {
 			sourceLabel: draft.sourceLabel,
 			caption: draft.caption,
 			totalDurationSeconds: draft.totalDurationSeconds,
-			maxPartSeconds: STORY_MAX_SECONDS,
+			// The longest clip is the length that was actually used, so a reopened draft
+			// describes itself without needing a column for the request.
+			maxPartSeconds:
+				Math.max(0, ...(draft.parts || []).map((part) => part.durationSeconds)) ||
+				STORY_DEFAULT_PART_SECONDS,
+			minPartSeconds: STORY_MIN_PART_SECONDS,
+			maxAllowedPartSeconds: STORY_MAX_PART_SECONDS,
 			errorMessage: draft.errorMessage,
 			publishedAt: draft.publishedAt,
 			parts: (draft.parts || []).map((part) => ({
@@ -115,6 +124,7 @@ export class WhatsAppStoryService {
 		accountId: string,
 		source: { attachmentId?: string; socialDownloadId?: string },
 		caption?: string,
+		maxPartSeconds?: number,
 	) {
 		await this.statuses.assertCanPublish(user, accountId);
 
@@ -133,7 +143,7 @@ export class WhatsAppStoryService {
 			throw new BadRequestException('No video was given to add to a story');
 		}
 
-		return this.prepareFromFile(user, accountId, file, attachmentId, caption);
+		return this.prepareFromFile(user, accountId, file, attachmentId, caption, maxPartSeconds);
 	}
 
 	private async prepareFromFile(
@@ -142,12 +152,14 @@ export class WhatsAppStoryService {
 		source: { absolutePath: string; fileName?: string | null },
 		attachmentId: string | null,
 		caption?: string,
+		maxPartSeconds?: number,
 	) {
 		const totalSeconds = await probeAudioSeconds(source.absolutePath).catch(() => 0);
 		const rejection = describeStoryRejection(totalSeconds);
 		if (rejection) throw new BadRequestException(rejection);
 
-		const segments = planStorySegments(totalSeconds);
+		const partSeconds = normalizeStoryPartSeconds(maxPartSeconds);
+		const segments = planStorySegments(totalSeconds, partSeconds);
 		if (!segments.length) {
 			throw new BadRequestException('This video is too short to publish as a story');
 		}

@@ -8,8 +8,25 @@ import * as path from 'path';
  * encoding anything.
  */
 
-/** WhatsApp refuses a status video longer than this. */
-export const STORY_MAX_SECONDS = 30;
+/**
+ * How long each clip is by default.
+ *
+ * Not a platform constant — WhatsApp's own limit has moved over time and differs
+ * between clients, so the length is a choice the caller makes and this is only the
+ * starting point.
+ */
+export const STORY_DEFAULT_PART_SECONDS = 90;
+
+/** The range a caller may ask for. Outside this the result stops being a story. */
+export const STORY_MIN_PART_SECONDS = 5;
+export const STORY_MAX_PART_SECONDS = 180;
+
+/** Clamps a requested clip length into the usable range. */
+export function normalizeStoryPartSeconds(requested: unknown): number {
+	const value = Number(requested);
+	if (!Number.isFinite(value) || value <= 0) return STORY_DEFAULT_PART_SECONDS;
+	return Math.min(STORY_MAX_PART_SECONDS, Math.max(STORY_MIN_PART_SECONDS, Math.round(value)));
+}
 
 /**
  * A tail shorter than this is folded into the previous clip instead of becoming its
@@ -41,11 +58,11 @@ function round(value: number, places = 3): number {
  */
 export function planStorySegments(
 	totalSeconds: number,
-	maxSeconds = STORY_MAX_SECONDS,
+	maxSeconds = STORY_DEFAULT_PART_SECONDS,
 	minTailSeconds = STORY_MIN_TAIL_SECONDS,
 ): StorySegment[] {
 	const total = Number(totalSeconds);
-	const limit = Math.max(1, Number(maxSeconds) || STORY_MAX_SECONDS);
+	const limit = Math.max(1, Number(maxSeconds) || STORY_DEFAULT_PART_SECONDS);
 	if (!Number.isFinite(total) || total <= 0) return [];
 	if (total <= limit) {
 		return [{ index: 0, startSeconds: 0, durationSeconds: round(total) }];

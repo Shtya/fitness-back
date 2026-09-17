@@ -1,23 +1,49 @@
 import * as path from 'path';
 import {
-	STORY_MAX_SECONDS,
+	STORY_DEFAULT_PART_SECONDS,
+	STORY_MAX_PART_SECONDS,
+	STORY_MIN_PART_SECONDS,
 	buildStorySegmentFfmpegArgs,
 	describeStoryRejection,
+	normalizeStoryPartSeconds,
 	planStorySegments,
 	resolveStoryPathInsideRoot,
 	storyPartRelativePath,
 } from './whatsapp-story-video';
+
+describe('normalizeStoryPartSeconds', () => {
+	it('falls back to the default for anything unusable', () => {
+		expect(normalizeStoryPartSeconds(undefined)).toBe(STORY_DEFAULT_PART_SECONDS);
+		expect(normalizeStoryPartSeconds(0)).toBe(STORY_DEFAULT_PART_SECONDS);
+		expect(normalizeStoryPartSeconds('abc')).toBe(STORY_DEFAULT_PART_SECONDS);
+	});
+
+	it('clamps a choice into the usable range', () => {
+		expect(normalizeStoryPartSeconds(30)).toBe(30);
+		expect(normalizeStoryPartSeconds(1)).toBe(STORY_MIN_PART_SECONDS);
+		expect(normalizeStoryPartSeconds(9999)).toBe(STORY_MAX_PART_SECONDS);
+		expect(normalizeStoryPartSeconds(45.6)).toBe(46);
+	});
+});
 
 describe('planStorySegments', () => {
 	it('leaves a short video as a single story', () => {
 		expect(planStorySegments(12)).toEqual([
 			{ index: 0, startSeconds: 0, durationSeconds: 12 },
 		]);
-		expect(planStorySegments(STORY_MAX_SECONDS)).toHaveLength(1);
+		expect(planStorySegments(STORY_DEFAULT_PART_SECONDS)).toHaveLength(1);
+	});
+
+	it('defaults to 90-second clips', () => {
+		expect(planStorySegments(200)).toEqual([
+			{ index: 0, startSeconds: 0, durationSeconds: 90 },
+			{ index: 1, startSeconds: 90, durationSeconds: 90 },
+			{ index: 2, startSeconds: 180, durationSeconds: 20 },
+		]);
 	});
 
 	it('covers the whole video with no gap and no overlap', () => {
-		const segments = planStorySegments(70);
+		const segments = planStorySegments(70, 30);
 		expect(segments).toEqual([
 			{ index: 0, startSeconds: 0, durationSeconds: 30 },
 			{ index: 1, startSeconds: 30, durationSeconds: 30 },
@@ -36,7 +62,7 @@ describe('planStorySegments', () => {
 	});
 
 	it('folds a too-short tail into the clip before it', () => {
-		const segments = planStorySegments(60.4);
+		const segments = planStorySegments(60.4, 30);
 		expect(segments).toHaveLength(2);
 		expect(segments[1]).toEqual({ index: 1, startSeconds: 30, durationSeconds: 30.4 });
 		const covered = segments.reduce((sum, part) => sum + part.durationSeconds, 0);
@@ -44,13 +70,13 @@ describe('planStorySegments', () => {
 	});
 
 	it('keeps a tail that is long enough to stand alone', () => {
-		const segments = planStorySegments(64);
+		const segments = planStorySegments(64, 30);
 		expect(segments).toHaveLength(3);
 		expect(segments[2].durationSeconds).toBe(4);
 	});
 
 	it('numbers the parts in playback order from zero', () => {
-		expect(planStorySegments(95).map(part => part.index)).toEqual([0, 1, 2, 3]);
+		expect(planStorySegments(95, 30).map(part => part.index)).toEqual([0, 1, 2, 3]);
 	});
 
 	it('honours a different platform limit', () => {

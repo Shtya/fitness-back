@@ -41,6 +41,7 @@ export class WhatsAppStoryController {
 			accountId,
 			{ attachmentId: body.attachmentId, socialDownloadId: body.socialDownloadId },
 			body.caption,
+			body.maxPartSeconds,
 		);
 	}
 
