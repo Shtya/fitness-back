@@ -487,9 +487,18 @@ export class StartWhatsAppSocialDownloadDto {
 }
 
 export class PrepareWhatsAppStoryDto {
-	/** The video attachment to publish. Visibility is checked in the service. */
+	/**
+	 * The video to publish: either a message attachment or a clip already downloaded
+	 * from a social link. Exactly one is expected; the service rejects neither being
+	 * given, and ownership of whichever is used is checked there.
+	 */
+	@IsOptional()
 	@IsUUID()
-	attachmentId: string;
+	attachmentId?: string;
+
+	@IsOptional()
+	@IsUUID()
+	socialDownloadId?: string;
 
 	/** Shown on the first clip only, so a sliced video does not repeat it. */
 	@IsOptional()

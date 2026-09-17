@@ -36,10 +36,10 @@ export class WhatsAppStoryController {
 		@Param('accountId') accountId: string,
 		@Body() body: PrepareWhatsAppStoryDto,
 	) {
-		return this.stories.prepareFromAttachment(
+		return this.stories.prepare(
 			req.user,
 			accountId,
-			body.attachmentId,
+			{ attachmentId: body.attachmentId, socialDownloadId: body.socialDownloadId },
 			body.caption,
 		);
 	}

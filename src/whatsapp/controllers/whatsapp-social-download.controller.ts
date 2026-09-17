@@ -4,7 +4,10 @@ import { createReadStream } from 'fs';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { JwtOrMediaTokenGuard } from '../guards/jwt-or-media-token.guard';
-import { StartWhatsAppSocialDownloadDto } from '../dto/whatsapp.dto';
+import {
+	SendWhatsAppLibraryItemDto,
+	StartWhatsAppSocialDownloadDto,
+} from '../dto/whatsapp.dto';
 import { WhatsAppSocialDownloadService } from '../services/whatsapp-social-download.service';
 
 /**
@@ -86,6 +89,22 @@ export class WhatsAppSocialDownloadController {
 
 		res.setHeader('Content-Length', String(file.size));
 		createReadStream(file.absolutePath).pipe(res);
+	}
+
+	/** Forwards the downloaded clip into a conversation — this one or any other. */
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Post('social-downloads/:downloadId/send')
+	send(
+		@Req() req: any,
+		@Param('downloadId') downloadId: string,
+		@Body() body: SendWhatsAppLibraryItemDto,
+	) {
+		return this.downloads.sendToConversation(
+			req.user,
+			downloadId,
+			body.conversationId,
+			body.clientMessageId,
+		);
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)

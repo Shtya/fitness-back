@@ -387,6 +387,27 @@ export class WhatsAppSocialDownloadService {
 		};
 	}
 
+	/**
+	 * Sends a downloaded video into a conversation as a normal video message.
+	 *
+	 * Goes through the existing file-send path, so the clip is uploaded from disk
+	 * rather than fetched from the social platform again, and it lands with the same
+	 * attachment record and audit trail as any other outgoing video.
+	 */
+	async sendToConversation(
+		user: User,
+		downloadId: string,
+		conversationId: string,
+		clientMessageId?: string,
+	) {
+		const file = await this.resolveFile(user, downloadId);
+		return this.sync.sendMediaFromFile(user, conversationId, file.absolutePath, {
+			type: 'video',
+			fileName: file.fileName,
+			clientMessageId,
+		});
+	}
+
 	async remove(user: User, downloadId: string) {
 		const row = await this.downloadRepo.findOne({
 			where: { id: downloadId, userId: user.id },

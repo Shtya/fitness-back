@@ -13,6 +13,7 @@ import {
 	WhatsAppStoryDraft,
 	type WhatsAppStoryDraftPart,
 } from '../entities/whatsapp.entity';
+import { WhatsAppSocialDownloadService } from './whatsapp-social-download.service';
 import { WhatsAppStatusService } from './whatsapp-status.service';
 import { WhatsAppSyncService } from './whatsapp-sync.service';
 import { probeAudioSeconds, runFfmpeg } from '../utils/whatsapp-voice-ogg';
@@ -60,6 +61,7 @@ export class WhatsAppStoryService {
 		private readonly draftRepo: Repository<WhatsAppStoryDraft>,
 		private readonly sync: WhatsAppSyncService,
 		private readonly statuses: WhatsAppStatusService,
+		private readonly socialDownloads: WhatsAppSocialDownloadService,
 	) {}
 
 	private serialize(draft: WhatsAppStoryDraft) {
@@ -102,21 +104,45 @@ export class WhatsAppStoryService {
 	/**
 	 * Cuts a chat video into story-length clips and returns them for review.
 	 *
+	 * The source is either a video attachment or a video already downloaded from a
+	 * social link — by the time it gets here both are just a file on disk, so the
+	 * cutting and publishing below make no distinction.
+	 *
 	 * Nothing is published here. The draft holds the clips until the user confirms.
 	 */
-	async prepareFromAttachment(
+	async prepare(
 		user: User,
 		accountId: string,
-		attachmentId: string,
+		source: { attachmentId?: string; socialDownloadId?: string },
 		caption?: string,
 	) {
 		await this.statuses.assertCanPublish(user, accountId);
-		const attachment = await this.sync.assertAttachmentVisible(user, attachmentId);
-		if (!String(attachment.type || '').toLowerCase().includes('video')) {
-			throw new BadRequestException('Only a video message can be added to a story');
-		}
-		const source = await this.sync.resolveAttachmentFile(user, attachmentId);
 
+		let file: { absolutePath: string; fileName?: string | null };
+		let attachmentId: string | null = null;
+		if (source.attachmentId) {
+			const attachment = await this.sync.assertAttachmentVisible(user, source.attachmentId);
+			if (!String(attachment.type || '').toLowerCase().includes('video')) {
+				throw new BadRequestException('Only a video message can be added to a story');
+			}
+			file = await this.sync.resolveAttachmentFile(user, source.attachmentId);
+			attachmentId = attachment.id;
+		} else if (source.socialDownloadId) {
+			file = await this.socialDownloads.resolveFile(user, source.socialDownloadId);
+		} else {
+			throw new BadRequestException('No video was given to add to a story');
+		}
+
+		return this.prepareFromFile(user, accountId, file, attachmentId, caption);
+	}
+
+	private async prepareFromFile(
+		user: User,
+		accountId: string,
+		source: { absolutePath: string; fileName?: string | null },
+		attachmentId: string | null,
+		caption?: string,
+	) {
 		const totalSeconds = await probeAudioSeconds(source.absolutePath).catch(() => 0);
 		const rejection = describeStoryRejection(totalSeconds);
 		if (rejection) throw new BadRequestException(rejection);
@@ -129,8 +155,8 @@ export class WhatsAppStoryService {
 		let draft = this.draftRepo.create({
 			userId: user.id,
 			accountId,
-			sourceAttachmentId: attachment.id,
-			sourceLabel: attachment.fileName || null,
+			sourceAttachmentId: attachmentId,
+			sourceLabel: source.fileName || null,
 			status: 'draft',
 			totalDurationSeconds: Math.round(totalSeconds * 100) / 100,
 			caption: caption?.trim() || null,
@@ -169,7 +195,9 @@ export class WhatsAppStoryService {
 			// Half-cut clips are useless, and leaving them would be shown as reviewable.
 			await this.removeFiles(draft).catch(() => undefined);
 			await this.draftRepo.delete(draft.id).catch(() => undefined);
-			this.logger.warn(`story prepare failed for ${attachmentId}: ${error?.message || error}`);
+			this.logger.warn(
+				`story prepare failed for ${source.absolutePath}: ${error?.message || error}`,
+			);
 			throw new BadRequestException(
 				error?.message || 'This video could not be prepared for a story',
 			);
