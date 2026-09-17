@@ -10,7 +10,12 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { In, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
-import { WhatsAppContact, WhatsAppStatus, WhatsAppStatusHistory } from '../entities/whatsapp.entity';
+import {
+	WhatsAppContact,
+	WhatsAppConversation,
+	WhatsAppStatus,
+	WhatsAppStatusHistory,
+} from '../entities/whatsapp.entity';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -25,6 +30,7 @@ import {
 	isWeakWhatsAppContactName,
 	preferWhatsAppContactName,
 } from '../utils/whatsapp-contact-name';
+import { statusAudienceJids } from '../utils/whatsapp-contact';
 
 function statusId(item: any) {
 	return String(
@@ -47,6 +53,15 @@ function isUuid(value: unknown) {
 	);
 }
 
+/**
+ * Ceiling on how many recipients one publish is encrypted for.
+ *
+ * Not a WhatsApp limit — a guard on our side, since the cost of publishing grows with
+ * the audience and an account that blasts thousands of copies at once is one that gets
+ * throttled.
+ */
+const STATUS_AUDIENCE_LIMIT = 800;
+
 type StatusRow = WhatsAppStatus | WhatsAppStatusHistory;
 type StatusRowSource = 'active' | 'history';
 
@@ -62,6 +77,8 @@ export class WhatsAppStatusService {
 		private readonly historyRepo: Repository<WhatsAppStatusHistory>,
 		@InjectRepository(WhatsAppContact)
 		private readonly contactRepo: Repository<WhatsAppContact>,
+		@InjectRepository(WhatsAppConversation)
+		private readonly conversationRepo: Repository<WhatsAppConversation>,
 		private readonly access: WhatsAppAccessService,
 		private readonly providers: WhatsAppProviderManagerService,
 		private readonly audit: WhatsAppAuditService,
@@ -573,6 +590,40 @@ export class WhatsAppStatusService {
 		return provider;
 	}
 
+	/**
+	 * Everyone this account could publish a status to, taken from what has been synced
+	 * into the database rather than from the provider's memory.
+	 *
+	 * A status reaches only the recipients named in the send. The provider's own contact
+	 * list is populated by an app-state sync that WhatsApp does not repeat on every
+	 * reconnect, so after a restart it is empty and a publish would silently go to
+	 * nobody. Persisted contacts and the people we already have chats with survive that.
+	 */
+	private async publishAudience(accountId: string): Promise<string[]> {
+		const [conversations, contacts] = await Promise.all([
+			this.conversationRepo.find({
+				where: { accountId },
+				select: ['providerChatId'],
+				// Publishing encrypts a copy per recipient, so the most recently active
+				// chats — the people actually likely to open it — come first.
+				order: { lastMessageAt: 'DESC' },
+				take: STATUS_AUDIENCE_LIMIT,
+			}),
+			this.contactRepo.find({
+				where: { accountId },
+				select: ['waId', 'phoneNumber'],
+				take: STATUS_AUDIENCE_LIMIT,
+			}),
+		]);
+		// Group and broadcast chat ids come through here too; the filter drops them,
+		// since neither can view a status.
+		const audience = statusAudienceJids([
+			...conversations.map(conversation => conversation.providerChatId),
+			...contacts.flatMap(contact => [contact.phoneNumber, contact.waId]),
+		]);
+		return audience.slice(0, STATUS_AUDIENCE_LIMIT);
+	}
+
 	async publish(
 		user: User,
 		accountId: string,
@@ -582,6 +633,7 @@ export class WhatsAppStatusService {
 		const result = await provider.publishStatus(input.content, {
 			type: input.type,
 			caption: input.caption,
+			audienceWaIds: await this.publishAudience(accountId),
 		});
 		const publishedId = statusId(result);
 		if (publishedId) {

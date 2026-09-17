@@ -3461,7 +3461,9 @@ export class WppConnectProvider implements WhatsAppProvider {
 		};
 	}
 
-	publishStatus(content: string, options: { type: string; caption?: string }) {
+	// `audienceWaIds` is accepted for interface parity; WPPConnect picks the audience
+	// from the account's own contact list inside the web client.
+	publishStatus(content: string, options: { type: string; caption?: string; audienceWaIds?: string[] }) {
 		if (options.type === 'text') return this.client.sendTextStatus(content);
 		if (options.type === 'image') {
 			return this.client.sendImageStatus(content, { caption: options.caption || '' });

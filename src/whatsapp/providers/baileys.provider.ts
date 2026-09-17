@@ -22,7 +22,10 @@ import {
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 import { probeVideoMeta, renderVideoThumbnail } from '../utils/whatsapp-video-probe';
-import { enrichContactMessageNormalized } from '../utils/whatsapp-contact';
+import {
+	enrichContactMessageNormalized,
+	statusAudienceJids,
+} from '../utils/whatsapp-contact';
 
 type BaileysSocket = any;
 
@@ -2764,35 +2767,39 @@ export class BaileysProvider implements WhatsAppProvider {
 	 * list uploads fine and is shown to nobody. Groups, newsletters and broadcast
 	 * lists are excluded because a status is only delivered to individual users.
 	 */
-	private statusAudienceJids(): string[] {
-		const jids = new Set<string>();
+	/**
+	 * The people a status will be sent to.
+	 *
+	 * The in-memory contact map only fills up when WhatsApp pushes an app-state sync,
+	 * which it does not repeat on every reconnect — so after a restart it is empty and
+	 * this would otherwise report that the account has no contacts at all. The caller
+	 * passes the audience it has persisted, and this merges the two.
+	 */
+	private statusAudienceJids(extra: Iterable<unknown> = []): string[] {
+		const candidates: unknown[] = [];
 		for (const contact of this.contacts.values()) {
-			const id = String(contact?.id || '');
-			const digits = String(contact?.phoneNumber || '').replace(/\D/g, '');
-			if (digits) {
-				jids.add(`${digits}@s.whatsapp.net`);
-				continue;
-			}
-			if (/^\d+@(s\.whatsapp\.net|c\.us)$/.test(id)) {
-				jids.add(`${id.split('@')[0]}@s.whatsapp.net`);
-			}
+			candidates.push(contact?.phoneNumber || contact?.id || '');
 		}
-		return [...jids];
+		for (const value of extra) candidates.push(value);
+		return statusAudienceJids(candidates);
 	}
 
 	/**
 	 * Publishes a status (story). `content` is the text for `type: 'text'`, and an
 	 * absolute file path for `image` / `video` — the same contract WPPConnect uses.
 	 */
-	async publishStatus(content: string, options: { type: string; caption?: string }) {
+	async publishStatus(
+		content: string,
+		options: { type: string; caption?: string; audienceWaIds?: string[] },
+	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const type = String(options.type || 'text').toLowerCase();
-		const statusJidList = this.statusAudienceJids();
+		const statusJidList = this.statusAudienceJids(options.audienceWaIds || []);
 		if (!statusJidList.length) {
 			throw new Error(
-				'No contacts have synced yet, so a status would be published to nobody. Try again once the account finishes syncing.',
+				'No contacts are known for this account yet, so a status would be published to nobody. Open a chat with someone, or wait for the contact sync to finish, then try again.',
 			);
 		}
 

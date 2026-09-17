@@ -6,7 +6,41 @@ import {
 	mergeContactIntoPersistableRaw,
 	needsContactHydration,
 	parseVcardPhones,
+	statusAudienceJids,
 } from './whatsapp-contact';
+
+describe('statusAudienceJids', () => {
+	it('accepts contact jids, chat ids and bare numbers, deduplicated', () => {
+		expect(
+			statusAudienceJids([
+				'201234567890@s.whatsapp.net',
+				'201234567890@c.us',
+				'+20 100 111 2233',
+				'201234567890',
+			]),
+		).toEqual(['201234567890@s.whatsapp.net', '201001112233@s.whatsapp.net']);
+	});
+
+	it('drops everything that cannot view a status', () => {
+		expect(
+			statusAudienceJids([
+				'120363111222333444@g.us',
+				'status@broadcast',
+				'1234@broadcast',
+				'98765432101234@lid',
+				'0123456789@newsletter',
+				'',
+				null,
+				undefined,
+			]),
+		).toEqual([]);
+	});
+
+	it('rejects numbers that are not dialable', () => {
+		expect(statusAudienceJids(['123', '1234567', '1234567890123456789'])).toEqual([]);
+		expect(statusAudienceJids(['12345678'])).toEqual(['12345678@s.whatsapp.net']);
+	});
+});
 
 describe('whatsapp-contact', () => {
 	it('detects contact message types', () => {

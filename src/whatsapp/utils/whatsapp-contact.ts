@@ -35,6 +35,29 @@ export function digitsFromWaId(value: unknown): string {
 		.replace(/\D/g, '');
 }
 
+/**
+ * Who a status is encrypted for.
+ *
+ * A status goes to `status@broadcast`, but only the recipients named in the send
+ * actually receive a copy they can open — an empty list publishes to nobody. Accepts
+ * whatever identifiers are to hand (contact JIDs, chat ids, bare phone numbers) and
+ * keeps the ones that name a person: groups, broadcast lists, newsletters and `lid`
+ * aliases cannot view a status, and a `lid` is not the person's phone number anyway.
+ */
+export function statusAudienceJids(values: Iterable<unknown>): string[] {
+	const jids = new Set<string>();
+	for (const value of values) {
+		const text = String(value ?? '').trim();
+		if (!text) continue;
+		if (text.includes('@') && !/@(s\.whatsapp\.net|c\.us)$/i.test(text)) continue;
+		const digits = digitsFromWaId(text);
+		// Shortest and longest an E.164 subscriber number gets.
+		if (digits.length < 8 || digits.length > 15) continue;
+		jids.add(`${digits}@s.whatsapp.net`);
+	}
+	return [...jids];
+}
+
 export function formatPhoneForDisplay(phone: string, waId?: string | null): string {
 	const raw = String(phone || '').trim();
 	if (raw.startsWith('+')) return raw.replace(/\s+/g, ' ').trim();

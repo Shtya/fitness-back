@@ -194,6 +194,14 @@ export interface WhatsAppProvider {
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
 	downloadStatus?(providerStatusId: string, senderWaId?: string | null): Promise<any>;
 	getStatuses(): Promise<any[]>;
-	publishStatus(content: string, options: { type: string; caption?: string }): Promise<any>;
+	publishStatus(
+		content: string,
+		/**
+		 * `audienceWaIds` is who the status is encrypted for. A provider that keeps its
+		 * own contact list may ignore it; Baileys needs it because its in-memory list is
+		 * empty until WhatsApp pushes a sync.
+		 */
+		options: { type: string; caption?: string; audienceWaIds?: string[] },
+	): Promise<any>;
 	viewStatus(statusId: string, senderWaId?: string): Promise<any>;
 }
