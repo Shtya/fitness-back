@@ -827,6 +827,65 @@ export class WhatsAppSocialDownload extends CoreEntity {
 	completedAt: Date | null;
 }
 
+/** One prepared clip inside a story draft, in playback order. */
+export type WhatsAppStoryDraftPart = {
+	index: number;
+	startSeconds: number;
+	durationSeconds: number;
+	storagePath: string;
+	fileSizeBytes: number;
+	status: 'ready' | 'publishing' | 'published' | 'failed';
+	errorMessage: string | null;
+	providerStatusId: string | null;
+};
+
+/**
+ * A video staged for publishing as one or more stories.
+ *
+ * The draft exists so the cut clips can be reviewed before anything is published,
+ * and so a partially published sequence is recoverable: each part carries its own
+ * status, and publishing resumes from the first one that has not gone out.
+ */
+@Entity('whatsapp_story_drafts')
+@Index('idx_whatsapp_story_drafts_user', ['userId'])
+export class WhatsAppStoryDraft extends CoreEntity {
+	@Index()
+	@Column({ name: 'user_id', type: 'uuid' })
+	userId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user: User;
+
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@Column({ name: 'source_attachment_id', type: 'uuid', nullable: true })
+	sourceAttachmentId: string | null;
+
+	@Column({ name: 'source_label', type: 'varchar', length: 200, nullable: true })
+	sourceLabel: string | null;
+
+	@Column({ type: 'varchar', length: 20, default: 'draft' })
+	status: 'draft' | 'publishing' | 'published' | 'failed';
+
+	@Column({ name: 'total_duration_seconds', type: 'float', default: 0 })
+	totalDurationSeconds: number;
+
+	@Column({ type: 'text', nullable: true })
+	caption: string | null;
+
+	/** Small and always read as a whole, so it stays with its draft rather than in a join. */
+	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+	parts: WhatsAppStoryDraftPart[];
+
+	@Column({ name: 'error_message', type: 'text', nullable: true })
+	errorMessage: string | null;
+
+	@Column({ name: 'published_at', type: 'timestamptz', nullable: true })
+	publishedAt: Date | null;
+}
+
 /**
  * A user's folder inside the saved-media library.
  *

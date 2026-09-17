@@ -96,3 +96,17 @@ export function signedMediaPath(attachmentId: string, token: string): string {
 export function signedSocialDownloadPath(downloadId: string, token: string): string {
 	return `/api/v1/whatsapp/social-downloads/${encodeURIComponent(downloadId)}/content?token=${encodeURIComponent(token)}`;
 }
+
+/**
+ * Same scheme for one clip of a story draft.
+ *
+ * The token is signed over `<draftId>:<index>` so a token for part 1 cannot be
+ * replayed to read part 2.
+ */
+export function signedStoryPartPath(
+	draftId: string,
+	index: number,
+	token: string,
+): string {
+	return `/api/v1/whatsapp/story-drafts/${encodeURIComponent(draftId)}/parts/${index}/content?token=${encodeURIComponent(token)}`;
+}

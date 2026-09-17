@@ -1,14 +1,16 @@
 import * as path from 'path';
 import {
+	BROWSER_USER_AGENT,
 	MAX_SOCIAL_VIDEO_BYTES,
 	TIKTOK_API_HOSTNAME,
 	buildSocialDownloadArgs,
 	describeSocialDownloadFailure,
 	extractSocialVideoUrls,
+	findSocialVideoUrlInText,
 	isRetryableSocialDownloadFailure,
 	lastSocialDownloadError,
 	normalizeSocialVideoUrl,
-	socialRetryExtractorArgs,
+	socialDownloadAttempts,
 	resolveSocialPathInsideRoot,
 	socialDownloadRelativePath,
 	socialDownloadTitle,
@@ -184,21 +186,36 @@ describe('describeSocialDownloadFailure', () => {
 	});
 });
 
-describe('socialRetryExtractorArgs', () => {
-	it('routes a TikTok retry through the mobile api host', () => {
-		expect(socialRetryExtractorArgs('tiktok')).toEqual([
+describe('socialDownloadAttempts', () => {
+	it('starts with the default path so a working link is not slowed down', () => {
+		expect(socialDownloadAttempts('tiktok')[0]).toEqual([]);
+		expect(socialDownloadAttempts('facebook')[0]).toEqual([]);
+	});
+
+	it('escalates TikTok to a browser agent and then the mobile api host', () => {
+		const attempts = socialDownloadAttempts('tiktok');
+		expect(attempts).toHaveLength(3);
+		expect(attempts[1]).toEqual(['--no-cache-dir', '--user-agent', BROWSER_USER_AGENT]);
+		expect(attempts[2]).toEqual([
+			'--no-cache-dir',
 			'--extractor-args',
 			`tiktok:api_hostname=${TIKTOK_API_HOSTNAME}`,
 		]);
-		expect(socialRetryExtractorArgs('tiktok', 'api99.example.com')).toEqual([
-			'--extractor-args',
-			'tiktok:api_hostname=api99.example.com',
-		]);
 	});
 
-	it('has no fallback for the other platforms', () => {
-		expect(socialRetryExtractorArgs('facebook')).toEqual([]);
-		expect(socialRetryExtractorArgs('instagram')).toEqual([]);
+	it('keeps the api-host rung off the platforms it does not apply to', () => {
+		expect(socialDownloadAttempts('facebook')).toHaveLength(2);
+		expect(socialDownloadAttempts('instagram')).toHaveLength(2);
+		expect(socialDownloadAttempts('facebook').flat()).not.toContain('--extractor-args');
+	});
+
+	it('takes overrides for both tunables', () => {
+		const attempts = socialDownloadAttempts('tiktok', {
+			tiktokApiHostname: 'api99.example.com',
+			userAgent: 'Custom/1.0',
+		});
+		expect(attempts[1]).toContain('Custom/1.0');
+		expect(attempts[2]).toContain('tiktok:api_hostname=api99.example.com');
 	});
 
 	it('lands in the argument list before the url', () => {
@@ -207,9 +224,36 @@ describe('socialRetryExtractorArgs', () => {
 			'/tmp/out.mp4',
 			MAX_SOCIAL_VIDEO_BYTES,
 			'',
-			socialRetryExtractorArgs('tiktok'),
+			socialDownloadAttempts('tiktok')[2],
 		);
 		expect(args.indexOf('--extractor-args')).toBeLessThan(args.indexOf('--'));
+		expect(args.indexOf('--no-cache-dir')).toBeLessThan(args.indexOf('--'));
+	});
+});
+
+describe('findSocialVideoUrlInText', () => {
+	it('downloads the link as written, while deduping on the stripped form', () => {
+		const text = 'look https://vt.tiktok.com/ZSqbvxjPk/?_t=ZS-99n6&_r=1 nice';
+		const found = findSocialVideoUrlInText(text, 'https://vt.tiktok.com/ZSqbvxjPk/');
+		expect(found).toEqual({
+			raw: 'https://vt.tiktok.com/ZSqbvxjPk/?_t=ZS-99n6&_r=1',
+			normalized: 'https://vt.tiktok.com/ZSqbvxjPk/',
+		});
+	});
+
+	it('still refuses a url the sender never posted', () => {
+		expect(
+			findSocialVideoUrlInText('https://vt.tiktok.com/a/', 'https://vt.tiktok.com/b/'),
+		).toBeNull();
+		expect(findSocialVideoUrlInText('no links here', 'https://vt.tiktok.com/a/')).toBeNull();
+	});
+
+	it('keeps the first occurrence of a link that appears twice', () => {
+		const found = findSocialVideoUrlInText(
+			'https://vt.tiktok.com/a/?_t=first https://vt.tiktok.com/a/?_t=second',
+			'https://vt.tiktok.com/a/',
+		);
+		expect(found?.raw).toBe('https://vt.tiktok.com/a/?_t=first');
 	});
 });
 

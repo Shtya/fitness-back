@@ -486,6 +486,18 @@ export class StartWhatsAppSocialDownloadDto {
 	url: string;
 }
 
+export class PrepareWhatsAppStoryDto {
+	/** The video attachment to publish. Visibility is checked in the service. */
+	@IsUUID()
+	attachmentId: string;
+
+	/** Shown on the first clip only, so a sliced video does not repeat it. */
+	@IsOptional()
+	@IsString()
+	@MaxLength(700)
+	caption?: string;
+}
+
 export class ViewWhatsAppStatusDto {
 	@IsOptional()
 	@IsString()

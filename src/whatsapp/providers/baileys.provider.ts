@@ -497,7 +497,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		groupParticipants: true,
 		mediaDownload: true,
 		statusFetch: true,
-		statusPublish: false,
+		statusPublish: true,
 		statusView: true,
 		reactions: true,
 		messageActions: true,
@@ -2756,8 +2756,70 @@ export class BaileysProvider implements WhatsAppProvider {
 		return items;
 	}
 
-	async publishStatus() {
-		throw new Error('Status publish is not enabled for the Baileys provider yet');
+	/**
+	 * The personal contacts a published status should reach.
+	 *
+	 * WhatsApp does not derive this server-side: a status sent without a recipient
+	 * list uploads fine and is shown to nobody. Groups, newsletters and broadcast
+	 * lists are excluded because a status is only delivered to individual users.
+	 */
+	private statusAudienceJids(): string[] {
+		const jids = new Set<string>();
+		for (const contact of this.contacts.values()) {
+			const id = String(contact?.id || '');
+			const digits = String(contact?.phoneNumber || '').replace(/\D/g, '');
+			if (digits) {
+				jids.add(`${digits}@s.whatsapp.net`);
+				continue;
+			}
+			if (/^\d+@(s\.whatsapp\.net|c\.us)$/.test(id)) {
+				jids.add(`${id.split('@')[0]}@s.whatsapp.net`);
+			}
+		}
+		return [...jids];
+	}
+
+	/**
+	 * Publishes a status (story). `content` is the text for `type: 'text'`, and an
+	 * absolute file path for `image` / `video` — the same contract WPPConnect uses.
+	 */
+	async publishStatus(content: string, options: { type: string; caption?: string }) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		const type = String(options.type || 'text').toLowerCase();
+		const statusJidList = this.statusAudienceJids();
+		if (!statusJidList.length) {
+			throw new Error(
+				'No contacts have synced yet, so a status would be published to nobody. Try again once the account finishes syncing.',
+			);
+		}
+
+		let payload: any;
+		if (type === 'text') {
+			const text = String(content || '').trim();
+			if (!text) throw new Error('A text status cannot be empty');
+			payload = { text };
+		} else if (type === 'image' || type === 'video') {
+			const buffer = await fs.readFile(content);
+			payload =
+				type === 'image'
+					? { image: buffer, caption: options.caption || undefined, mimetype: 'image/jpeg' }
+					: { video: buffer, caption: options.caption || undefined, mimetype: 'video/mp4' };
+		} else {
+			throw new Error(`Unsupported status type: ${type}`);
+		}
+
+		const result = await this.socket.sendMessage('status@broadcast', payload, {
+			statusJidList,
+			broadcast: true,
+		});
+		this.logger.log(
+			`Published ${type} status for ${this.accountId} to ${statusJidList.length} contact(s)`,
+		);
+		// Caching it lets the status list show our own story without a full resync.
+		this.rememberStatus(result);
+		return result;
 	}
 
 	async viewStatus(statusId: string, senderWaId?: string) {

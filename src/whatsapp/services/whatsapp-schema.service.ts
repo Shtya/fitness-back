@@ -74,6 +74,24 @@ const OPTIONAL_TABLES = [
 		ON whatsapp_social_downloads (message_id, user_id, source_url)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_social_downloads_message
 		ON whatsapp_social_downloads (message_id)`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_story_drafts (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		account_id uuid NOT NULL,
+		source_attachment_id uuid,
+		source_label varchar(200),
+		status varchar(20) NOT NULL DEFAULT 'draft',
+		total_duration_seconds double precision NOT NULL DEFAULT 0,
+		caption text,
+		parts jsonb NOT NULL DEFAULT '[]'::jsonb,
+		error_message text,
+		published_at timestamptz
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_whatsapp_story_drafts_user
+		ON whatsapp_story_drafts (user_id)`,
 	`ALTER TABLE whatsapp_account_access ADD COLUMN IF NOT EXISTS notifications_enabled boolean NOT NULL DEFAULT true`,
 	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity

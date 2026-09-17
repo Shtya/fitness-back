@@ -558,16 +558,27 @@ export class WhatsAppStatusService {
 		return { items: mapped };
 	}
 
-	async publish(
-		user: User,
-		accountId: string,
-		input: { type: string; content: string; caption?: string },
-	) {
+	/**
+	 * Throws unless this user may publish a status on this account.
+	 *
+	 * Split out so a caller that is about to do expensive preparation — cutting a
+	 * video into story clips, for one — can fail before spending the CPU.
+	 */
+	async assertCanPublish(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const provider = this.provider(accountId);
 		if (!provider.capabilities.statusPublish) {
 			throw new BadRequestException('Status publishing is not supported by this provider');
 		}
+		return provider;
+	}
+
+	async publish(
+		user: User,
+		accountId: string,
+		input: { type: string; content: string; caption?: string },
+	) {
+		const provider = await this.assertCanPublish(user, accountId);
 		const result = await provider.publishStatus(input.content, {
 			type: input.type,
 			caption: input.caption,
@@ -613,7 +624,7 @@ export class WhatsAppStatusService {
 			metadata: { type: input.type },
 		});
 		const listed = await this.list(user, accountId, false);
-		return { ok: true, providerResult: result, ...listed };
+		return { ok: true, providerStatusId: publishedId || null, providerResult: result, ...listed };
 	}
 	async view(user: User, accountId: string, statusProviderId: string, senderWaId?: string) {
 		const permission = await this.access.getAccountAccess(user, accountId);

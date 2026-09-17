@@ -69,19 +69,49 @@ export function normalizeSocialVideoUrl(rawUrl: unknown): string | null {
  * open proxy that fetches any address chosen by the caller.
  */
 export function extractSocialVideoUrls(text: unknown): string[] {
-	const found = new Set<string>();
+	return findSocialVideoUrlsInText(text).map((entry) => entry.normalized);
+}
+
+/**
+ * Both forms of every supported link in a message: as written, and normalized.
+ *
+ * The two are not interchangeable. The normalized form is a dedup key, so it drops
+ * the share parameters. The form as written is what should actually be fetched:
+ * `?_r=1&_t=...` on a TikTok share link is part of how that page is served, and a
+ * downloader handed the stripped URL is making a colder request than the user did.
+ */
+export function findSocialVideoUrlsInText(
+	text: unknown,
+): { raw: string; normalized: string }[] {
+	const found = new Map<string, string>();
 	// Mirrors the frontend's `MESSAGE_URL_PATTERN`, including the schemeless bare-host
 	// form (`tiktok.com/@a/video/1`). If this were narrower, the UI would offer a
 	// download the server then rejects as "not part of this message".
 	const pattern =
 		/(?:https?:\/\/|www\.)[^\s<>"']+|(?:(?:m\.|www\.)?(?:facebook|instagram|tiktok)\.com|fb\.watch|instagr\.am|fb\.com)\/[^\s<>"']+/gi;
-	for (const raw of String(text || '').match(pattern) || []) {
-		const trimmed = raw.replace(/[),.!?;:\]}]+$/, '');
-		const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-		const normalized = normalizeSocialVideoUrl(candidate);
-		if (normalized) found.add(normalized);
+	for (const match of String(text || '').match(pattern) || []) {
+		const trimmed = match.replace(/[),.!?;:\]}]+$/, '');
+		const raw = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+		const normalized = normalizeSocialVideoUrl(raw);
+		// First occurrence wins: that is the one the sender actually pasted.
+		if (normalized && !found.has(normalized)) found.set(normalized, raw);
 	}
-	return [...found];
+	return [...found.entries()].map(([normalized, raw]) => ({ raw, normalized }));
+}
+
+/**
+ * The link in the message that the requested URL refers to, or `null`.
+ *
+ * Resolving through the message text is what keeps this endpoint from being an open
+ * proxy: the caller cannot name an address the sender never posted.
+ */
+export function findSocialVideoUrlInText(
+	text: unknown,
+	requestedUrl: unknown,
+): { raw: string; normalized: string } | null {
+	const wanted = normalizeSocialVideoUrl(requestedUrl);
+	if (!wanted) return null;
+	return findSocialVideoUrlsInText(text).find((entry) => entry.normalized === wanted) || null;
 }
 
 /** Storage-relative output path. Namespaced per user; random so retries never collide. */
@@ -138,20 +168,37 @@ export function buildSocialDownloadArgs(
 /** TikTok's mobile API host, used to get around a bot-checked web page. */
 export const TIKTOK_API_HOSTNAME = 'api22-normal-c-useast2a.tiktokv.com';
 
+/** A current desktop Chrome UA. TikTok serves the plain page to this one. */
+export const BROWSER_USER_AGENT =
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
 /**
- * Extra arguments for a second attempt after the first one failed.
+ * The argument sets to try, in order, until one produces a file.
  *
- * TikTok's web page intermittently answers with a bot check instead of the video
- * data ("Unexpected response from webpage request"). Asking the extractor to go
- * through the mobile API instead is the documented way around it, and it only makes
- * sense as a fallback because the normal path is the one TikTok keeps current.
+ * TikTok is the reason this is a ladder rather than a single call. Its page answers
+ * a JavaScript challenge before releasing the video data, and that step is where the
+ * failures land ("Unexpected response from webpage request"). Each rung removes one
+ * dependency of the rung before it:
+ *
+ * 1. the default path, which is the one TikTok keeps working for most posts;
+ * 2. a real browser User-Agent with the on-disk cache bypassed — measured to skip
+ *    the challenge entirely, and immune to a stale challenge cookie;
+ * 3. TikTok's mobile API host, which does not involve the web page at all.
+ *
+ * Facebook and Instagram get the first two rungs only, and in practice never leave
+ * the first, so their behaviour is unchanged.
  */
-export function socialRetryExtractorArgs(
+export function socialDownloadAttempts(
 	platform: SocialPlatform,
-	tiktokApiHostname = TIKTOK_API_HOSTNAME,
-): string[] {
-	if (platform !== 'tiktok' || !tiktokApiHostname) return [];
-	return ['--extractor-args', `tiktok:api_hostname=${tiktokApiHostname}`];
+	options: { tiktokApiHostname?: string; userAgent?: string } = {},
+): string[][] {
+	const userAgent = options.userAgent || BROWSER_USER_AGENT;
+	const apiHostname = options.tiktokApiHostname || TIKTOK_API_HOSTNAME;
+	const attempts: string[][] = [[], ['--no-cache-dir', '--user-agent', userAgent]];
+	if (platform === 'tiktok' && apiHostname) {
+		attempts.push(['--no-cache-dir', '--extractor-args', `tiktok:api_hostname=${apiHostname}`]);
+	}
+	return attempts;
 }
 
 /**

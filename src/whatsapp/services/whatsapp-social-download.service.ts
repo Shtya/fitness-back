@@ -15,13 +15,12 @@ import {
 	type SocialPlatform,
 	buildSocialDownloadArgs,
 	describeSocialDownloadFailure,
-	extractSocialVideoUrls,
+	findSocialVideoUrlInText,
 	isRetryableSocialDownloadFailure,
-	normalizeSocialVideoUrl,
 	resolveSocialPathInsideRoot,
+	socialDownloadAttempts,
 	socialDownloadRelativePath,
 	socialDownloadTitle,
-	socialRetryExtractorArgs,
 	socialVideoPlatform,
 } from '../utils/whatsapp-social-download';
 
@@ -95,15 +94,15 @@ export class WhatsAppSocialDownloadService {
 		});
 		if (!message) throw new NotFoundException('WhatsApp message not found');
 
-		const normalized = normalizeSocialVideoUrl(requestedUrl);
 		const platform = socialVideoPlatform(requestedUrl);
-		if (!normalized || !platform) {
+		// Resolving through the text both authorises the request and recovers the link
+		// exactly as the sender wrote it, which is the form worth downloading.
+		const link = findSocialVideoUrlInText(message.text, requestedUrl);
+		if (!platform) {
 			throw new BadRequestException('Not a supported TikTok, Instagram or Facebook video link');
 		}
-		if (!extractSocialVideoUrls(message.text).includes(normalized)) {
-			throw new BadRequestException('That link is not part of this message');
-		}
-		return { message, normalized, platform };
+		if (!link) throw new BadRequestException('That link is not part of this message');
+		return { message, normalized: link.normalized, fetchUrl: link.raw, platform };
 	}
 
 	private serialize(row: WhatsAppSocialDownload) {
@@ -165,7 +164,7 @@ export class WhatsAppSocialDownloadService {
 	 * `failed` row is retried, which is what the retry button calls.
 	 */
 	async start(user: User, conversationId: string, messageId: string, requestedUrl: string) {
-		const { normalized, platform } = await this.resolveTarget(
+		const { normalized, fetchUrl, platform } = await this.resolveTarget(
 			user,
 			conversationId,
 			messageId,
@@ -214,7 +213,7 @@ export class WhatsAppSocialDownloadService {
 		row = await this.downloadRepo.save(row);
 
 		// Deliberately not awaited: the HTTP response must not hold a yt-dlp run open.
-		void this.run(row.id, user.id, normalized, platform);
+		void this.run(row.id, user.id, fetchUrl, platform);
 		return this.serialize(row);
 	}
 
@@ -263,7 +262,9 @@ export class WhatsAppSocialDownloadService {
 			this.logger.warn(
 				`social download failed row=${rowId} url=${url} exit=${
 					error?.exitCode ?? 'n/a'
-				}: ${error?.message || error}\n${String(error?.stderr || '').trim()}`,
+				}: ${error?.message || error}\n${String(error?.stdout || '').trim()}\n${String(
+					error?.stderr || '',
+				).trim()}`,
 			);
 			await this.downloadRepo
 				.update(rowId, { status: 'failed', errorMessage: message, completedAt: new Date() })
@@ -274,25 +275,39 @@ export class WhatsAppSocialDownloadService {
 	}
 
 	/**
-	 * One download, with a single fallback attempt.
+	 * Walks the attempt ladder until one of them produces the video.
 	 *
-	 * The fallback exists because TikTok's web page answers a bot check often enough
-	 * that a first failure says nothing about whether the video is reachable.
+	 * A first failure on TikTok says very little about whether the post is reachable,
+	 * so stopping there would reject videos that download fine on the next rung. The
+	 * ladder is only walked for failures that can actually change outcome — a private
+	 * post is not requested three times.
 	 */
 	private async attemptDownload(url: string, outputPath: string, platform: SocialPlatform) {
-		try {
-			await this.spawnYtDlp(url, outputPath);
-		} catch (error: any) {
-			const fallback = socialRetryExtractorArgs(
-				platform,
-				process.env.YTDLP_TIKTOK_API_HOSTNAME || undefined,
-			);
-			if (!fallback.length || !isRetryableSocialDownloadFailure(error?.stderr || '')) throw error;
-			this.logger.warn(`social download retrying url=${url} with ${fallback.join(' ')}`);
-			// A half-written file from the failed attempt would be appended to otherwise.
-			await fs.rm(outputPath, { force: true }).catch(() => undefined);
-			await this.spawnYtDlp(url, outputPath, fallback);
+		const attempts = socialDownloadAttempts(platform, {
+			tiktokApiHostname: process.env.YTDLP_TIKTOK_API_HOSTNAME || undefined,
+			userAgent: process.env.YTDLP_USER_AGENT || undefined,
+		});
+		let lastError: any;
+		for (const [index, extraArgs] of attempts.entries()) {
+			if (index > 0) {
+				if (!isRetryableSocialDownloadFailure(lastError?.stderr || '')) break;
+				this.logger.warn(
+					`social download attempt ${index + 1}/${attempts.length} url=${url} args=${
+						extraArgs.join(' ') || 'none'
+					}`,
+				);
+				// yt-dlp resumes an existing output file, and a partial one from the failed
+				// attempt would come back as "416 Range Not Satisfiable" instead of a video.
+				await fs.rm(outputPath, { force: true }).catch(() => undefined);
+			}
+			try {
+				await this.spawnYtDlp(url, outputPath, extraArgs);
+				return;
+			} catch (error: any) {
+				lastError = error;
+			}
 		}
+		throw lastError;
 	}
 
 	private spawnYtDlp(url: string, outputPath: string, extraArgs: string[] = []) {
@@ -314,6 +329,7 @@ export class WhatsAppSocialDownloadService {
 			);
 			this.logger.debug(`social download spawn ${binary} url=${url}`);
 			let stderr = '';
+			let stdout = '';
 			let settled = false;
 			const finish = (error?: any) => {
 				if (settled) return;
@@ -332,14 +348,21 @@ export class WhatsAppSocialDownloadService {
 				stderr = `${stderr}${chunk}`.slice(-2000);
 			});
 			// stdout is piped whether or not we read it, so it has to be drained: a full
-			// pipe buffer would block yt-dlp forever. Some extractor errors land here too.
+			// pipe buffer would block yt-dlp forever. Kept apart from stderr so progress
+			// chatter cannot be mistaken for the reason a download failed.
 			child.stdout?.on('data', (chunk) => {
-				stderr = `${stderr}${chunk}`.slice(-2000);
+				stdout = `${stdout}${chunk}`.slice(-2000);
 			});
 			child.on('error', (error) => finish(Object.assign(error, { stderr })));
 			child.on('close', (code) => {
 				if (code === 0) finish();
-				else finish(Object.assign(new Error('yt-dlp failed'), { stderr, exitCode: code }));
+				else {
+					// stdout carries the extractor's progress trail, which is what tells you
+					// which stage a failure happened at.
+					finish(
+						Object.assign(new Error('yt-dlp failed'), { stderr, stdout, exitCode: code }),
+					);
+				}
 			});
 		});
 	}
