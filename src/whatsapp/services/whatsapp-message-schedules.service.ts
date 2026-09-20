@@ -195,6 +195,13 @@ export class WhatsAppMessageSchedulesService {
 		const schedules: WhatsAppMessageSchedule[] = [];
 		for (const row of recipientRows) {
 			if (!row.schedule || seen.has(row.schedule.id)) continue;
+			// Cancelled / completed runs must not linger in the chat strip.
+			if (
+				row.schedule.status === WhatsAppMessageScheduleStatus.CANCELLED ||
+				row.schedule.status === WhatsAppMessageScheduleStatus.COMPLETED
+			) {
+				continue;
+			}
 			seen.add(row.schedule.id);
 			schedules.push(row.schedule);
 		}
@@ -210,8 +217,11 @@ export class WhatsAppMessageSchedulesService {
 	async update(user: User, scheduleId: string, dto: UpdateWhatsAppMessageScheduleDto) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
-		if (schedule.status !== WhatsAppMessageScheduleStatus.ACTIVE) {
-			throw new BadRequestException('Only active schedules can be edited');
+		if (
+			schedule.status !== WhatsAppMessageScheduleStatus.ACTIVE &&
+			schedule.status !== WhatsAppMessageScheduleStatus.PAUSED
+		) {
+			throw new BadRequestException('Only active or paused schedules can be edited');
 		}
 
 		if (typeof dto.title === 'string') schedule.title = dto.title.trim() || null;
