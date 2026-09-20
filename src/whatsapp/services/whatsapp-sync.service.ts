@@ -1150,17 +1150,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { messageId: message.id },
 			order: { created_at: 'ASC' },
 		});
+		const serialized = saved.map((reaction) => ({
+			id: reaction.id,
+			actorKey: reaction.actorKey,
+			emoji: reaction.emoji,
+			reactedAt: reaction.reactedAt,
+		}));
 		this.gateway.emitConversationEvent(
 			message.conversationId,
 			'message_reactions',
 			{
 				messageId: message.id,
 				providerMessageId: providerMessageIdValue,
-				reactions: saved,
+				reactions: serialized,
 			},
 			accountId,
 		);
-		return saved;
+		return serialized;
 	}
 
 	/** WhatsApp Web media downloads all run through one Puppeteer page. Letting a
