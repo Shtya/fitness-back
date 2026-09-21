@@ -59,4 +59,22 @@ export class BodyMeasurement extends CoreEntity {
 
   @Column({ type: 'decimal', precision: 6, scale: 2, nullable: true })
   thighs: number | null;
+
+  @Column({ type: 'decimal', precision: 6, scale: 2, nullable: true })
+  height: number | null;
+
+  @Column({ type: 'decimal', precision: 6, scale: 2, nullable: true })
+  shoulderWidth: number | null;
+
+  @Column({ type: 'decimal', precision: 6, scale: 2, nullable: true })
+  inseam: number | null;
+
+  @Column({ type: 'varchar', length: 8, default: 'cm' })
+  unit: string;
+
+  @Column({ type: 'varchar', length: 32, default: 'manual' })
+  source: string;
+
+  @Column({ type: 'jsonb', nullable: true })
+  confidence: Record<string, number | null> | null;
 }

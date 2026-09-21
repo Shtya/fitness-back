@@ -48,6 +48,30 @@ export class CreateBodyMeasurementDto {
   @IsOptional()
   @IsNumber()
   thighs?: number;
+
+  @IsOptional()
+  @IsNumber()
+  height?: number;
+
+  @IsOptional()
+  @IsNumber()
+  shoulderWidth?: number;
+
+  @IsOptional()
+  @IsNumber()
+  inseam?: number;
+
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @IsOptional()
+  @IsString()
+  source?: string;
+
+  @IsOptional()
+  @IsObject()
+  confidence?: Record<string, number | null>;
 }
 
 export class UpdateBodyMeasurementDto extends CreateBodyMeasurementDto {}

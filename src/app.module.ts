@@ -45,6 +45,7 @@ import { EmailMemoModule } from './email-memo/email-memo.module';
 import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.module';
 import { AiModule } from './ai/ai.module';
 import { WebTranslatorModule } from './web-translator/web-translator.module';
+import { BodyMeasurementModule } from './body-measurement/body-measurement.module';
 
 @Module({
 	imports: [
@@ -112,6 +113,7 @@ import { WebTranslatorModule } from './web-translator/web-translator.module';
 		GoldIntelligenceModule,
 		AiModule,
 		WebTranslatorModule,
+		BodyMeasurementModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],
