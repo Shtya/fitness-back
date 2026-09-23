@@ -35,6 +35,7 @@ export const AI_FEATURE_IDS = [
 	'studio.topic',
 	'studio.content',
 	'studio.image',
+	'ai-reading',
 ] as const;
 
 export type AiFeatureId = (typeof AI_FEATURE_IDS)[number];
@@ -45,6 +46,7 @@ export const FEATURE_ALIASES: Record<string, AiFeatureId> = {
 	'studio-image': 'studio.image',
 	transcription: 'transcription.stt',
 	exercise: 'exercise.form',
+	reading: 'ai-reading',
 };
 
 export type AiFeatureSpec = {
@@ -61,6 +63,7 @@ export const AI_PAGES = [
 	{ id: 'fitcoach', href: '/dashboard/ai-free' },
 	{ id: 'email-memo', href: '/dashboard/email-memo' },
 	{ id: 'studio', href: '/dashboard/ai-content-studio' },
+	{ id: 'ai-reading', href: '/dashboard/ai-reading' },
 ] as const;
 
 export const AI_FEATURES: AiFeatureSpec[] = [
@@ -76,6 +79,7 @@ export const AI_FEATURES: AiFeatureSpec[] = [
 	{ id: 'studio.topic', name: 'Studio topic', type: 'text', defaultModelKey: 'gemini-2.5-flash', page: 'studio' },
 	{ id: 'studio.content', name: 'Studio content', type: 'text', defaultModelKey: 'gemini-2.5-flash', page: 'studio' },
 	{ id: 'studio.image', name: 'Studio image', type: 'image', defaultModelKey: 'gemini-2.5-flash-image', page: 'studio' },
+	{ id: 'ai-reading', name: 'AI Reading', type: 'text', defaultModelKey: 'gpt-oss:20b', page: 'ai-reading' },
 ];
 
 export type AiModelPricing = {
@@ -120,7 +124,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE',
-		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies'],
+		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'llama3.1-8b',
@@ -132,7 +136,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE',
-		usedBy: ['studio.topic', 'whatsapp.replies'],
+		usedBy: ['studio.topic', 'whatsapp.replies', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'pollinations',
@@ -144,7 +148,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE',
-		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies'],
+		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'chatgpt',
@@ -156,7 +160,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE',
-		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies'],
+		usedBy: ['email-memo', 'studio.topic', 'whatsapp.replies', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'auto',
@@ -168,7 +172,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE',
-		usedBy: ['whatsapp.replies', 'fitcoach.chat'],
+		usedBy: ['whatsapp.replies', 'fitcoach.chat', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'gemini-2.5-flash',
@@ -180,7 +184,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE_TIER',
-		usedBy: ['studio.topic', 'studio.content'],
+		usedBy: ['studio.topic', 'studio.content', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'gemini-2.5-flash-lite',
@@ -192,7 +196,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE_TIER',
-		usedBy: ['studio.topic', 'studio.content'],
+		usedBy: ['studio.topic', 'studio.content', 'ai-reading'],
 	}),
 	seed({
 		modelKey: 'gemini-2.0-flash',
