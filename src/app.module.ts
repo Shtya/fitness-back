@@ -40,6 +40,7 @@ import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
 import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 import { QuranRevisionModule } from './quran-revision/quran-revision.module';
 import { LearningModule } from './learning/learning.module';
+import { AiReadingModule } from './ai-reading/ai-reading.module';
 import { AiContentStudioModule } from './ai-content-studio/ai-content-studio.module';
 import { EmailMemoModule } from './email-memo/email-memo.module';
 import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.module';
@@ -108,6 +109,7 @@ import { BodyMeasurementModule } from './body-measurement/body-measurement.modul
 		MetaWhatsAppModule,
 		QuranRevisionModule,
 		LearningModule,
+		AiReadingModule,
 		AiContentStudioModule,
 		EmailMemoModule,
 		GoldIntelligenceModule,
