@@ -618,6 +618,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private historyInboxDebounceTimers = new Map<string, NodeJS.Timeout>();
 	private historyInboxTotals = new Map<string, { chats: number; messages: number }>();
 	private readonly historyInboxDebounceMs = 8_000;
+	private inboundMessageListeners = new Set<
+		(accountId: string, message: WhatsAppMessage) => void | Promise<void>
+	>();
 
 	constructor(
 		@InjectRepository(WhatsAppAccount)
@@ -653,6 +656,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.unsubscribe = this.providers.onProviderEvent((accountId, event) =>
 			this.handleProviderEvent(accountId, event),
 		);
+	}
+
+	/** Live, newly persisted inbound messages only (no history, no fromMe, no duplicates). */
+	onInboundMessagePersisted(
+		listener: (accountId: string, message: WhatsAppMessage) => void | Promise<void>,
+	) {
+		this.inboundMessageListeners.add(listener);
+		return () => this.inboundMessageListeners.delete(listener);
+	}
+
+	private notifyInboundMessagePersisted(accountId: string, message: WhatsAppMessage) {
+		for (const listener of this.inboundMessageListeners) {
+			void Promise.resolve()
+				.then(() => listener(accountId, message))
+				.catch(error =>
+					this.logger.warn(
+						`Inbound message listener failed for ${message.id}: ${error?.message || error}`,
+					),
+				);
+		}
 	}
 
 	onModuleDestroy() {
@@ -1042,19 +1065,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				const message = await this.messageRepo.findOne({
 					where: { accountId, providerMessageId: event.providerMessageId },
 				});
-				if (!message) return;
+				if (!message || message.deletedMode === event.mode) return;
 				const providerDeletedAt = new Date();
+				// Keep text/attachments so the inbox can still show what the sender removed.
 				await this.messageRepo.update(message.id, {
 					deletedMode: event.mode,
 					providerDeletedAt,
-					text: null,
 				});
 				this.gateway.emitConversationEvent(
 					message.conversationId,
 					'message_updated',
 					{
 						messageId: message.id,
-						changes: { deletedMode: event.mode, providerDeletedAt, text: null },
+						changes: { deletedMode: event.mode, providerDeletedAt },
 					},
 					accountId,
 				);
@@ -2602,6 +2625,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			!this.bootstrapping.has(accountId);
 		if (shouldCountUnread) {
 			await this.conversationRepo.increment({ id: conversation.id }, 'unreadCount', 1);
+			this.notifyInboundMessagePersisted(accountId, saved);
 		} else if (
 			emitEvents &&
 			!fromHistory &&

@@ -1329,6 +1329,18 @@ export class BaileysProvider implements WhatsAppProvider {
 		return null;
 	}
 
+	/** protocolMessage type 0 = REVOKE ("delete for everyone"), sent by the peer or by our own phone. */
+	private ingestRevoke(raw: any): boolean {
+		const protocol = unwrapMessageContent(raw?.message)?.protocolMessage;
+		if (!protocol) return false;
+		const type = protocol.type ?? 0;
+		if (type !== 0 && type !== 'REVOKE') return false;
+		const targetId = String(protocol.key?.id || '').trim();
+		if (!targetId) return false;
+		this.emit({ type: 'message_deleted', providerMessageId: targetId, mode: 'everyone' });
+		return true;
+	}
+
 	private ingestReaction(raw: any): boolean {
 		const content = unwrapMessageContent(raw?.message);
 		const reaction = content?.reactionMessage;
@@ -1589,6 +1601,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			// history dumps, except a recent fromMe echo from the phone app.
 			for (const raw of list) {
 				if (this.rememberStatus(raw)) continue;
+				if (this.ingestRevoke(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
@@ -1615,6 +1628,15 @@ export class BaileysProvider implements WhatsAppProvider {
 			const readChatIds = new Set<string>();
 			for (const item of updates) {
 				const providerMessageId = String(item?.key?.id || '').trim();
+				const stubType = item?.update?.messageStubType;
+				if (
+					providerMessageId &&
+					item?.update?.message === null &&
+					(stubType === 1 || stubType === 'REVOKE')
+				) {
+					this.emit({ type: 'message_deleted', providerMessageId, mode: 'everyone' });
+					continue;
+				}
 				const status = mapBaileysMessageStatus(item?.update?.status);
 				if (providerMessageId && status) {
 					this.emit({ type: 'message_status', providerMessageId, status });
@@ -1783,6 +1805,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			const historyMessages: NormalizedWhatsAppMessage[] = [];
 			for (const raw of messages) {
 				if (this.rememberStatus(raw)) continue;
+				if (this.ingestRevoke(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;

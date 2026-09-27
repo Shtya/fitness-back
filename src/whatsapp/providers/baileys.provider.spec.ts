@@ -318,6 +318,42 @@ describe('BaileysProvider media download helpers', () => {
 	});
 });
 
+describe('BaileysProvider revoke detection', () => {
+	it('emits message_deleted for a REVOKE protocol message from the peer', () => {
+		const provider = new BaileysProvider('account-test');
+		const events: any[] = [];
+		provider.onEvent(event => {
+			events.push(event);
+		});
+
+		const handled = (provider as any).ingestRevoke({
+			key: { remoteJid: '201000000000@s.whatsapp.net', id: 'revoke-envelope', fromMe: false },
+			message: { protocolMessage: { type: 0, key: { id: 'original-1' } } },
+		});
+
+		expect(handled).toBe(true);
+		expect(events).toEqual([
+			{ type: 'message_deleted', providerMessageId: 'original-1', mode: 'everyone' },
+		]);
+	});
+
+	it('ignores non-revoke protocol messages such as edits', () => {
+		const provider = new BaileysProvider('account-test');
+		const events: any[] = [];
+		provider.onEvent(event => {
+			events.push(event);
+		});
+
+		const handled = (provider as any).ingestRevoke({
+			key: { remoteJid: '201000000000@s.whatsapp.net', id: 'edit-envelope' },
+			message: { protocolMessage: { type: 14, key: { id: 'original-2' } } },
+		});
+
+		expect(handled).toBe(false);
+		expect(events).toEqual([]);
+	});
+});
+
 describe('BaileysProvider message actions', () => {
 	it('forwards from in-memory raw and remembers the new message', async () => {
 		const provider = new BaileysProvider('account-test');

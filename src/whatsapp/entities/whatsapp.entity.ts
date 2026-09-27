@@ -1252,6 +1252,58 @@ export class WhatsAppMessageScheduleDelivery extends CoreEntity {
 	clientMessageId: string;
 }
 
+/** forward = WhatsApp "Forwarded" label; copy = re-sent as a fresh message. */
+export type WhatsAppAutoForwardMode = 'forward' | 'copy';
+
+@Entity('whatsapp_auto_forward_rules')
+@Unique('uq_whatsapp_auto_forward_rule_pair', ['sourceConversationId', 'targetConversationId'])
+export class WhatsAppAutoForwardRule extends CoreEntity {
+	@Index()
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@ManyToOne(() => WhatsAppAccount, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'account_id' })
+	account: WhatsAppAccount;
+
+	@Column({ name: 'created_by_user_id', type: 'uuid' })
+	createdByUserId: string;
+
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'created_by_user_id' })
+	createdByUser: User;
+
+	@Index()
+	@Column({ name: 'source_conversation_id', type: 'uuid' })
+	sourceConversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'source_conversation_id' })
+	sourceConversation: WhatsAppConversation;
+
+	@Column({ name: 'target_conversation_id', type: 'uuid' })
+	targetConversationId: string;
+
+	@ManyToOne(() => WhatsAppConversation, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'target_conversation_id' })
+	targetConversation: WhatsAppConversation;
+
+	@Column({ type: 'varchar', length: 16, default: 'forward' })
+	mode: WhatsAppAutoForwardMode;
+
+	@Column({ name: 'is_active', type: 'boolean', default: true })
+	isActive: boolean;
+
+	@Column({ name: 'forwarded_count', type: 'int', default: 0 })
+	forwardedCount: number;
+
+	@Column({ name: 'last_forwarded_at', type: 'timestamptz', nullable: true })
+	lastForwardedAt: Date | null;
+
+	@Column({ name: 'last_error', type: 'text', nullable: true })
+	lastError: string | null;
+}
+
 @Entity('whatsapp_boards')
 @Index('idx_whatsapp_boards_account', ['accountId'])
 export class WhatsAppBoard extends CoreEntity {
