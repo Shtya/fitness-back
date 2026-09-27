@@ -1,5 +1,5 @@
 // src/chat/chat.controller.ts
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Req, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Req, UseInterceptors, UploadedFile, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { ChatService } from './chat.service';
@@ -71,6 +71,11 @@ export class ChatController {
   @Post('upload/image')
   @UseInterceptors(FileInterceptor('file', chatImageUploadOptions))
   async uploadImage(@UploadedFile() file: any) {
+    if (!file?.filename) {
+      throw new BadRequestException(
+        'No image uploaded (or unsupported type). Use jpeg/png/webp/gif.',
+      );
+    }
     return {
       url: `/uploads/chat/images/${file.filename}`,
       path: file.path,

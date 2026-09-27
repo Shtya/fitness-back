@@ -8,10 +8,13 @@ function ensureDir(dir: string) {
 }
 
 function randomName(original: string) {
-  const name = original.replace(/\.[^/.]+$/, '');
-  const extension = extname(original);
-  const rand = Array(16).fill(null).map(() => Math.floor(Math.random()*16).toString(16)).join('');
-  return `${name}-${rand}${extension}`;
+  const extension = extname(original || '') || '.png';
+  const safeExt = /^\.[a-z0-9]{1,8}$/i.test(extension) ? extension.toLowerCase() : '.png';
+  const rand = Array(16)
+    .fill(null)
+    .map(() => Math.floor(Math.random() * 16).toString(16))
+    .join('');
+  return `img-${Date.now()}-${rand}${safeExt}`;
 }
 
 export const chatImageUploadOptions = {
@@ -24,10 +27,17 @@ export const chatImageUploadOptions = {
     filename: (req, file, cb) => cb(null, randomName(file.originalname)),
   }),
   fileFilter: (req, file, cb) => {
-    if (/^image\/(jpeg|png|jpg|gif|webp|svg\+xml)$/.test(file.mimetype)) return cb(null, true);
-    cb(new Error('Unsupported image type'), false);
+    const mime = String(file?.mimetype || '').toLowerCase();
+    if (
+      mime.startsWith('image/') ||
+      mime === 'application/octet-stream' ||
+      /^image\/(jpeg|png|jpg|gif|webp|bmp|avif|heic|heif|svg\+xml)$/.test(mime)
+    ) {
+      return cb(null, true);
+    }
+    cb(null, false);
   },
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 12 * 1024 * 1024 }, // 12MB
 };
 
 export const chatVideoUploadOptions = {

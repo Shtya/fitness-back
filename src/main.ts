@@ -30,6 +30,13 @@ async function bootstrap() {
   app.useGlobalInterceptors(new TimingInterceptor());
   app.useGlobalFilters(app.get(QueryFailedErrorFilter));
 
+  // CORS must run before static /uploads so canvas capture (html-to-image) can
+  // fetch avatars cross-origin. Static middleware otherwise answers first with no ACAO.
+  app.enableCors({
+    origin: true,
+    credentials: true,
+  });
+
   // WhatsApp / Meta media is private and must only be served by guarded controllers.
   app.use('/uploads/whatsapp-media', (_req, res) => res.sendStatus(404));
   app.use('/uploads/meta-whatsapp-media', (_req, res) => res.sendStatus(404));
@@ -37,13 +44,12 @@ async function bootstrap() {
   // Public application assets only.
   app.useStaticAssets(join(__dirname, '..', '..', 'uploads'), {
     prefix: '/uploads/',
+    setHeaders: (res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
   });
 
-  // Allow any browser origin (reflect request Origin; works with credentials).
-  app.enableCors({
-    origin: true,
-    credentials: true,
-  });
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(
     new ValidationPipe({
