@@ -20,7 +20,7 @@ export class SettingsController {
 
   @Get()
   async get(@Req() req: any, @Query('user_id') user_id: any) {
-    return this.service.get(user_id || req?.user?.id);
+    return this.service.getForRequester(req.user, user_id);
   }
 
   @Put()

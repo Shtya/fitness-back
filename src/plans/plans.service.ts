@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, EntityManager } from 'typeorm';
 import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole, PlanBlock } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
+import { parsePagination } from 'common/pagination';
 import { RedisService } from '../redis/redis.service';
 
 const DAY_ALIASES: Record<string, DayOfWeek> = {
@@ -370,10 +371,9 @@ export class PlanService {
 
 
 	async list(q: any, actor: { id: string; role: UserRole }) {
-		const page = Number(q.page) || 1;
-		const limit = Math.min(Number(q.limit) || 12, 100);
+		const { page, limit, skip } = parsePagination(q.page, q.limit, { defaultLimit: 12 });
 		const search = (q.search || '').trim();
-		const sortBy = (q.sortBy as any) || 'created_at';
+		const sortBy = ['created_at', 'name', 'isActive'].includes(q.sortBy) ? q.sortBy : 'created_at';
 		const sortOrder: 'ASC' | 'DESC' = String(q.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
 		const cacheKey = ['plans:list', actor.id, actor.role, page, limit, sortBy, sortOrder, search || '_'].join(':');
@@ -405,7 +405,7 @@ export class PlanService {
 
 		qb.orderBy(sortExpr, sortOrder)
 			.addOrderBy('p.id', 'DESC')
-			.skip((page - 1) * limit)
+			.skip(skip)
 			.take(limit);
 
 		const [rows, total] = await qb.getManyAndCount();

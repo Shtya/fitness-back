@@ -9,10 +9,11 @@ import { User } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
 import { ChatPushService } from './chat-push.service';
 import { BadgeService } from '../notification/badge.service';
+import { corsOriginDelegate } from 'common/cors-origin';
 
 @WebSocketGateway({
 	cors: {
-		origin: true,
+		origin: corsOriginDelegate(),
 		credentials: true,
 	},
 })

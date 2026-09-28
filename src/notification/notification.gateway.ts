@@ -10,10 +10,11 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification, NotificationAudience, User } from 'entities/global.entity';
+import { corsOriginDelegate } from 'common/cors-origin';
 
 @WebSocketGateway({
   namespace: '/notifications',
-  cors: { origin: true, credentials: true },
+  cors: { origin: corsOriginDelegate(), credentials: true },
 })
 @Injectable()
 export class NotificationGateway implements OnGatewayConnection, OnGatewayDisconnect {

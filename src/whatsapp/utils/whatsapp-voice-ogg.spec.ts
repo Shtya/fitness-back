@@ -71,4 +71,21 @@ describe('whatsapp voice ogg helper', () => {
 		expect(body.toString()).toBe('converted-bytes');
 		await fs.rm(dir, { recursive: true, force: true });
 	});
+
+	it('rejects non-Ogg and missing files from the header alone (audit A7)', async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-voice-header-'));
+		const webm = path.join(dir, 'voice.webm');
+		await fs.writeFile(webm, Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(1024)]));
+		const tiny = path.join(dir, 'tiny.ogg');
+		await fs.writeFile(tiny, Buffer.from('Og'));
+		const readFileSpy = jest.spyOn(fs, 'readFile');
+
+		await expect(isValidWhatsAppVoiceOggFile(webm)).resolves.toBe(false);
+		await expect(isValidWhatsAppVoiceOggFile(tiny)).resolves.toBe(false);
+		await expect(isValidWhatsAppVoiceOggFile(path.join(dir, 'missing.ogg'))).resolves.toBe(false);
+		expect(readFileSpy).not.toHaveBeenCalled();
+
+		readFileSpy.mockRestore();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
 });

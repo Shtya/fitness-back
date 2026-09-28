@@ -60,8 +60,44 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			notifications as any,
 			redis as any,
 		);
-		return { service, accountRepo, accessRepo, logRepo, gateway, sessions, redis, redisClient, notifications };
+		return {
+			service,
+			accountRepo,
+			accessRepo,
+			logRepo,
+			messageRepo,
+			gateway,
+			sessions,
+			redis,
+			redisClient,
+			notifications,
+		};
 	}
+
+	it('leaves message_status persistence to the sync service (single write, A5)', async () => {
+		const { service, messageRepo, gateway } = createService();
+		const listener = jest.fn();
+		service.onProviderEvent(listener);
+		const event = { type: 'message_status', providerMessageId: 'P1', status: 'read' };
+
+		await (service as any).handleEvent('account-1', event);
+
+		expect(messageRepo.findOne).not.toHaveBeenCalled();
+		expect(messageRepo.save).not.toHaveBeenCalled();
+		expect(gateway.emitAccountEvent).not.toHaveBeenCalled();
+		expect(listener).toHaveBeenCalledWith('account-1', event);
+	});
+
+	it('gives Baileys a retry lookup limited to outbound rows of the same account', async () => {
+		const { service, messageRepo } = createService();
+		const provider = (service as any).createProvider({ id: 'account-1', providerName: 'baileys' });
+		messageRepo.findOne.mockResolvedValue({ id: 'm1', text: 'hi', raw: null });
+
+		await expect(provider.getMessageForRetry({ id: 'P1' })).resolves.toEqual({ conversation: 'hi' });
+		const query = messageRepo.findOne.mock.calls[0][0];
+		expect(query.where).toEqual({ accountId: 'account-1', providerMessageId: 'P1', direction: 'outbound' });
+		expect(query.select).toEqual({ id: true, text: true, raw: true });
+	});
 
 	it('never broadcasts message content to the account room', async () => {
 		const { service, gateway } = createService();
@@ -328,5 +364,37 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			error: 'boom',
 		});
 		expect(notifications.create).toHaveBeenCalledTimes(2);
+	});
+
+	describe('WHATSAPP_SESSIONS_ENABLED=false', () => {
+		const previous = process.env.WHATSAPP_SESSIONS_ENABLED;
+		beforeEach(() => {
+			process.env.WHATSAPP_SESSIONS_ENABLED = 'false';
+		});
+		afterEach(() => {
+			if (previous === undefined) delete process.env.WHATSAPP_SESSIONS_ENABLED;
+			else process.env.WHATSAPP_SESSIONS_ENABLED = previous;
+		});
+
+		it('refuses to open a session and writes no account status', async () => {
+			const { service, accountRepo, redisClient } = createService();
+			await expect(service.connect('account-1')).rejects.toThrow(/disabled/);
+			expect(accountRepo.update).not.toHaveBeenCalled();
+			expect(redisClient.set).not.toHaveBeenCalled();
+		});
+
+		it('refuses logout so the shared session and lock stay intact', async () => {
+			const { service, sessions, redisClient } = createService();
+			await expect(service.disconnect('account-1', true)).rejects.toThrow(/disabled/);
+			expect(sessions.remove).not.toHaveBeenCalled();
+			expect(redisClient.del).not.toHaveBeenCalled();
+		});
+
+		it('skips session restore on boot', async () => {
+			const { service, accountRepo } = createService();
+			await service.onApplicationBootstrap();
+			expect(accountRepo.find).not.toHaveBeenCalled();
+			expect(accountRepo.update).not.toHaveBeenCalled();
+		});
 	});
 });

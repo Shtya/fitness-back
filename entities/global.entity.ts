@@ -230,7 +230,7 @@ export class User extends CoreEntity {
 	@Column({ type: 'varchar', length: 64, nullable: true })
 	membership?: string | null; // 'Basic' | 'Gold' | 'Platinum' | '-'
 
-	@Column()
+	@Column({ select: false })
 	password: string;
 
 	@Column({ type: 'enum', enum: UserRole, default: UserRole.CLIENT })
@@ -267,10 +267,10 @@ export class User extends CoreEntity {
 	lastLogin!: Date | null;
 
 	/* password reset OTP/token + expiry */
-	@Column({ type: 'varchar', nullable: true })
+	@Column({ type: 'varchar', nullable: true, select: false })
 	resetPasswordToken!: string | null;
 
-	@Column({ type: 'timestamptz', nullable: true })
+	@Column({ type: 'timestamptz', nullable: true, select: false })
 	resetPasswordExpires!: Date | null;
 
 	@Column({ type: 'int', default: 0 })

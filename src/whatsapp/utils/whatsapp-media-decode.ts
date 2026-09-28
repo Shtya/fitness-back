@@ -1,3 +1,17 @@
+import { promises as fs } from 'fs';
+
+/** Magic-byte sniffing and size-floor checks need only the first bytes of a file. */
+export async function readFileHeader(filePath: string, bytes: number): Promise<Buffer> {
+	const handle = await fs.open(filePath, 'r');
+	try {
+		const header = Buffer.alloc(bytes);
+		const { bytesRead } = await handle.read(header, 0, bytes, 0);
+		return header.subarray(0, bytesRead);
+	} finally {
+		await handle.close();
+	}
+}
+
 export function decodeProviderMedia(data: any): Buffer {
 	const value = data?.data ?? data?.base64 ?? data;
 	if (Buffer.isBuffer(value)) return value;

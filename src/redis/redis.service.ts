@@ -169,23 +169,69 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   // Alternative: More efficient scanning for large datasets
   async deletePatternScan(pattern: string): Promise<void> {
-    if (!this.isReady() || !this.client) return;
-    let cursor: any = 0;
-    let keys: string[] = [];
-
-    do {
-      const result = await this.client.scan(cursor, {
-        MATCH: pattern,
-        COUNT: 100,
-      });
-
-      cursor = result.cursor;
-      keys = keys.concat(result.keys);
-    } while (cursor !== 0);
-
-    if (keys.length > 0) {
+    const keys = await this.scanKeys(pattern);
+    if (keys.length > 0 && this.client) {
       await this.client.del(keys);
     }
+  }
+
+  /** Non-blocking alternative to KEYS (SCAN cursor is a string in node-redis v5). */
+  async scanKeys(pattern: string, count = 200): Promise<string[]> {
+    if (!this.isReady() || !this.client) return [];
+    const keys: string[] = [];
+    let cursor: any = '0';
+    do {
+      const result: any = await this.client.scan(cursor, { MATCH: pattern, COUNT: count });
+      cursor = result.cursor;
+      keys.push(...(result.keys || []));
+    } while (String(cursor) !== '0');
+    return keys;
+  }
+
+  /** One round-trip read of many JSON values; missing keys map to null. */
+  async mGet<T>(keys: string[]): Promise<(T | null)[]> {
+    if (!keys.length || !this.isReady() || !this.client) return keys.map(() => null);
+    const values: any[] = await this.client.mGet(keys);
+    return values.map(value => {
+      if (!value) return null;
+      try {
+        return JSON.parse(value) as T;
+      } catch {
+        return value as T;
+      }
+    });
+  }
+
+  async sMembers(key: string): Promise<string[]> {
+    if (!this.isReady() || !this.client) return [];
+    return (await this.client.sMembers(key)) as string[];
+  }
+
+  /** SET value (with TTL) and register `member` in the `indexKey` set in one MULTI round-trip. */
+  async setWithIndex(
+    key: string,
+    value: any,
+    ttlSec: number,
+    indexKey: string,
+    member: string,
+    indexTtlSec: number,
+  ): Promise<void> {
+    if (!this.isReady() || !this.client) return;
+    const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+    await this.client
+      .multi()
+      .setEx(key, ttlSec, stringValue)
+      .sAdd(indexKey, member)
+      .expire(indexKey, indexTtlSec)
+      .exec();
+  }
+
+  /** DEL keys and remove `members` from the `indexKey` set in one MULTI round-trip. */
+  async delWithIndex(keys: string[], indexKey: string, members: string[]): Promise<void> {
+    if (!keys.length || !this.isReady() || !this.client) return;
+    const tx = this.client.multi().del(keys);
+    if (members.length) tx.sRem(indexKey, members);
+    await tx.exec();
   }
 
   // Additional utility methods

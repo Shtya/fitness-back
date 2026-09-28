@@ -21,6 +21,7 @@ import {
 	UserSubscription,
 } from 'entities/billing.entity';
 import { User, UserRole } from 'entities/global.entity';
+import { parsePagination } from 'common/pagination';
 @Injectable()
 export class BillingService {
 	constructor(
@@ -46,10 +47,8 @@ export class BillingService {
 		private readonly userRepo: Repository<User>,
 	) { }
 
-	private paginate(page = 1, limit = 20) {
-		const take = Math.min(limit || 20, 100);
-		const skip = (page - 1) * take;
-		return { take, skip, page, limit: take };
+	private paginate(page: unknown = 1, limit: unknown = 20) {
+		return parsePagination(page, limit);
 	}
 
 	private buildInvoiceNumber() {

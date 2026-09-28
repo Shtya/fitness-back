@@ -34,6 +34,7 @@ import { CreateSuggestionDto } from './dto/suggestion.dto';
 import { UpdateMealPlanDto } from './dto/update-meal-plan.dto';
 import { MealPlanListResponse, ProgressData } from './interfaces/nutrition.interface';
 import { GymSettings } from '../../entities/settings.entity';
+import { parsePagination } from 'common/pagination';
 
 /** ---------- i18n helpers ---------- */
 type Lang = 'ar' | 'en';
@@ -379,8 +380,10 @@ export class NutritionService {
     user: { id: string; role: UserRole },
     _lang?: Lang,
   ): Promise<MealPlanListResponse> {
-    const { q, sortBy = 'created_at', sortOrder = 'DESC', limit = 12, page = 1 } = params;
-    const skip = (page - 1) * limit;
+    const { q } = params;
+    const { page, limit, skip } = parsePagination(params.page, params.limit, { defaultLimit: 12, maxLimit: 1000 });
+    const sortBy = params.sortBy && this.mealPlanRepo.metadata.findColumnWithPropertyName(params.sortBy) ? params.sortBy : 'created_at';
+    const sortOrder = String(params.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     // ✅ FAST LIST: no relations
     const where = [

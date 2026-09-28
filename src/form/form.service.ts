@@ -9,6 +9,7 @@ import { Form, FormField, FormSubmission, NotificationAudience, NotificationType
 import { CreateFormDto, UpdateFormDto, SubmitFormDto, ReorderFieldsDto } from './form.dto';
 import { NotificationService } from 'src/notification/notification.service';
 import { User, UserRole } from 'entities/global.entity';
+import { parsePagination } from 'common/pagination';
 
 type Requester = { id: string; role: UserRole, adminId?: string | null };
 
@@ -43,7 +44,7 @@ export class FormService {
 		return form;
 	}
 
-	private async ensureCanReadForm(formId: number, requester: Requester): Promise<Form> {
+	private async ensureCanReadForm(formId: number, _requester: Requester): Promise<Form> {
 		const form = await this.formRepository.findOne({ where: { id: formId } });
 		if (!form) throw new NotFoundException('Form not found');
  
@@ -97,10 +98,8 @@ export class FormService {
 		return await this.formRepository.save(form);
 	}
 
-	async getAllForms(page = 1, limit = 10, requester: Requester, includeGlobal = true) {
-
-		console.log(requester);
-		const skip = (page - 1) * limit;
+	async getAllForms(rawPage: unknown = 1, rawLimit: unknown = 10, requester: Requester, includeGlobal = true) {
+		const { page, limit, skip } = parsePagination(rawPage, rawLimit, { defaultLimit: 10, maxLimit: 1000 });
 
 		let where: any;
 
@@ -257,11 +256,12 @@ export class FormService {
 
 	async getFormSubmissionsScoped(
 		formId: number,
-		page = 1,
-		limit = 10,
+		rawPage: unknown = 1,
+		rawLimit: unknown = 10,
 		requester: Requester,
 		assignedTo?: string, // ✅ NEW
 	) {
+		const { page, limit, skip } = parsePagination(rawPage, rawLimit, { defaultLimit: 10, maxLimit: 1000 });
 		const form = await this.ensureCanReadForm(formId, requester);
 
 		const where: any = { form: { id: form.id } };
@@ -273,7 +273,7 @@ export class FormService {
 		const [results, total] = await this.submissionRepository.findAndCount({
 			where,
 			relations: ['form', 'assignedTo'],
-			skip: (page - 1) * limit,
+			skip,
 			take: limit,
 			order: { created_at: 'DESC' },
 		});

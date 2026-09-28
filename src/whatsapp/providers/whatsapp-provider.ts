@@ -180,9 +180,13 @@ export interface WhatsAppProvider {
 	pinMessage(providerMessageId: string, pinned: boolean): Promise<any>;
 	getMessageInfo(providerMessageId: string): Promise<any>;
 	markChatRead(chatId: string): Promise<any>;
+	/**
+	 * Resolves `{ data }` (buffer/base64) or, when the provider can stream and
+	 * `toFile` is given, `{ filePath }` with the media already written there.
+	 */
 	downloadMedia(
 		providerMessageId: string,
-		options?: { rawHint?: any },
+		options?: { rawHint?: any; toFile?: string },
 	): Promise<any>;
 	/** Subscribe to typing/online presence for a chat. */
 	subscribePresence?(chatId: string | string[]): Promise<number | void>;

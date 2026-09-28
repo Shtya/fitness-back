@@ -6,11 +6,12 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from 'entities/global.entity';
+import { corsOriginDelegate } from 'common/cors-origin';
 
 @WebSocketGateway({
 	namespace: '/reminders',
 	cors: {
-		origin: true,
+		origin: corsOriginDelegate(),
 		credentials: true,
 	},
 })

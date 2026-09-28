@@ -8,6 +8,7 @@ import { Notification, NotificationAudience, NotificationType, ExercisePlan, Use
 import { RegisterDto, LoginDto, UpdateProfileDto, ResetPasswordDto, ForgotPasswordDto } from 'dto/auth.dto';
 import { ConfigService } from '@nestjs/config';
 import { MailService } from 'common/nodemailer';
+import { parsePagination } from 'common/pagination';
 import * as crypto from 'crypto';
 import { isUUID } from 'class-validator';
 import { FoodSuggestion, MealPlan } from '../../entities/meal_plans.entity';
@@ -27,10 +28,14 @@ export class AuthService {
 
 	/* Utility to normalize pagination */
 	private normPaged(q?: { page?: string | number; limit?: string | number }) {
-		const page = Math.max(1, Number(q?.page ?? 1));
-		const limit = Math.min(100, Math.max(1, Number(q?.limit ?? 20)));
-		const skip = (page - 1) * limit;
+		const { page, limit, skip } = parsePagination(q?.page, q?.limit);
 		return { page, limit, skip };
+	}
+
+	/** ORDER BY is interpolated, so only real User columns may reach it. */
+	private userSortColumn(requested: unknown, fallback = 'created_at') {
+		const name = String(requested ?? '').trim();
+		return name && this.userRepo.metadata.findColumnWithPropertyName(name) ? name : fallback;
 	}
 
 	private likeable(search?: string) {
@@ -345,9 +350,8 @@ export class AuthService {
 
 	// auth.service.ts
 	async listUsersAdvanced(query: any, actor?: { id: string; role: UserRole }) {
-		const page = Number(query.page ?? 1);
-		const limit = Math.min(Number(query.limit ?? 10), 100);
-		const sortBy = query.sortBy ?? 'created_at';
+		const { page, limit } = parsePagination(query.page, query.limit, { defaultLimit: 10 });
+		const sortBy = this.userSortColumn(query.sortBy);
 		const sortOrder: 'ASC' | 'DESC' = (String(query.sortOrder || 'DESC').toUpperCase() as any) === 'ASC' ? 'ASC' : 'DESC';
 		const search = (query.search || '').trim();
 		const role = (query.role || '').toLowerCase();
@@ -535,9 +539,8 @@ export class AuthService {
 	}
 
 	async listCoachClientsAdvanced(query: any, actor?: { id: string; role: UserRole; adminId?: string }) {
-		const page = Math.max(1, Number(query.page ?? 1));
-		const limit = Math.min(Math.max(1, Number(query.limit ?? 10)), 100);
-		const sortBy = (query.sortBy ?? 'created_at').toString();
+		const { page, limit } = parsePagination(query.page, query.limit, { defaultLimit: 10 });
+		const sortBy = this.userSortColumn(query.sortBy);
 		const sortOrder: 'ASC' | 'DESC' = String(query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 		const search = (query.search || '').trim();
 		const includePlans = String(query.includePlans || '').toLowerCase() === 'true';
@@ -705,9 +708,7 @@ export class AuthService {
 	}
 
 	async listAdminsForSuper(query: any) {
-		const page = Math.max(1, Number(query.page ?? 1));
-		const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
-		const skip = (page - 1) * limit;
+		const { page, limit, skip } = parsePagination(query.page, query.limit);
 		const search = (query.search || '').trim();
 		const status = (query.status || '').trim(); // optional: pending/active/suspended
 
@@ -1020,8 +1021,8 @@ export class AuthService {
 		return this.serialize(user);
 	}
 
-	async getAllUsers(page = 1, limit = 10) {
-		const skip = (page - 1) * limit;
+	async getAllUsers(rawPage: unknown = 1, rawLimit: unknown = 10) {
+		const { page, limit, skip } = parsePagination(rawPage, rawLimit, { defaultLimit: 10 });
 		const [users, total] = await this.userRepo.findAndCount({
 			skip,
 			take: limit,
@@ -1071,7 +1072,10 @@ export class AuthService {
 	}
 
 	async resetPassword(dto: ResetPasswordDto) {
-		const user = await this.userRepo.findOne({ where: { email: dto.email } });
+		const user = await this.userRepo.findOne({
+			where: { email: dto.email },
+			select: ['id', 'email', 'password', 'resetPasswordToken', 'resetPasswordExpires'],
+		});
 		if (!user || !user.resetPasswordToken || !user.resetPasswordExpires) throw new BadRequestException('Invalid email or OTP');
 
 		if (user.resetPasswordToken !== dto.otp || user.resetPasswordExpires < new Date()) throw new BadRequestException('Invalid or expired OTP');
@@ -1194,9 +1198,7 @@ export class AuthService {
 
 	// auth.service.ts
 	async superAdminOverview(q: any) {
-		const page = Math.max(1, Number(q.page || 1));
-		const limit = Math.min(100, Math.max(1, Number(q.limit || 20)));
-		const skip = (page - 1) * limit;
+		const { page, limit, skip } = parsePagination(q.page, q.limit);
 
 		const search = (q.search || '').trim();
 		const role = (q.role || '').toLowerCase();

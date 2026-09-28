@@ -1,4 +1,58 @@
-import { sanitizeBaileysWaMessage } from './baileys-media-raw';
+import { buildBaileysRetryMessage, sanitizeBaileysWaMessage } from './baileys-media-raw';
+
+describe('buildBaileysRetryMessage (getMessage fallback)', () => {
+	const key = { remoteJid: '201000000000@s.whatsapp.net', id: 'M1', fromMe: true };
+
+	it('returns undefined without a stored row or content', () => {
+		expect(buildBaileysRetryMessage(null)).toBeUndefined();
+		expect(buildBaileysRetryMessage({ text: '   ', raw: null })).toBeUndefined();
+	});
+
+	it('rebuilds text from the raw payload, falling back to the stored text', () => {
+		expect(
+			buildBaileysRetryMessage({ raw: { key, message: { extendedTextMessage: { text: 'hi' } } } }),
+		).toEqual({ conversation: 'hi' });
+		expect(buildBaileysRetryMessage({ raw: { key, message: { conversation: 'yo' } } })).toEqual({
+			conversation: 'yo',
+		});
+		expect(buildBaileysRetryMessage({ text: 'plain', raw: null })).toEqual({ conversation: 'plain' });
+	});
+
+	it('revives media byte fields as Buffers', () => {
+		const message = buildBaileysRetryMessage({
+			raw: {
+				protocol: 'baileys',
+				key,
+				message: { imageMessage: { url: 'https://mmg', mediaKey: 'AQID', mimetype: 'image/jpeg' } },
+			},
+		}) as any;
+		expect(Buffer.isBuffer(message.imageMessage.mediaKey)).toBe(true);
+		expect(message.imageMessage.url).toBe('https://mmg');
+	});
+
+	it('keeps only encodable location and contact fields', () => {
+		expect(
+			buildBaileysRetryMessage({
+				raw: {
+					key,
+					message: {
+						locationMessage: {
+							degreesLatitude: '30.1',
+							degreesLongitude: 31.2,
+							name: 'Cairo',
+							jpegThumbnail: { type: 'Buffer', data: [1, 2] },
+						},
+					},
+				},
+			}),
+		).toEqual({ locationMessage: { degreesLatitude: 30.1, degreesLongitude: 31.2, name: 'Cairo' } });
+		expect(
+			buildBaileysRetryMessage({
+				raw: { key, message: { contactMessage: { displayName: 'Ali', vcard: 'BEGIN:VCARD', extra: 1 } } },
+			}),
+		).toEqual({ contactMessage: { displayName: 'Ali', vcard: 'BEGIN:VCARD' } });
+	});
+});
 
 describe('sanitizeBaileysWaMessage', () => {
 	it('keeps group sender pushName and quoted image thumbnail on text replies', () => {

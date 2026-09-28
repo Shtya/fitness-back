@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
-import { promises as fs } from 'fs';
+import { createWriteStream, promises as fs } from 'fs';
 import * as path from 'path';
+import { pipeline } from 'stream/promises';
 import * as qrcode from 'qrcode';
 import {
 	NormalizedWhatsAppMessage,
@@ -12,7 +13,8 @@ import {
 	WhatsAppSendQuoteOptions,
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
-import { reviveBaileysWaMessage } from '../utils/baileys-media-raw';
+import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
+import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import {
 	buildVoiceWaveform,
@@ -38,6 +40,8 @@ const CACHE_MAX = {
 	newsletterName: 1_000,
 	avatarUrl: 2_000,
 	messagesByChat: 2_000,
+	/** Across all chat buckets; chats × perChatMessages alone allowed ~1M rows with raw payloads. */
+	rememberedMessages: 40_000,
 	rawByMessageId: 4_000,
 	reactions: 4_000,
 	perChatMessages: 500,
@@ -132,6 +136,15 @@ export function mapBaileysMessageStatus(status: unknown): string | null {
 function isStatusBroadcastJid(jid: string | null | undefined): boolean {
 	const id = String(jid || '').toLowerCase();
 	return Boolean(id) && (id.includes('status@') || id.endsWith('@broadcast'));
+}
+
+/** Pipes a Baileys media stream to disk; returns bytes written (0 = nothing usable). */
+export async function writeMediaStreamToFile(
+	stream: AsyncIterable<any> | NodeJS.ReadableStream,
+	filePath: string,
+): Promise<number> {
+	await pipeline(stream as any, createWriteStream(filePath));
+	return (await fs.stat(filePath)).size;
 }
 
 export function shouldSkipMediaReupload(raw: any): boolean {
@@ -458,6 +471,22 @@ export function classifyBaileysDisconnect(
 	return phoneLikelyClosed ? 'phone_closed' : 'connection_lost';
 }
 
+const RECONNECT_BASE_MS = 2_000;
+const RECONNECT_MAX_MS = 5 * 60_000;
+export const RECONNECT_ALERT_AFTER = 12;
+
+/** Exponential backoff with equal jitter: attempt 1 → 1–2 s, doubling, capped at 2.5–5 min. */
+export function computeReconnectDelayMs(
+	attempt: number,
+	minDelayMs = 0,
+	random: () => number = Math.random,
+) {
+	const exponent = Math.min(Math.max(attempt, 1) - 1, 16);
+	const ceiling = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** exponent);
+	const jittered = ceiling / 2 + random() * (ceiling / 2);
+	return Math.max(minDelayMs, Math.round(jittered));
+}
+
 async function resolveBaileysSocketVersion(baileys: any): Promise<number[]> {
 	const configured = process.env.WHATSAPP_BAILEYS_VERSION?.trim();
 	if (configured) {
@@ -531,6 +560,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private readonly newsletterNameCache = new Map<string, string | null>();
 	private readonly avatarUrlCache = new Map<string, { url: string | null; at: number }>();
 	private readonly messagesByChat = new Map<string, Map<string, NormalizedWhatsAppMessage>>();
+	private rememberedMessageCount = 0;
 	/** Original WAMessage by provider id — required for Baileys media download. */
 	private readonly rawByMessageId = new Map<string, any>();
 	private readonly reactionsByMessageId = new Map<string, NormalizedWhatsAppReaction[]>();
@@ -541,11 +571,62 @@ export class BaileysProvider implements WhatsAppProvider {
 	private historySyncChunks = 0;
 	/** Provider ids already included in a messaging-history.set batch. */
 	private readonly recentHistoryMessageIds = new Set<string>();
+	/** Owned by the provider (not the socket) so they survive reconnects. */
+	private readonly msgRetryCounterCache = new TtlCacheStore(60 * 60_000, 5_000);
+	private readonly groupMetadataCache = new TtlCacheStore(5 * 60_000, 500);
+	private messageLookup:
+		| ((providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>)
+		| null = null;
 
 	constructor(private readonly accountId: string) {}
 
 	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>) {
 		this.listeners.add(listener);
+	}
+
+	/** Persisted-message fallback for retry receipts after a reconnect or restart. */
+	setMessageLookup(
+		lookup: (providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>,
+	) {
+		this.messageLookup = lookup;
+	}
+
+	/** Baileys `getMessage`: re-encrypt a message a recipient could not decrypt. */
+	async getMessageForRetry(key: { id?: string | null } | null | undefined) {
+		const id = String(key?.id || '').trim();
+		if (!id) return undefined;
+		const cached = this.rawByMessageId.get(id);
+		if (cached?.message) return cached.message;
+		if (!this.messageLookup) return undefined;
+		try {
+			return buildBaileysRetryMessage(await this.messageLookup(id));
+		} catch (error) {
+			this.logger.warn(
+				`getMessage lookup failed for ${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return undefined;
+		}
+	}
+
+	/** Baileys `cachedGroupMetadata`: avoid a metadata query on every group send. */
+	async getCachedGroupMetadata(jid: string) {
+		const id = String(jid || '').trim();
+		if (!id.endsWith('@g.us')) return undefined;
+		const cached = this.groupMetadataCache.get<any>(id);
+		if (cached) return cached;
+		if (!this.socket || typeof this.socket.groupMetadata !== 'function') return undefined;
+		try {
+			return this.rememberGroupMetadata(id, await this.socket.groupMetadata(id));
+		} catch {
+			return undefined;
+		}
+	}
+
+	private rememberGroupMetadata(id: string, meta: any) {
+		if (meta && Array.isArray(meta.participants)) this.groupMetadataCache.set(id, meta);
+		return meta || undefined;
 	}
 
 	private emit(event: WhatsAppProviderEvent) {
@@ -755,7 +836,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (this.groupSubjectCache.has(id)) return this.groupSubjectCache.get(id) || null;
 		if (!this.socket || this.state !== 'connected') return null;
 		try {
-			const meta = await this.socket.groupMetadata(id);
+			const meta = this.rememberGroupMetadata(id, await this.socket.groupMetadata(id));
 			const subject = String(meta?.subject || '').trim() || null;
 			this.groupSubjectCache.set(id, subject);
 			trimMapToMax(this.groupSubjectCache, CACHE_MAX.groupSubject);
@@ -842,6 +923,21 @@ export class BaileysProvider implements WhatsAppProvider {
 		return { name, pictureUrl };
 	}
 
+	/** Drops least-recently-touched chat buckets until both the chat and total-message caps hold. */
+	private evictRememberedChats(keepChatId: string) {
+		for (const [chatId, bucket] of this.messagesByChat) {
+			if (
+				this.messagesByChat.size <= CACHE_MAX.messagesByChat &&
+				this.rememberedMessageCount <= CACHE_MAX.rememberedMessages
+			) {
+				return;
+			}
+			if (chatId === keepChatId) continue;
+			this.rememberedMessageCount = Math.max(0, this.rememberedMessageCount - bucket.size);
+			this.messagesByChat.delete(chatId);
+		}
+	}
+
 	private rememberMessage(normalized: NormalizedWhatsAppMessage, rawMessage?: any) {
 		if (!normalized.chatId || !normalized.providerMessageId) return;
 		let bucket = this.messagesByChat.get(normalized.chatId);
@@ -853,6 +949,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.messagesByChat.delete(normalized.chatId);
 			this.messagesByChat.set(normalized.chatId, bucket);
 		}
+		if (!bucket.has(normalized.providerMessageId)) this.rememberedMessageCount += 1;
 		bucket.set(normalized.providerMessageId, normalized);
 		if (rawMessage?.message) {
 			this.rawByMessageId.set(normalized.providerMessageId, rawMessage);
@@ -866,8 +963,9 @@ export class BaileysProvider implements WhatsAppProvider {
 				this.rawByMessageId.delete(key);
 				this.reactionsByMessageId.delete(key);
 			}
+			this.rememberedMessageCount -= keys.length;
 		}
-		trimMapToMax(this.messagesByChat, CACHE_MAX.messagesByChat);
+		this.evictRememberedChats(normalized.chatId);
 		trimMapToMax(this.rawByMessageId, CACHE_MAX.rawByMessageId);
 		trimMapToMax(this.reactionsByMessageId, CACHE_MAX.reactions);
 		if (normalized.contactName && !normalized.fromMe) {
@@ -1514,10 +1612,22 @@ export class BaileysProvider implements WhatsAppProvider {
 			syncFullHistory: shouldSyncFullHistory(),
 			connectTimeoutMs: 60_000,
 			browser: Browsers?.ubuntu?.('Chrome') || Browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'],
+			msgRetryCounterCache: this.msgRetryCounterCache,
+			getMessage: (key: any) => this.getMessageForRetry(key),
+			cachedGroupMetadata: (jid: string) => this.getCachedGroupMetadata(jid),
 		});
 		this.socket = socket;
 
 		socket.ev.on('creds.update', saveCreds);
+
+		socket.ev.on('groups.update', (updates: any[]) => {
+			for (const update of Array.isArray(updates) ? updates : []) {
+				if (update?.id) this.groupMetadataCache.del(String(update.id));
+			}
+		});
+		socket.ev.on('group-participants.update', (update: any) => {
+			if (update?.id) this.groupMetadataCache.del(String(update.id));
+		});
 
 		socket.ev.on('connection.update', async (update: any) => {
 			if (this.closing) return;
@@ -1714,14 +1824,14 @@ export class BaileysProvider implements WhatsAppProvider {
 				String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
 				String(update?.lastKnownPresence || '').toLowerCase();
 
-			this.logger.log(
+			this.logger.debug(
 				`[WHATSAPP PRESENCE] Baileys RAW session=${this.accountId} id=${rawId} jid=${chatId || 'empty'} lastKnown=${lastKnown || '(empty)'} participants=${Object.keys(presences).join(',') || 'none'} lastSeen=${first?.lastSeen ?? 'n/a'}`,
 			);
 
 			if (!chatId) return;
 			// Empty payloads are common after subscribe; do not force offline.
 			if (!lastKnown) {
-				this.logger.log(
+				this.logger.debug(
 					`[WHATSAPP PRESENCE] Baileys EMPTY (no lastKnownPresence) — waiting for real update session=${this.accountId} jid=${chatId}`,
 				);
 				return;
@@ -1740,7 +1850,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			} else if (lastKnown === 'unavailable' || lastKnown === 'offline') {
 				state = 'unavailable';
 			} else {
-				this.logger.log(
+				this.logger.debug(
 					`[WHATSAPP PRESENCE] Baileys UNKNOWN lastKnown=${lastKnown} session=${this.accountId} jid=${chatId}`,
 				);
 				return;
@@ -1758,7 +1868,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				? (rawLastSeen < 1e12 ? rawLastSeen * 1000 : rawLastSeen)
 				: 0;
 
-			this.logger.log(
+			this.logger.debug(
 				`[WHATSAPP PRESENCE]\n` +
 					`  Session: ${this.accountId}\n` +
 					`  JID: ${chatId}\n` +
@@ -1852,13 +1962,16 @@ export class BaileysProvider implements WhatsAppProvider {
 	private scheduleReconnect(minDelayMs = 0) {
 		if (this.closing || this.reconnectTimer || this.opening) return;
 		this.reconnectAttempt += 1;
-		if (this.reconnectAttempt > 12) {
-			this.setState('error', {
-				error: 'WhatsApp reconnect failed repeatedly. Reconnect from the dashboard.',
+		if (this.reconnectAttempt === RECONNECT_ALERT_AFTER) {
+			this.logger.error(
+				`Baileys reconnect for ${this.accountId} failed ${RECONNECT_ALERT_AFTER} times; still retrying with backoff.`,
+			);
+			this.setState('disconnected', {
+				reason: 'reconnect_retrying',
+				error: 'WhatsApp reconnect keeps failing. Still retrying automatically; check the phone connection.',
 			});
-			return;
 		}
-		const delay = Math.max(minDelayMs, Math.min(60_000, 2_000 * this.reconnectAttempt));
+		const delay = computeReconnectDelayMs(this.reconnectAttempt, minDelayMs);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			if (this.closing || this.opening) return;
@@ -1916,6 +2029,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.newsletterNameCache.clear();
 		this.avatarUrlCache.clear();
 		this.messagesByChat.clear();
+		this.rememberedMessageCount = 0;
 		this.rawByMessageId.clear();
 		this.qr = null;
 		this.pairingCode = null;
@@ -2151,7 +2265,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		try {
 			const meta =
 				typeof (this.socket as any).groupMetadata === 'function'
-					? await (this.socket as any).groupMetadata(jid)
+					? this.rememberGroupMetadata(jid, await (this.socket as any).groupMetadata(jid))
 					: null;
 			const participants = Array.isArray(meta?.participants) ? meta.participants : [];
 			return participants.map((participant: any) => {
@@ -2510,7 +2624,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 		}
 		const bucket = this.messagesByChat.get(chatId) || this.messagesByChat.get(jid);
-		bucket?.delete(id);
+		if (bucket?.delete(id)) this.rememberedMessageCount = Math.max(0, this.rememberedMessageCount - 1);
 		this.rawByMessageId.delete(id);
 		return { ok: true };
 	}
@@ -2582,7 +2696,7 @@ export class BaileysProvider implements WhatsAppProvider {
 					await this.socket.presenceSubscribe(jid);
 					count += 1;
 					if (count <= 8 || count % 25 === 0) {
-						this.logger.log(
+						this.logger.debug(
 							`[WHATSAPP PRESENCE] Baileys presenceSubscribe ok session=${this.accountId} jid=${jid} n=${count}`,
 						);
 					}
@@ -2626,7 +2740,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
-	async downloadMedia(providerMessageId: string, options: { rawHint?: any } = {}) {
+	async downloadMedia(
+		providerMessageId: string,
+		options: { rawHint?: any; toFile?: string } = {},
+	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
@@ -2696,6 +2813,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		attachFullMediaUrls(content, getUrlFromDirectPath);
 
 		let buffer: Buffer | Uint8Array | null = null;
+		const toFile = options.toFile || null;
+		let streamedBytes = 0;
 		const mediaNodes: Array<{ node: any; type: string }> = [
 			{ node: content?.imageMessage, type: 'image' },
 			{ node: content?.videoMessage, type: 'video' },
@@ -2717,6 +2836,11 @@ export class BaileysProvider implements WhatsAppProvider {
 						},
 						candidate.type,
 					);
+					if (toFile) {
+						streamedBytes = await writeMediaStreamToFile(stream, toFile);
+						if (streamedBytes) break;
+						continue;
+					}
 					const chunks: Buffer[] = [];
 					for await (const chunk of stream) {
 						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -2734,13 +2858,14 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 
 		if (
+			!streamedBytes &&
 			(!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) &&
 			typeof downloadMediaMessage === 'function'
 		) {
 			try {
-				buffer = await downloadMediaMessage(
+				const downloaded = await downloadMediaMessage(
 					raw,
-					'buffer',
+					toFile ? 'stream' : 'buffer',
 					{},
 					shouldSkipMediaReupload(raw)
 						? {}
@@ -2748,6 +2873,8 @@ export class BaileysProvider implements WhatsAppProvider {
 								reuploadRequest: this.socket.updateMediaMessage?.bind(this.socket),
 							},
 				);
+				if (toFile) streamedBytes = await writeMediaStreamToFile(downloaded, toFile);
+				else buffer = downloaded;
 			} catch (error) {
 				this.logger.warn(
 					`downloadMediaMessage failed for ${id}: ${
@@ -2757,12 +2884,16 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 		}
 
+		if (streamedBytes && toFile) {
+			this.rawByMessageId.set(id, raw);
+			return { filePath: toFile };
+		}
 		if (!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) {
 			throw new Error('Baileys returned empty media');
 		}
 		// Keep a live copy so retries are cheap.
 		this.rawByMessageId.set(id, raw);
-		return { data: Buffer.from(buffer) };
+		return { data: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer) };
 	}
 
 	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {

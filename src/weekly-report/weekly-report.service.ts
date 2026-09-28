@@ -6,6 +6,7 @@ import { WeeklyReport } from 'entities/weekly-report.entity';
 import { ReportConfig } from 'entities/report-config.entity';
 import { User, UserRole, NotificationType, NotificationAudience } from 'entities/global.entity';
 import { NotificationService } from '../notification/notification.service';
+import { parsePagination } from 'common/pagination';
 
 @Injectable()
 export class WeeklyReportService {
@@ -425,15 +426,7 @@ export class WeeklyReportService {
   }
 
   private normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
-    const pageNum = Number(pageInput);
-    const limitNum = Number(limitInput);
-
-    const page = Number.isFinite(pageNum) && pageNum > 0 ? Math.floor(pageNum) : 1;
-    const takeRaw = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : 10;
-
-    const take = Math.min(takeRaw, maxLimit);
-    const skip = (page - 1) * take;
-
+    const { page, take, skip } = parsePagination(pageInput, limitInput, { defaultLimit: 10, maxLimit });
     return { page, take, skip };
   }
 }

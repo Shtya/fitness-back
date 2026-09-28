@@ -7,15 +7,16 @@ import {
 	Query,
 	Req,
 	Res,
-	StreamableFile,
 	UseGuards,
 } from '@nestjs/common';
-import { createReadStream } from 'fs';
 import type { Response } from 'express';
+import { streamResolvedAttachment } from '../utils/whatsapp-attachment-stream';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { PublishWhatsAppStatusDto, ViewWhatsAppStatusDto } from '../dto/whatsapp.dto';
 import { WhatsAppStatusService } from '../services/whatsapp-status.service';
+
+const STATUS_CONTENT_CACHE = 'private, max-age=3600';
 
 @Controller('whatsapp/accounts/:accountId/statuses')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -61,14 +62,9 @@ export class WhatsAppStatusController {
 		const file = await this.statuses.resolveContent(req.user, accountId, statusId, {
 			history: true,
 		});
-		res.setHeader('X-Content-Type-Options', 'nosniff');
-		res.setHeader('Content-Type', file.mimeType);
-		res.setHeader('Cache-Control', 'private, max-age=3600');
-		res.setHeader(
-			'Content-Disposition',
-			`inline; filename="${encodeURIComponent(file.fileName)}"`,
-		);
-		return new StreamableFile(createReadStream(file.absolutePath));
+		return streamResolvedAttachment(req, res, file, `status-history-${statusId}`, {
+			cacheControl: STATUS_CONTENT_CACHE,
+		});
 	}
 
 	@Post(':providerStatusId/view')
@@ -94,13 +90,8 @@ export class WhatsAppStatusController {
 		@Param('statusId') statusId: string,
 	) {
 		const file = await this.statuses.resolveContent(req.user, accountId, statusId);
-		res.setHeader('X-Content-Type-Options', 'nosniff');
-		res.setHeader('Content-Type', file.mimeType);
-		res.setHeader('Cache-Control', 'private, max-age=3600');
-		res.setHeader(
-			'Content-Disposition',
-			`inline; filename="${encodeURIComponent(file.fileName)}"`,
-		);
-		return new StreamableFile(createReadStream(file.absolutePath));
+		return streamResolvedAttachment(req, res, file, `status-${statusId}`, {
+			cacheControl: STATUS_CONTENT_CACHE,
+		});
 	}
 }

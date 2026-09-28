@@ -12,6 +12,7 @@ import {
 	WhatsAppMessage,
 } from '../entities/whatsapp.entity';
 import { WhatsAppAccessService } from './whatsapp-access.service';
+import { prepareMessagesForClient } from '../utils/whatsapp-client-payload';
 
 const MAX_GROUP_NAME = 120;
 const MAX_GROUPS_PER_CHAT = 80;
@@ -213,11 +214,13 @@ export class WhatsAppMessageGroupsService {
 			);
 		return {
 			...this.toGroupDto(group, ordered.length),
-			messages: ordered.map((message) => ({
-				...message,
-				messageGroupId: group.id,
-				messageGroupName: group.name,
-			})),
+			messages: prepareMessagesForClient(
+				ordered.map((message) => ({
+					...message,
+					messageGroupId: group.id,
+					messageGroupName: group.name,
+				})),
+			),
 		};
 	}
 

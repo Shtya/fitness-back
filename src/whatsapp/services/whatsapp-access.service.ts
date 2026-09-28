@@ -20,8 +20,28 @@ export type WhatsAppAccountPermission =
 	| 'canAssign'
 	| 'canTransfer';
 
+const ACCESS_CACHE_TTL_MS = 10_000;
+const ACCESS_CACHE_MAX = 2000;
+
+type CacheEntry<T> = { row: T; at: number };
+
+function cloneRow<T extends object>(row: T): T;
+function cloneRow<T extends object>(row: T | null): T | null;
+function cloneRow<T extends object>(row: T | null): T | null {
+	return row ? Object.assign(Object.create(Object.getPrototypeOf(row)), row) : null;
+}
+
 @Injectable()
 export class WhatsAppAccessService {
+	/**
+	 * Every REST call, socket watch and unread poll resolves the same account + access
+	 * rows. They are cached briefly and handed out as copies so a caller mutating its
+	 * result cannot leak into the cache. `canManage` checks always read fresh rows,
+	 * because those callers may `save()` the account they get back.
+	 */
+	private readonly accountCache = new Map<string, CacheEntry<WhatsAppAccount>>();
+	private readonly accessCache = new Map<string, CacheEntry<WhatsAppAccountAccess | null>>();
+
 	constructor(
 		@InjectRepository(WhatsAppAccount)
 		private readonly accountRepo: Repository<WhatsAppAccount>,
@@ -71,30 +91,69 @@ export class WhatsAppAccessService {
 		);
 	}
 
-	async getAccountAccess(user: User, accountId: string) {
+	/** Drops cached account + access rows after any write that changes them. */
+	invalidateAccount(accountId: string) {
+		this.accountCache.delete(accountId);
+		const prefix = `${accountId}:`;
+		for (const key of this.accessCache.keys()) {
+			if (key.startsWith(prefix)) this.accessCache.delete(key);
+		}
+	}
+
+	/** Short-lived read-only snapshot for hot paths that only need stable account fields. */
+	async getAccountSnapshot(accountId: string): Promise<WhatsAppAccount | null> {
+		return cloneRow(await this.loadAccount(accountId, false));
+	}
+
+	private remember<T>(cache: Map<string, CacheEntry<T>>, key: string, row: T) {
+		cache.delete(key);
+		cache.set(key, { row, at: Date.now() });
+		while (cache.size > ACCESS_CACHE_MAX) {
+			cache.delete(cache.keys().next().value as string);
+		}
+	}
+
+	private async loadAccount(accountId: string, fresh: boolean) {
+		const cached = this.accountCache.get(accountId);
+		if (!fresh && cached && Date.now() - cached.at < ACCESS_CACHE_TTL_MS) return cached.row;
+		const account = await this.accountRepo.findOne({ where: { id: accountId } });
+		if (account) this.remember(this.accountCache, accountId, account);
+		else this.accountCache.delete(accountId);
+		return account;
+	}
+
+	private async loadAccess(accountId: string, userId: string, fresh: boolean) {
+		const key = `${accountId}:${userId}`;
+		const cached = this.accessCache.get(key);
+		if (!fresh && cached && Date.now() - cached.at < ACCESS_CACHE_TTL_MS) return cached.row;
+		const access = await this.accessRepo.findOne({ where: { accountId, userId } });
+		this.remember(this.accessCache, key, access || null);
+		return access || null;
+	}
+
+	async getAccountAccess(user: User, accountId: string, options: { fresh?: boolean } = {}) {
 		if (!user?.id) throw new ForbiddenException('WhatsApp user is not authenticated');
-		const account = await this.accountRepo.findOne({
-			where: { id: accountId },
-		});
+		const fresh = Boolean(options.fresh);
+		const account = cloneRow(await this.loadAccount(accountId, fresh));
 		if (!account) throw new NotFoundException('WhatsApp account not found');
 		if (account.ownerAdminId === user.id) {
-			const ownerAccess = await this.accessRepo.findOne({
-				where: { accountId, userId: user.id },
-			});
+			const ownerAccess = cloneRow(await this.loadAccess(accountId, user.id, fresh));
 			return this.fullAccess(account, ownerAccess);
 		}
 		if (!this.isEligibleStaff(user)) {
 			throw new ForbiddenException('WhatsApp account access denied');
 		}
-		const access = await this.accessRepo.findOne({
-			where: { accountId, userId: user.id },
-		});
+		const access = cloneRow(await this.loadAccess(accountId, user.id, fresh));
 		if (!access?.canView) throw new ForbiddenException('WhatsApp account access denied');
 		return { account, ...access };
 	}
 
 	async listAccessibleAccounts(user: User) {
-		if (!this.isEligibleStaff(user)) return [];
+		return (await this.loadAccessibleAccounts(user)).accounts;
+	}
+
+	private async loadAccessibleAccounts(user: User) {
+		if (!this.isEligibleStaff(user)) return { accounts: [], accessByAccountId: new Map() };
 
 		const [owned, rows] = await Promise.all([
 			this.accountRepo.find({
@@ -108,51 +167,63 @@ export class WhatsAppAccessService {
 			}),
 		]);
 		const byId = new Map<string, WhatsAppAccount>();
+		const accessByAccountId = new Map<string, WhatsAppAccountAccess>();
 		for (const account of owned) byId.set(account.id, account);
 		for (const row of rows) {
-			if (row.account) byId.set(row.account.id, row.account);
+			if (!row.account) continue;
+			byId.set(row.account.id, row.account);
+			accessByAccountId.set(row.account.id, row);
 		}
-		return [...byId.values()].sort(
+		const accounts = [...byId.values()].sort(
 			(a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
 		);
+		return { accounts, accessByAccountId };
 	}
 
-	/** Sum of unread messages across conversations the user can see. */
+	/**
+	 * Sum of unread messages across conversations the user can see, in one query.
+	 * Visibility per account follows `canSeeAllConversations`: everything on accounts
+	 * the user owns / manages / assigns, only their assigned chats elsewhere.
+	 */
 	async getUnreadTotal(user: User) {
-		const accounts = await this.listAccessibleAccounts(user);
+		const { accounts, accessByAccountId } = await this.loadAccessibleAccounts(user);
 		if (!accounts.length) {
 			return { totalUnread: 0, unreadConversations: 0 };
 		}
-
-		let totalUnread = 0;
-		let unreadConversations = 0;
-
+		const seeAllIds: string[] = [];
+		const assignedOnlyIds: string[] = [];
 		for (const account of accounts) {
-			const access = await this.getAccountAccess(user, account.id);
-			const canSeeAll = this.canSeeAllConversations(user, access);
-			const qb = this.conversationRepo
-				.createQueryBuilder('conversation')
-				.select('COALESCE(SUM(conversation.unreadCount), 0)', 'totalUnread')
-				.addSelect(
-					`COUNT(*) FILTER (WHERE conversation.unreadCount > 0)`,
-					'unreadConversations',
-				)
-				.where('conversation.accountId = :accountId', { accountId: account.id })
-				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
-					broadcast: '%@broadcast%',
-				})
-				.andWhere('LOWER(conversation.providerChatId) NOT LIKE :status', {
-					status: '%status@%',
-				});
-			if (!canSeeAll) {
-				qb.andWhere('conversation.assignedUserId = :userId', { userId: user.id });
-			}
-			const row = await qb.getRawOne();
-			totalUnread += Number(row?.totalUnread) || 0;
-			unreadConversations += Number(row?.unreadConversations) || 0;
+			const access = accessByAccountId.get(account.id);
+			const canSeeAll = this.canSeeAllConversations(user, {
+				account,
+				canManage: account.ownerAdminId === user.id || Boolean(access?.canManage),
+				canAssign: account.ownerAdminId === user.id || Boolean(access?.canAssign),
+			});
+			(canSeeAll ? seeAllIds : assignedOnlyIds).push(account.id);
 		}
-
-		return { totalUnread, unreadConversations };
+		const visibility: string[] = [];
+		if (seeAllIds.length) visibility.push('conversation.accountId IN (:...seeAllIds)');
+		if (assignedOnlyIds.length) {
+			visibility.push(
+				'(conversation.accountId IN (:...assignedOnlyIds) AND conversation.assignedUserId = :userId)',
+			);
+		}
+		const row = await this.conversationRepo
+			.createQueryBuilder('conversation')
+			.select('COALESCE(SUM(conversation.unreadCount), 0)', 'totalUnread')
+			.addSelect(`COUNT(*) FILTER (WHERE conversation.unreadCount > 0)`, 'unreadConversations')
+			.where(`(${visibility.join(' OR ')})`, { seeAllIds, assignedOnlyIds, userId: user.id })
+			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
+				broadcast: '%@broadcast%',
+			})
+			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :status', {
+				status: '%status@%',
+			})
+			.getRawOne();
+		return {
+			totalUnread: Number(row?.totalUnread) || 0,
+			unreadConversations: Number(row?.unreadConversations) || 0,
+		};
 	}
 
 	async assertAccountPermission(
@@ -160,7 +231,9 @@ export class WhatsAppAccessService {
 		accountId: string,
 		permission: WhatsAppAccountPermission = 'canView',
 	) {
-		const { account, ...access } = await this.getAccountAccess(user, accountId);
+		const { account, ...access } = await this.getAccountAccess(user, accountId, {
+			fresh: permission === 'canManage',
+		});
 		if (!access?.[permission]) {
 			throw new ForbiddenException(`WhatsApp account permission denied: ${permission}`);
 		}
@@ -170,7 +243,9 @@ export class WhatsAppAccessService {
 	async assertConversationVisible(user: User, conversationId: string) {
 		const conversation = await this.conversationRepo.findOne({
 			where: { id: conversationId },
-			relations: ['contact', 'group', 'group.participants', 'assignedUser'],
+			// Group participants are read through `participantRepo` where needed; loading
+			// them here cost a join on every messages / watch / attachment request.
+			relations: ['contact', 'group', 'assignedUser'],
 		});
 		if (!conversation) throw new NotFoundException('WhatsApp conversation not found');
 		const accountAccess = await this.getAccountAccess(user, conversation.accountId);
@@ -237,6 +312,7 @@ export class WhatsAppAccessService {
 			row.notificationsEnabled = settings.notificationsEnabled;
 		}
 		await this.accessRepo.save(row);
+		this.invalidateAccount(accountId);
 		return getWhatsAppNotificationPreferences(row);
 	}
 
@@ -318,6 +394,7 @@ export class WhatsAppAccessService {
 				);
 			}
 		});
+		this.invalidateAccount(accountId);
 
 		return this.accessRepo.find({
 			where: { accountId },

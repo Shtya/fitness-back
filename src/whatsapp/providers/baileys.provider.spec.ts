@@ -3,11 +3,142 @@ import {
 	applyLiveChatUnread,
 	attachFullMediaUrls,
 	classifyBaileysDisconnect,
+	computeReconnectDelayMs,
+	RECONNECT_ALERT_AFTER,
 	isHistoryMessageUpsert,
 	mapBaileysMessageStatus,
 	shouldSkipMediaReupload,
 	shouldSyncFullHistory,
+	writeMediaStreamToFile,
 } from './baileys.provider';
+import { mkdtemp, readFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { Readable } from 'stream';
+
+describe('Baileys media streaming (audit A7)', () => {
+	it('writes the decrypted stream to disk chunk by chunk and reports the size', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'wa-media-'));
+		try {
+			const target = join(dir, 'clip.mp4.part');
+			const chunks = [Buffer.from('abc'), Buffer.from('defg'), Buffer.alloc(1024, 1)];
+			await expect(writeMediaStreamToFile(Readable.from(chunks), target)).resolves.toBe(1031);
+			expect((await readFile(target)).subarray(0, 7).toString()).toBe('abcdefg');
+			await expect(writeMediaStreamToFile(Readable.from([]), target)).resolves.toBe(0);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('Baileys reconnect backoff (audit P3)', () => {
+	it('grows exponentially with jitter and caps at 5 minutes', () => {
+		expect(computeReconnectDelayMs(1, 0, () => 0)).toBe(1_000);
+		expect(computeReconnectDelayMs(1, 0, () => 1)).toBe(2_000);
+		expect(computeReconnectDelayMs(4, 0, () => 1)).toBe(16_000);
+		expect(computeReconnectDelayMs(50, 0, () => 1)).toBe(300_000);
+		expect(computeReconnectDelayMs(50, 0, () => 0)).toBe(150_000);
+		expect(computeReconnectDelayMs(1, 8_000, () => 0)).toBe(8_000);
+	});
+
+	it('keeps retrying after repeated failures and alerts once instead of giving up', () => {
+		jest.useFakeTimers();
+		try {
+			const provider = new BaileysProvider('account-test') as any;
+			const events: any[] = [];
+			provider.onEvent((event: any) => events.push(event));
+			(provider as any).logger = { error: jest.fn(), warn: jest.fn(), debug: jest.fn() };
+			for (let i = 0; i < RECONNECT_ALERT_AFTER + 3; i += 1) {
+				provider.scheduleReconnect();
+				expect(provider.reconnectTimer).not.toBeNull();
+				clearTimeout(provider.reconnectTimer);
+				provider.reconnectTimer = null;
+			}
+			expect(provider.getState()).not.toBe('error');
+			const alerts = events.filter((event) => event.reason === 'reconnect_retrying');
+			expect(alerts).toHaveLength(1);
+			expect(provider.logger.error).toHaveBeenCalledTimes(1);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+});
+
+describe('Baileys in-memory message cache bounds (audit A6)', () => {
+	const remember = (provider: any, chatIndex: number, messageIndex: number) =>
+		provider.rememberMessage({
+			chatId: `20100000${String(chatIndex).padStart(4, '0')}@c.us`,
+			providerMessageId: `c${chatIndex}-m${messageIndex}`,
+			fromMe: true,
+			type: 'text',
+			text: 'x',
+			timestamp: new Date(1_700_000_000_000 + messageIndex * 1000),
+		});
+
+	it('caps the total remembered messages across chats, evicting least-recent chats first', () => {
+		const provider = new BaileysProvider('account-test') as any;
+		for (let chat = 0; chat < 120; chat += 1) {
+			for (let message = 0; message < 400; message += 1) remember(provider, chat, message);
+		}
+		let total = 0;
+		for (const bucket of provider.messagesByChat.values()) total += bucket.size;
+
+		expect(total).toBeLessThanOrEqual(40_000);
+		expect(provider.rememberedMessageCount).toBe(total);
+		expect(provider.messagesByChat.has('201000000119@c.us')).toBe(true);
+		expect(provider.messagesByChat.has('201000000000@c.us')).toBe(false);
+	});
+
+	it('keeps the counter exact across per-chat trims, duplicates and deletes', async () => {
+		const provider = new BaileysProvider('account-test') as any;
+		for (let message = 0; message < 520; message += 1) remember(provider, 1, message);
+		remember(provider, 1, 519);
+		expect(provider.rememberedMessageCount).toBe(500);
+
+		provider.socket = {};
+		provider.state = 'connected';
+		await provider.deleteMessage('201000000001@c.us', 'c1-m519', 'local');
+		expect(provider.rememberedMessageCount).toBe(499);
+	});
+});
+
+describe('Baileys retry receipts and group metadata (audit P3)', () => {
+	it('serves getMessage from memory first, then the persisted lookup', async () => {
+		const provider = new BaileysProvider('account-test') as any;
+		provider.rawByMessageId.set('MEM', { key: { id: 'MEM' }, message: { conversation: 'memory' } });
+		const lookup = jest.fn().mockResolvedValue({ text: 'from db', raw: null });
+		provider.setMessageLookup(lookup);
+
+		await expect(provider.getMessageForRetry({ id: 'MEM' })).resolves.toEqual({ conversation: 'memory' });
+		expect(lookup).not.toHaveBeenCalled();
+		await expect(provider.getMessageForRetry({ id: 'DB' })).resolves.toEqual({ conversation: 'from db' });
+		expect(lookup).toHaveBeenCalledWith('DB');
+		await expect(provider.getMessageForRetry({ id: '' })).resolves.toBeUndefined();
+	});
+
+	it('returns undefined when the lookup fails', async () => {
+		const provider = new BaileysProvider('account-test') as any;
+		provider.logger = { warn: jest.fn() };
+		provider.setMessageLookup(jest.fn().mockRejectedValue(new Error('db down')));
+		await expect(provider.getMessageForRetry({ id: 'X' })).resolves.toBeUndefined();
+		expect(provider.logger.warn).toHaveBeenCalled();
+	});
+
+	it('caches group metadata once and ignores non-group jids', async () => {
+		const provider = new BaileysProvider('account-test') as any;
+		const meta = { id: '1@g.us', participants: [{ id: 'a@s.whatsapp.net' }] };
+		provider.socket = { groupMetadata: jest.fn().mockResolvedValue(meta) };
+
+		await expect(provider.getCachedGroupMetadata('1@g.us')).resolves.toBe(meta);
+		await expect(provider.getCachedGroupMetadata('1@g.us')).resolves.toBe(meta);
+		expect(provider.socket.groupMetadata).toHaveBeenCalledTimes(1);
+		await expect(provider.getCachedGroupMetadata('201@s.whatsapp.net')).resolves.toBeUndefined();
+
+		provider.groupMetadataCache.del('1@g.us');
+		await provider.getCachedGroupMetadata('1@g.us');
+		expect(provider.socket.groupMetadata).toHaveBeenCalledTimes(2);
+	});
+});
 
 describe('BaileysProvider inbox lookup', () => {
 	it('returns messages stored under LID when querying the phone JID', async () => {

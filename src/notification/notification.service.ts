@@ -8,17 +8,10 @@ import { ExpoPushService } from './expo-push.service';
 import { BadgeService } from './badge.service';
 import { NOTIFICATION_CHANNELS } from './notification-channels';
 import { WebPushService } from './web-push.service';
+import { parsePagination } from 'common/pagination';
 
 export function normalizePagination(pageInput?: number | string, limitInput?: number | string, maxLimit = 100) {
-	const pageNum = Number(pageInput);
-	const limitNum = Number(limitInput);
-
-	const page = Number.isFinite(pageNum) && pageNum > 0 ? Math.floor(pageNum) : 1;
-	const takeRaw = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : 20;
-
-	const take = Math.min(takeRaw, maxLimit);
-	const skip = (page - 1) * take;
-
+	const { page, take, skip } = parsePagination(pageInput, limitInput, { maxLimit });
 	return { page, take, skip };
 }
 

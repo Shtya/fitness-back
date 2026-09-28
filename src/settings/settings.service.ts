@@ -1,8 +1,9 @@
 // src/modules/settings/settings.service.ts
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { GymSettings, DhikrItem, ReminderSetting } from 'entities/settings.entity';
+import { UserRole } from 'entities/global.entity';
 import { UpdateSettingsDto } from './settings.dto';
 
 @Injectable()
@@ -69,6 +70,26 @@ export class SettingsService {
 
   async get(adminId: string): Promise<GymSettings> {
     return this.getOrCreate(adminId);
+  }
+
+  /**
+   * Own row, or the row of the requester's own admin (team theme / coach AI tools).
+   * Other organisations' settings — and the AI key for clients — are never returned.
+   */
+  async getForRequester(
+    requester: { id: string; role?: string; adminId?: string | null },
+    requestedId?: string | null,
+  ): Promise<GymSettings> {
+    const targetId = String(requestedId || requester.id);
+    const isSelf = targetId === String(requester.id);
+    const isOwnAdmin = Boolean(requester.adminId) && targetId === String(requester.adminId);
+    const isSuperAdmin = requester.role === UserRole.SUPER_ADMIN;
+    if (!isSelf && !isOwnAdmin && !isSuperAdmin) {
+      throw new ForbiddenException('Settings access denied');
+    }
+    const settings = await this.getOrCreate(targetId);
+    if (isSelf || isSuperAdmin || requester.role === UserRole.COACH) return settings;
+    return { ...settings, aiSecretKey: null } as GymSettings;
   }
 
   async update(adminId: string, dto: UpdateSettingsDto): Promise<GymSettings> {

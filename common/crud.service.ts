@@ -10,10 +10,12 @@ export interface CustomPaginatedResponse<T> {
   records: T[];
 }
 
+const SAFE_FILTER_PATH = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+
 export class CRUD {
   static async findAll<T>(repository: Repository<T>, entityName: string, search?: string, page: any = 1, limit: any = 10, sortBy?: string, sortOrder: 'ASC' | 'DESC' = 'DESC', relations?: string[], searchFields?: string[], filters?: Record<string, any>): Promise<CustomPaginatedResponse<T>> {
-    const pageNumber = Number(page) || 1;
-    const limitNumber = Number(limit) || 10;
+    const pageNumber = Math.floor(Number(page) || 1);
+    const limitNumber = Math.floor(Number(limit) || 10);
 
     if (isNaN(pageNumber) || isNaN(limitNumber) || pageNumber < 1 || limitNumber < 1) {
       throw new BadRequestException('Pagination parameters must be valid numbers greater than 0.');
@@ -42,6 +44,9 @@ export class CRUD {
     if (filters && Object.keys(filters).length > 0) {
       const flatFilters = flatten(filters);
       Object.entries(flatFilters).forEach(([flatKey, value]) => {
+        if (!SAFE_FILTER_PATH.test(flatKey)) {
+          throw new BadRequestException(`Invalid filter field: '${flatKey}'`);
+        }
         if (value !== null && value !== undefined && value !== '') {
           const paramKey = flatKey.replace(/\./g, '_');
           query.andWhere(`${entityName}.${flatKey} = :${paramKey}`, {

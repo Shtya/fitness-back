@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { readFileHeader } from './whatsapp-media-decode';
 
 function isOggBuffer(buffer: Buffer): boolean {
 	return Boolean(buffer?.length >= 4 && buffer.subarray(0, 4).toString('ascii') === 'OggS');
@@ -315,10 +316,7 @@ export function looksLikeOutgoingVoiceUpload(
 
 export async function isValidWhatsAppVoiceOggFile(filePath: string): Promise<boolean> {
 	try {
-		const buffer = await fs.readFile(filePath);
-		if (!buffer?.length || buffer.subarray(0, 4).toString('ascii') !== 'OggS') {
-			return false;
-		}
+		if (!isOggBuffer(await readFileHeader(filePath, 4))) return false;
 		const seconds = await probeAudioSeconds(filePath);
 		return seconds > 0;
 	} catch {

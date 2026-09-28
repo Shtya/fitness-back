@@ -18,6 +18,7 @@ import {
 	WhatsAppConversation,
 	WhatsAppConversationAssignment,
 } from '../entities/whatsapp.entity';
+import { toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -115,11 +116,8 @@ export class WhatsAppAssignmentService {
 			previousUserId: currentUserId || null,
 			assignedBy: { id: actor.id, name: actor.name },
 		};
-		this.gateway.emitAccountEvent(
-			conversation.accountId,
-			'conversation_assignment',
-			payload,
-		);
+		// Unscoped on purpose: the previous assignee must learn they lost the chat.
+		// A single emit to [conversation room, account room] delivers once per socket.
 		this.gateway.emitConversationEvent(
 			conversationId,
 			'conversation_assignment',
@@ -157,11 +155,16 @@ export class WhatsAppAssignmentService {
 
 	async history(user: User, conversationId: string) {
 		await this.accessConversation(user, conversationId);
-		return this.assignmentRepo.find({
+		const rows = await this.assignmentRepo.find({
 			where: { conversationId },
 			relations: ['assignedUser', 'assignedByUser'],
 			order: { created_at: 'DESC' },
 		});
+		return rows.map(row => ({
+			...row,
+			assignedUser: toWhatsAppClientUser(row.assignedUser),
+			assignedByUser: toWhatsAppClientUser(row.assignedByUser),
+		}));
 	}
 
 	private async accessConversation(user: User, conversationId: string) {

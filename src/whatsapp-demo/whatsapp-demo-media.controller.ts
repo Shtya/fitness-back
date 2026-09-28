@@ -7,7 +7,6 @@ import {
   Post,
   Req,
   Res,
-  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -18,6 +17,7 @@ import { memoryStorage } from 'multer';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { WhatsAppDemoService } from './whatsapp-demo.service';
+import { quietStreamableFile } from '../whatsapp/utils/whatsapp-stream-errors';
 
 @Controller('whatsapp-demo')
 @UseGuards(JwtAuthGuard)
@@ -54,7 +54,7 @@ export class WhatsAppDemoMediaController {
       `inline; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
     );
     response.setHeader('Cache-Control', 'private, max-age=300');
-    return new StreamableFile(createReadStream(absolutePath));
+    return quietStreamableFile(createReadStream(absolutePath));
   }
 
   @Delete('attachments/:attachmentId')

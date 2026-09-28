@@ -139,6 +139,7 @@ export class WhatsAppConversationsController {
 		@Query('filter') filter = 'all',
 		@Query('assignedUserId') assignedUserId = '',
 		@Query('kind') kind = '',
+		@Query('updatedSince') updatedSince = '',
 	) {
 		return this.sync.listConversations(
 			req.user,
@@ -149,6 +150,7 @@ export class WhatsAppConversationsController {
 			filter,
 			assignedUserId,
 			kind,
+			updatedSince,
 		);
 	}
 
@@ -759,22 +761,18 @@ export class WhatsAppConversationsController {
 			),
 		].slice(0, 60);
 		const userId = String(req.user?.id || '');
-		const items = await Promise.all(
-			ids.map(async (attachmentId) => {
-				try {
-					const attachment = await this.sync.assertAttachmentVisible(req.user, attachmentId);
-					this.sync.warmAttachment(req.user, attachmentId, attachment);
-					const signed = signMediaToken(attachmentId, userId);
-					return {
-						attachmentId,
-						url: signedMediaPath(attachmentId, signed.token),
-						expiresAt: signed.expiresAt,
-					};
-				} catch {
-					return null;
-				}
-			}),
-		);
-		return { items: items.filter(Boolean) };
+		const visible = await this.sync.visibleAttachmentsById(req.user, ids);
+		const items = ids
+			.filter((attachmentId) => visible.has(attachmentId))
+			.map((attachmentId) => {
+				this.sync.warmAttachment(req.user, attachmentId, visible.get(attachmentId));
+				const signed = signMediaToken(attachmentId, userId);
+				return {
+					attachmentId,
+					url: signedMediaPath(attachmentId, signed.token),
+					expiresAt: signed.expiresAt,
+				};
+			});
+		return { items };
 	}
 }

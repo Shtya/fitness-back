@@ -15,6 +15,7 @@ import {
 import type { Response } from 'express';
 import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
+import { pipeFileToResponse } from '../utils/whatsapp-stream-errors';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
@@ -112,7 +113,7 @@ export class WhatsAppMediaLibraryController {
 		res.setHeader('Accept-Ranges', 'bytes');
 		// Private: the response is per-user and the URL carries no signature.
 		res.setHeader('Cache-Control', 'private, max-age=600');
-		createReadStream(absolutePath).pipe(res);
+		pipeFileToResponse(createReadStream(absolutePath), res);
 	}
 
 	@Post('items/:itemId/send')

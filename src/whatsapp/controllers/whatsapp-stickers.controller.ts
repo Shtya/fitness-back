@@ -7,7 +7,6 @@ import {
 	Post,
 	Req,
 	Res,
-	StreamableFile,
 	UploadedFile,
 	UseGuards,
 	UseInterceptors,
@@ -20,6 +19,7 @@ import { randomUUID } from 'crypto';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { WhatsAppStickersService } from '../services/whatsapp-stickers.service';
+import { quietStreamableFile } from '../utils/whatsapp-stream-errors';
 
 const STICKER_TYPES = new Set(['image/webp', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif']);
 
@@ -77,7 +77,7 @@ export class WhatsAppStickersController {
 			'Content-Disposition',
 			`inline; filename="${encodeURIComponent(file.fileName)}"`,
 		);
-		return new StreamableFile(file.stream);
+		return quietStreamableFile(file.stream);
 	}
 
 	@Delete(':stickerId')

@@ -293,3 +293,57 @@ export function reviveBaileysWaMessage(raw: any) {
 		...(raw.pushName ? { pushName: raw.pushName } : {}),
 	};
 }
+
+/**
+ * Rebuild message content from a persisted row so Baileys can answer a retry
+ * receipt (`getMessage`). Only plain string/number fields and revived media
+ * byte fields are returned, so the result is safe to protobuf-encode.
+ */
+export function buildBaileysRetryMessage(
+	stored: { text?: string | null; raw?: any } | null | undefined,
+): Record<string, unknown> | undefined {
+	if (!stored) return undefined;
+	const media = reviveBaileysWaMessage(stored.raw);
+	if (media?.message) return media.message;
+	const content = stored.raw?.message ? unwrapBaileysContent(stored.raw.message) || {} : {};
+	if (content.contactMessage) {
+		return {
+			contactMessage: {
+				displayName: content.contactMessage.displayName,
+				vcard: content.contactMessage.vcard,
+			},
+		};
+	}
+	if (content.contactsArrayMessage) {
+		return {
+			contactsArrayMessage: {
+				displayName: content.contactsArrayMessage.displayName,
+				contacts: (content.contactsArrayMessage.contacts || []).map((entry: any) => ({
+					displayName: entry?.displayName,
+					vcard: entry?.vcard,
+				})),
+			},
+		};
+	}
+	const location = content.locationMessage;
+	const latitude = Number(location?.degreesLatitude);
+	const longitude = Number(location?.degreesLongitude);
+	if (location && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+		return {
+			locationMessage: {
+				degreesLatitude: latitude,
+				degreesLongitude: longitude,
+				...(typeof location.name === 'string' ? { name: location.name } : {}),
+				...(typeof location.address === 'string' ? { address: location.address } : {}),
+			},
+		};
+	}
+	const text =
+		typeof content.extendedTextMessage?.text === 'string'
+			? content.extendedTextMessage.text
+			: typeof content.conversation === 'string'
+				? content.conversation
+				: stored.text;
+	if (typeof text !== 'string' || !text.trim()) return undefined;
+	return { conversation: text };
+}

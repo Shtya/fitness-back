@@ -14,7 +14,7 @@ const ents = require('../src/phone-intelligence/entities/phone-intelligence.enti
     password: process.env.DATABASE_PASSWORD,
     database: process.env.DATABASE_NAME,
     ssl: { rejectUnauthorized: false },
-    synchronize: true,
+    synchronize: false,
     entities: [
       ents.PhoneLookup,
       ents.PhoneReport,
@@ -23,7 +23,7 @@ const ents = require('../src/phone-intelligence/entities/phone-intelligence.enti
     ],
   });
   await ds.initialize();
-  console.log('sync OK');
+  console.log('connected (read-only check, schema changes ship as SQL migrations)');
   const tables = await ds.query(`
     SELECT tablename
     FROM pg_tables

@@ -72,6 +72,7 @@ import { WhatsAppGateway } from './gateways/whatsapp.gateway';
 import { WhatsAppAssignmentService } from './services/whatsapp-assignment.service';
 import { WhatsAppSyncService } from './services/whatsapp-sync.service';
 import { WhatsAppContactPresenceService } from './services/whatsapp-contact-presence.service';
+import { WhatsAppPersistDeadLetterService } from './services/whatsapp-persist-dead-letter.service';
 import { WhatsAppStatusService } from './services/whatsapp-status.service';
 import { WhatsAppReportsService } from './services/whatsapp-reports.service';
 import { WhatsAppSchemaService } from './services/whatsapp-schema.service';
@@ -170,6 +171,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppProviderManagerService,
 		WhatsAppSyncService,
 		WhatsAppContactPresenceService,
+		WhatsAppPersistDeadLetterService,
 		WhatsAppAssignmentService,
 		WhatsAppStatusService,
 		WhatsAppReportsService,

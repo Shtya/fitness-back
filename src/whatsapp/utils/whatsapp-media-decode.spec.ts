@@ -2,7 +2,29 @@ import {
 	decodeProviderMedia,
 	isIncompleteChatImageDownload,
 	isIncompleteStatusMedia,
+	readFileHeader,
 } from './whatsapp-media-decode';
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+describe('readFileHeader (audit A7)', () => {
+	it('returns only the requested prefix, or the whole file when shorter', async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-header-'));
+		const big = path.join(dir, 'big.bin');
+		await fs.writeFile(big, Buffer.concat([Buffer.from('OggS'), Buffer.alloc(4096, 1)]));
+		const small = path.join(dir, 'small.bin');
+		await fs.writeFile(small, Buffer.from('ab'));
+
+		const header = await readFileHeader(big, 256);
+		expect(header.length).toBe(256);
+		expect(header.subarray(0, 4).toString('ascii')).toBe('OggS');
+		expect((await readFileHeader(small, 256)).toString('ascii')).toBe('ab');
+		await expect(readFileHeader(path.join(dir, 'missing.bin'), 4)).rejects.toThrow();
+
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+});
 
 describe('decodeProviderMedia', () => {
 	it('returns a Buffer payload without re-encoding it as base64', () => {

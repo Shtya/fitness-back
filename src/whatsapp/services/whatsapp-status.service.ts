@@ -61,6 +61,7 @@ function isUuid(value: unknown) {
  * throttled.
  */
 const STATUS_AUDIENCE_LIMIT = 800;
+const STATUS_PRUNE_INTERVAL_MS = 5 * 60_000;
 
 type StatusRow = WhatsAppStatus | WhatsAppStatusHistory;
 type StatusRowSource = 'active' | 'history';
@@ -69,6 +70,7 @@ type StatusRowSource = 'active' | 'history';
 
 export class WhatsAppStatusService {
 	private readonly logger = new Logger(WhatsAppStatusService.name);
+	private readonly lastPruneAt = new Map<string, number>();
 
 	constructor(
 		@InjectRepository(WhatsAppStatus)
@@ -218,8 +220,18 @@ export class WhatsAppStatusService {
 	}
 
 	private async archiveStatusRow(row: StatusRow) {
+		await this.archiveStatusRows([row]);
+	}
+
+	private async archiveStatusRows(rows: StatusRow[]) {
+		if (!rows.length) return;
+		const archivedAt = new Date();
+		// One INSERT … ON CONFLICT cannot touch the same key twice.
+		const unique = [
+			...new Map(rows.map(row => [`${row.accountId}:${row.providerStatusId}`, row])).values(),
+		];
 		await this.historyRepo.upsert(
-			{
+			unique.map(row => ({
 				accountId: row.accountId,
 				providerStatusId: row.providerStatusId,
 				senderWaId: row.senderWaId,
@@ -229,8 +241,8 @@ export class WhatsAppStatusService {
 				publishedAt: row.publishedAt,
 				expiresAt: row.expiresAt,
 				mediaPath: row.mediaPath,
-				archivedAt: new Date(),
-			},
+				archivedAt,
+			})),
 			['accountId', 'providerStatusId'],
 		);
 	}
@@ -242,12 +254,27 @@ export class WhatsAppStatusService {
 			.andWhere('status.expiresAt IS NOT NULL')
 			.andWhere('status.expiresAt <= :now', { now: new Date() })
 			.getMany();
-		for (const row of expired) {
-			await this.archiveStatusRow(row);
-		}
-		if (expired.length) {
-			await this.repo.delete(expired.map(row => row.id));
-		}
+		if (!expired.length) return;
+		await this.archiveStatusRows(expired);
+		await this.repo.delete(expired.map(row => row.id));
+	}
+
+	/**
+	 * Reads already exclude expired rows, so archiving is housekeeping:
+	 * run it off the request path, at most once per interval per account.
+	 */
+	private schedulePrune(accountId: string) {
+		const last = this.lastPruneAt.get(accountId) || 0;
+		if (Date.now() - last < STATUS_PRUNE_INTERVAL_MS) return;
+		this.lastPruneAt.set(accountId, Date.now());
+		void this.pruneExpiredStatuses(accountId).catch(error => {
+			this.lastPruneAt.delete(accountId);
+			this.logger.warn(
+				`Status prune failed for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		});
 	}
 
 	private async upsertProviderStatuses(
@@ -360,7 +387,7 @@ export class WhatsAppStatusService {
 
 	async list(user: User, accountId: string, refresh = false, debug = false) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
-		await this.pruneExpiredStatuses(accountId);
+		this.schedulePrune(accountId);
 		const contactNames = new Map<string, string>();
 		let provider = this.providers.getProvider(accountId);
 		let providerState = provider?.getState() || this.providers.getProviderState(accountId);
@@ -510,9 +537,7 @@ export class WhatsAppStatusService {
 		const historyCount = await this.historyRepo.count({ where: { accountId } });
 		if (!historyCount) {
 			const activeRows = await this.repo.find({ where: { accountId }, take: 500 });
-			for (const row of activeRows) {
-				await this.archiveStatusRow(row);
-			}
+			await this.archiveStatusRows(activeRows);
 		}
 		const items = await this.historyRepo
 			.createQueryBuilder('status')

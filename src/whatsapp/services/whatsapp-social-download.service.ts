@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { existsSync, promises as fs } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { Repository } from 'typeorm';
 import type { User } from '../../../entities/global.entity';
@@ -18,6 +19,7 @@ import {
 	findSocialVideoUrlInText,
 	isRetryableSocialDownloadFailure,
 	resolveSocialPathInsideRoot,
+	socialCookiesEnvKey,
 	socialDownloadAttempts,
 	socialDownloadRelativePath,
 	socialDownloadTitle,
@@ -228,10 +230,12 @@ export class WhatsAppSocialDownloadService {
 		this.running.add(rowId);
 		const relativePath = socialDownloadRelativePath(userId);
 		const absolutePath = resolveSocialPathInsideRoot(mediaRoot(), relativePath);
+		let cookiesFile: string | null = null;
 		try {
 			if (!absolutePath) throw new Error('Invalid social download storage path');
 			await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-			await this.attemptDownload(url, absolutePath, platform);
+			cookiesFile = await this.prepareCookiesFile(platform, rowId);
+			await this.attemptDownload(url, absolutePath, platform, cookiesFile);
 
 			const stat = await fs.stat(absolutePath);
 			if (!stat.size) throw new Error('Downloader produced an empty file');
@@ -256,6 +260,7 @@ export class WhatsAppSocialDownloadService {
 			const message = describeSocialDownloadFailure(
 				error?.stderr || error?.message || '',
 				typeof error?.exitCode === 'number' ? error.exitCode : null,
+				{ platform, usedCookies: Boolean(cookiesFile) },
 			);
 			// The downloader's own output is the only useful part of this failure; without
 			// it the log says "yt-dlp failed" and nobody can tell why.
@@ -270,8 +275,28 @@ export class WhatsAppSocialDownloadService {
 				.update(rowId, { status: 'failed', errorMessage: message, completedAt: new Date() })
 				.catch(() => undefined);
 		} finally {
+			if (cookiesFile) await fs.rm(cookiesFile, { force: true }).catch(() => undefined);
 			this.running.delete(rowId);
 		}
+	}
+
+	/**
+	 * A private copy of the platform's cookies.txt for one run, or `null` if none is
+	 * configured. yt-dlp rewrites its cookie jar on exit, so concurrent runs must not
+	 * share (or corrupt) the operator's file.
+	 */
+	private async prepareCookiesFile(platform: SocialPlatform, rowId: string): Promise<string | null> {
+		const envKey = socialCookiesEnvKey(platform);
+		const source = process.env[envKey]?.trim();
+		if (!source) return null;
+		if (!existsSync(source)) {
+			this.logger.warn(`${envKey} is set but the file does not exist; downloading without a session`);
+			return null;
+		}
+		const copy = path.join(os.tmpdir(), `so7ba-social-cookies-${rowId}.txt`);
+		await fs.copyFile(source, copy);
+		await fs.chmod(copy, 0o600).catch(() => undefined);
+		return copy;
 	}
 
 	/**
@@ -282,10 +307,16 @@ export class WhatsAppSocialDownloadService {
 	 * ladder is only walked for failures that can actually change outcome — a private
 	 * post is not requested three times.
 	 */
-	private async attemptDownload(url: string, outputPath: string, platform: SocialPlatform) {
+	private async attemptDownload(
+		url: string,
+		outputPath: string,
+		platform: SocialPlatform,
+		cookiesFile: string | null = null,
+	) {
 		const attempts = socialDownloadAttempts(platform, {
 			tiktokApiHostname: process.env.YTDLP_TIKTOK_API_HOSTNAME || undefined,
 			userAgent: process.env.YTDLP_USER_AGENT || undefined,
+			cookiesFile,
 		});
 		let lastError: any;
 		for (const [index, extraArgs] of attempts.entries()) {

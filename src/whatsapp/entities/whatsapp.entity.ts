@@ -151,6 +151,8 @@ export class WhatsAppProviderSession extends CoreEntity {
 
 @Entity('whatsapp_contacts')
 @Unique('uq_whatsapp_contact_account_wa_id', ['accountId', 'waId'])
+// Expression index from migrations/20260928_whatsapp_p2_indexes.sql; TypeORM must not manage it.
+@Index('idx_whatsapp_contacts_account_phone_digits', { synchronize: false })
 export class WhatsAppContact extends CoreEntity {
 	@Index()
 	@Column({ name: 'account_id', type: 'uuid' })
@@ -257,6 +259,7 @@ export class WhatsAppConversation extends CoreEntity {
 	@Column({ name: 'provider_chat_id', type: 'varchar', length: 160 })
 	providerChatId: string;
 
+	@Index('idx_whatsapp_conversations_contact_id')
 	@Column({ name: 'contact_id', type: 'uuid', nullable: true })
 	contactId: string | null;
 

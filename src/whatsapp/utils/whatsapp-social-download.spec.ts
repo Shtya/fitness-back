@@ -10,6 +10,7 @@ import {
 	isRetryableSocialDownloadFailure,
 	lastSocialDownloadError,
 	normalizeSocialVideoUrl,
+	socialCookiesEnvKey,
 	socialDownloadAttempts,
 	resolveSocialPathInsideRoot,
 	socialDownloadRelativePath,
@@ -180,6 +181,24 @@ describe('describeSocialDownloadFailure', () => {
 		expect(message).not.toContain('exit 1');
 	});
 
+	it('does not call a public Instagram post private when no session is configured', () => {
+		const stderr =
+			'ERROR: [Instagram] DaT4Nh5TODw: Instagram sent an empty media response. Check if this post is accessible in your browser without being logged-in. If it is not, then use --cookies-from-browser or --cookies for the authentication.';
+		const message = describeSocialDownloadFailure(stderr, 1, { platform: 'instagram' });
+		expect(message).not.toMatch(/private/i);
+		expect(message).toContain('YTDLP_INSTAGRAM_COOKIES');
+		expect(isRetryableSocialDownloadFailure(stderr)).toBe(false);
+	});
+
+	it('blames privacy or an expired session once cookies were used', () => {
+		const message = describeSocialDownloadFailure('ERROR: login required', 1, {
+			platform: 'instagram',
+			usedCookies: true,
+		});
+		expect(message).toMatch(/private/i);
+		expect(message).toMatch(/expired/i);
+	});
+
 	it('falls back to a generic message with the exit code', () => {
 		expect(describeSocialDownloadFailure('something odd', 2)).toContain('exit 2');
 		expect(describeSocialDownloadFailure('', null)).not.toContain('exit');
@@ -216,6 +235,20 @@ describe('socialDownloadAttempts', () => {
 		});
 		expect(attempts[1]).toContain('Custom/1.0');
 		expect(attempts[2]).toContain('tiktok:api_hostname=api99.example.com');
+	});
+
+	it('tries a configured cookies session first, then the anonymous rungs', () => {
+		const attempts = socialDownloadAttempts('instagram', { cookiesFile: '/tmp/ig.txt' });
+		expect(attempts[0]).toEqual(['--cookies', '/tmp/ig.txt']);
+		expect(attempts.slice(1)).toEqual(socialDownloadAttempts('instagram'));
+		expect(socialDownloadAttempts('instagram', { cookiesFile: null })[0]).toEqual([]);
+		const args = buildSocialDownloadArgs('https://www.instagram.com/reel/x/', '/tmp/o.mp4', 1, '', attempts[0]);
+		expect(args.indexOf('--cookies')).toBeLessThan(args.indexOf('--'));
+	});
+
+	it('names the cookies env var per platform', () => {
+		expect(socialCookiesEnvKey('instagram')).toBe('YTDLP_INSTAGRAM_COOKIES');
+		expect(socialCookiesEnvKey('facebook')).toBe('YTDLP_FACEBOOK_COOKIES');
 	});
 
 	it('lands in the argument list before the url', () => {

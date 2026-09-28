@@ -12,7 +12,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
-import { User } from '../../../entities/global.entity';
+import { corsOriginDelegate } from 'common/cors-origin';
+import { User, UserRole } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 
 /**
@@ -26,30 +27,28 @@ export interface ConversationEventScope {
 	shared?: boolean;
 }
 
-function resolveWhatsAppGatewayCorsOrigin(): boolean | string | string[] {
-	const raw =
-		process.env.WHATSAPP_WS_CORS_ORIGIN ||
-		process.env.CORS_ORIGIN ||
-		process.env.FRONTEND_URL ||
-		'';
-	const trimmed = String(raw).trim();
-	if (!trimmed || trimmed === '*') {
-		// Dev default: reflect request origin. Production should set CORS_ORIGIN.
-		if (process.env.NODE_ENV === 'production') {
-			return process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-		}
-		return true;
-	}
-	if (trimmed.includes(',')) {
-		return trimmed.split(',').map((part) => part.trim()).filter(Boolean);
-	}
-	return trimmed;
+/** Every inbox watcher of the account (unscoped events). */
+export const accountRoom = (accountId: string) => `whatsapp:account:${accountId}`;
+/** Inbox watchers allowed to see every conversation of the account. */
+export const accountAllRoom = (accountId: string) => `whatsapp:account:${accountId}:all`;
+/** Inbox watchers limited to conversations assigned to `userId`. */
+export const accountAssigneeRoom = (accountId: string, userId: string) =>
+	`whatsapp:account:${accountId}:assigned:${userId}`;
+
+export function scopeRooms(accountId: string, scope: ConversationEventScope): string[] {
+	if (scope.shared) return [accountRoom(accountId)];
+	const rooms = [accountAllRoom(accountId)];
+	if (scope.assignedUserId) rooms.push(accountAssigneeRoom(accountId, String(scope.assignedUserId)));
+	return rooms;
 }
+
+/** setTimeout overflows above 2^31-1 ms (~24.8 days). */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 @WebSocketGateway({
 	namespace: '/whatsapp',
 	cors: {
-		origin: resolveWhatsAppGatewayCorsOrigin(),
+		origin: corsOriginDelegate('WHATSAPP_WS_CORS_ORIGIN'),
 		credentials: true,
 	},
 })
@@ -67,6 +66,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			lastSeenAt: number;
 		}
 	>();
+
+	private readonly tokenExpiryTimers = new Map<string, NodeJS.Timeout>();
 
 	@WebSocketServer()
 	server: Server;
@@ -90,8 +91,40 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		return null;
 	}
 
+	private isTokenExpired(client: Socket) {
+		const expiresAt = client.data?.tokenExpiresAt;
+		return typeof expiresAt === 'number' && Date.now() >= expiresAt;
+	}
+
+	/** Disconnect the socket when its JWT expires; the client reconnects with a refreshed token. */
+	private scheduleTokenExpiry(client: Socket) {
+		this.clearTokenExpiry(client);
+		const expiresAt = client.data?.tokenExpiresAt;
+		if (typeof expiresAt !== 'number') return;
+		const delay = Math.min(Math.max(expiresAt - Date.now(), 0), MAX_TIMER_DELAY_MS);
+		const timer = setTimeout(() => {
+			this.tokenExpiryTimers.delete(client.id);
+			if (!this.isTokenExpired(client)) {
+				this.scheduleTokenExpiry(client);
+				return;
+			}
+			client.emit('whatsapp:auth_expired');
+			client.disconnect(true);
+		}, delay);
+		timer.unref?.();
+		this.tokenExpiryTimers.set(client.id, timer);
+	}
+
+	private clearTokenExpiry(client: Socket) {
+		const timer = this.tokenExpiryTimers.get(client.id);
+		if (timer) clearTimeout(timer);
+		this.tokenExpiryTimers.delete(client.id);
+	}
+
 	private async resolveUser(client: Socket): Promise<User | null> {
-		if (client.data?.user?.id) return client.data.user as User;
+		if (client.data?.user?.id) {
+			return this.isTokenExpired(client) ? null : (client.data.user as User);
+		}
 
 		const token = this.extractToken(client);
 		if (!token) return null;
@@ -105,11 +138,18 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			const user = await this.userRepo.findOne({ where: { id: userId } });
 			if (!user) return null;
 			client.data.user = user;
+			client.data.tokenExpiresAt =
+				typeof decoded?.exp === 'number' ? decoded.exp * 1000 : null;
 			return user;
 		} catch (error) {
 			this.logger.warn(`WhatsApp socket auth failed for ${client.id}: ${String(error)}`);
 			return null;
 		}
+	}
+
+	/** Staff names, roles, and online times are visible to admins only. */
+	private canSeeStaffPresence(user?: User | null) {
+		return user?.role === UserRole.ADMIN || user?.role === UserRole.SUPER_ADMIN;
 	}
 
 	private presenceEntryFromUser(user: User) {
@@ -167,7 +207,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		entry.socketIds.add(client.id);
 		entry.lastSeenAt = Date.now();
 		client.data.presenceUserId = userId;
-		void client.join('whatsapp:presence');
+		if (this.canSeeStaffPresence(user)) void client.join('whatsapp:presence');
 		this.broadcastPresence();
 	}
 
@@ -202,9 +242,11 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		client.data.accountScopes = {};
 		client.join(`whatsapp:user:${user.id}`);
 		this.registerPresence(client, user);
+		this.scheduleTokenExpiry(client);
 	}
 
 	handleDisconnect(client: Socket) {
+		this.clearTokenExpiry(client);
 		this.unregisterPresence(client);
 		this.logger.debug(`WhatsApp socket disconnected: ${client.id}`);
 	}
@@ -220,7 +262,11 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 	}
 
 	@SubscribeMessage('whatsapp:presence:list')
-	presenceList() {
+	async presenceList(@ConnectedSocket() client: Socket) {
+		const user = await this.resolveUser(client);
+		if (!this.canSeeStaffPresence(user)) {
+			return { items: [], at: new Date().toISOString(), forbidden: true };
+		}
 		return this.getOnlinePresence();
 	}
 
@@ -239,14 +285,17 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		if (!access.canView) {
 			throw new ForbiddenException('WhatsApp account permission denied: canView');
 		}
-		// Recorded before the join so every socket in the room carries a scope.
-		// `emitConversationEvent` relies on that invariant to decide who may see a
-		// conversation without hitting the database on every inbound message.
+		// Scope is recorded and mapped to a sub-room at watch time, so scoped events
+		// are routed by room membership (no per-event fetchSockets / DB lookups).
 		if (!client.data.accountScopes) client.data.accountScopes = {};
-		client.data.accountScopes[accountId] = {
-			canSeeAll: this.accessService.canSeeAllConversations(user, access),
-		};
-		await client.join(`whatsapp:account:${accountId}`);
+		const canSeeAll = this.accessService.canSeeAllConversations(user, access);
+		const scopeRoom = canSeeAll
+			? accountAllRoom(accountId)
+			: accountAssigneeRoom(accountId, String(user.id));
+		const previousRoom = client.data.accountScopes[accountId]?.room;
+		client.data.accountScopes[accountId] = { canSeeAll, room: scopeRoom };
+		if (previousRoom && previousRoom !== scopeRoom) await client.leave(previousRoom);
+		await client.join([accountRoom(accountId), scopeRoom]);
 		return { ok: true };
 	}
 
@@ -255,8 +304,10 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		@ConnectedSocket() client: Socket,
 		@MessageBody() accountId: string,
 	) {
+		const scopeRoom = client.data?.accountScopes?.[accountId]?.room;
 		if (client.data?.accountScopes) delete client.data.accountScopes[accountId];
-		await client.leave(`whatsapp:account:${accountId}`);
+		await client.leave(accountRoom(accountId));
+		if (scopeRoom) await client.leave(scopeRoom);
 		return { ok: true };
 	}
 
@@ -298,12 +349,11 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		scope?: ConversationEventScope,
 	) {
 		const packet = { accountId, event, payload, at: new Date().toISOString() };
-		const room = `whatsapp:account:${accountId}`;
 		if (!scope) {
-			this.server?.to(room).emit('whatsapp:event', packet);
+			this.server?.to(accountRoom(accountId)).emit('whatsapp:event', packet);
 			return;
 		}
-		void this.emitScopedToAccount(room, null, accountId, packet, scope);
+		this.server?.to(scopeRooms(accountId, scope)).emit('whatsapp:event', packet);
 	}
 
 	emitConversationEvent(
@@ -327,80 +377,67 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			return;
 		}
 
-		const accountRoom = `whatsapp:account:${resolvedAccountId}`;
+		// Passing rooms as an array delivers the packet once even if the client
+		// joined several of them (open-chat room + inbox rooms).
 		if (!scope) {
-			// Passing rooms as an array delivers the packet once even if the client
-			// joined both the inbox room and the open-chat room.
-			this.server?.to([conversationRoom, accountRoom]).emit('whatsapp:event', packet);
+			this.server
+				?.to([conversationRoom, accountRoom(resolvedAccountId)])
+				.emit('whatsapp:event', packet);
 			return;
 		}
-
-		// Members of the conversation room already passed `assertConversationVisible`
-		// at watch time, so they are always allowed. `except` keeps them out of the
-		// scoped fan-out below so nobody receives the packet twice.
-		this.server?.to(conversationRoom).emit('whatsapp:event', packet);
-		void this.emitScopedToAccount(
-			accountRoom,
-			conversationRoom,
-			resolvedAccountId,
-			packet,
-			scope,
-		);
+		// Conversation-room members already passed `assertConversationVisible` at
+		// watch time. Inbox members get it by the same rule REST uses: canSeeAll
+		// members always, restricted members only for chats assigned to them.
+		this.server
+			?.to([conversationRoom, ...scopeRooms(resolvedAccountId, scope)])
+			.emit('whatsapp:event', packet);
 	}
 
 	/**
-	 * Inbox-room delivery filtered by the same rule REST uses
-	 * (`WhatsAppAccessService.assertConversationVisible`): a member who cannot see
-	 * all conversations only receives events for chats assigned to them. Without
-	 * this, `canView`-only staff received full message payloads for conversations
-	 * the REST inbox deliberately hides from them.
+	 * Account-wide snapshot whose items each belong to one conversation (e.g.
+	 * online contacts). Members who cannot see all conversations only receive
+	 * the items of chats assigned to them; assignees are resolved only when such
+	 * a member is in the room.
 	 */
-	private async emitScopedToAccount(
-		accountRoom: string,
-		excludeRoom: string | null,
+	async emitAccountSnapshotScoped<T extends { conversationId: string }>(
 		accountId: string,
-		packet: Record<string, unknown>,
-		scope: ConversationEventScope,
+		event: string,
+		snapshot: { items: T[] } & Record<string, unknown>,
+		resolveAssignees: (conversationIds: string[]) => Promise<Map<string, string | null>>,
 	) {
 		if (!this.server) return;
+		const room = accountRoom(accountId);
+		const at = new Date().toISOString();
 		try {
-			const target = excludeRoom
-				? this.server.in(accountRoom).except(excludeRoom)
-				: this.server.in(accountRoom);
-			const sockets = await target.fetchSockets();
-			for (const socket of sockets) {
-				if (this.socketMaySeeConversation(socket, accountId, scope)) {
-					socket.emit('whatsapp:event', packet);
-				}
+			this.server
+				.to(accountAllRoom(accountId))
+				.emit('whatsapp:event', { accountId, event, payload: snapshot, at });
+			const sockets = await this.server.in(room).except(accountAllRoom(accountId)).fetchSockets();
+			const restricted = sockets.filter((socket) => {
+				const entry = socket.data?.accountScopes?.[accountId];
+				return Boolean(entry) && !entry.canSeeAll;
+			});
+			if (!restricted.length) return;
+			const assignees = await resolveAssignees(snapshot.items.map((item) => item.conversationId));
+			for (const socket of restricted) {
+				const userId = String(socket.data?.user?.id || '');
+				const items = snapshot.items.filter(
+					(item) => Boolean(userId) && assignees.get(String(item.conversationId)) === userId,
+				);
+				socket.emit('whatsapp:event', {
+					accountId,
+					event,
+					payload: { ...snapshot, items },
+					at,
+				});
 			}
 		} catch (error) {
 			this.logger.warn(
-				`Scoped WhatsApp fan-out failed for ${accountRoom}: ${
+				`Scoped WhatsApp snapshot fan-out failed for ${room}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
 		}
-	}
-
-	private socketMaySeeConversation(
-		socket: { data?: any },
-		accountId: string,
-		scope: ConversationEventScope,
-	) {
-		if (scope.shared) return true;
-		const entry = socket.data?.accountScopes?.[accountId];
-		if (!entry) {
-			// Every join goes through `watchAccount`, which records the scope first.
-			// Reaching this means a new join path skipped it; drop the packet rather
-			// than leak, and make the bug visible.
-			this.logger.warn(
-				`WhatsApp socket in ${accountId} inbox room has no recorded scope; dropping event`,
-			);
-			return false;
-		}
-		if (entry.canSeeAll) return true;
-		const userId = socket.data?.user?.id;
-		return Boolean(scope.assignedUserId) && String(scope.assignedUserId) === String(userId);
 	}
 
 	emitToUser(userId: string, event: string, payload: any) {

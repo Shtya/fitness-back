@@ -37,6 +37,13 @@ lerna-debug.log*
 
 # dotenv environment variable files
 .env
+.env.*
+!.env.example
+
+# SSH / service credentials
+deploy-key
+deploy-key.pub
+*.pem
 # .env.development.local
 # .env.test.local
 # .env.production.local
@@ -51,9 +58,11 @@ pids
 *.pid
 *.seed
 *.pid.lock
-/uploads/whatsapp-media/
-/storage/whatsapp-media/
+# User-generated media (already-tracked files stay tracked until untracked per deploy/PRODUCTION-CHANGES.md §13).
+/uploads/
+/storage/
 /tokens/
+*cookies*.txt
 # Provisioned by `npm run yt-dlp:install`, not source.
 /tools/
 

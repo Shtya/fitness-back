@@ -63,13 +63,19 @@ import {
 	PaymentStatus,
 } from 'entities/billing.entity';
 
+function requiredEnv(name: string) {
+	const value = process.env[name];
+	if (!value) throw new Error(`Seeder requires ${name} in the environment`);
+	return value;
+}
+
 export const AppDataSource = new DataSource({
 	type: 'postgres',
-	host: 'aws-0-eu-central-1.pooler.supabase.com',
-	port: 5432,
-	username: 'postgres.sghvszzxubiyocwhfczj',
-	password: 'ahmedshtya-083',
-	database: 'gym-db',
+	host: requiredEnv('DATABASE_HOST'),
+	port: Number(process.env.DATABASE_PORT || 5432),
+	username: requiredEnv('DATABASE_USER'),
+	password: requiredEnv('DATABASE_PASSWORD'),
+	database: requiredEnv('DATABASE_NAME'),
 	entities: [__dirname + '/../**/*.entity{.ts,.js}'],
 	synchronize: false,
 });

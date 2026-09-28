@@ -5,7 +5,7 @@ import {
 	OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { RedisService } from '../../redis/redis.service';
 import {
 	WhatsAppContact,
@@ -88,6 +88,9 @@ export class WhatsAppContactPresenceService
 	private readonly lastSubscribeAt = new Map<string, number>();
 	private readonly lastRosterAt = new Map<string, number>();
 	private readonly subscribeInFlight = new Set<string>();
+	private readonly hydratedAccounts = new Set<string>();
+	private readonly hydrating = new Map<string, Promise<void>>();
+	private readonly pendingBroadcast = new Set<string>();
 	private pruneTimer: ReturnType<typeof setInterval> | null = null;
 	/** Debug counters (temporary — prove WA → Redis → Socket path). */
 	private presenceApplyCount = 0;
@@ -182,22 +185,14 @@ export class WhatsAppContactPresenceService
 				? this.onlineRedisTtlSec
 				: Math.ceil(this.offlineKeepMs / 1000);
 		try {
-			await this.redis.set(
+			await this.redis.setWithIndex(
 				this.redisKey(entry.accountId, entry.conversationId),
 				entry,
 				ttlSec,
+				this.redisIndexKey(entry.accountId),
+				entry.conversationId,
+				Math.max(ttlSec, this.onlineRedisTtlSec),
 			);
-			const client = (this.redis as any).client;
-			if (client?.sadd) {
-				await client.sadd(
-					this.redisIndexKey(entry.accountId),
-					entry.conversationId,
-				);
-				await client.expire(
-					this.redisIndexKey(entry.accountId),
-					Math.max(ttlSec, this.onlineRedisTtlSec),
-				);
-			}
 			this.logger.debug(
 				`[WHATSAPP PRESENCE] Redis SET key=${this.redisKey(
 					entry.accountId,
@@ -215,11 +210,22 @@ export class WhatsAppContactPresenceService
 
 	private async removePersisted(accountId: string, conversationId: string) {
 		try {
-			await this.redis.del(this.redisKey(accountId, conversationId));
-			const client = (this.redis as any).client;
-			if (client?.srem) {
-				await client.srem(this.redisIndexKey(accountId), conversationId);
-			}
+			await this.redis.delWithIndex(
+				[this.redisKey(accountId, conversationId)],
+				this.redisIndexKey(accountId),
+				[conversationId],
+			);
+		} catch {
+			/* Redis optional */
+		}
+	}
+
+	private async removePersistedAccount(accountId: string) {
+		try {
+			const indexKey = this.redisIndexKey(accountId);
+			const ids = await this.redis.sMembers(indexKey);
+			const keys = [...ids.map((id) => this.redisKey(accountId, id)), indexKey];
+			await this.redis.delWithIndex(keys, indexKey, []);
 		} catch {
 			/* Redis optional */
 		}
@@ -238,7 +244,7 @@ export class WhatsAppContactPresenceService
 		},
 	) {
 		if (!this.isDirectChat(conversation)) {
-			this.logger.log(
+			this.logger.debug(
 				`[WHATSAPP PRESENCE] DROP non-direct conversationId=${conversation?.id} chatId=${conversation?.providerChatId}`,
 			);
 			return;
@@ -283,7 +289,7 @@ export class WhatsAppContactPresenceService
 			accountId,
 			(this.presenceEventsByAccount.get(accountId) || 0) + 1,
 		);
-		this.logger.log(
+		this.logger.debug(
 			`[WHATSAPP PRESENCE]\n` +
 				`  Session: ${accountId}\n` +
 				`  Conversation: ${conversationId}\n` +
@@ -383,10 +389,10 @@ export class WhatsAppContactPresenceService
 		for (const [mapKey, entry] of this.byConversation) {
 			if (entry.accountId === accountId) {
 				this.byConversation.delete(mapKey);
-				void this.removePersisted(accountId, entry.conversationId);
 				changed = true;
 			}
 		}
+		void this.removePersistedAccount(accountId);
 		this.lastSubscribeAt.delete(accountId);
 		this.lastRosterAt.delete(accountId);
 		if (changed) this.broadcast(accountId);
@@ -450,34 +456,37 @@ export class WhatsAppContactPresenceService
 		}
 	}
 
+	/**
+	 * Memory is authoritative while the process lives; Redis only restores
+	 * presence after a restart, so each account is hydrated once.
+	 */
+	private ensureHydrated(accountId: string): Promise<void> {
+		if (this.hydratedAccounts.has(accountId)) return Promise.resolve();
+		let pending = this.hydrating.get(accountId);
+		if (!pending) {
+			pending = this.hydrateFromRedis(accountId).finally(() => {
+				this.hydrating.delete(accountId);
+			});
+			this.hydrating.set(accountId, pending);
+		}
+		return pending;
+	}
+
 	private async hydrateFromRedis(accountId: string) {
 		if (!(await this.redis.isAvailable())) return;
 		try {
-			const client = (this.redis as any).client;
-			let conversationIds: string[] = [];
-			if (client?.smembers) {
-				conversationIds = await client.smembers(this.redisIndexKey(accountId));
-			}
-			if (!conversationIds.length) {
-				const keys =
-					typeof (this.redis as any).scanKeys === 'function'
-						? await (this.redis as any).scanKeys(`wa:presence:${accountId}:*`)
-						: await this.redis.keys(`wa:presence:${accountId}:*`);
-				for (const redisKey of keys || []) {
-					const entry = await this.redis.get<ContactPresenceItem>(redisKey);
-					if (!entry?.conversationId || entry.accountId !== accountId) continue;
-					conversationIds.push(entry.conversationId);
-					this.mergeHydrated(entry);
-				}
-				return;
-			}
-			for (const conversationId of conversationIds) {
-				const entry = await this.redis.get<ContactPresenceItem>(
-					this.redisKey(accountId, conversationId),
-				);
+			const indexed = await this.redis.sMembers(this.redisIndexKey(accountId));
+			const keys = indexed.length
+				? indexed.map((id) => this.redisKey(accountId, id))
+				: (await this.redis.scanKeys(`wa:presence:${accountId}:*`)).filter(
+						(key) => key !== this.redisIndexKey(accountId),
+					);
+			const entries = await this.redis.mGet<ContactPresenceItem>(keys);
+			for (const entry of entries) {
 				if (!entry?.conversationId || entry.accountId !== accountId) continue;
 				this.mergeHydrated(entry);
 			}
+			this.hydratedAccounts.add(accountId);
 		} catch (error) {
 			this.logger.debug(
 				`Presence Redis hydrate failed for ${accountId}: ${
@@ -510,7 +519,11 @@ export class WhatsAppContactPresenceService
 		accountId: string,
 		options?: { includeOffline?: boolean },
 	) {
-		await this.hydrateFromRedis(accountId);
+		await this.ensureHydrated(accountId);
+		return this.snapshot(accountId, options);
+	}
+
+	private snapshot(accountId: string, options?: { includeOffline?: boolean }) {
 		this.pruneMemory(accountId);
 		const now = Date.now();
 		const includeOffline = Boolean(options?.includeOffline);
@@ -529,7 +542,7 @@ export class WhatsAppContactPresenceService
 			if (aLive !== bLive) return bLive - aLive;
 			return (b.updatedAt || 0) - (a.updatedAt || 0);
 		});
-		this.logger.log(
+		this.logger.debug(
 			`[WHATSAPP PRESENCE] listOnline session=${accountId} live=${items.filter((i) => i.online || i.typing || i.recording).length} totalReturned=${items.length} appliedEvents=${this.presenceEventsByAccount.get(accountId) || 0}`,
 		);
 		return {
@@ -539,15 +552,43 @@ export class WhatsAppContactPresenceService
 		};
 	}
 
+	/** conversationId → assignedUserId, in one query. */
+	async assigneesFor(conversationIds: string[]): Promise<Map<string, string | null>> {
+		const ids = [...new Set(conversationIds.filter(Boolean).map(String))];
+		if (!ids.length) return new Map();
+		const rows = await this.conversationRepo.find({
+			where: { id: In(ids) },
+			select: { id: true, assignedUserId: true },
+		});
+		return new Map(
+			rows.map((row) => [String(row.id), row.assignedUserId ? String(row.assignedUserId) : null]),
+		);
+	}
+
+	/** Same rule as the inbox: assigned-only members see presence for their own chats. */
+	async restrictToAssignee<T extends { items: ContactPresenceItem[] }>(snapshot: T, userId: string) {
+		const assignees = await this.assigneesFor(snapshot.items.map((item) => item.conversationId));
+		return {
+			...snapshot,
+			items: snapshot.items.filter(
+				(item) => Boolean(userId) && assignees.get(String(item.conversationId)) === String(userId),
+			),
+		};
+	}
+
+	/** Coalesces bursts of presence events into one `online_contacts` emit per account. */
 	private broadcast(accountId: string) {
-		void this.listOnline(accountId, { includeOffline: true }).then((snapshot) => {
-			const live = (snapshot.items || []).filter(
-				(i) => i.online || i.typing || i.recording,
-			).length;
-			this.logger.log(
-				`[WHATSAPP PRESENCE] Socket.IO emit online_contacts session=${accountId} live=${live} items=${snapshot.items?.length || 0}`,
+		if (this.pendingBroadcast.has(accountId)) return;
+		this.pendingBroadcast.add(accountId);
+		void this.ensureHydrated(accountId).finally(() => {
+			this.pendingBroadcast.delete(accountId);
+			const snapshot = this.snapshot(accountId, { includeOffline: true });
+			this.logger.debug(
+				`[WHATSAPP PRESENCE] Socket.IO emit online_contacts session=${accountId} items=${snapshot.items.length}`,
 			);
-			this.gateway.emitAccountEvent(accountId, 'online_contacts', snapshot);
+			void this.gateway.emitAccountSnapshotScoped(accountId, 'online_contacts', snapshot, (ids) =>
+				this.assigneesFor(ids),
+			);
 		});
 	}
 

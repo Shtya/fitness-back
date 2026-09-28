@@ -455,7 +455,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 				const state = String(presence?.state || 'unavailable');
 				const lastSeen = Number(presence?.lastSeen || 0);
 
-				this.logger.log(
+				this.logger.debug(
 					`[WHATSAPP PRESENCE]\n` +
 						`  Session: ${this.accountId}\n` +
 						`  JID: ${chatId}\n` +

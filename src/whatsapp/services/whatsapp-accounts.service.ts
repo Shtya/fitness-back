@@ -196,6 +196,7 @@ export class WhatsAppAccountsService {
 			await manager.delete(WhatsAppAccountAccess, { accountId });
 			await manager.delete(WhatsAppAccount, { id: accountId });
 		});
+		this.accessService.invalidateAccount(accountId);
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId: null,

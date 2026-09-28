@@ -1,6 +1,7 @@
 import { Controller, Delete, Get, Param, Post, Body, Req, Res, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { createReadStream } from 'fs';
+import { pipeFileToResponse } from '../utils/whatsapp-stream-errors';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import { JwtOrMediaTokenGuard } from '../guards/jwt-or-media-token.guard';
@@ -78,7 +79,7 @@ export class WhatsAppSocialDownloadController {
 				res.status(206);
 				res.setHeader('Content-Range', `bytes ${start}-${end}/${file.size}`);
 				res.setHeader('Content-Length', String(end - start + 1));
-				createReadStream(file.absolutePath, { start, end }).pipe(res);
+				pipeFileToResponse(createReadStream(file.absolutePath, { start, end }), res);
 				return;
 			}
 			res.status(416);
@@ -88,7 +89,7 @@ export class WhatsAppSocialDownloadController {
 		}
 
 		res.setHeader('Content-Length', String(file.size));
-		createReadStream(file.absolutePath).pipe(res);
+		pipeFileToResponse(createReadStream(file.absolutePath), res);
 	}
 
 	/** Forwards the downloaded clip into a conversation — this one or any other. */

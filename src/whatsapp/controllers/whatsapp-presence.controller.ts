@@ -36,8 +36,10 @@ export class WhatsAppPresenceController {
 			includeOffline === '1' ||
 			includeOffline === 'true' ||
 			includeOffline === 'yes';
-		return await this.contactPresence.listOnline(id, {
+		const snapshot = await this.contactPresence.listOnline(id, {
 			includeOffline: wantOffline,
 		});
+		if (this.access.canSeeAllConversations(req.user, access)) return snapshot;
+		return this.contactPresence.restrictToAssignee(snapshot, String(req.user?.id || ''));
 	}
 }

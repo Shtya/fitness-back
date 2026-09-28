@@ -7,6 +7,9 @@
  * `jpegThumbnail` is stripped only when the message already carries
  * `previewDataUrl` on an attachment — otherwise the chat bubbles still need
  * it as the blurred placeholder fallback.
+ *
+ * Large media sidecars the browser never reads are stripped too (a sticker
+ * `pngThumbnail` alone can be ~100 KB per message).
  */
 const REDACTED_KEYS = new Set([
 	'mediaKey',
@@ -18,6 +21,10 @@ const REDACTED_KEYS = new Set([
 	'thumbnailDirectPath',
 	'thumbnailSha256',
 	'thumbnailEncSha256',
+	'pngThumbnail',
+	'scansSidecar',
+	'midQualityFileSha256',
+	'firstFrameSidecar',
 ]);
 
 const THUMBNAIL_KEYS = new Set(['jpegThumbnail']);

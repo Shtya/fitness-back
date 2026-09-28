@@ -48,6 +48,22 @@ describe('redactRawForClient', () => {
 		expect(result.message.imageMessage.contextInfo.mentionedJid).toEqual(['2010000@c.us']);
 	});
 
+	it('drops large media sidecars the browser never reads but keeps location fields', () => {
+		const raw = {
+			message: {
+				stickerMessage: { pngThumbnail: 'X'.repeat(1000), isAnimated: false, firstFrameSidecar: 'F' },
+				imageMessage: { scansSidecar: 'S', midQualityFileSha256: 'M', width: 10, height: 20 },
+				locationMessage: { degreesLatitude: 1, degreesLongitude: 2, url: 'https://maps.example', jpegThumbnail: 'T' },
+			},
+		};
+
+		const result = redactRawForClient(raw) as any;
+
+		expect(result.message.stickerMessage).toEqual({ isAnimated: false });
+		expect(result.message.imageMessage).toEqual({ width: 10, height: 20 });
+		expect(result.message.locationMessage).toEqual(raw.message.locationMessage);
+	});
+
 	it('does not mutate the caller entity, so DB-backed re-downloads still work', () => {
 		const raw = { message: { audioMessage: { mediaKey: 'c2VjcmV0' } } };
 

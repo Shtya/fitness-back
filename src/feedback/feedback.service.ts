@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Feedback, FeedbackStatus } from 'entities/global.entity';
 import { CreateFeedbackDto } from './dto/create-feedback.dto';
+import { parsePagination } from 'common/pagination';
 
 @Injectable()
 export class FeedbackService {
@@ -44,13 +45,16 @@ export class FeedbackService {
    * Get all feedbacks with optional filters
    */
   async getAllFeedbacks(
-    skip: number = 0,
-    take: number = 50,
+    rawSkip: unknown = 0,
+    rawTake: unknown = 50,
     type?: string,
     status?: string,
     userId?: string,
     category?: string,
   ) {
+    const parsedSkip = Math.floor(Number(rawSkip));
+    const skip = Number.isFinite(parsedSkip) && parsedSkip > 0 ? parsedSkip : 0;
+    const { take } = parsePagination(1, rawTake, { defaultLimit: 50, maxLimit: 1000 });
     const query = this.feedbackRepo.createQueryBuilder('feedback');
 
     if (type) {

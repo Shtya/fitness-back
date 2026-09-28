@@ -10,10 +10,11 @@ import { Server, Socket } from 'socket.io';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../../entities/global.entity';
+import { corsOriginDelegate } from 'common/cors-origin';
 
 @WebSocketGateway({
 	namespace: '/email-memo',
-	cors: { origin: true, credentials: true },
+	cors: { origin: corsOriginDelegate(), credentials: true },
 })
 @Injectable()
 export class EmailMemoGateway implements OnGatewayConnection, OnGatewayDisconnect {

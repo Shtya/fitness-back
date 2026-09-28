@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsRelations, In, Repository } from 'typeorm';
+import { parsePagination } from 'common/pagination';
 import {
 	Recipe,
 	RecipeFavorite,
@@ -414,8 +415,7 @@ export class RecipesService {
 
 
 	async findAll(query: any) {
-		const page = Number(query.page || 1);
-		const limit = Number(query.limit || 20);
+		const { page, limit, skip } = parsePagination(query.page, query.limit, { maxLimit: 1000 });
 
 		const baseQb = this.recipeRepo.createQueryBuilder('recipe');
 		this.applyRecipeFilters(baseQb, query);
@@ -436,7 +436,7 @@ export class RecipesService {
 		const pagedRecipes = await baseQb
 			.clone()
 			.orderBy(sortCol, sortDir)
-			.skip((page - 1) * limit)
+			.skip(skip)
 			.take(limit)
 			.select(['recipe.id'])
 			.getMany();
@@ -659,14 +659,13 @@ export class RecipesService {
 	}
 
 	async getUserFavorites(userId: string, query: any) {
-		const page = Number(query.page ?? 1);
-		const limit = Number(query.limit ?? 20);
+		const { page, limit, skip } = parsePagination(query.page, query.limit, { maxLimit: 1000 });
 
 		// Step 1: جيب الـ IDs بس مع pagination
 		const [favs, total] = await this.favoriteRepo.findAndCount({
 			where: { userId },
 			order: { created_at: 'DESC' },
-			skip: (page - 1) * limit,
+			skip,
 			take: limit,
 		});
 

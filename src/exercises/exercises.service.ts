@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { Exercise, ExerciseVideo, UserRole } from 'entities/global.entity';
 import { RedisService } from 'src/redis/redis.service';
+import { parsePagination } from 'common/pagination';
 
 type PublicExercise = {
   id: string;
@@ -189,8 +190,7 @@ export class ExercisesService {
   }
 
   async list(q: any, userId: string) {
-    const page = Math.max(1, parseInt(q?.page ?? '1', 10));
-    const limit = Math.max(1, Math.min(100, parseInt(q?.limit ?? '12', 10)));
+    const { page, limit, skip } = parsePagination(q?.page, q?.limit, { defaultLimit: 12 });
     const sortKey = String(q?.sortBy ?? 'created_at');
     const SORTABLE: Record<string, string> = {
       created_at: 'e.created_at',
@@ -223,7 +223,7 @@ export class ExercisesService {
 
     qb.orderBy(sortByExpr, sortOrder)
       .addOrderBy('e.id', 'DESC')
-      .skip((page - 1) * limit)
+      .skip(skip)
       .take(limit);
 
     const [rows, total] = await qb.getManyAndCount();

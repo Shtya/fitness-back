@@ -49,6 +49,7 @@ describe('WhatsAppConversationsController', () => {
 			'all',
 			'',
 			'',
+			'',
 		);
 	});
 

@@ -7,12 +7,13 @@ import {
 	NotFoundException,
 	OnModuleDestroy,
 	OnModuleInit,
+	Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { In, Repository } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { NotificationAudience, NotificationType, User } from '../../../entities/global.entity';
 import { NotificationService } from '../../notification/notification.service';
 import {
@@ -42,8 +43,13 @@ import {
 	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
+import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
-import { decodeProviderMedia, isIncompleteChatImageDownload } from '../utils/whatsapp-media-decode';
+import {
+	decodeProviderMedia,
+	isIncompleteChatImageDownload,
+	readFileHeader,
+} from '../utils/whatsapp-media-decode';
 import {
 	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
@@ -54,16 +60,16 @@ import {
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppContactPresenceService, expandPresenceSubscribeIds } from './whatsapp-contact-presence.service';
+import { WhatsAppPersistDeadLetterService } from './whatsapp-persist-dead-letter.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { WhatsAppStatusService } from './whatsapp-status.service';
 import {
 	providerChatActivityMs as providerChatActivityMsFromChat,
 	providerChatMessageActivityMs,
 	whatsAppTimestampToDate,
-	whatsAppTimestampToMs,
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
-import { redactMessagesRawForClient } from '../utils/whatsapp-raw-redact';
+import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
 	isWeakWhatsAppContactName,
@@ -119,6 +125,9 @@ function sniffAudioMime(buffer: Buffer): string | null {
 	}
 	return null;
 }
+
+/** Covers every magic-byte sniffer and the 64/256-byte floors in isValidAudioBuffer. */
+const MEDIA_HEADER_BYTES = 256;
 
 function isValidAudioBuffer(buffer: Buffer, mimeType?: string | null) {
 	if (buffer.length < 64) return false;
@@ -405,6 +414,77 @@ const CONTACT_SYNC_CHUNK = 400;
 /** Mirrors `EMAIL_MEMO_AI_CHAT_ID`; duplicated to avoid a module cycle with email-memo. */
 const EMAIL_MEMO_AI_CHAT_ID = 'email-memo-ai@so7ba.internal';
 
+const LIVE_CONTACT_FETCH_TTL_MS = 30 * 60_000;
+const LIVE_CONTACT_FETCH_MAX = 5000;
+const CONVERSATION_HOT_CACHE_TTL_MS = 60_000;
+const CONVERSATION_HOT_CACHE_MAX = 5000;
+const MESSAGE_PERSIST_LANE_MAX = 10_000;
+
+function trimMapToMax<K, V>(map: Map<K, V>, max: number) {
+	while (map.size > max) {
+		const oldest = map.keys().next().value;
+		if (oldest === undefined) break;
+		map.delete(oldest);
+	}
+}
+
+const CONVERSATION_DELTA_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * `updatedSince` for reconnect catch-up. Invalid, future, or older-than-7-days
+ * values are ignored so the caller gets the normal first page instead.
+ */
+export function parseConversationDeltaSince(value?: string | null, now = Date.now()) {
+	const raw = String(value || '').trim();
+	if (!raw) return null;
+	const at = new Date(raw);
+	const ms = at.getTime();
+	if (!Number.isFinite(ms) || ms > now || now - ms > CONVERSATION_DELTA_MAX_AGE_MS) return null;
+	return at;
+}
+
+/**
+ * Live-persist lane for a chat. Group and channel ids never alias, so each gets
+ * its own lane. Direct chats can arrive as LID and phone-number twins that alias
+ * merging folds into one conversation, so they stay serialized per account.
+ */
+export function persistLaneForChat(accountId: string, chatId?: string | null) {
+	const id = String(chatId || '');
+	if (id.endsWith('@g.us') || id.endsWith('@newsletter')) return `${accountId}:chat:${id}`;
+	return `${accountId}:direct`;
+}
+
+/** Message types that still produce an inbox preview when they have no text. */
+const CONVERSATION_PREVIEW_MEDIA_TYPES = [
+	'image',
+	'photo',
+	'video',
+	'audio',
+	'ptt',
+	'voice',
+	'document',
+	'sticker',
+	'location',
+	'live_location',
+	'contact',
+	'contacts',
+	'poll',
+];
+
+/** Effective preference column for rows joined by `joinConversationPreferences`. */
+const PREFERENCE_COALESCE = (column: string) =>
+	`COALESCE("conversationPreference"."${column}", "chatPreference"."${column}")`;
+
+type ConversationPreviewMessage = Pick<
+	WhatsAppMessage,
+	'id' | 'providerMessageId' | 'text' | 'type' | 'direction' | 'status' | 'providerTimestamp'
+>;
+
+type ConversationWithPreferences = WhatsAppConversation & {
+	preferenceByConversation?: WhatsAppConversationPreference | null;
+	preferenceByChat?: WhatsAppConversationPreference | null;
+};
+
 function chunkList<T>(items: T[], size: number): T[][] {
 	const chunks: T[][] = [];
 	for (let index = 0; index < items.length; index += size) {
@@ -596,14 +676,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private unsubscribe?: () => void;
 	private bootstrapping = new Set<string>();
 	private bootstrapUnlockTimers = new Map<string, NodeJS.Timeout>();
-	private persistQueue: Promise<void> = Promise.resolve();
+	/** Serial lane per key (see `persistLaneForChat`); lanes run in parallel up to the cap. */
+	private readonly persistLanes = new Map<string, Promise<void>>();
+	/** `${accountId}:${providerMessageId}` → lane, so acks for a queued message wait behind it. */
+	private readonly messagePersistLane = new Map<string, string>();
+	private readonly persistSlotWaiters: Array<() => void> = [];
 	private activePersists = 0;
-	private readonly maxConcurrentPersists = 1;
+	private readonly maxConcurrentPersists = 3;
 	private conversationUpdateTimers = new Map<string, NodeJS.Timeout>();
 	private conversationUpdatePayloads = new Map<string, Record<string, unknown>>();
 	private conversationUpdateScopes = new Map<string, ConversationEventScope>();
 	private attachmentDownloads = new Map<string, Promise<any>>();
 	private activeMediaDownloads = 0;
+	private readonly resolvedAttachmentFiles = new TtlCacheStore(60_000, 2_000);
 	private readonly maxConcurrentMediaDownloads = Number(
 		process.env.WHATSAPP_MEDIA_DOWNLOAD_CONCURRENCY || 4,
 	);
@@ -612,6 +697,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private inboxReconcileInFlight = new Set<string>();
 	private inboxSyncTail = new Map<string, Promise<unknown>>();
 	private conversationHotCache = new Map<string, { conversation: WhatsAppConversation; at: number }>();
+	private eventScopeCache = new Map<string, { scope: ConversationEventScope; at: number }>();
+	private readonly liveContactFetchAt = new Map<string, number>();
 	private lastInboxSyncAt = new Map<string, number>();
 	private historyPersistQueue: Promise<void> = Promise.resolve();
 	private historyPersistPending = 0;
@@ -650,11 +737,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		private readonly contactPresence: WhatsAppContactPresenceService,
 		@InjectRepository(WhatsAppConversationPreference)
 		private readonly preferenceRepo: Repository<WhatsAppConversationPreference>,
+		@Optional()
+		private readonly deadLetters?: WhatsAppPersistDeadLetterService,
 	) {}
 
 	onModuleInit() {
 		this.unsubscribe = this.providers.onProviderEvent((accountId, event) =>
 			this.handleProviderEvent(accountId, event),
+		);
+		this.deadLetters?.start((entry) =>
+			this.persistMessage(entry.accountId, entry.message, null, true, { emitEvents: true }),
 		);
 	}
 
@@ -843,12 +935,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 				return;
 			}
+			const context = `message:${accountId}:${event.message?.providerMessageId || 'unknown'}`;
+			const lane = persistLaneForChat(accountId, event.message.chatId);
+			if (event.message.providerMessageId) {
+				this.rememberMessagePersistLane(accountId, event.message.providerMessageId, lane);
+			}
 			this.enqueuePersist(
 				() =>
 					this.persistMessage(accountId, event.message, null, true, {
 						emitEvents: true,
 					}),
-				`message:${accountId}:${event.message?.providerMessageId || 'unknown'}`,
+				context,
+				(error) => this.deadLetters?.add(accountId, event.message, context, error),
+				lane,
 			);
 			return;
 		}
@@ -861,7 +960,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				const conversation = await this.findInboxConversation(accountId, event.chatId);
 				if (!conversation) return;
 				await this.clearUnreadFromPhone(accountId, conversation.id);
-			}, `chat_read:${accountId}:${event.chatId}`);
+			}, `chat_read:${accountId}:${event.chatId}`, undefined, persistLaneForChat(accountId, event.chatId));
 			return;
 		}
 		if (event.type === 'history_sync') {
@@ -892,7 +991,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'presence') {
 			const chatId = String(event.payload?.chatId || '');
 			if (!chatId || !isSupportedInboxChatId(chatId)) {
-				this.logger.log(
+				this.logger.debug(
 					`[WHATSAPP PRESENCE] Sync DROP unsupported chatId=${chatId || '(empty)'} session=${accountId}`,
 				);
 				return;
@@ -912,7 +1011,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				// Only create a stub chat for live presence — avoid flooding the inbox
 				// with offline address-book JIDs we subscribed to.
 				if (!pendingOnline) {
-					this.logger.log(
+					this.logger.debug(
 						`[WHATSAPP PRESENCE] Sync SKIP unmatched offline jid=${chatId} session=${accountId}`,
 					);
 					return;
@@ -955,16 +1054,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				senderName: String(event.payload?.senderName || ''),
 				lastSeen: Number(event.payload?.lastSeen || 0),
 			};
-			this.logger.log(
+			this.logger.debug(
 				`[WHATSAPP PRESENCE] Sync APPLY session=${accountId} conv=${conversation.id} jid=${presencePayload.chatId} state=${state} isOnline=${presencePayload.isOnline}`,
 			);
 			this.contactPresence.applyPresenceEvent(accountId, conversation, presencePayload);
-			this.gateway.emitAccountEvent(accountId, 'presence', presencePayload);
+			// One emit reaches the open-chat room and the permitted inbox members exactly once.
 			this.gateway.emitConversationEvent(
 				conversation.id,
 				'presence',
 				presencePayload,
 				accountId,
+				this.conversationEventScope(conversation),
 			);
 			return;
 		}
@@ -1021,7 +1121,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					});
 					message.status = nextStatus as WhatsAppMessageStatus;
 				}
-				this.gateway.emitConversationEvent(
+				const scope = await this.emitScopedConversationEvent(
 					message.conversationId,
 					'message_status',
 					{
@@ -1049,14 +1149,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						text: message.text,
 						direction: message.direction,
 					},
-				});
-			}, `message_status:${accountId}:${event.providerMessageId}`);
+				}, scope);
+			}, `message_status:${accountId}:${event.providerMessageId}`, undefined, this.persistLaneForMessage(accountId, event.providerMessageId));
 			return;
 		}
 		if (event.type === 'message_reactions') {
 			this.enqueuePersist(
 				() => this.persistMessageReactions(accountId, event.providerMessageId, event.reactions),
 				`message_reactions:${accountId}:${event.providerMessageId}`,
+				undefined,
+				this.persistLaneForMessage(accountId, event.providerMessageId),
 			);
 			return;
 		}
@@ -1072,7 +1174,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					deletedMode: event.mode,
 					providerDeletedAt,
 				});
-				this.gateway.emitConversationEvent(
+				await this.emitScopedConversationEvent(
 					message.conversationId,
 					'message_updated',
 					{
@@ -1081,7 +1183,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					},
 					accountId,
 				);
-			}, `message_deleted:${accountId}:${event.providerMessageId}`);
+			}, `message_deleted:${accountId}:${event.providerMessageId}`, undefined, this.persistLaneForMessage(accountId, event.providerMessageId));
 		}
 	}
 
@@ -1179,7 +1281,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			emoji: reaction.emoji,
 			reactedAt: reaction.reactedAt,
 		}));
-		this.gateway.emitConversationEvent(
+		await this.emitScopedConversationEvent(
 			message.conversationId,
 			'message_reactions',
 			{
@@ -1207,48 +1309,104 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
-	private enqueuePersist(task: () => Promise<unknown>, context = 'unknown') {
-		this.persistQueue = this.persistQueue
-			.then(async () => {
-				while (this.activePersists >= this.maxConcurrentPersists) {
-					await new Promise((resolve) => setTimeout(resolve, 25));
-				}
-				this.activePersists += 1;
-				try {
-					let lastError: unknown;
-					for (let attempt = 1; attempt <= 3; attempt += 1) {
-						try {
-							await task();
-							lastError = undefined;
-							break;
-						} catch (error) {
-							lastError = error;
-							this.logger.warn(
-								`WhatsApp persistence failed (${context}), attempt ${attempt}/3: ${
-									error instanceof Error ? error.message : String(error)
-								}`,
-							);
-							if (attempt < 3) {
-								await new Promise((resolve) => setTimeout(resolve, attempt * 250));
-							}
-						}
-					}
-					if (lastError) {
-						this.logger.error(
-							`WhatsApp persistence dropped after retries (${context})`,
-							lastError instanceof Error ? lastError.stack : String(lastError),
-						);
-					}
-				} finally {
-					this.activePersists -= 1;
-				}
-			})
+	/** Cached (10 s) account row for hot write paths; throws like `findOneByOrFail`. */
+	private async requireAccountSnapshot(accountId: string) {
+		const account = await this.access.getAccountSnapshot(accountId);
+		if (!account) throw new NotFoundException('WhatsApp account not found');
+		return account;
+	}
+
+	private enqueuePersist(
+		task: () => Promise<unknown>,
+		context = 'unknown',
+		onDropped?: (error: unknown) => Promise<unknown> | undefined,
+		lane = 'global',
+	) {
+		const previous = this.persistLanes.get(lane) || Promise.resolve();
+		const next = previous
+			.then(() => this.runPersistTask(task, context, onDropped))
 			.catch((error) =>
 				this.logger.error(
 					`WhatsApp persistence queue failed (${context})`,
 					error instanceof Error ? error.stack : String(error),
 				),
 			);
+		this.persistLanes.set(lane, next);
+		void next.finally(() => {
+			if (this.persistLanes.get(lane) === next) this.persistLanes.delete(lane);
+		});
+	}
+
+	private async runPersistTask(
+		task: () => Promise<unknown>,
+		context: string,
+		onDropped?: (error: unknown) => Promise<unknown> | undefined,
+	) {
+		await this.acquirePersistSlot();
+		try {
+			let lastError: unknown;
+			for (let attempt = 1; attempt <= 3; attempt += 1) {
+				try {
+					await task();
+					lastError = undefined;
+					break;
+				} catch (error) {
+					lastError = error;
+					this.logger.warn(
+						`WhatsApp persistence failed (${context}), attempt ${attempt}/3: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+					if (attempt < 3) {
+						await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+					}
+				}
+			}
+			if (lastError) {
+				this.logger.error(
+					`WhatsApp persistence failed after retries (${context})`,
+					lastError instanceof Error ? lastError.stack : String(lastError),
+				);
+				await onDropped?.(lastError);
+			}
+		} finally {
+			this.releasePersistSlot();
+		}
+	}
+
+	private async acquirePersistSlot() {
+		if (this.activePersists < this.maxConcurrentPersists) {
+			this.activePersists += 1;
+			return;
+		}
+		await new Promise<void>((resolve) => this.persistSlotWaiters.push(resolve));
+	}
+
+	private releasePersistSlot() {
+		const waiter = this.persistSlotWaiters.shift();
+		if (waiter) waiter();
+		else this.activePersists -= 1;
+	}
+
+	private rememberMessagePersistLane(accountId: string, providerMessageId: string, lane: string) {
+		const key = `${accountId}:${providerMessageId}`;
+		this.messagePersistLane.delete(key);
+		this.messagePersistLane.set(key, lane);
+		trimMapToMax(this.messagePersistLane, MESSAGE_PERSIST_LANE_MAX);
+	}
+
+	private persistLaneForMessage(accountId: string, providerMessageId?: string | null) {
+		return (
+			this.messagePersistLane.get(`${accountId}:${providerMessageId || ''}`) ||
+			`${accountId}:acks`
+		);
+	}
+
+	/** Resolves once every persist lane has drained (tests / shutdown). */
+	async whenPersistIdle() {
+		while (this.persistLanes.size) {
+			await Promise.all([...this.persistLanes.values()]);
+		}
 	}
 
 	private enqueueInboxSync<T>(accountId: string, task: () => Promise<T>): Promise<T> {
@@ -1370,7 +1528,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 		if (!incoming.length) return { inserted: 0 };
 		const started = Date.now();
-		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
+		const account = await this.requireAccountSnapshot(accountId);
 		const byChat = new Map<string, NormalizedWhatsAppMessage[]>();
 		for (const message of incoming) {
 			const list = byChat.get(message.chatId) || [];
@@ -1817,19 +1975,40 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	) {
 		if (!conversation) return conversation;
 		const entry = { conversation, at: Date.now() };
-		this.conversationHotCache.set(`${accountId}:${chatId}`, entry);
+		// Insertion order tracks `at` (hits never refresh it), so expired entries sit at the front.
+		for (const [key, cached] of this.conversationHotCache) {
+			if (entry.at - cached.at < CONVERSATION_HOT_CACHE_TTL_MS) break;
+			this.conversationHotCache.delete(key);
+		}
+		const keys = [`${accountId}:${chatId}`];
 		if (conversation.providerChatId && conversation.providerChatId !== chatId) {
-			this.conversationHotCache.set(
-				`${accountId}:${conversation.providerChatId}`,
-				entry,
-			);
+			keys.push(`${accountId}:${conversation.providerChatId}`);
+		}
+		for (const key of keys) {
+			// Re-insert so Map order tracks recency for eviction.
+			this.conversationHotCache.delete(key);
+			this.conversationHotCache.set(key, entry);
+		}
+		while (this.conversationHotCache.size > CONVERSATION_HOT_CACHE_MAX) {
+			const oldest = this.conversationHotCache.keys().next().value;
+			if (oldest === undefined) break;
+			this.conversationHotCache.delete(oldest);
 		}
 		return conversation;
 	}
 
 	private forgetConversation(accountId: string, chatId?: string | null) {
 		if (!chatId) return;
-		this.conversationHotCache.delete(`${accountId}:${chatId}`);
+		const key = `${accountId}:${chatId}`;
+		const entry = this.conversationHotCache.get(key);
+		this.conversationHotCache.delete(key);
+		const alias = entry?.conversation.providerChatId;
+		if (alias && alias !== chatId) {
+			const aliasKey = `${accountId}:${alias}`;
+			if (this.conversationHotCache.get(aliasKey) === entry) {
+				this.conversationHotCache.delete(aliasKey);
+			}
+		}
 	}
 
 	private conversationRelations() {
@@ -1926,7 +2105,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		// Self-chat: match account phone even when contact phone formatting differs.
-		const account = await this.accountRepo.findOneBy({ id: accountId });
+		const account = await this.access.getAccountSnapshot(accountId);
 		const own = String(account?.phoneNumber || '').replace(/\D/g, '');
 		if (own && phonesMatch(own, digits)) {
 			const selfContacts = await this.contactRepo
@@ -2124,17 +2303,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	) {
 		const cacheKey = `${accountId}:${chatId}`;
 		const cached = this.conversationHotCache.get(cacheKey);
-		if (cached && Date.now() - cached.at < 60_000) {
+		if (cached && Date.now() - cached.at >= CONVERSATION_HOT_CACHE_TTL_MS) {
+			this.conversationHotCache.delete(cacheKey);
+		} else if (cached) {
 			if (!options.title && !options.phone) {
 				return cached.conversation;
 			}
-			const patched = await this.applyConversationIdentityPatch(
-				cached.conversation,
-				chatId,
-				options,
-			);
-			await this.rebindConversationPreferences(patched);
-			return this.rememberConversation(accountId, chatId, patched);
+			// Identity patch never changes id/providerChatId, and preferences were
+			// rebound when this row was first cached, so no rebind UPDATE here.
+			return this.applyConversationIdentityPatch(cached.conversation, chatId, options);
 		}
 		const existing = await this.conversationRepo.findOne({
 			where: { accountId, providerChatId: chatId },
@@ -2333,11 +2510,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			.andWhere('unread_count > 0')
 			.execute();
 		if (!Number(result.affected)) return;
-		this.gateway.emitAccountEvent(accountId, 'conversation_read', {
-			conversationId,
-			reason: 'phone_read',
-		});
-		this.gateway.emitConversationEvent(
+		await this.emitScopedConversationEvent(
 			conversationId,
 			'conversation_read',
 			{ conversationId, reason: 'phone_read' },
@@ -2363,7 +2536,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			throw new BadRequestException('Provider message does not have stable identifiers');
 		}
 		normalized = enrichContactMessageNormalized(normalized);
-		const account = await this.accountRepo.findOneByOrFail({ id: accountId });
+		const account = await this.requireAccountSnapshot(accountId);
 		const phoneHint = await this.resolveChatPhoneDigits(
 			accountId,
 			normalized.chatId,
@@ -2666,7 +2839,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			await this.decorateGroupMessages(conversation, [hydrated]);
 			this.attachMediaPreviews([hydrated]);
 			const forClient = { ...hydrated } as typeof hydrated;
-			redactMessagesRawForClient([forClient]);
+			prepareMessagesForClient([forClient]);
 			this.gateway.emitConversationEvent(
 				conversation.id,
 				'message',
@@ -2813,6 +2986,38 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			assignedUserId: conversation.assignedUserId ?? null,
 			shared: String(conversation.providerChatId || '') === EMAIL_MEMO_AI_CHAT_ID,
 		};
+	}
+
+	/** Scope by id for provider events that only carry a message. Short cache absorbs ack bursts. */
+	private async conversationEventScopeById(
+		conversationId: string,
+	): Promise<ConversationEventScope> {
+		const cached = this.eventScopeCache.get(conversationId);
+		if (cached && Date.now() - cached.at < 5_000) return cached.scope;
+		const conversation = await this.conversationRepo.findOne({
+			where: { id: conversationId },
+			select: ['id', 'assignedUserId', 'providerChatId'],
+		});
+		const scope: ConversationEventScope = conversation
+			? this.conversationEventScope(conversation)
+			: { assignedUserId: null, shared: false };
+		this.eventScopeCache.set(conversationId, { scope, at: Date.now() });
+		if (this.eventScopeCache.size > 2_000) {
+			const oldest = this.eventScopeCache.keys().next().value;
+			if (oldest) this.eventScopeCache.delete(oldest);
+		}
+		return scope;
+	}
+
+	private async emitScopedConversationEvent(
+		conversationId: string,
+		event: string,
+		payload: any,
+		accountId: string,
+	) {
+		const scope = await this.conversationEventScopeById(conversationId);
+		this.gateway.emitConversationEvent(conversationId, event, payload, accountId, scope);
+		return scope;
 	}
 
 	/** Coalesces bursts without postponing them: the pending timer is never reset,
@@ -3245,10 +3450,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		filter = 'all',
 		assignedUserId = '',
 		kind = '',
+		updatedSince = '',
 	) {
 		const accountAccess = await this.access.getAccountAccess(user, accountId);
 		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
 		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
+		const since = parseConversationDeltaSince(updatedSince);
 		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
 		const pageNumber = Math.max(Number(page) || 1, 1);
 		// Always serve inbox rows from DB — even while the live session is offline —
@@ -3258,23 +3465,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			.createQueryBuilder('conversation')
 			.leftJoinAndSelect('conversation.contact', 'contact')
 			.leftJoinAndSelect('conversation.group', 'group')
-			.leftJoinAndSelect('conversation.assignedUser', 'assignedUser')
-			.leftJoin(
-				WhatsAppConversationPreference,
-				'conversationPreference',
-				`
-				"conversationPreference"."user_id" = :preferenceUserId
-				AND "conversationPreference"."deleted_at" IS NULL
-				AND (
-					"conversationPreference"."conversation_id" = "conversation"."id"
-					OR (
-						"conversationPreference"."account_id" = "conversation"."account_id"
-						AND "conversationPreference"."provider_chat_id" = "conversation"."provider_chat_id"
-					)
-				)
-				`,
-				{ preferenceUserId: user.id },
-			)
+			.leftJoinAndSelect('conversation.assignedUser', 'assignedUser');
+		this.joinConversationPreferences(query, user.id);
+		query
 			.where('conversation.accountId = :accountId', { accountId })
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
@@ -3305,9 +3498,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			query.andWhere('conversation.unreadCount > 0');
 		}
 		if (filter === 'favorites') {
-			query.andWhere('conversationPreference.isFavorite = :isFavorite', {
-				isFavorite: true,
-			});
+			query.andWhere(`${PREFERENCE_COALESCE('is_favorite')} = true`);
 		}
 		if (filter === 'important' || filter === 'starred') {
 			query.andWhere((qb) => {
@@ -3321,15 +3512,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				return `EXISTS ${subQuery}`;
 			});
 		}
-		if (filter === 'archived') {
-			query.andWhere('conversationPreference.isArchived = :isArchived', {
-				isArchived: true,
-			});
-		} else {
-			query.andWhere(
-				'(conversationPreference.isArchived IS NULL OR conversationPreference.isArchived = false)',
-			);
-		}
+		query.andWhere(
+			`COALESCE(${PREFERENCE_COALESCE('is_archived')}, false) = ${filter === 'archived'}`,
+		);
 		if (assignedUserId === 'unassigned') {
 			query.andWhere('conversation.assignedUserId IS NULL');
 		} else if (/^[0-9a-f-]{36}$/i.test(assignedUserId)) {
@@ -3349,90 +3534,36 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				{ search: `%${normalizedSearch}%` },
 			);
 		}
-		const [items, total] = await query
-			.addSelect('conversationPreference.isPinned')
-			.orderBy('conversationPreference.isPinned', 'DESC', 'NULLS LAST')
-			.addOrderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
-			.addOrderBy('conversation.created_at', 'DESC')
-			.take(take)
-			.skip((pageNumber - 1) * take)
-			.getManyAndCount();
-		const conversationIds = items.map((item) => item.id);
-		const chatIds = items.map((item) => item.providerChatId).filter(Boolean);
-		const preferences = items.length
-			? await this.preferenceRepo.find({
-					where: [
-						{
-							userId: user.id,
-							conversationId: In(conversationIds),
-						},
-						...(chatIds.length
-							? [
-									{
-										userId: user.id,
-										accountId,
-										providerChatId: In(chatIds),
-									},
-								]
-							: []),
-					],
-				})
-			: [];
-		const preferenceByConversationId = new Map(
-			preferences
-				.filter((item) => item.conversationId)
-				.map((item) => [item.conversationId as string, item]),
-		);
-		const preferenceByChatId = new Map(
-			preferences
-				.filter((item) => item.accountId && item.providerChatId)
-				.map((item) => [`${item.accountId}:${item.providerChatId}`, item]),
-		);
-		const lastMessages = items.length
-			? await this.messageRepo
-					.createQueryBuilder('message')
-					.distinctOn(['message.conversationId'])
-					.where('message.conversationId IN (:...conversationIds)', {
-						conversationIds: items.map((item) => item.id),
-					})
-					.andWhere(
-						`(
-							NULLIF(BTRIM(message.text), '') IS NOT NULL
-							OR LOWER(message.type) IN (:...previewMediaTypes)
-						)`,
-						{
-							previewMediaTypes: [
-								'image',
-								'photo',
-								'video',
-								'audio',
-								'ptt',
-								'voice',
-								'document',
-								'sticker',
-								'location',
-								'live_location',
-								'contact',
-								'contacts',
-								'poll',
-							],
-						},
-					)
-					.orderBy('message.conversationId', 'ASC')
-					.addOrderBy('message.providerTimestamp', 'DESC')
-					.addOrderBy('message.created_at', 'DESC')
-					.getMany()
-			: [];
-		const lastMessageByConversationId = new Map(
-			lastMessages.map((message) => [message.conversationId, message]),
+		if (since) {
+			query.andWhere(
+				'(conversation.updated_at > :since OR conversation.lastMessageAt > :since)',
+				{ since },
+			);
+		}
+		const countQuery = query.clone();
+		const [rows, total, archivedCount] = await Promise.all([
+			query
+				.addSelect(PREFERENCE_COALESCE('is_pinned'), 'preference_is_pinned')
+				.orderBy('preference_is_pinned', 'DESC', 'NULLS LAST')
+				.addOrderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
+				.addOrderBy('conversation.created_at', 'DESC')
+				.limit(take)
+				.offset((pageNumber - 1) * take)
+				.getMany(),
+			countQuery.getCount(),
+			this.countArchivedConversations(user.id, accountId, inboxKind),
+		]);
+		const lastMessageByConversationId = await this.findLastPreviewMessages(
+			rows.map((item) => item.id),
 		);
 		const result = {
-			items: items.map((item) => {
-				const preference =
-					preferenceByConversationId.get(item.id) ||
-					preferenceByChatId.get(`${item.accountId}:${item.providerChatId}`);
+			items: rows.map((row) => {
+				const { preferenceByConversation, preferenceByChat, ...item } =
+					row as ConversationWithPreferences;
+				const preference = preferenceByConversation || preferenceByChat;
 				return {
 					...item,
+					assignedUser: toWhatsAppClientUser(item.assignedUser),
 					lastProviderSyncAt: item.lastProviderSyncAt
 						? new Date(item.lastProviderSyncAt).toISOString()
 						: null,
@@ -3446,27 +3577,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						: null,
 					isEmailMemoAi:
 						String(item.providerChatId || '') === 'email-memo-ai@so7ba.internal',
-					lastMessage: (() => {
-						const message = lastMessageByConversationId.get(item.id);
-						return message
-							? {
-									id: message.id,
-									providerMessageId: message.providerMessageId,
-									text: message.text,
-									type: message.type,
-									direction: message.direction,
-									status: message.status,
-									providerTimestamp: message.providerTimestamp,
-								}
-							: null;
-					})(),
+					lastMessage: lastMessageByConversationId.get(item.id) || null,
 				};
 			}),
 			total,
 			page: pageNumber,
 			limit: take,
 			scope: canSeeAll ? 'all' : 'assigned',
-			archivedCount: await this.countArchivedConversations(user.id, accountId, inboxKind),
+			archivedCount,
+			...(since ? { updatedSince: since.toISOString() } : {}),
 		};
 		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
 			void this.contactPresence.subscribeRecentDirectChats(accountId).catch(() => undefined);
@@ -3573,51 +3692,97 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true, conversationId, isArchived: Boolean(isArchived) };
 	}
 
+	/**
+	 * A preference row is keyed by `conversation_id`, but survives a conversation being
+	 * recreated through `(account_id, provider_chat_id)` until it is rebound. Two joins
+	 * (each backed by a unique index) replace an `OR` join the planner cannot index;
+	 * the conversation-keyed row wins, the chat-keyed row is only a fallback.
+	 */
+	private joinConversationPreferences(
+		query: SelectQueryBuilder<WhatsAppConversation>,
+		userId: string,
+	) {
+		return query
+			.leftJoinAndMapOne(
+				'conversation.preferenceByConversation',
+				WhatsAppConversationPreference,
+				'conversationPreference',
+				`"conversationPreference"."conversation_id" = "conversation"."id"
+				AND "conversationPreference"."user_id" = :preferenceUserId
+				AND "conversationPreference"."deleted_at" IS NULL`,
+				{ preferenceUserId: userId },
+			)
+			.leftJoinAndMapOne(
+				'conversation.preferenceByChat',
+				WhatsAppConversationPreference,
+				'chatPreference',
+				`"conversationPreference"."id" IS NULL
+				AND "chatPreference"."account_id" = "conversation"."account_id"
+				AND "chatPreference"."provider_chat_id" = "conversation"."provider_chat_id"
+				AND "chatPreference"."user_id" = :preferenceUserId
+				AND "chatPreference"."deleted_at" IS NULL`,
+				{ preferenceUserId: userId },
+			);
+	}
+
+	/** One index-backed `LIMIT 1` per conversation instead of sorting every message of the page. */
+	private async findLastPreviewMessages(conversationIds: string[]) {
+		const byConversationId = new Map<string, ConversationPreviewMessage>();
+		if (!conversationIds.length) return byConversationId;
+		const rows: Array<ConversationPreviewMessage & { conversationId: string }> =
+			await this.messageRepo.query(
+				`SELECT lm.* FROM unnest($1::uuid[]) AS c(id)
+				CROSS JOIN LATERAL (
+					SELECT
+						m.conversation_id AS "conversationId",
+						m.id,
+						m.provider_message_id AS "providerMessageId",
+						m.text,
+						m.type,
+						m.direction,
+						m.status,
+						m.provider_timestamp AS "providerTimestamp"
+					FROM whatsapp_messages m
+					WHERE m.conversation_id = c.id
+						AND m.deleted_at IS NULL
+						AND (NULLIF(BTRIM(m.text), '') IS NOT NULL OR LOWER(m.type) = ANY($2))
+					ORDER BY m.provider_timestamp DESC, m.created_at DESC
+					LIMIT 1
+				) lm`,
+				[conversationIds, CONVERSATION_PREVIEW_MEDIA_TYPES],
+			);
+		for (const { conversationId, ...message } of rows) {
+			byConversationId.set(conversationId, message);
+		}
+		return byConversationId;
+	}
+
 	private async countArchivedConversations(
 		userId: string,
 		accountId: string,
 		inboxKind: string,
 	) {
-		const query = this.preferenceRepo
-			.createQueryBuilder('pref')
-			.innerJoin(
-				WhatsAppConversation,
-				'conversation',
-				`
-				conversation.account_id = :accountId
-				AND conversation.deleted_at IS NULL
-				AND (
-					pref.conversation_id = conversation.id
-					OR (
-						pref.account_id = conversation.account_id
-						AND pref.provider_chat_id = conversation.provider_chat_id
-					)
-				)
-				`,
-				{ accountId },
-			)
-			.where('pref.user_id = :userId', { userId })
-			.andWhere('pref.deleted_at IS NULL')
-			.andWhere('pref.is_archived = true')
-			.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :broadcast', {
+		const query = this.conversationRepo
+			.createQueryBuilder('conversation')
+			.where('conversation.accountId = :accountId', { accountId })
+			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
 			})
-			.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :status', {
+			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :status', {
 				status: '%status@%',
 			});
+		this.joinConversationPreferences(query, userId);
+		query.andWhere(`${PREFERENCE_COALESCE('is_archived')} = true`);
 		if (inboxKind === 'channel') {
-			query.andWhere('LOWER(conversation.provider_chat_id) LIKE :newsletter', {
+			query.andWhere('LOWER(conversation.providerChatId) LIKE :newsletter', {
 				newsletter: '%@newsletter',
 			});
 		} else if (inboxKind === 'chat') {
-			query.andWhere('LOWER(conversation.provider_chat_id) NOT LIKE :newsletter', {
+			query.andWhere('LOWER(conversation.providerChatId) NOT LIKE :newsletter', {
 				newsletter: '%@newsletter',
 			});
 		}
-		const row = await query
-			.select('COUNT(DISTINCT conversation.id)', 'count')
-			.getRawOne();
-		return Number(row?.count || 0);
+		return query.getCount();
 	}
 
 	private async saveConversationPreference(
@@ -3994,10 +4159,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		messages: WhatsAppMessage[],
 		options: { fetchLive?: boolean } = {},
 	) {
+		const hydrated: WhatsAppMessage[] = [];
 		const missing = (messages || []).filter(message => needsContactHydration(message));
-		if (!missing.length) return;
+		if (!missing.length) return hydrated;
 		const provider = this.providers.getProvider(conversation.accountId);
-		if (!provider) return;
+		if (!provider) return hydrated;
 		const conversationChatId = String(conversation.providerChatId || '').trim();
 		for (const message of missing) {
 			try {
@@ -4045,6 +4211,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				(message as any).raw = nextRaw;
 				message.type = 'contact';
 				if (typeof updates.text === 'string') message.text = updates.text;
+				hydrated.push(message);
 			} catch (error) {
 				this.logger.warn(
 					`Could not hydrate WhatsApp contact ${message.providerMessageId}: ${
@@ -4053,6 +4220,66 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 			}
 		}
+		return hydrated;
+	}
+
+	/**
+	 * `fetchMessage` is a round trip to WhatsApp per shared-contact card, so it never
+	 * blocks a messages response. Cards still missing phones are fetched in the
+	 * background (once per TTL, so an unresolvable card is not refetched on every
+	 * open) and patched into open chats through `message_updated`.
+	 */
+	private scheduleLiveContactHydration(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+	) {
+		if (!this.providers.getProvider(conversation.accountId)) return;
+		const now = Date.now();
+		const pending = (messages || []).filter((message) => {
+			if (!message?.id || !needsContactHydration(message)) return false;
+			const attemptedAt = this.liveContactFetchAt.get(message.id);
+			return !attemptedAt || now - attemptedAt >= LIVE_CONTACT_FETCH_TTL_MS;
+		});
+		if (!pending.length) return;
+		for (const message of pending) {
+			this.liveContactFetchAt.delete(message.id);
+			this.liveContactFetchAt.set(message.id, now);
+		}
+		while (this.liveContactFetchAt.size > LIVE_CONTACT_FETCH_MAX) {
+			this.liveContactFetchAt.delete(this.liveContactFetchAt.keys().next().value as string);
+		}
+		// Copies taken before client redaction keep the full `raw` that gets persisted.
+		const copies = pending.map((message) => ({ ...message }) as WhatsAppMessage);
+		void this.hydrateContactsFromProvider(conversation, copies, { fetchLive: true })
+			.then((hydrated) => {
+				for (const message of hydrated) {
+					const clientMessage = { ...message } as WhatsAppMessage;
+					this.attachSharedContacts([clientMessage]);
+					prepareMessagesForClient([clientMessage]);
+					void this.emitScopedConversationEvent(
+						conversation.id,
+						'message_updated',
+						{
+							conversationId: conversation.id,
+							messageId: message.id,
+							changes: {
+								type: clientMessage.type,
+								text: clientMessage.text,
+								raw: (clientMessage as any).raw,
+								sharedContact: (clientMessage as any).sharedContact || null,
+							},
+						},
+						conversation.accountId,
+					).catch(() => undefined);
+				}
+			})
+			.catch((error) => {
+				this.logger.warn(
+					`Background contact hydration failed for ${conversation.id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			});
 	}
 
 	private attachMessageLocations(messages: WhatsAppMessage[]) {
@@ -4404,14 +4631,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	) {
 		this.attachMediaPreviews(messages);
 		await this.hydrateLocationsFromProvider(conversation, messages);
-		await this.hydrateContactsFromProvider(conversation, messages, { fetchLive: true });
+		await this.hydrateContactsFromProvider(conversation, messages);
+		this.scheduleLiveContactHydration(conversation, messages);
 		this.attachMessageLocations(messages);
 		this.attachSharedContacts(messages);
 		await this.decorateGroupMessages(conversation, messages);
 		await this.decorateMessageMentions(conversation, messages);
 		// Last step on purpose: everything above may read the media-crypto fields,
 		// and server-side re-downloads reload `raw` from the DB, not from here.
-		return redactMessagesRawForClient(messages);
+		return prepareMessagesForClient(messages);
 	}
 
 	/** Kick off durable downloads for pending/failed media once the chat is open
@@ -4509,7 +4737,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const message = attachment.message;
 		const conversationId = message?.conversationId;
 		if (!conversationId || !attachment.id) return;
-		this.gateway.emitConversationEvent(
+		void this.emitScopedConversationEvent(
 			conversationId,
 			'attachment_ready',
 			{
@@ -4522,6 +4750,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				url: `/api/v1/whatsapp/attachments/${attachment.id}/content`,
 			},
 			message.accountId,
+		).catch((error) =>
+			this.logger.warn(
+				`attachment_ready emit failed for ${attachment.id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			),
 		);
 	}
 
@@ -4936,7 +5170,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async starMessage(user: User, conversationId: string, messageId: string, isStarred: boolean) {
-		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
+		const { conversation, message, provider } = await this.resolveMessageAction(
+			user,
+			conversationId,
+			messageId,
+		);
 		// Important/star is always stored in our DB. Provider sync is best-effort only.
 		let syncedToWhatsApp = false;
 		if (typeof provider.starMessage === 'function') {
@@ -4962,12 +5200,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			'message_updated',
 			result,
 			message.accountId,
+			this.conversationEventScope(conversation),
 		);
 		return result;
 	}
 
 	async pinMessage(user: User, conversationId: string, messageId: string, isPinned: boolean) {
-		const { message, provider } = await this.resolveMessageAction(user, conversationId, messageId);
+		const { conversation, message, provider } = await this.resolveMessageAction(
+			user,
+			conversationId,
+			messageId,
+		);
 		// Pin in our inbox is local. Provider pin is best-effort (Baileys currently unsupported).
 		let syncedToWhatsApp = false;
 		if (typeof provider.pinMessage === 'function') {
@@ -4994,6 +5237,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			'message_updated',
 			result,
 			message.accountId,
+			this.conversationEventScope(conversation),
 		);
 		return result;
 	}
@@ -5028,6 +5272,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			'message_updated',
 			result,
 			conversation.accountId,
+			this.conversationEventScope(conversation),
 		);
 		return result;
 	}
@@ -5403,10 +5648,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		try {
 			await provider.markChatRead(conversation.providerChatId);
 			await this.conversationRepo.update(conversation.id, { unreadCount: 0 });
-			this.gateway.emitAccountEvent(conversation.accountId, 'conversation_read', {
-				conversationId: conversation.id,
-				userId,
-			});
+			this.gateway.emitAccountEvent(
+				conversation.accountId,
+				'conversation_read',
+				{ conversationId: conversation.id, userId },
+				this.conversationEventScope(conversation),
+			);
 		} catch (error) {
 			// The outgoing message already succeeded. A receipt failure must not make
 			// the frontend retry and accidentally send the message twice.
@@ -5445,10 +5692,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		await this.conversationRepo.update(conversationId, { unreadCount: 0 });
-		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_read', {
-			conversationId,
-			userId: user.id,
-		});
+		this.gateway.emitAccountEvent(
+			conversation.accountId,
+			'conversation_read',
+			{ conversationId, userId: user.id },
+			this.conversationEventScope(conversation),
+		);
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId: conversation.accountId,
@@ -5628,6 +5877,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			targetId: saved.id,
 			metadata: { conversationId },
 		});
+		prepareMessagesForClient([saved]);
 		return { ok: true, message: saved, providerResult: { id } };
 	}
 
@@ -5678,6 +5928,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { id: persisted.id },
 			relations: ['attachments', 'senderUser', 'reactions'],
 		});
+		prepareMessagesForClient([saved]);
 		return { ok: true, message: saved };
 	}
 
@@ -5713,10 +5964,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { id: message.id },
 			relations: ['attachments', 'senderUser', 'reactions'],
 		});
-		this.gateway.emitAccountEvent(conversation.accountId, 'message_updated', {
+		prepareMessagesForClient([saved]);
+		this.gateway.emitConversationEvent(
 			conversationId,
-			message: saved,
-		});
+			'message_updated',
+			{ conversationId, message: saved },
+			conversation.accountId,
+			this.conversationEventScope(conversation),
+		);
 		return { ok: true, message: saved };
 	}
 
@@ -5901,6 +6156,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			targetId: saved.id,
 			metadata: { conversationId, type: input.type },
 		});
+		prepareMessagesForClient([outbound]);
 		return { ok: true, message: outbound, providerResult: { id } };
 	}
 
@@ -5956,7 +6212,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await fs.copyFile(input.sourcePath, durablePath);
 		let mimeType = input.mimeType || attachment.mimeType || null;
 		try {
-			const bytes = await fs.readFile(durablePath);
+			const bytes = await readFileHeader(durablePath, MEDIA_HEADER_BYTES);
 			mimeType =
 				sniffVideoMime(bytes) ||
 				sniffImageMime(bytes) ||
@@ -6099,10 +6355,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		attachmentId: string,
 		options: { clientMessageId?: string } = {},
 	) {
-		const { conversation, accountAccess } = await this.assertConversationVisible(
-			user,
-			conversationId,
-		);
+		const { accountAccess } = await this.assertConversationVisible(user, conversationId);
 		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
 
 		const attachment = await this.assertAttachmentVisible(user, attachmentId);
@@ -6216,6 +6469,37 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	/**
+	 * Batch form of {@link assertAttachmentVisible}: one attachment query and one
+	 * visibility check per distinct conversation (a screenful of media is usually a
+	 * single chat). Missing or hidden attachments are left out of the result.
+	 */
+	async visibleAttachmentsById(user: User, attachmentIds: string[]) {
+		const visible = new Map<string, WhatsAppMessageAttachment>();
+		const ids = attachmentIds.filter((id) => /^[0-9a-f-]{36}$/i.test(id));
+		if (!ids.length) return visible;
+		const attachments = await this.attachmentRepo.find({
+			where: { id: In(ids) },
+			relations: ['message'],
+		});
+		const conversationIds = [
+			...new Set(attachments.map((item) => item.message?.conversationId).filter(Boolean)),
+		] as string[];
+		const allowed = new Set<string>();
+		await Promise.all(
+			conversationIds.map((conversationId) =>
+				this.assertConversationVisible(user, conversationId).then(
+					() => allowed.add(conversationId),
+					() => undefined,
+				),
+			),
+		);
+		for (const attachment of attachments) {
+			if (allowed.has(attachment.message?.conversationId)) visible.set(attachment.id, attachment);
+		}
+		return visible;
+	}
+
+	/**
 	 * Fire-and-forget pull so the file is already on disk by the time the browser
 	 * issues its first Range request. Callers must not await this. Pass the
 	 * attachment from `assertAttachmentVisible` to skip already-cached media —
@@ -6271,7 +6555,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					String(attachment.type || '').toLowerCase(),
 				);
 				if (audioType) {
-					const cachedBuffer = await fs.readFile(cachedPath);
+					const cachedBuffer = await readFileHeader(cachedPath, MEDIA_HEADER_BYTES);
 					if (!isValidAudioBuffer(cachedBuffer, attachment.mimeType)) {
 						throw new Error('Cached audio is invalid');
 					}
@@ -6375,12 +6659,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		attachment.downloadStatus = 'downloading';
 		await this.attachmentRepo.save(attachment);
+		let partPath: string | null = null;
 		try {
 			const mediaId = attachment.providerMediaId || attachment.message.providerMessageId;
 			if (!mediaId) throw new Error('Attachment has no provider media id');
+			const absolutePath = await this.attachmentDownloadPath(attachment);
+			// Unique per attempt: overlapping downloads of one attachment must not interleave bytes.
+			const toFile = `${absolutePath}.${randomUUID().slice(0, 8)}.part`;
+			partPath = toFile;
 			let rawHint = attachment.message?.raw || null;
 			const attemptDownload = async (hint: any) =>
-				this.withMediaDownloadSlot(() => provider.downloadMedia(mediaId, { rawHint: hint }));
+				this.withMediaDownloadSlot(() =>
+					provider.downloadMedia(mediaId, { rawHint: hint, toFile }),
+				);
 
 			let data: any;
 			try {
@@ -6413,59 +6704,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					);
 				}
 			}
-			const buffer = decodeProviderMedia(data);
-			if (!buffer.length) throw new Error('Provider returned empty media');
-			const mediaKind = String(attachment.type || '').toLowerCase();
-			const audioType = ['audio', 'ptt', 'voice'].includes(mediaKind);
-			if (audioType && !isValidAudioBuffer(buffer, attachment.mimeType)) {
-				throw new Error('Provider returned invalid audio media');
-			}
-			if (mediaKind === 'video') {
-				const videoMime = sniffVideoMime(buffer);
-				if (!videoMime && sniffImageMime(buffer)) {
-					throw new Error('Provider returned a thumbnail instead of video');
-				}
-				if (videoMime) attachment.mimeType = videoMime;
-			}
-			const expectedImageBytes =
-				Number(baileysRawMediaNode(rawHint)?.fileLength) ||
-				Number(attachment.fileSizeBytes) ||
-				0;
-			if (
-				mediaKind === 'image' &&
-				isIncompleteChatImageDownload(buffer.length, {
-					type: mediaKind,
-					mimeType: attachment.mimeType || sniffImageMime(buffer),
-					fileSizeBytes: expectedImageBytes || attachment.fileSizeBytes,
-				})
-			) {
-				throw new Error('Provider returned a thumbnail instead of the full image');
-			}
-			const sniffedMime =
-				(audioType ? sniffAudioMime(buffer) : null) ||
-				(mediaKind === 'video' ? sniffVideoMime(buffer) : sniffImageMime(buffer)) ||
-				guessMimeFromPath(attachment.fileName || '', attachment.type);
-			if (sniffedMime && sniffedMime !== attachment.mimeType) {
-				attachment.mimeType = sniffedMime;
-			}
-			const root = path.resolve(
-				process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
-			);
-			const accountFolder = path.join(root, attachment.message.accountId);
-			await fs.mkdir(accountFolder, { recursive: true });
-			const safeName = `${attachment.id}-${path
-				.basename(attachment.fileName || 'attachment')
-				.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-			const absolutePath = path.resolve(accountFolder, safeName);
-			if (!absolutePath.startsWith(`${accountFolder}${path.sep}`)) {
-				throw new Error('Invalid media storage path');
-			}
-			await fs.writeFile(absolutePath, buffer);
+			const size = await this.storeDownloadedMedia(attachment, data, rawHint, absolutePath);
 			attachment.storagePath = path.relative(process.cwd(), absolutePath).replace(/\\/g, '/');
-			attachment.fileSizeBytes = String(buffer.length);
+			attachment.fileSizeBytes = String(size);
 			attachment.downloadStatus = 'downloaded';
 			await this.attachmentRepo.save(attachment);
-			logStep(`downloaded bytes=${buffer.length}`);
+			logStep(`downloaded bytes=${size}`);
 			this.emitAttachmentReady(attachment, false);
 			return {
 				ok: true,
@@ -6476,6 +6720,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				type: attachment.type,
 			};
 		} catch (error: any) {
+			if (partPath) await fs.rm(partPath, { force: true }).catch(() => {});
 			attachment.downloadStatus = 'failed';
 			await this.attachmentRepo.save(attachment);
 			const detail = String(error?.message || error || '');
@@ -6484,6 +6729,79 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				detail && detail !== 'Object' ? detail : 'WhatsApp media is not available',
 			);
 		}
+	}
+
+	private async attachmentDownloadPath(attachment: WhatsAppMessageAttachment): Promise<string> {
+		const root = path.resolve(
+			process.env.WHATSAPP_MEDIA_ROOT || path.join(process.cwd(), 'storage', 'whatsapp-media'),
+		);
+		const accountFolder = path.join(root, attachment.message.accountId);
+		await fs.mkdir(accountFolder, { recursive: true });
+		const safeName = `${attachment.id}-${path
+			.basename(attachment.fileName || 'attachment')
+			.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+		const absolutePath = path.resolve(accountFolder, safeName);
+		if (!absolutePath.startsWith(`${accountFolder}${path.sep}`)) {
+			throw new Error('Invalid media storage path');
+		}
+		return absolutePath;
+	}
+
+	/**
+	 * Validates a provider download and moves it to `absolutePath`. Providers that
+	 * stream (`{ filePath }`) are checked from the file header, so large videos
+	 * never sit in memory; buffer payloads keep the original write path.
+	 */
+	private async storeDownloadedMedia(
+		attachment: WhatsAppMessageAttachment,
+		data: any,
+		rawHint: any,
+		absolutePath: string,
+	): Promise<number> {
+		const streamedPath = typeof data?.filePath === 'string' ? data.filePath : null;
+		const buffer = streamedPath ? null : decodeProviderMedia(data);
+		const size = streamedPath ? (await fs.stat(streamedPath)).size : buffer!.length;
+		if (!size) throw new Error('Provider returned empty media');
+		const header = streamedPath ? await readFileHeader(streamedPath, MEDIA_HEADER_BYTES) : buffer!;
+		const mediaKind = String(attachment.type || '').toLowerCase();
+		const audioType = ['audio', 'ptt', 'voice'].includes(mediaKind);
+		if (audioType && !isValidAudioBuffer(header, attachment.mimeType)) {
+			throw new Error('Provider returned invalid audio media');
+		}
+		if (mediaKind === 'video') {
+			const videoMime = sniffVideoMime(header);
+			if (!videoMime && sniffImageMime(header)) {
+				throw new Error('Provider returned a thumbnail instead of video');
+			}
+			if (videoMime) attachment.mimeType = videoMime;
+		}
+		const expectedImageBytes =
+			Number(baileysRawMediaNode(rawHint)?.fileLength) ||
+			Number(attachment.fileSizeBytes) ||
+			0;
+		if (
+			mediaKind === 'image' &&
+			isIncompleteChatImageDownload(size, {
+				type: mediaKind,
+				mimeType: attachment.mimeType || sniffImageMime(header),
+				fileSizeBytes: expectedImageBytes || attachment.fileSizeBytes,
+			})
+		) {
+			throw new Error('Provider returned a thumbnail instead of the full image');
+		}
+		const sniffedMime =
+			(audioType ? sniffAudioMime(header) : null) ||
+			(mediaKind === 'video' ? sniffVideoMime(header) : sniffImageMime(header)) ||
+			guessMimeFromPath(attachment.fileName || '', attachment.type);
+		if (sniffedMime && sniffedMime !== attachment.mimeType) {
+			attachment.mimeType = sniffedMime;
+		}
+		if (streamedPath) {
+			await fs.rename(streamedPath, absolutePath);
+		} else {
+			await fs.writeFile(absolutePath, buffer!);
+		}
+		return size;
 	}
 
 	private async refreshAttachmentRawFromLive(
@@ -6515,7 +6833,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return after > before;
 	}
 
+	/** Range requests for one video/voice arrive in bursts; the visibility check
+	 *  and attachment lookups only need to run once per user per short window. */
 	async resolveAttachmentFile(user: User, attachmentId: string) {
+		const cacheKey = `${user?.id || ''}:${attachmentId}`;
+		const cached = this.resolvedAttachmentFiles.get<{
+			absolutePath: string;
+			mimeType: string;
+			fileName: string;
+		}>(cacheKey);
+		if (cached) {
+			try {
+				await fs.access(cached.absolutePath);
+				return cached;
+			} catch {
+				this.resolvedAttachmentFiles.del(cacheKey);
+			}
+		}
+		const resolved = await this.resolveAttachmentFileUncached(user, attachmentId);
+		this.resolvedAttachmentFiles.set(cacheKey, resolved);
+		return resolved;
+	}
+
+	private async resolveAttachmentFileUncached(user: User, attachmentId: string) {
 		const downloaded = await this.downloadAttachment(user, attachmentId);
 		if (!downloaded?.ok || !downloaded.path) {
 			throw new BadRequestException('WhatsApp media is not available');

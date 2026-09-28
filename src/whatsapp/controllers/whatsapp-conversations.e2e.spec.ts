@@ -159,6 +159,26 @@ describe('WhatsApp conversations API (isolated HTTP integration)', () => {
 			'all',
 			'',
 			'',
+			'',
+		);
+	});
+
+	it('passes the reconnect delta cursor through (audit P3 delta sync)', async () => {
+		await request(app.getHttpServer())
+			.get(
+				'/api/v1/whatsapp/accounts/account-1/conversations?page=1&limit=100&updatedSince=2026-09-28T11%3A50%3A00.000Z',
+			)
+			.expect(200);
+		expect(sync.listConversations).toHaveBeenLastCalledWith(
+			{ id: 'test-user' },
+			'account-1',
+			1,
+			100,
+			'',
+			'all',
+			'',
+			'',
+			'2026-09-28T11:50:00.000Z',
 		);
 	});
 });

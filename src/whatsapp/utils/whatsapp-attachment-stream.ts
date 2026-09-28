@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import type { Request, Response } from 'express';
 import { StreamableFile } from '@nestjs/common';
 import { parseByteRange } from './whatsapp-byte-range';
+import { quietStreamableFile } from './whatsapp-stream-errors';
 
 const INLINE_TYPES = new Set([
 	'image/jpeg',
@@ -22,6 +23,7 @@ export async function streamResolvedAttachment(
 	res: Response,
 	file: { absolutePath: string; mimeType?: string | null; fileName?: string | null },
 	attachmentId: string,
+	options: { cacheControl?: string } = {},
 ): Promise<StreamableFile | undefined> {
 	const mimeType = String(file.mimeType || 'application/octet-stream')
 		.toLowerCase()
@@ -33,7 +35,7 @@ export async function streamResolvedAttachment(
 		mimeType.startsWith('video/');
 	res.setHeader('X-Content-Type-Options', 'nosniff');
 	res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
-	res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+	res.setHeader('Cache-Control', options.cacheControl || 'private, max-age=604800, immutable');
 	res.setHeader(
 		'Content-Disposition',
 		`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,
@@ -54,7 +56,7 @@ export async function streamResolvedAttachment(
 	}
 
 	if (!inline || size == null) {
-		return new StreamableFile(createReadStream(file.absolutePath));
+		return quietStreamableFile(createReadStream(file.absolutePath));
 	}
 	res.setHeader('Accept-Ranges', 'bytes');
 	const range = parseByteRange(String(req.headers.range || ''), size);
@@ -65,12 +67,12 @@ export async function streamResolvedAttachment(
 	}
 	if (!range) {
 		res.setHeader('Content-Length', String(size));
-		return new StreamableFile(createReadStream(file.absolutePath));
+		return quietStreamableFile(createReadStream(file.absolutePath));
 	}
 	res.status(206);
 	res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
 	res.setHeader('Content-Length', String(range.end - range.start + 1));
-	return new StreamableFile(
+	return quietStreamableFile(
 		createReadStream(file.absolutePath, { start: range.start, end: range.end }),
 	);
 }

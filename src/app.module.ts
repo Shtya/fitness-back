@@ -6,6 +6,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { QueryFailedErrorFilter } from 'common/QueryFailedErrorFilter';
+import { shouldSynchronizeSchema } from 'common/database-schema-sync';
+import { resolveDatabasePoolSize } from 'common/database-pool';
+import { backgroundJobsEnabled } from 'common/runtime-isolation';
 import { AssetModule } from './asset/asset.module';
 import { PlansModule } from './plans/plans.module';
 import { PrsModule } from './prs/prs.module';
@@ -51,7 +54,7 @@ import { BodyMeasurementModule } from './body-measurement/body-measurement.modul
 @Module({
 	imports: [
 		ConfigModule.forRoot(),
-		ScheduleModule.forRoot(),
+		...(backgroundJobsEnabled() ? [ScheduleModule.forRoot()] : []),
 		TypeOrmModule.forRoot({
 			type: 'postgres',
 			host: process.env.DATABASE_HOST,
@@ -61,15 +64,10 @@ import { BodyMeasurementModule } from './body-measurement/body-measurement.modul
 			database: process.env.DATABASE_NAME,
 			entities: [__dirname + '/../**/*.entity{.ts,.js}'],
 			autoLoadEntities: true,
-			// Never let TypeORM mutate a production schema implicitly.
-			// Production deployments must apply reviewed migrations instead.
-			synchronize:
-				process.env.NODE_ENV !== 'production' &&
-				process.env.DATABASE_SYNCHRONIZE !== 'false',
-			// Stay well under Supabase session-mode pool_size (often 15 shared).
-			poolSize: Math.min(Math.max(Number(process.env.DATABASE_POOL_SIZE) || 4, 2), 8),
+			synchronize: shouldSynchronizeSchema(),
+			poolSize: resolveDatabasePoolSize(),
 			extra: {
-				max: Math.min(Math.max(Number(process.env.DATABASE_POOL_SIZE) || 4, 2), 8),
+				max: resolveDatabasePoolSize(),
 				idleTimeoutMillis: 10000,
 				connectionTimeoutMillis: 20000,
 			},

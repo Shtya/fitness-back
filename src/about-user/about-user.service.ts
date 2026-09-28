@@ -5,6 +5,7 @@ import { MealPlan, MealPlanDay, Meal, MealItem, Supplement, MealPlanAssignment, 
 import { BodyMeasurement, ProgressPhoto } from 'entities/profile.entity';
 import { WeeklyReport } from 'entities/weekly-report.entity';
 import { Between, FindOptionsWhere, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
+import { parsePagination } from 'common/pagination';
 
 type DateRange = { from?: string; to?: string };
 
@@ -181,12 +182,13 @@ export class AboutUserService {
   }
 
   /* ----------------------------- weekly reports (list) ----------------------------- */
-  async listWeeklyReports(userId: string, page = 1, limit = 20) {
+  async listWeeklyReports(userId: string, rawPage: unknown = 1, rawLimit: unknown = 20) {
+    const { page, limit, skip } = parsePagination(rawPage, rawLimit, { maxLimit: 1000 });
     await this.ensureUser(userId);
     const [rows, total] = await this.weeklyReports.findAndCount({
       where: { userId },
       order: { created_at: 'DESC' },
-      skip: (page - 1) * limit,
+      skip,
       take: limit,
     });
     const records = rows.map(r => ({

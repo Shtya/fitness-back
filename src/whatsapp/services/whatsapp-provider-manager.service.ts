@@ -3,7 +3,9 @@ import {
 	Logger,
 	OnApplicationBootstrap,
 	OnApplicationShutdown,
+	ServiceUnavailableException,
 } from '@nestjs/common';
+import { whatsappSessionsEnabled } from 'common/runtime-isolation';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { In, Not, Repository } from 'typeorm';
@@ -19,7 +21,7 @@ import {
 	WhatsAppAccountStatus,
 	WhatsAppConnectionLog,
 	WhatsAppMessage,
-	WhatsAppMessageStatus,
+	WhatsAppMessageDirection,
 } from '../entities/whatsapp.entity';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppProvider, WhatsAppProviderEvent } from '../providers/whatsapp-provider';
@@ -211,6 +213,11 @@ export class WhatsAppProviderManagerService
 		phoneNumber?: string,
 		options?: { connectionMethod?: 'qr' | 'pairing_code' },
 	) {
+		if (!whatsappSessionsEnabled()) {
+			throw new ServiceUnavailableException(
+				'WhatsApp sessions are disabled on this server (WHATSAPP_SESSIONS_ENABLED=false)',
+			);
+		}
 		const pending = this.connecting.get(accountId);
 		if (pending) return pending;
 
@@ -397,7 +404,18 @@ export class WhatsAppProviderManagerService
 	private createProvider(account: WhatsAppAccount): WhatsAppProvider {
 		const providerName = this.resolveProviderName(account);
 		if (providerName === 'baileys') {
-			return new BaileysProvider(account.id);
+			const provider = new BaileysProvider(account.id);
+			provider.setMessageLookup((providerMessageId) =>
+				this.messageRepo.findOne({
+					where: {
+						accountId: account.id,
+						providerMessageId,
+						direction: WhatsAppMessageDirection.OUTBOUND,
+					},
+					select: { id: true, text: true, raw: true },
+				}),
+			);
+			return provider;
 		}
 		if (providerName === 'wppconnect') {
 			return new WppConnectProvider(
@@ -669,27 +687,6 @@ export class WhatsAppProviderManagerService
 			await this.accountRepo.update(accountId, { status: WhatsAppAccountStatus.QR_PENDING });
 			await this.log(accountId, 'pairing_code_updated');
 		}
-		if (event.type === 'message_status') {
-			const rank: Record<string, number> = {
-				pending: 0,
-				sent: 1,
-				delivered: 2,
-				read: 3,
-				played: 4,
-				failed: 1,
-			};
-			const message = await this.messageRepo.findOne({
-				where: { accountId, providerMessageId: event.providerMessageId },
-			});
-			if (
-				message &&
-				(rank[event.status] ?? -1) >= (rank[message.status] ?? -1)
-			) {
-				message.status = event.status as WhatsAppMessageStatus;
-				message.statusUpdatedAt = new Date();
-				await this.messageRepo.save(message);
-			}
-		}
 
 		// Account rooms are visible to staff with canView. Never broadcast QR codes,
 		// message content, raw provider payloads, or status receipts to that room.
@@ -706,6 +703,11 @@ export class WhatsAppProviderManagerService
 	}
 
 	async disconnect(accountId: string, logout = false) {
+		if (!whatsappSessionsEnabled()) {
+			throw new ServiceUnavailableException(
+				'WhatsApp sessions are disabled on this server (WHATSAPP_SESSIONS_ENABLED=false)',
+			);
+		}
 		const provider = this.providers.get(accountId);
 		if (provider) {
 			if (logout) await provider.logout();
@@ -914,6 +916,12 @@ export class WhatsAppProviderManagerService
 	}
 
 	async onApplicationBootstrap() {
+		if (!whatsappSessionsEnabled()) {
+			this.logger.warn(
+				'WhatsApp sessions disabled (WHATSAPP_SESSIONS_ENABLED=false): no session restore, no account status writes',
+			);
+			return;
+		}
 		await this.migrateAccountsToConfiguredProvider().catch(error =>
 			this.logger.warn(
 				`WhatsApp provider migration failed: ${

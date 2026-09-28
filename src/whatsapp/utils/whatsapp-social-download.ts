@@ -185,16 +185,19 @@ export const BROWSER_USER_AGENT =
  *    the challenge entirely, and immune to a stale challenge cookie;
  * 3. TikTok's mobile API host, which does not involve the web page at all.
  *
- * Facebook and Instagram get the first two rungs only, and in practice never leave
- * the first, so their behaviour is unchanged.
+ * Facebook and Instagram get the first two rungs only. When a cookies file is
+ * configured for the platform, a logged-in rung is tried before all of them.
  */
 export function socialDownloadAttempts(
 	platform: SocialPlatform,
-	options: { tiktokApiHostname?: string; userAgent?: string } = {},
+	options: { tiktokApiHostname?: string; userAgent?: string; cookiesFile?: string | null } = {},
 ): string[][] {
 	const userAgent = options.userAgent || BROWSER_USER_AGENT;
 	const apiHostname = options.tiktokApiHostname || TIKTOK_API_HOSTNAME;
 	const attempts: string[][] = [[], ['--no-cache-dir', '--user-agent', userAgent]];
+	// A logged-in session goes first: Instagram answers every anonymous request with an
+	// "empty media response", public posts included.
+	if (options.cookiesFile) attempts.unshift(['--cookies', options.cookiesFile]);
 	if (platform === 'tiktok' && apiHostname) {
 		attempts.push(['--no-cache-dir', '--extractor-args', `tiktok:api_hostname=${apiHostname}`]);
 	}
@@ -249,10 +252,30 @@ export function lastSocialDownloadError(stderr: string): string {
 	return detail.length > 160 ? `${detail.slice(0, 157)}...` : detail;
 }
 
+/** Env var holding a Netscape cookies.txt for a platform, e.g. `YTDLP_INSTAGRAM_COOKIES`. */
+export function socialCookiesEnvKey(platform: SocialPlatform): string {
+	return `YTDLP_${platform.toUpperCase()}_COOKIES`;
+}
+
 /** Turns yt-dlp's stderr into something worth showing a user. */
-export function describeSocialDownloadFailure(stderr: string, exitCode: number | null): string {
+export function describeSocialDownloadFailure(
+	stderr: string,
+	exitCode: number | null,
+	context: { platform?: SocialPlatform; usedCookies?: boolean } = {},
+): string {
 	const text = String(stderr || '').toLowerCase();
-	if (text.includes('login required') || text.includes('not logged') || text.includes('cookies')) {
+	if (
+		text.includes('login required') ||
+		text.includes('not logged') ||
+		text.includes('cookies') ||
+		text.includes('empty media response')
+	) {
+		if (context.platform === 'instagram' && !context.usedCookies) {
+			return `Instagram only allows video downloads with a logged-in session. An admin needs to add Instagram cookies on the server (${socialCookiesEnvKey('instagram')}).`;
+		}
+		if (context.usedCookies) {
+			return 'This post is private, or the saved login session has expired, so it cannot be downloaded.';
+		}
 		return 'This post is private or needs a login, so it cannot be downloaded.';
 	}
 	if (text.includes('unsupported url')) return 'This link does not point to a downloadable video.';
