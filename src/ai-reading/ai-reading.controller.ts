@@ -21,6 +21,11 @@ export class AiReadingController {
 		return this.service.putState(req.user, body);
 	}
 
+	@Put('notebook')
+	putNotebook(@Req() req: any, @Body() body: any) {
+		return this.service.putNotebook(req.user, body);
+	}
+
 	@Post('books')
 	upsertBook(@Req() req: any, @Body() body: any) {
 		return this.service.upsertBook(req.user, body?.book || body);
