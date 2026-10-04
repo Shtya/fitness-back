@@ -1,4 +1,30 @@
-import { WhatsAppSyncService, parseConversationDeltaSince } from './whatsapp-sync.service';
+import {
+	WhatsAppSyncService,
+	parseConversationDeltaSince,
+	toSafeMediaFileName,
+} from './whatsapp-sync.service';
+
+describe('toSafeMediaFileName (ENAMETOOLONG on Arabic captions)', () => {
+	it('keeps short ASCII names and their extension', () => {
+		expect(toSafeMediaFileName('photo 1.jpg')).toBe('photo_1.jpg');
+		expect(toSafeMediaFileName('../../etc/passwd')).toBe('passwd');
+	});
+
+	it('collapses non-Latin names to the fallback and keeps the extension', () => {
+		expect(toSafeMediaFileName('صورة التمرين.jpeg')).toBe('attachment.jpeg');
+		expect(toSafeMediaFileName('', 'file')).toBe('file');
+		expect(toSafeMediaFileName(null)).toBe('attachment');
+	});
+
+	it('stays far below the 255-byte filename limit for long captions', () => {
+		const caption = `${'تمرين '.repeat(60)}AI ${'ا'.repeat(80)}..`;
+		const name = toSafeMediaFileName(caption);
+		expect(name).toBe('AI');
+		const long = toSafeMediaFileName(`${'a'.repeat(400)}.mp4`);
+		expect(long.endsWith('.mp4')).toBe(true);
+		expect(`${'0'.repeat(36)}-${long}.12345678.part`.length).toBeLessThan(255);
+	});
+});
 
 describe('parseConversationDeltaSince (reconnect delta, P3)', () => {
 	const now = Date.parse('2026-09-28T12:00:00Z');

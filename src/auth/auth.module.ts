@@ -11,10 +11,12 @@ import { RolesGuard } from './guard/roles.guard';
 import {  Notification, ExercisePlan, User } from 'entities/global.entity';
 import { FoodSuggestion, MealPlan } from "entities/meal_plans.entity";
 import { MailService } from 'common/nodemailer';
+import { PageAccessModule } from '../page-access/page-access.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    PageAccessModule,
     TypeOrmModule.forFeature([User , MealPlan , ExercisePlan , Notification , FoodSuggestion]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

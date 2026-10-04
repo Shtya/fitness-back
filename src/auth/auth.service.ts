@@ -12,6 +12,7 @@ import { parsePagination } from 'common/pagination';
 import * as crypto from 'crypto';
 import { isUUID } from 'class-validator';
 import { FoodSuggestion, MealPlan } from '../../entities/meal_plans.entity';
+import { PageAccessService } from '../page-access/page-access.service';
 
 @Injectable()
 export class AuthService {
@@ -24,7 +25,12 @@ export class AuthService {
 		private jwt: JwtService,
 		private cfg: ConfigService,
 		public emailService: MailService,
+		private readonly pageAccess: PageAccessService,
 	) { }
+
+	private async serializeWithPageAccess(user: User) {
+		return { ...this.serialize(user), pageAccess: await this.pageAccess.forUser(user) };
+	}
 
 	/* Utility to normalize pagination */
 	private normPaged(q?: { page?: string | number; limit?: string | number }) {
@@ -145,7 +151,7 @@ export class AuthService {
 			message: 'Impersonation session created',
 			accessToken,
 			refreshToken,
-			user: this.serialize(user),
+			user: await this.serializeWithPageAccess(user),
 		};
 	}
 
@@ -962,7 +968,7 @@ export class AuthService {
 
 		const accessToken = this.signAccess(user.id, user.tenantId);
 		const refreshToken = this.signRefresh(user.id, user.tenantId);
-		return { accessToken, refreshToken, user: this.serialize(user) };
+		return { accessToken, refreshToken, user: await this.serializeWithPageAccess(user) };
 	}
 
 	async refreshTokens(refreshToken: string) {
@@ -986,7 +992,7 @@ export class AuthService {
 	async getCurrentUser(userId: string) {
 		const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['activeExercisePlan', 'activeMealPlan'] });
 		if (!user) throw new UnauthorizedException('User not found');
-		return this.serialize(user);
+		return this.serializeWithPageAccess(user);
 	}
 
 	async updateProfile(userId: string, dto: UpdateProfileDto) {
@@ -1207,7 +1213,7 @@ export class AuthService {
 		const sortOrder: 'ASC' | 'DESC' = String(q.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 		const includeTree = ['1', 'true', true].includes(String(q.includeTree).toLowerCase());
 
-		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.role', 'u.status', 'u.created_at', 'u.adminId', 'u.coachId', 'u.subscriptionEnd']).orderBy(`u.${sortBy}`, sortOrder).skip(skip).take(limit);
+		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.role', 'u.status', 'u.created_at', 'u.adminId', 'u.coachId', 'u.subscriptionEnd', 'u.allowedPages', 'u.loginLandingPage']).orderBy(`u.${sortBy}`, sortOrder).skip(skip).take(limit);
 
 		if (search) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s: `%${search}%` });
 		if (role) qb.andWhere('u.role = :role', { role });
@@ -1262,6 +1268,8 @@ export class AuthService {
 			}
 		}
 
+		const overridesByUser = await this.pageAccess.overrideSummaries(users.map(u => u.id));
+
 		const now = new Date();
 		const items = users.map(u => {
 			let daysLeft: number | null = null;
@@ -1271,7 +1279,7 @@ export class AuthService {
 					daysLeft = Math.ceil((end.getTime() - now.getTime()) / 86400000);
 				}
 			}
-			const base: any = { ...this.serialize(u), daysLeft };
+			const base: any = { ...this.serialize(u), daysLeft, pageOverrides: overridesByUser[u.id] ?? null };
 			if (u.role === UserRole.ADMIN) {
 				base.counts = countsByAdmin[u.id] || { coaches: 0, clients: 0, activeClients: 0, suspendedClients: 0 };
 				if (includeTree) base.tree = treeByAdmin[u.id] || { coaches: [], clientsSample: [] };

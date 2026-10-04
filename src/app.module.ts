@@ -50,6 +50,8 @@ import { GoldIntelligenceModule } from './gold-intelligence/gold-intelligence.mo
 import { AiModule } from './ai/ai.module';
 import { WebTranslatorModule } from './web-translator/web-translator.module';
 import { BodyMeasurementModule } from './body-measurement/body-measurement.module';
+import { FacebookEngagementModule } from './facebook-engagement/facebook-engagement.module';
+import { SiteInspectorModule } from './site-inspector/site-inspector.module';
 
 @Module({
 	imports: [
@@ -114,6 +116,8 @@ import { BodyMeasurementModule } from './body-measurement/body-measurement.modul
 		AiModule,
 		WebTranslatorModule,
 		BodyMeasurementModule,
+		FacebookEngagementModule,
+		SiteInspectorModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],

@@ -282,3 +282,112 @@ Check (no file written): `cd /root/backend && tools/yt-dlp --cookies /tmp/ig-che
 after `cp /root/secure/instagram-cookies.txt /tmp/ig-check.txt` (yt-dlp rewrites the jar it is given), then `rm /tmp/ig-check.txt`.
 When downloads start failing with "saved login session has expired", export fresh cookies and replace the file (no restart needed).
 Rollback: remove the env line and restart.
+
+## 19. Facebook Engagement Manager (2026-09-30)
+
+New module `backend/src/facebook-engagement` + dashboard `/dashboard/facebook-engagement`. It publishes comments
+only as Pages the user manages, on those Pages' own posts, through the official Graph API. Nothing below has
+been applied. Run 19.1 before (or right after) deploying the code: until then the module's endpoints fail
+(tables missing) and the worker logs one `Publishing tick failed` warning. The sidebar item is hidden by default
+(`defaultVisible: false`).
+
+### 19.1 DB migration (additive, re-runnable)
+
+File: `backend/migrations/20260929_facebook_engagement.sql` — 7 new `fb_engagement_*` tables, no changes to
+existing tables. The runner sends the file as one multi-statement query, so it applies atomically.
+
+```bash
+cd /root/backend && node scripts/run-sql-migration.mjs migrations/20260929_facebook_engagement.sql
+```
+
+Check:
+
+```sql
+SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'fb_engagement_%' ORDER BY 1;  -- 7 rows
+```
+
+Rollback (drops only this module's data):
+
+```sql
+DROP TABLE IF EXISTS fb_engagement_activity_logs, fb_engagement_jobs, fb_engagement_comments,
+  fb_engagement_campaigns, fb_engagement_posts, fb_engagement_accounts, fb_engagement_connections;
+```
+
+### 19.2 Environment (`/root/backend/.env`)
+
+```bash
+cp /root/backend/.env /root/backend/.env.bak.$(date +%F)
+cat >> /root/backend/.env <<EOF
+FB_ENGAGEMENT_ENCRYPTION_KEY=$(openssl rand -base64 32)
+EOF
+# After step 19.3 (Meta app), add:
+# FACEBOOK_APP_ID=<app id>
+# FACEBOOK_APP_SECRET=<app secret>
+pm2 restart backend --update-env
+```
+
+| Key | Required | Notes |
+| --- | --- | --- |
+| `FB_ENGAGEMENT_ENCRYPTION_KEY` | Strongly recommended | base64 of 32 bytes; encrypts stored Facebook tokens (AES-256-GCM). If unset, a key is derived from `JWT_SECRET` — rotating `JWT_SECRET` would then make stored tokens unreadable (users must reconnect). Set it **before** the first connection and never change it afterwards. |
+| `FACEBOOK_APP_ID` / `FACEBOOK_APP_SECRET` | For "Continue with Facebook" | Without them, OAuth is disabled and users can still connect with a Page/User access token. |
+| `FACEBOOK_OAUTH_REDIRECT_URI` | Optional | Default `${META_WHATSAPP_PUBLIC_API_URL origin}/api/v1/facebook-engagement/oauth/callback`. Must match the Meta app exactly. |
+| `FB_ENGAGEMENT_MIN_INTERVAL_SECONDS` | Optional | Minimum gap between two comments from the same Page across all campaigns (default `10`). |
+| `FB_ENGAGEMENT_GRAPH_VERSION` | Optional | Falls back to `META_GRAPH_API_VERSION`, then `v21.0`. |
+
+The OAuth callback redirects to the frontend origin from the existing `FRONTEND_URL` allowlist.
+The publishing worker runs every 5 s only when `BACKGROUND_JOBS_ENABLED` is not `false` (production default).
+Jobs are claimed with `FOR UPDATE SKIP LOCKED`, so more than one backend process is safe.
+
+Check: `curl -s -H "Authorization: Bearer <token>" https://<api>/api/v1/facebook-engagement/config` →
+`oauthConfigured: true` once the app keys are set.
+Rollback: restore the `.bak` file and restart (stored tokens become unreadable if the key is removed).
+
+### 19.3 Meta app (owner action)
+
+1. developers.facebook.com → the app → add **Facebook Login for Business** (or Facebook Login).
+2. Valid OAuth Redirect URIs: the `redirectUri` shown on the dashboard Accounts page (= 19.2 default).
+3. Permissions: `pages_show_list`, `pages_read_engagement`, `pages_manage_engagement`.
+   In Development mode they work only for app roles (admins/developers/testers); for other users they need
+   **App Review** + Business Verification. Do not request more permissions than these three.
+4. Page roles: the connecting user needs a Page task that includes `MODERATE` (Page admin/moderator).
+
+Limits kept by design: no personal profiles, no other people's Pages/posts, no groups, one comment per unique
+message per post, paced per Page; Facebook policy/rate-limit errors pause or cancel the queue instead of retrying.
+
+## 20. Sidebar page access per role / per user (2026-09-30)
+
+New module `backend/src/page-access` + dashboard `/dashboard/super-admin/page-access` (super admin only).
+Each page per role is `default` (shown), `optional` (Marketplace) or `locked` (hidden + blocked by the Next.js
+middleware); the super admin can also pin or lock pages per user from the Users page. Nothing below has been
+applied. Deploy order does not matter: until 20.1 runs, `/auth/me` and login return no restrictions (one
+`Page access tables are missing` warning) and only the new save endpoints fail.
+
+### 20.1 DB migration (additive, re-runnable)
+
+File: `backend/migrations/20260930_page_access.sql` — 2 new tables (`role_page_settings`,
+`user_page_overrides`), no changes to existing tables. Applied atomically by the runner.
+
+```bash
+cd /root/backend && node scripts/run-sql-migration.mjs migrations/20260930_page_access.sql
+```
+
+Check:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name IN ('role_page_settings', 'user_page_overrides') ORDER BY 1;  -- 2 rows
+```
+
+Rollback (drops only page-access settings; users fall back to the code defaults):
+
+```sql
+DROP TABLE IF EXISTS user_page_overrides, role_page_settings;
+```
+
+### 20.2 Behaviour notes
+
+- Signed-in users pick up changes within about a minute (on tab focus); the middleware cookie is refreshed then.
+- Locks are UI/navigation enforcement (the `user` cookie is not signed). API authorization stays role-based.
+- Saving a user's overrides clears the old `users.allowedPages` allowlist for that user. Users with an old list
+  keep it (now also enforced by the middleware) until the super admin saves the new editor.
+- No env changes and no restart beyond the normal code deploy.

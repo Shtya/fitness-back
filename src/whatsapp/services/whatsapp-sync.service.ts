@@ -176,6 +176,28 @@ function guessMimeFromPath(filePath: string, fallbackType?: string | null): stri
 	return null;
 }
 
+const MAX_MEDIA_FILE_STEM = 80;
+
+/**
+ * ASCII-only on-disk name. Capped because non-Latin names (Arabic captions,
+ * emoji) otherwise expand to hundreds of `_` and exceed the 255-byte filename
+ * limit (ENAMETOOLONG), which makes the media permanently undownloadable.
+ */
+export function toSafeMediaFileName(
+	fileName: string | null | undefined,
+	fallback = 'attachment',
+): string {
+	const base = path.basename(String(fileName || ''));
+	const rawExt = path.extname(base);
+	const ext = /^\.[a-zA-Z0-9]{1,10}$/.test(rawExt) ? rawExt : '';
+	const stem = (ext ? base.slice(0, -ext.length) : base)
+		.replace(/[^a-zA-Z0-9._-]/g, '_')
+		.replace(/_{2,}/g, '_')
+		.replace(/^[._]+|[._]+$/g, '')
+		.slice(0, MAX_MEDIA_FILE_STEM);
+	return `${stem || fallback}${ext}`;
+}
+
 function sniffImageMime(buffer: Buffer): string | null {
 	if (!buffer || buffer.length < 12) return null;
 	if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
@@ -5160,10 +5182,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 										: mime.includes('pdf')
 											? '.pdf'
 											: path.extname(attachment.fileName || sourceAbsolute) || '.bin';
-		const baseName = path
-			.basename(attachment.fileName || `share${ext}`)
-			.replace(/[^a-zA-Z0-9._-]/g, '_');
-		const fileName = `share_${Date.now()}_${randomUUID().slice(0, 8)}_${baseName || `file${ext}`}`;
+		const baseName = toSafeMediaFileName(attachment.fileName || `share${ext}`, 'file');
+		const fileName = `share_${Date.now()}_${randomUUID().slice(0, 8)}_${baseName}`;
 		const destAbsolute = path.join(outgoingDir, fileName);
 		await fs.copyFile(sourceAbsolute, destAbsolute);
 		return path.relative(root, destAbsolute).replace(/\\/g, '/');
@@ -6202,9 +6222,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		if (!attachment) return;
-		const safeName = `${attachment.id}-${path
-			.basename(input.fileName || 'attachment')
-			.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+		const safeName = `${attachment.id}-${toSafeMediaFileName(input.fileName)}`;
 		const durablePath = path.resolve(accountFolder, safeName);
 		if (!durablePath.startsWith(`${accountFolder}${path.sep}`)) {
 			throw new Error('Invalid media storage path');
@@ -6737,9 +6755,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 		const accountFolder = path.join(root, attachment.message.accountId);
 		await fs.mkdir(accountFolder, { recursive: true });
-		const safeName = `${attachment.id}-${path
-			.basename(attachment.fileName || 'attachment')
-			.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+		const safeName = `${attachment.id}-${toSafeMediaFileName(attachment.fileName)}`;
 		const absolutePath = path.resolve(accountFolder, safeName);
 		if (!absolutePath.startsWith(`${accountFolder}${path.sep}`)) {
 			throw new Error('Invalid media storage path');
