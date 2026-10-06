@@ -18,19 +18,49 @@ export type UserPageAccess = {
 	roleModes: RolePageModes;
 	extraPages: string[];
 	lockedPages: string[];
+	/** Page ids explicitly set to shown, including ones outside the role's built-in menu. */
+	granted: string[];
 	/** Effective locked ids after user overrides; used by the frontend middleware. */
 	locked: string[];
 };
 
-const EMPTY_ACCESS: UserPageAccess = { roleModes: {}, extraPages: [], lockedPages: [], locked: [] };
+const EMPTY_ACCESS: UserPageAccess = { roleModes: {}, extraPages: [], lockedPages: [], locked: [], granted: [] };
+
+/**
+ * Store-admin tools — hidden for gym roles until Page Access sets them to "default".
+ * Keep in sync with ITEM_META.defaultLocked in the frontend Sidebar.
+ */
+export const DEFAULT_LOCKED_PAGE_IDS = [
+	'transcript',
+	'learning',
+	'learningManagement',
+	'learningStudy',
+	'webTranslator',
+	'siteInspector',
+	'phoneCheck',
+	'fitnessLeads',
+	'metaWhatsApp',
+	'facebookEngagement',
+	'money',
+] as const;
 
 export function isManagedPageRole(role: unknown): role is ManagedPageRole {
 	return MANAGED_PAGE_ROLES.includes(role as ManagedPageRole);
 }
 
-/** Role locks + user locks, minus pages the user was explicitly given. */
-export function effectiveLockedPages(roleModes: RolePageModes, extraPages: string[], lockedPages: string[]) {
-	const locked = new Set(Object.keys(roleModes).filter(id => roleModes[id] === 'locked'));
+/**
+ * Effective locked page ids for middleware:
+ * - start from Store-admin defaults
+ * - apply roleModes (default unlocks; locked/optional hide)
+ * - apply per-user locks / extras
+ */
+export function effectiveLockedPages(roleModes: RolePageModes, extraPages: string[], lockedPages: string[], role?: string) {
+	const skipDefaults = role === 'super_admin' || role === UserRole.SUPER_ADMIN;
+	const locked = new Set<string>(skipDefaults ? [] : DEFAULT_LOCKED_PAGE_IDS);
+	for (const [id, mode] of Object.entries(roleModes || {})) {
+		if (mode === 'locked' || mode === 'optional') locked.add(id);
+		else if (mode === 'default') locked.delete(id);
+	}
 	for (const id of lockedPages) locked.add(id);
 	for (const id of extraPages) locked.delete(id);
 	return [...locked].sort();
@@ -55,12 +85,16 @@ export class PageAccessService {
 	) {}
 
 	async listRoles() {
-		const rows = await this.roleSettings.find();
-		const roles = Object.fromEntries(MANAGED_PAGE_ROLES.map(role => [role, {}])) as Record<ManagedPageRole, RolePageModes>;
-		for (const row of rows) {
-			if (isManagedPageRole(row.role)) roles[row.role][row.pageId] = row.mode;
-		}
-		return { roles };
+		const blank = (): Record<ManagedPageRole, RolePageModes> =>
+			Object.fromEntries(MANAGED_PAGE_ROLES.map(role => [role, {}])) as Record<ManagedPageRole, RolePageModes>;
+		return this.tolerateMissingTables(async () => {
+			const rows = await this.roleSettings.find();
+			const roles = blank();
+			for (const row of rows) {
+				if (isManagedPageRole(row.role)) roles[row.role][row.pageId] = row.mode;
+			}
+			return { roles };
+		}, { roles: blank() });
 	}
 
 	async replaceRole(role: string, rawModes: Record<string, string>, actorId: string) {
@@ -86,7 +120,17 @@ export class PageAccessService {
 			const roleModes: RolePageModes = Object.fromEntries(rows.map(row => [row.pageId, row.mode]));
 			const extraPages = override?.extraPages ?? [];
 			const lockedPages = override?.lockedPages ?? [];
-			return { roleModes, extraPages, lockedPages, locked: effectiveLockedPages(roleModes, extraPages, lockedPages) };
+			const granted = [...new Set([
+				...Object.entries(roleModes).filter(([, mode]) => mode === 'default').map(([id]) => id),
+				...extraPages,
+			])].sort();
+			return {
+				roleModes,
+				extraPages,
+				lockedPages,
+				granted,
+				locked: effectiveLockedPages(roleModes, extraPages, lockedPages, user.role),
+			};
 		}, EMPTY_ACCESS);
 	}
 

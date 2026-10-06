@@ -24,8 +24,7 @@ export class WeeklyReportController {
     if (req.user.role === UserRole.CLIENT) {
       return this.weeklyReportService.findUserReports(req.user.id, Number(page), Number(limit));
     } else {
-			console.log(query.search);
-      return CRUD.findAll(this.weeklyReportService.weeklyReportRepo, 'p', query.search, query.page, query.limit, query.sortBy, query.sortOrder ?? 'DESC', ['user'], [''], query.filters);
+      return this.weeklyReportService.listStaffReports(req.user, query);
     }
   }
 
@@ -90,7 +89,7 @@ export class WeeklyReportController {
   @Roles(UserRole.COACH, UserRole.ADMIN)
   async updateFeedback(@Param('id') id: string, @Body() updateDto: { coachFeedback?: string }, @Request() req) {
     const locale = String(req?.headers?.['x-locale'] || req?.headers?.['accept-language'] || 'en');
-    return this.weeklyReportService.updateFeedback(id, updateDto, req.user.id, locale);
+    return this.weeklyReportService.updateFeedback(id, updateDto, req.user, locale);
   }
 
   @Put(':id/read')

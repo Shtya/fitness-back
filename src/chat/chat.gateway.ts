@@ -82,11 +82,30 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				client.join(`conversation_${participant.conversation.id}`);
 			});
 
-			// Notify others about user online status
-			this.server.emit('user_online', { userId: user.id, online: true });
+			// Presence only within this user's conversation rooms (not global broadcast)
+			for (const room of client.rooms) {
+				if (String(room).startsWith('conversation_')) {
+					client.to(room).emit('user_online', { userId: user.id, online: true });
+				}
+			}
 		} catch (error) {
 			console.error('Connection error:', error);
 			client.disconnect();
+		}
+	}
+
+	private async emitPresence(userId: string, online: boolean) {
+		try {
+			const participants = await this.participantRepo.find({
+				where: { user: { id: userId }, isActive: true },
+				relations: ['conversation'],
+			});
+			for (const p of participants) {
+				const cid = p.conversation?.id;
+				if (cid) this.server.to(`conversation_${cid}`).emit('user_online', { userId, online });
+			}
+		} catch (e) {
+			console.error('Presence emit failed:', e);
 		}
 	}
 
@@ -97,7 +116,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			sockets.delete(client.id);
 			if (!sockets.size) {
 				this.connectedUsers.delete(userId);
-				this.server.emit('user_online', { userId, online: false });
+				void this.emitPresence(userId, false);
 			}
 			return;
 		}
@@ -107,7 +126,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				socketIds.delete(client.id);
 				if (!socketIds.size) {
 					this.connectedUsers.delete(uid);
-					this.server.emit('user_online', { userId: uid, online: false });
+					void this.emitPresence(uid, false);
 				}
 				break;
 			}

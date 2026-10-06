@@ -13,7 +13,7 @@ export function parsePagination(
 	options: { defaultLimit?: number; maxLimit?: number } = {},
 ) {
 	const defaultLimit = options.defaultLimit ?? 20;
-	const maxLimit = options.maxLimit ?? 100;
+	const maxLimit = options.maxLimit ?? 1000;
 	const safePage = positiveInt(page, 1);
 	const take = Math.min(maxLimit, positiveInt(limit, defaultLimit));
 	return { page: safePage, limit: take, take, skip: (safePage - 1) * take };

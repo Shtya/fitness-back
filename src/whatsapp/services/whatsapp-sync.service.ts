@@ -2,6 +2,7 @@ import {
 	BadGatewayException,
 	BadRequestException,
 	ForbiddenException,
+	HttpException,
 	Injectable,
 	Logger,
 	NotFoundException,
@@ -869,6 +870,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private requireProvider(accountId: string) {
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected') {
+			throw new BadRequestException('WhatsApp account is not connected');
+		}
+		return provider;
+	}
+
+	/** Manual sync: start the saved session if this process is not holding it. */
+	private async providerForManualSync(accountId: string) {
+		const current = this.providers.getProvider(accountId);
+		if (current?.getState() === 'connected') return current;
+		try {
+			await this.providers.connect(accountId, undefined, { userInitiated: true });
+		} catch (error) {
+			if (error instanceof HttpException) throw error;
+			throw new BadRequestException(
+				error instanceof Error ? error.message : 'WhatsApp account is not connected',
+			);
+		}
+		const ready = await this.providers.waitUntilConnected(accountId, 45_000);
+		const provider = this.providers.getProvider(accountId);
+		if (!ready || provider?.getState() !== 'connected') {
 			throw new BadRequestException('WhatsApp account is not connected');
 		}
 		return provider;
@@ -3088,7 +3109,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async syncContacts(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
-		const provider = this.requireProvider(accountId);
+		const provider = await this.providerForManualSync(accountId);
 		return this.syncContactsInternal(accountId, provider);
 	}
 
@@ -3124,7 +3145,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				isBusiness: Boolean(item?.isBusiness),
 			});
 		}
-		if (!incoming.size) return { supported: true, count: 0 };
+		if (!incoming.size) return { supported: true, count: 0, renamed: 0 };
 
 		const waIds = [...incoming.keys()];
 		const existingByWaId = new Map<string, WhatsAppContact>();
@@ -3163,8 +3184,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			};
 		});
 
+		const dirty = rows.filter((row) => {
+			const existing = existingByWaId.get(row.waId);
+			if (!existing) return true;
+			return (
+				(existing.name || null) !== (row.name || null) ||
+				(existing.phoneNumber || null) !== (row.phoneNumber || null) ||
+				(existing.avatarUrl || null) !== (row.avatarUrl || null) ||
+				Boolean(existing.isBusiness) !== Boolean(row.isBusiness)
+			);
+		});
+		const renamed = dirty.filter((row) => {
+			const existing = existingByWaId.get(row.waId);
+			return Boolean(existing) && (existing?.name || null) !== (row.name || null);
+		}).length;
 		let count = 0;
-		for (const chunk of chunkList(rows, CONTACT_SYNC_CHUNK)) {
+		for (const chunk of chunkList(dirty, CONTACT_SYNC_CHUNK)) {
 			await this.contactRepo.upsert(chunk, ['accountId', 'waId']);
 			count += chunk.length;
 		}
@@ -3174,12 +3209,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.subscribeRecentDirectChats(accountId, 200, true)
 				.catch(() => undefined);
 		}
-		return { supported: true, count };
+		return { supported: true, count, renamed };
 	}
 
 	async syncChats(user: User, accountId: string, limit = 500) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
-		const provider = this.requireProvider(accountId);
+		const provider = await this.providerForManualSync(accountId);
 		this.gateway.emitAccountEvent(accountId, 'sync_started', {
 			accountId,
 			progress: 10,
@@ -3188,6 +3223,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		try {
 			const result = await this.syncChatsInternal(accountId, provider, limit, {
 				syncGroupParticipants: false,
+				pullAddressBook: true,
 			});
 			await this.markAccountHydrated(accountId, { history: true });
 			this.gateway.emitAccountEvent(accountId, 'sync_completed', {
@@ -3208,7 +3244,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		accountId: string,
 		provider: WhatsAppProvider,
 		limit = 500,
-		options: { syncGroupParticipants?: boolean; emitProgress?: boolean } = {},
+		options: { syncGroupParticipants?: boolean; emitProgress?: boolean; pullAddressBook?: boolean } = {},
 	) {
 		return this.enqueueInboxSync(accountId, () =>
 			this.syncChatsUnlocked(accountId, provider, limit, options),
@@ -3219,7 +3255,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		accountId: string,
 		provider: WhatsAppProvider,
 		limit = 500,
-		options: { syncGroupParticipants?: boolean; emitProgress?: boolean } = {},
+		options: { syncGroupParticipants?: boolean; emitProgress?: boolean; pullAddressBook?: boolean } = {},
 	) {
 		if (!provider.capabilities.history) return { supported: false, count: 0 };
 		const started = Date.now();
@@ -3409,6 +3445,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					total: list.length,
 				});
 			}
+		}
+		if (options.pullAddressBook && typeof provider.pullAddressBook === 'function') {
+			await provider.pullAddressBook().catch((error) => {
+				this.logger.warn(
+					`Address-book download failed for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			});
+		}
+		if (provider.capabilities.contacts) {
+			const names = await this.syncContactsInternal(accountId, provider).catch((error) => {
+				this.logger.warn(
+					`Address-book name sync failed for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				return null;
+			});
+			if (names && names.renamed > 0) changed = true;
 		}
 		if (changed) {
 			this.gateway.emitAccountEvent(accountId, 'conversation_updated', {

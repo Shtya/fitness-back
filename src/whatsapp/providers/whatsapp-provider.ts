@@ -136,6 +136,8 @@ export interface WhatsAppProvider {
 	/** Fetch a chat message from the live provider (RAM first, then WhatsApp). */
 	fetchMessage?(chatId: string, providerMessageId: string): Promise<NormalizedWhatsAppMessage | null>;
 	getContacts(): Promise<any[]>;
+	/** Re-download the phone address book. Implemented by Baileys only. */
+	pullAddressBook?(): Promise<void>;
 	resolveContactIdentity?(
 		chatId: string,
 	): Promise<{ phoneNumber?: string | null; name?: string | null } | null>;

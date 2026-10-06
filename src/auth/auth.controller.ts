@@ -220,14 +220,14 @@ export class AuthController {
 	// Assign a coach to a user (client or trainer). Admin and Coach can do it.
 	@Post('coach/assign')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN, UserRole.COACH)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	assignCoach(@Body('userId') userId: string, @Body('coachId') coachId: string) {
 		if (!userId || !coachId) throw new BadRequestException('userId and coachId are required');
 		return this.authService.assignCoach(userId, coachId);
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN)
+	@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 	@Get('admin/:adminId/coaches')
 	async getCoachesByAdmin(@Param('adminId') adminId: string, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
 		return this.authService.getCoachesByAdmin(adminId, { page, limit, search });
@@ -252,12 +252,11 @@ export class AuthController {
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.ADMIN, UserRole.COACH)
+	@Roles(UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN)
 	@Get('coach/:coachId/clients')
 	async getClientsByCoach(@Param('coachId') coachId: string, @Req() req: any, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
-		// Coaches can only see their own roster; admins can see any coach
 		const actor = req.user as { id: string; role: UserRole };
-		const allow = actor.role === UserRole.ADMIN || (actor.role === UserRole.COACH && actor.id === coachId);
+		const allow = actor.role === UserRole.ADMIN || actor.role === UserRole.SUPER_ADMIN || (actor.role === UserRole.COACH && actor.id === coachId);
 		if (!allow) throw new BadRequestException('Not allowed');
 
 		return this.authService.getClientsByCoach(coachId, { page, limit, search });

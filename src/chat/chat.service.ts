@@ -1,7 +1,7 @@
 // src/chat/chat.service.ts
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not, Like } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { User, UserRole, Feedback, FeedbackType, FeedbackStatus } from 'entities/global.entity';
 import { ChatConversation, ChatMessage, ChatParticipant } from 'entities/global.entity';
 
@@ -16,6 +16,8 @@ const DEFAULT_CHAT_SETTINGS = {
 	groupByConversation: true,
 	blockedUserIds: [] as string[],
 };
+
+const CHAT_USER_SELECT: (keyof User)[] = ['id', 'name', 'email', 'phone', 'role', 'status', 'coachId', 'adminId'];
 
 
 @Injectable()
@@ -402,21 +404,117 @@ export class ChatService {
 			.getMany();
 	}
 
-	async searchUsers(currentUserId: string, query: string, role?: UserRole) {
-		let whereConditions: any = [
-			{ id: Not(currentUserId), name: Like(`%${query}%`) },
-			{ id: Not(currentUserId), email: Like(`%${query}%`) },
-		];
+	private sanitizeChatUser(user: User | null | undefined) {
+		if (!user) return null;
+		return {
+			id: user.id,
+			name: user.name,
+			email: user.email,
+			phone: user.phone ?? null,
+			role: user.role,
+			status: user.status,
+			coachId: user.coachId ?? null,
+			adminId: user.adminId ?? null,
+		};
+	}
 
-		if (role) {
-			whereConditions = whereConditions.map(condition => ({ ...condition, role }));
+	/** Who may open a direct chat with whom (gym / coach tree). */
+	private async assertCanChatWith(actor: User, target: User) {
+		if (!actor || !target) throw new NotFoundException('User not found');
+		if (actor.id === target.id) throw new BadRequestException('Cannot chat with yourself');
+		if (actor.role === UserRole.SUPER_ADMIN) return;
+
+		if (actor.role === UserRole.ADMIN) {
+			const ok =
+				target.adminId === actor.id ||
+				(target.role === UserRole.ADMIN && target.id === actor.id) ||
+				(target.tenantId && actor.tenantId && target.tenantId === actor.tenantId && target.role !== UserRole.SUPER_ADMIN);
+			if (!ok) throw new ForbiddenException('Not allowed to chat with this user');
+			return;
 		}
 
-		return this.userRepo.find({
-			where: whereConditions,
-			take: 20,
-			order: { name: 'ASC' },
+		if (actor.role === UserRole.COACH) {
+			const ok =
+				(target.role === UserRole.CLIENT && target.coachId === actor.id) ||
+				(target.role === UserRole.ADMIN && target.id === actor.adminId) ||
+				(target.role === UserRole.COACH && target.adminId && target.adminId === actor.adminId);
+			if (!ok) throw new ForbiddenException('Not allowed to chat with this user');
+			return;
+		}
+
+		if (actor.role === UserRole.CLIENT) {
+			const ok =
+				(target.role === UserRole.COACH && target.id === actor.coachId) ||
+				(target.role === UserRole.ADMIN && target.id === actor.adminId);
+			if (!ok) throw new ForbiddenException('Not allowed to chat with this user');
+			return;
+		}
+
+		throw new ForbiddenException('Not allowed to chat with this user');
+	}
+
+	async searchUsers(currentUserId: string, query: string, role?: UserRole) {
+		const q = String(query || '').trim();
+		if (q.length < 1) return [];
+
+		const actor = await this.userRepo.findOne({
+			where: { id: currentUserId },
+			select: [...CHAT_USER_SELECT, 'tenantId'] as any,
 		});
+		if (!actor) throw new NotFoundException('User not found');
+
+		const qb = this.userRepo
+			.createQueryBuilder('u')
+			.select([
+				'u.id',
+				'u.name',
+				'u.email',
+				'u.phone',
+				'u.role',
+				'u.status',
+				'u.coachId',
+				'u.adminId',
+			])
+			.where('u.id != :me', { me: currentUserId })
+			.andWhere('(u.name ILIKE :q OR u.email ILIKE :q)', { q: `%${q}%` })
+			.orderBy('u.name', 'ASC')
+			.take(20);
+
+		if (role) qb.andWhere('u.role = :role', { role });
+
+		if (actor.role === UserRole.SUPER_ADMIN) {
+			// unrestricted
+		} else if (actor.role === UserRole.ADMIN) {
+			if (actor.tenantId) {
+				qb.andWhere(
+					'(u.adminId = :adminId OR (u.tenantId = :tenantId AND u.role != :sa))',
+					{ adminId: actor.id, tenantId: actor.tenantId, sa: UserRole.SUPER_ADMIN },
+				);
+			} else {
+				qb.andWhere('u.adminId = :adminId', { adminId: actor.id });
+			}
+		} else if (actor.role === UserRole.COACH) {
+			qb.andWhere(
+				'((u.role = :client AND u.coachId = :coachId) OR (u.role = :admin AND u.id = :adminId) OR (u.role = :coach AND u.adminId = :adminId AND u.id != :me))',
+				{
+					client: UserRole.CLIENT,
+					admin: UserRole.ADMIN,
+					coach: UserRole.COACH,
+					coachId: actor.id,
+					adminId: actor.adminId,
+					me: currentUserId,
+				},
+			);
+		} else if (actor.role === UserRole.CLIENT) {
+			const ids = [actor.coachId, actor.adminId].filter(Boolean);
+			if (!ids.length) return [];
+			qb.andWhere('u.id IN (:...ids)', { ids });
+		} else {
+			return [];
+		}
+
+		const rows = await qb.getMany();
+		return rows.map(u => this.sanitizeChatUser(u));
 	}
 
 	async createConversation(createdBy: User, participantIds: string[], name?: string, isGroup: boolean = false) {
@@ -481,6 +579,8 @@ export class ChatService {
 		if (!currentUser || !targetUser) {
 			throw new NotFoundException('User not found');
 		}
+
+		await this.assertCanChatWith(currentUser, targetUser);
 
 		// Check if conversation already exists
 		const existingConversation = await this.conversationRepo.createQueryBuilder('conversation').innerJoinAndSelect('conversation.chatParticipants', 'participant1').innerJoinAndSelect('participant1.user', 'user1').innerJoin('conversation.chatParticipants', 'participant2').innerJoin('participant2.user', 'user2').where('user1.id = :currentUserId', { currentUserId }).andWhere('user2.id = :targetUserId', { targetUserId }).andWhere('conversation.isGroup = false').andWhere('participant1.isActive = true').andWhere('participant2.isActive = true').getOne();

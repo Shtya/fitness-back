@@ -52,6 +52,6 @@ export class CoachReportController {
   @Post('report-reminder')
   async sendReminder(@Request() req, @Body() body: { clientIds: string[] }) {
     const locale = String(req?.headers?.['x-locale'] || req?.headers?.['accept-language'] || 'ar');
-    return this.weeklyReportService.sendReminderToClients(body.clientIds || [], locale);
+    return this.weeklyReportService.sendReminderToClients(this.resolveOwnerId(req.user), body?.clientIds || [], locale);
   }
 }

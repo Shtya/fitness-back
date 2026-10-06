@@ -538,6 +538,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private readonly logger = new Logger(BaileysProvider.name);
 	private socket: BaileysSocket | null = null;
+	private authKeys: { set?: (data: Record<string, Record<string, unknown>>) => Promise<void> } | null = null;
 	private socketGeneration = 0;
 	private opening: Promise<void> | null = null;
 	private state: string = 'disconnected';
@@ -803,6 +804,30 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		if (lid && phoneDigits) this.rememberLidMapping(lid, phoneDigits);
 		trimMapToMax(this.contacts, CACHE_MAX.contacts);
+		// Address-book name replaces a profile name already copied onto the chat.
+		if (savedRaw) {
+			const keys = [id, lid, phoneDigits ? `${phoneDigits}@c.us` : null].filter(Boolean) as string[];
+			for (const key of keys) {
+				if (key.endsWith('@g.us') || key.endsWith('@newsletter')) continue;
+				this.rememberChat(key, { name: savedRaw });
+			}
+		}
+	}
+
+	/** Name saved on the phone. Profile pushName is not this. */
+	private savedContactName(chatId: string): string | null {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return null;
+		const hit = this.contacts.get(id);
+		const phone = hit?.phoneNumber || this.lidToPn.get(id) || null;
+		const own =
+			hit?.name && !isWeakDisplayName(hit.name, id, phone) ? String(hit.name).trim() : '';
+		if (own) return own;
+		if (!phone) return null;
+		const byPhone =
+			this.contacts.get(`${phone}@c.us`) || this.contacts.get(`${phone}@s.whatsapp.net`);
+		const saved = String(byPhone?.name || '').trim();
+		return saved && !isWeakDisplayName(saved, id, phone) ? saved : null;
 	}
 
 	private contactDisplayName(chatId: string): string | null {
@@ -1589,6 +1614,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		await fs.mkdir(this.sessionDir(), { recursive: true });
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
+		this.authKeys = state.keys;
 		const version = await resolveBaileysSocketVersion(baileys);
 
 		this.socketOpened = false;
@@ -1773,7 +1799,9 @@ export class BaileysProvider implements WhatsAppProvider {
 				const incoming = Number(chat.unreadCount);
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
 				this.rememberChat(id, {
-					name: extractChatDisplayName(chat),
+					name:
+						this.savedContactName(id) ||
+						extractChatDisplayName(chat),
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || 0,
 					unreadCount: Number.isFinite(incoming) && incoming > 0 ? incoming : prev,
 				});
@@ -1787,7 +1815,11 @@ export class BaileysProvider implements WhatsAppProvider {
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
 				const applied = applyLiveChatUnread(prev, chat.unreadCount);
 				this.rememberChat(id, {
-					name: extractChatDisplayName(chat) || this.chats.get(id)?.name || null,
+					name:
+						this.savedContactName(id) ||
+						extractChatDisplayName(chat) ||
+						this.chats.get(id)?.name ||
+						null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
 					unreadCount: applied.next,
 				});
@@ -1907,7 +1939,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (!id) continue;
 				const contactName = this.contactDisplayName(id);
 				this.rememberChat(id, {
-					name: extractChatDisplayName(chat) || contactName || null,
+					name: this.savedContactName(id) || extractChatDisplayName(chat) || contactName || null,
 					t: Number(chat.conversationTimestamp) || 0,
 					unreadCount: Number(chat.unreadCount) || 0,
 				});
@@ -2052,8 +2084,15 @@ export class BaileysProvider implements WhatsAppProvider {
 			const id = String(chat?.id?._serialized || '');
 			if (!id) continue;
 			const current = String(chat.name || '').trim();
+			const saved = this.savedContactName(id);
 			const fromContact = this.contactDisplayName(id);
-			if ((!current || isWeakDisplayName(current, id)) && fromContact) {
+			if (
+				saved &&
+				!id.endsWith('@g.us') &&
+				!id.endsWith('@newsletter')
+			) {
+				chat.name = saved;
+			} else if ((!current || isWeakDisplayName(current, id)) && fromContact) {
 				chat.name = fromContact;
 			}
 			if (id.endsWith('@g.us') && (!chat.name || isWeakDisplayName(chat.name, id))) {
@@ -2150,6 +2189,21 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 		}
 		return [...ids];
+	}
+
+	/**
+	 * Phone address-book names live in WhatsApp app state. A reconnect skips that
+	 * download, so a manual sync asks for the contact snapshot again.
+	 */
+	async pullAddressBook() {
+		const socket = this.socket as { resyncAppState?: (names: string[], initial: boolean) => Promise<void> } | null;
+		if (!socket?.resyncAppState || this.state !== 'connected') return;
+		if (this.authKeys?.set) {
+			await this.authKeys.set({
+				'app-state-sync-version': { critical_unblock_low: null },
+			});
+		}
+		await socket.resyncAppState(['critical_unblock_low'], false);
 	}
 
 	async getContacts() {

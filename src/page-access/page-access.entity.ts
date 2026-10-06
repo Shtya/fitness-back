@@ -3,7 +3,7 @@ import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 export const PAGE_MODES = ['default', 'optional', 'locked'] as const;
 export type PageMode = (typeof PAGE_MODES)[number];
 
-export const MANAGED_PAGE_ROLES = ['admin', 'coach', 'client'] as const;
+export const MANAGED_PAGE_ROLES = ['super_admin', 'admin', 'coach', 'client'] as const;
 export type ManagedPageRole = (typeof MANAGED_PAGE_ROLES)[number];
 
 @Entity('role_page_settings')

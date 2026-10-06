@@ -854,9 +854,10 @@ export class NutritionService {
     await this.notificationRepo.save(notif);
   }
 
-  async getNutritionStats(user?: { id: string; role: UserRole }) {
+  async getNutritionStats(user?: { id: string; role: UserRole; adminId?: string | null }) {
+    const ownerId = user?.role === UserRole.COACH ? user?.adminId : user?.id;
     const globalPlansCount = await this.mealPlanRepo.count({ where: { isActive: true, adminId: IsNull() } });
-    const myPlansCount = user?.id ? await this.mealPlanRepo.count({ where: { isActive: true, adminId: user.id } }) : 0;
+    const myPlansCount = ownerId ? await this.mealPlanRepo.count({ where: { isActive: true, adminId: ownerId } }) : 0;
     return { totals: { globalPlansCount, myPlansCount } };
   }
 

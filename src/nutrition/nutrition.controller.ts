@@ -108,6 +108,7 @@ export class NutritionController {
     return this.nutritionService.getNutritionStats({
       id: req.user.id,
       role: req.user.role,
+      adminId: req.user.adminId,
     });
   }
 

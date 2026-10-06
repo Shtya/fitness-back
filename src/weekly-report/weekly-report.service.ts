@@ -1,12 +1,16 @@
 // weekly-report/weekly-report.service.ts
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not, IsNull, In, ILike } from 'typeorm';
+import { Repository, Not, IsNull, In } from 'typeorm';
 import { WeeklyReport } from 'entities/weekly-report.entity';
 import { ReportConfig } from 'entities/report-config.entity';
 import { User, UserRole, NotificationType, NotificationAudience } from 'entities/global.entity';
 import { NotificationService } from '../notification/notification.service';
 import { parsePagination } from 'common/pagination';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLIENT_REPORT_STATUSES = ['submitted', 'pending', 'late'] as const;
+type ClientReportStatus = (typeof CLIENT_REPORT_STATUSES)[number];
 
 @Injectable()
 export class WeeklyReportService {
@@ -158,6 +162,51 @@ export class WeeklyReportService {
     };
   }
 
+  async listStaffReports(currentUser: User, query: any) {
+    const { page, take, skip } = this.normalizePagination(query?.page, query?.limit);
+    const filters = query?.filters && typeof query.filters === 'object' ? query.filters : {};
+    const sortBy = ['created_at', 'updated_at', 'weekOf'].includes(query?.sortBy) ? query.sortBy : 'created_at';
+    const sortOrder = String(query?.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const userId = typeof filters.userId === 'string' ? filters.userId.trim() : '';
+    if (userId && !UUID_RE.test(userId)) throw new BadRequestException('Invalid userId filter');
+
+    const scoped = () => {
+      const qb = this.weeklyReportRepo.createQueryBuilder('wr').leftJoin('wr.user', 'u');
+      if (currentUser.role === UserRole.ADMIN) qb.andWhere('(wr.adminId = :scopeId OR u.adminId = :scopeId)', { scopeId: currentUser.id });
+      else if (currentUser.role === UserRole.COACH) qb.andWhere('(wr.coachId = :scopeId OR u.coachId = :scopeId)', { scopeId: currentUser.id });
+      else if (typeof filters.adminId === 'string' && UUID_RE.test(filters.adminId)) qb.andWhere('wr.adminId = :adminId', { adminId: filters.adminId });
+      return qb;
+    };
+
+    const list = scoped().addSelect(['u.id', 'u.name', 'u.email']);
+    const search = String(query?.search ?? '').trim();
+    if (search) list.andWhere('(u.name ILIKE :s OR u.email ILIKE :s OR CAST(wr.weekOf AS text) ILIKE :s)', { s: `%${search}%` });
+    if (userId) list.andWhere('wr.userId = :userId', { userId });
+    if (String(filters.reviewed) === 'true') list.andWhere('wr.reviewedAt IS NOT NULL');
+    else if (String(filters.reviewed) === 'false') list.andWhere('wr.reviewedAt IS NULL');
+
+    const [[records, total], scopeTotal, reviewed] = await Promise.all([
+      list.orderBy(`wr.${sortBy}`, sortOrder).addOrderBy('wr.id', 'DESC').skip(skip).take(take).getManyAndCount(),
+      scoped().getCount(),
+      scoped().andWhere('wr.reviewedAt IS NOT NULL').getCount(),
+    ]);
+
+    return {
+      total_records: total,
+      current_page: page,
+      per_page: take,
+      records,
+      stats: { total: scopeTotal, reviewed, unreviewed: scopeTotal - reviewed },
+    };
+  }
+
+  private assertStaffAccess(report: WeeklyReport, currentUser: User) {
+    const owner: any = report.user || {};
+    if (currentUser.role === UserRole.CLIENT && report.userId !== currentUser.id) throw new ForbiddenException('Access denied');
+    if (currentUser.role === UserRole.COACH && report.coachId !== currentUser.id && owner.coachId !== currentUser.id) throw new ForbiddenException('Access denied');
+    if (currentUser.role === UserRole.ADMIN && report.adminId !== currentUser.id && owner.adminId !== currentUser.id) throw new ForbiddenException('Access denied');
+  }
+
   async findReportById(id: string, currentUser: User) {
     const report = await this.weeklyReportRepo.findOne({
       where: { id },
@@ -168,19 +217,12 @@ export class WeeklyReportService {
       throw new NotFoundException('Report not found');
     }
 
-    if (currentUser.role === UserRole.CLIENT && report.userId !== currentUser.id) {
-      throw new ForbiddenException('Access denied');
-    }
-
-    if (currentUser.role === UserRole.COACH && report.user.coachId !== currentUser.id) {
-      throw new ForbiddenException('Access denied');
-    }
-
+    this.assertStaffAccess(report, currentUser);
     return report;
   }
 
   // ✅ تحديث الملاحظة بدون لعب في isRead (isRead للعميل فقط)
-  async updateFeedback(id: string, updateDto: { coachFeedback?: string }, coachId: string, locale?: string) {
+  async updateFeedback(id: string, updateDto: { coachFeedback?: string }, currentUser: User, locale?: string) {
     const report = await this.weeklyReportRepo.findOne({
       where: { id },
       relations: ['user'],
@@ -190,9 +232,11 @@ export class WeeklyReportService {
       throw new NotFoundException('Report not found');
     }
 
+    this.assertStaffAccess(report, currentUser);
+
     const updateData: Partial<WeeklyReport> = {
       reviewedAt: new Date(),
-      reviewedById: coachId,
+      reviewedById: currentUser.id,
     };
 
     if (typeof updateDto.coachFeedback === 'string') {
@@ -328,21 +372,21 @@ export class WeeklyReportService {
     const { take, skip } = this.normalizePagination(page, limit);
 
     // Config is always scoped to adminId — coaches share the admin's config
-    const baseWhere: any =
-      role === UserRole.ADMIN
-        ? { adminId, role: UserRole.CLIENT }
-        : { adminId, role: UserRole.CLIENT };
-
-    if (search?.trim()) {
-      baseWhere.name = ILike(`%${search.trim()}%`);
-    }
-
-    const [clients, total] = await this.userRepo.findAndCount({
-      where: baseWhere,
+    const clients = await this.userRepo.find({
+      where: { adminId, role: UserRole.CLIENT } as any,
       select: ['id', 'name', 'email', 'phone'] as any,
-      take,
-      skip,
+      order: { name: 'ASC' } as any,
     });
+
+    const latestRows = await this.weeklyReportRepo
+      .createQueryBuilder('wr')
+      .innerJoin('wr.user', 'u')
+      .select('wr.userId', 'userId')
+      .addSelect('MAX(wr.created_at)', 'lastReportAt')
+      .where('u.adminId = :adminId AND u.role = :role', { adminId, role: UserRole.CLIENT })
+      .groupBy('wr.userId')
+      .getRawMany<{ userId: string; lastReportAt: string | Date }>();
+    const latestByUser = new Map(latestRows.map(r => [r.userId, new Date(r.lastReportAt)]));
 
     const weekStart = new Date();
     weekStart.setDate(weekStart.getDate() - 7);
@@ -352,63 +396,57 @@ export class WeeklyReportService {
     lateStart.setDate(lateStart.getDate() - 14);
     lateStart.setHours(0, 0, 0, 0);
 
-    let rows = await Promise.all(
-      clients.map(async client => {
-        const latest = await this.weeklyReportRepo.findOne({
-          where: { userId: client.id },
-          order: { created_at: 'DESC' },
-        });
+    const statusOf = (last?: Date): ClientReportStatus => {
+      if (!last || last < lateStart) return 'late';
+      return last >= weekStart ? 'submitted' : 'pending';
+    };
 
-        let status: 'submitted' | 'pending' | 'late';
-        const lastReportAt = latest?.created_at ?? null;
+    const allRows = clients.map(client => {
+      const lastReportAt = latestByUser.get(client.id) ?? null;
+      return {
+        id: client.id,
+        name: (client as any).name,
+        email: (client as any).email,
+        phone: (client as any).phone,
+        status: statusOf(lastReportAt ?? undefined),
+        lastReportAt,
+      };
+    });
 
-        if (!latest) {
-          status = 'late';
-        } else if (latest.created_at >= weekStart) {
-          status = 'submitted';
-        } else if (latest.created_at < lateStart) {
-          status = 'late';
-        } else {
-          status = 'pending';
-        }
+    const stats = { total: allRows.length, submitted: 0, pending: 0, late: 0 };
+    for (const r of allRows) stats[r.status]++;
 
-        return {
-          id: client.id,
-          name: (client as any).name,
-          email: (client as any).email,
-          phone: (client as any).phone,
-          status,
-          lastReportAt,
-        };
-      }),
-    );
-
-    // Apply status filter after computing statuses (since status is computed, not stored)
-    if (statusFilter && ['submitted', 'pending', 'late'].includes(statusFilter)) {
-      rows = rows.filter(r => r.status === statusFilter);
-    }
+    const q = search?.trim().toLowerCase();
+    const wanted = CLIENT_REPORT_STATUSES.includes(statusFilter as ClientReportStatus) ? statusFilter : '';
+    const filtered = allRows.filter(r => (!wanted || r.status === wanted) && (!q || String(r.name || '').toLowerCase().includes(q) || String(r.email || '').toLowerCase().includes(q)));
 
     return {
-      items: rows,
-      total: statusFilter ? rows.length : total,
+      items: filtered.slice(skip, skip + take),
+      total: filtered.length,
       page,
       limit: take,
-      hasMore: skip + take < (statusFilter ? rows.length : total),
+      hasMore: skip + take < filtered.length,
+      stats,
     };
   }
 
   /* ─── Send Reminder Notifications ─── */
 
-  async sendReminderToClients(clientIds: string[], locale: string) {
-    if (!clientIds?.length) return { sent: 0 };
+  async sendReminderToClients(ownerId: string, clientIds: string[], locale: string) {
+    const ids = (Array.isArray(clientIds) ? clientIds : []).filter(id => typeof id === 'string' && UUID_RE.test(id));
+    if (!ids.length) return { sent: 0 };
 
-    const clients = await this.userRepo.findBy({ id: In(clientIds) });
+    const clients = await this.userRepo.findBy({ id: In(ids), adminId: ownerId, role: UserRole.CLIENT } as any);
 
     const ar = String(locale || '').toLowerCase().startsWith('ar');
     const title = ar ? 'تذكير بالتقرير الأسبوعي 🔔' : 'Weekly Report Reminder 🔔';
-    const message = ar
-      ? 'لم نستلم تقرير المتابعة الأسبوعي منك بعد. يرجى إكماله في أقرب وقت للحفاظ على متابعتك مع مدربك. 🏋️'
-      : "Your weekly report has not been submitted yet. Please complete it as soon as possible.";
+    const config: any = clients.length ? await this.getReportConfig(ownerId) : null;
+    const customMessage = String(config?.notifications?.reminderMessage ?? '').trim();
+    const message =
+      customMessage ||
+      (ar
+        ? 'لم نستلم تقرير المتابعة الأسبوعي منك بعد. يرجى إكماله في أقرب وقت للحفاظ على متابعتك مع مدربك. 🏋️'
+        : 'Your weekly report has not been submitted yet. Please complete it as soon as possible.');
 
     await Promise.all(
       clients.map(client =>

@@ -54,8 +54,8 @@ export class AuthService {
 		// Optional: if you want to limit to the caller admin only, uncomment and pass req.user.id to this method.
 		// this.ensureSameAdminOrThrow(requestingAdminId, adminId);
 
-		const { page, limit, skip } = this.normPaged(opts);
-		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at']).where('u.role = :role', { role: UserRole.COACH }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+		const { page, limit, skip } = parsePagination(opts?.page, opts?.limit, { maxLimit: 500 });
+		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.lastLogin']).where('u.role = :role', { role: UserRole.COACH }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
 
 		const s = this.likeable(opts?.search);
 		if (s) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s });
@@ -240,9 +240,9 @@ export class AuthService {
 
 
 	async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string; coachId?: string }) {
-		const { page, limit, skip } = this.normPaged(opts);
+		const { page, limit, skip } = parsePagination(opts?.page, opts?.limit, { maxLimit: 500 });
 
-		const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+		const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.lastLogin', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
 
 		// فلترة بالبحث لو موجود
 		const s = this.likeable(opts?.search);
@@ -266,6 +266,7 @@ export class AuthService {
 				status: u.status,
 				coach: u.coach ? { id: u.coach.id, name: (u.coach as any).name } : null,
 				created_at: u.created_at,
+				lastLogin: u.lastLogin,
 			})),
 			total,
 			page,
@@ -292,7 +293,9 @@ export class AuthService {
 			throw new BadRequestException('adminId is required');
 		}
 
-		const whereBase = { adminId };
+		// Same universe as listUsersAdvanced for ADMIN: coaches + clients only.
+		const managed = In([UserRole.COACH, UserRole.CLIENT]);
+		const whereBase = { adminId, role: managed };
 
 		const [totalUsers, activeUsers, pendingUsers, suspendedUsers, coaches, clients] =
 			await Promise.all([
@@ -307,10 +310,10 @@ export class AuthService {
 					where: { ...whereBase, status: UserStatus.SUSPENDED },
 				}),
 				this.userRepo.count({
-					where: { ...whereBase, role: UserRole.COACH },
+					where: { adminId, role: UserRole.COACH },
 				}),
 				this.userRepo.count({
-					where: { ...whereBase, role: UserRole.CLIENT },
+					where: { adminId, role: UserRole.CLIENT },
 				}),
 			]);
 
@@ -745,6 +748,14 @@ export class AuthService {
 
 		// generate strong temp password
 		const tempPass = body?.password || crypto.randomBytes(6).toString('base64url'); // ~8 chars, tweak length as you like
+		const actor = await this.userRepo.findOne({ where: { id: userId } });
+		let ownerAdminId = userId;
+		if (actor?.role === UserRole.SUPER_ADMIN && body.adminId && r !== 'admin') {
+			const parent = await this.userRepo.findOne({ where: { id: body.adminId, role: UserRole.ADMIN } });
+			if (!parent) throw new BadRequestException('Admin not found');
+			ownerAdminId = parent.id;
+		}
+
 		const user = this.userRepo.create({
 			name,
 			email,
@@ -762,15 +773,15 @@ export class AuthService {
 			lastLogin: null,
 			resetPasswordToken: null,
 			resetPasswordExpires: null,
-			adminId: userId,
+			adminId: ownerAdminId,
 		});
 
 		if (coachId) {
-			// Ensure coach exists & is coach/trainer/admin (up to you)
 			const coach = await this.userRepo.findOne({ where: { id: coachId } });
 			if (!coach) throw new NotFoundException('Coach not found');
 			user.coach = coach;
 			user.coachId = coach.id;
+			if (actor?.role === UserRole.SUPER_ADMIN && coach.adminId) user.adminId = coach.adminId;
 		}
 
 		await this.userRepo.save(user);
@@ -871,6 +882,7 @@ export class AuthService {
 
 		user.coach = coach;
 		user.coachId = coach.id;
+		if (coach.adminId) user.adminId = coach.adminId;
 		await this.userRepo.save(user);
 
 		return { message: 'Coach assigned', user: this.serialize(user) };
@@ -1213,7 +1225,7 @@ export class AuthService {
 		const sortOrder: 'ASC' | 'DESC' = String(q.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 		const includeTree = ['1', 'true', true].includes(String(q.includeTree).toLowerCase());
 
-		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.role', 'u.status', 'u.created_at', 'u.adminId', 'u.coachId', 'u.subscriptionEnd', 'u.allowedPages', 'u.loginLandingPage']).orderBy(`u.${sortBy}`, sortOrder).skip(skip).take(limit);
+		const qb = this.userRepo.createQueryBuilder('u').select(['u.id', 'u.name', 'u.email', 'u.role', 'u.status', 'u.created_at', 'u.lastLogin', 'u.adminId', 'u.coachId', 'u.subscriptionEnd', 'u.allowedPages', 'u.loginLandingPage']).orderBy(`u.${sortBy}`, sortOrder).skip(skip).take(limit);
 
 		if (search) qb.andWhere('(u.email ILIKE :s OR u.name ILIKE :s OR u.phone ILIKE :s)', { s: `%${search}%` });
 		if (role) qb.andWhere('u.role = :role', { role });

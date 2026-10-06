@@ -211,9 +211,16 @@ export class WhatsAppProviderManagerService
 	async connect(
 		accountId: string,
 		phoneNumber?: string,
-		options?: { connectionMethod?: 'qr' | 'pairing_code' },
+		options?: { connectionMethod?: 'qr' | 'pairing_code'; userInitiated?: boolean },
 	) {
-		if (!whatsappSessionsEnabled()) {
+		const explicitLink =
+			options?.connectionMethod === 'qr' ||
+			options?.connectionMethod === 'pairing_code' ||
+			Boolean(phoneNumber);
+		// Boot restore stays off when sessions are disabled so this machine does not
+		// steal accounts that are already linked elsewhere. A person asking for a
+		// QR, a pairing code, or a manual sync is not a boot restore.
+		if (!whatsappSessionsEnabled() && !explicitLink && !options?.userInitiated) {
 			throw new ServiceUnavailableException(
 				'WhatsApp sessions are disabled on this server (WHATSAPP_SESSIONS_ENABLED=false)',
 			);
@@ -306,6 +313,11 @@ export class WhatsAppProviderManagerService
 		options?: { connectionMethod?: 'qr' | 'pairing_code' },
 	) {
 		let locked = await this.acquireLock(accountId);
+		if (!locked && !whatsappSessionsEnabled()) {
+			throw new ServiceUnavailableException(
+				'This WhatsApp account is already open on another server.',
+			);
+		}
 		if (!locked) {
 			// Stale/foreign locks are common after overlapping local backends or a
 			// shared Redis with another environment. User-initiated connect should

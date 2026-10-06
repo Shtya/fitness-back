@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { UserRole } from '../../entities/global.entity';
-import { effectiveLockedPages, PageAccessService } from './page-access.service';
+import { DEFAULT_LOCKED_PAGE_IDS, effectiveLockedPages, PageAccessService } from './page-access.service';
 
 function makeService(opts: { user?: any; roleRows?: any[]; override?: any; overrideRows?: any[]; findError?: any } = {}) {
 	const roleRepo = {
@@ -31,23 +31,25 @@ function makeService(opts: { user?: any; roleRows?: any[]; override?: any; overr
 }
 
 describe('effectiveLockedPages', () => {
-	it('merges role and user locks, and extra pages win', () => {
-		const roleModes = { tasks: 'locked', reports: 'locked', chat: 'optional', calendar: 'default' } as const;
-		expect(effectiveLockedPages(roleModes, ['reports'], ['calendar'])).toEqual(['calendar', 'tasks']);
+	it('merges defaults, role and user locks, and extra pages win', () => {
+		const roleModes = { tasks: 'locked', reports: 'locked', chat: 'optional', calendar: 'default', money: 'default' } as const;
+		expect(effectiveLockedPages(roleModes, ['reports'], ['calendar'])).toEqual(
+			[...DEFAULT_LOCKED_PAGE_IDS.filter((id) => id !== 'money'), 'calendar', 'chat', 'tasks'].sort(),
+		);
 	});
 
-	it('returns an empty list with no locks', () => {
-		expect(effectiveLockedPages({}, [], [])).toEqual([]);
+	it('starts from store-admin defaults when role modes are empty', () => {
+		expect(effectiveLockedPages({}, [], [])).toEqual([...DEFAULT_LOCKED_PAGE_IDS].sort());
 	});
 });
 
 describe('PageAccessService', () => {
 	const client = { id: 'u1', role: UserRole.CLIENT };
 
-	it('returns no restrictions for super admin without querying', async () => {
+	it('does not apply store-tool defaults to super admin', async () => {
 		const { service, roleRepo } = makeService();
-		await expect(service.forUser({ id: 's1', role: UserRole.SUPER_ADMIN })).resolves.toMatchObject({ locked: [] });
-		expect(roleRepo.find).not.toHaveBeenCalled();
+		await expect(service.forUser({ id: 's1', role: UserRole.SUPER_ADMIN })).resolves.toMatchObject({ locked: [], granted: [] });
+		expect(roleRepo.find).toHaveBeenCalled();
 	});
 
 	it('computes access from role rows and user override', async () => {
@@ -59,7 +61,8 @@ describe('PageAccessService', () => {
 			roleModes: { tasks: 'locked', chat: 'optional' },
 			extraPages: ['tasks'],
 			lockedPages: ['reports'],
-			locked: ['reports'],
+			granted: ['tasks'],
+			locked: [...DEFAULT_LOCKED_PAGE_IDS, 'chat', 'reports'].sort(),
 		});
 	});
 
@@ -84,7 +87,7 @@ describe('PageAccessService', () => {
 
 	it('rejects unmanaged roles and invalid modes', async () => {
 		const { service } = makeService();
-		await expect(service.replaceRole('super_admin', {}, 'a1')).rejects.toBeInstanceOf(BadRequestException);
+		await expect(service.replaceRole('guest', {}, 'a1')).rejects.toBeInstanceOf(BadRequestException);
 		await expect(service.replaceRole('client', { tasks: 'hidden' }, 'a1')).rejects.toBeInstanceOf(BadRequestException);
 		await expect(service.replaceRole('client', { 'bad id': 'locked' }, 'a1')).rejects.toBeInstanceOf(BadRequestException);
 	});

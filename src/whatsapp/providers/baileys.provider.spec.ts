@@ -256,6 +256,7 @@ describe('BaileysProvider stories', () => {
 		});
 		expect((provider as any).contactDisplayName(chatId)).toBe('Ahmed Ibrahim');
 		expect((provider as any).contacts.get(chatId).notify).toBe('aaaaaaaaasa211');
+		expect((provider as any).chats.get(chatId).name).toBe('Ahmed Ibrahim');
 	});
 
 	it('uses WhatsApp display name when the peer is not saved', () => {
