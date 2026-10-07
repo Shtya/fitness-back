@@ -31,6 +31,14 @@ export class LookupDto {
   targetLang?: "ar" | "en";
 
   @IsOptional()
+  @IsBoolean()
+  plain?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  fast?: boolean;
+
+  @IsOptional()
   @IsString()
   @MaxLength(2000)
   sourceUrl?: string;

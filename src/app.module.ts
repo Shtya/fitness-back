@@ -13,6 +13,7 @@ import { AssetModule } from './asset/asset.module';
 import { PlansModule } from './plans/plans.module';
 import { PrsModule } from './prs/prs.module';
 import { ChatModule } from './chat/chat.module';
+import { CalorieCalculationModule } from './calorie-calculations/calorie-calculation.module';
 import { FormModule } from './form/form.module';
 import { NotificationModule } from './notification/notification.module';
 import { NutritionModule } from './nutrition/nutrition.module';
@@ -83,6 +84,7 @@ import { SiteInspectorModule } from './site-inspector/site-inspector.module';
 		PlansModule,
 		ChatModule,
 		FormModule,
+		CalorieCalculationModule,
 		ExercisesModule,
 		NotificationModule,
 		NutritionModule,

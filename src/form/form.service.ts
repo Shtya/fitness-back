@@ -441,5 +441,80 @@ export class FormService {
 		return this.submissionRepository.save(submission);
 	}
 
+	private scopeSubmissions(qb: ReturnType<Repository<FormSubmission>['createQueryBuilder']>, requester: Requester) {
+		if (this.isSuper(requester)) return qb;
+		const role = String(requester.role || '').toLowerCase();
+		if (role === 'coach') {
+			const ids = [requester.id, requester.adminId].filter(Boolean);
+			return qb.andWhere('(form.adminId IN (:...ids) OR form.adminId IS NULL)', { ids });
+		}
+		return qb.andWhere('(form.adminId = :adminId OR form.adminId IS NULL)', { adminId: requester.id });
+	}
 
+	private presentSubmission(row: FormSubmission) {
+		const fields = Array.isArray(row.form?.fields) ? row.form.fields : [];
+		const answers: Record<string, any> = {};
+		for (const [key, value] of Object.entries(row.answers || {})) {
+			const field = fields.find(item => String(item.id) === String(key) || String(item.key) === String(key));
+			answers[key] = value;
+			if (field?.key) answers[field.key] = value;
+			if (field?.label) answers[field.label] = value;
+		}
+		return {
+			id: row.id,
+			name: respondentName(answers),
+			email: row.email,
+			createdAt: row.created_at,
+			formTitle: row.form?.title || '',
+			answers,
+		};
+	}
+
+	async listSubmissions(requester: Requester) {
+		const qb = this.scopeSubmissions(
+			this.submissionRepository
+				.createQueryBuilder('s')
+				.leftJoinAndSelect('s.form', 'form')
+				.leftJoinAndSelect('form.fields', 'fields')
+				.orderBy('s.created_at', 'DESC')
+				.take(500),
+			requester,
+		);
+		const rows = await qb.getMany();
+		return rows.map(row => this.presentSubmission(row));
+	}
+
+	async listSubmissionsByEmail(email: string, requester: Requester) {
+		const normalized = String(email || '').trim().toLowerCase();
+		if (!normalized || !normalized.includes('@')) return [];
+
+		const qb = this.scopeSubmissions(
+			this.submissionRepository
+				.createQueryBuilder('s')
+				.leftJoinAndSelect('s.form', 'form')
+				.leftJoinAndSelect('form.fields', 'fields')
+				.where('LOWER(TRIM(s.email)) = :email', { email: normalized })
+				.orderBy('s.created_at', 'DESC')
+				.take(40),
+			requester,
+		);
+		const rows = await qb.getMany();
+		return rows.map(row => this.presentSubmission(row));
+	}
+}
+
+function answerText(value: unknown): string {
+	if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+	if (value && typeof value === 'object' && 'value' in value) return answerText((value as { value?: unknown }).value);
+	return '';
+}
+
+function respondentName(answers: Record<string, any>): string {
+	const pattern = /(^|[^a-z])name([^a-z]|$)|اسم/i;
+	for (const [key, value] of Object.entries(answers || {})) {
+		if (!pattern.test(String(key))) continue;
+		const text = answerText(value);
+		if (text && !text.includes('@') && text.length < 120) return text;
+	}
+	return '';
 }

@@ -89,9 +89,11 @@ export class WebTranslatorService {
     const text = normalizeLookupText(dto.text);
     if (!text) throw new BadRequestException("text is required");
 
-    const settings = await this.getOrCreateSettings(user.id);
+    const settings = dto.targetLang
+      ? null
+      : await this.getOrCreateSettings(user.id);
     const preferredTarget =
-      dto.targetLang || (settings.targetLang === "en" ? "en" : "ar");
+      dto.targetLang || (settings?.targetLang === "en" ? "en" : "ar");
     const forcedSource =
       dto.sourceLang && dto.sourceLang !== "auto" ? dto.sourceLang : null;
     const sourceLang = forcedSource || detectLang(text);
@@ -104,16 +106,18 @@ export class WebTranslatorService {
 
     const translated = await this.translator.translate(text, targetLang);
     let pronunciation: string | null = null;
-    let partOfSpeech: string | null = null;
+    let partOfSpeech: string | null = translated.partOfSpeech || null;
     let example: string | null = null;
+    const single = isSingleWord(text);
+    const skipEnrich = Boolean(dto.plain || dto.fast);
 
-    if (isSingleWord(text) && sourceLang === "en") {
+    if (!skipEnrich && single && sourceLang === "en") {
       const dict = await this.dictionary(text);
-      pronunciation = dict.pronunciation;
-      partOfSpeech = dict.partOfSpeech;
-      example = dict.example;
+      pronunciation = pronunciation || dict.pronunciation;
+      partOfSpeech = partOfSpeech || dict.partOfSpeech;
+      example = example || dict.example;
     }
-    if (!partOfSpeech || !example) {
+    if (!skipEnrich && single && (!partOfSpeech || !example)) {
       const extra = await this.enrichWithAi(
         user,
         text,
@@ -126,29 +130,33 @@ export class WebTranslatorService {
       example = example || extra.example;
     }
 
-    const saved = await this.words.findOne({
-      where: {
-        userId: user.id,
-        normalizedText: uniquenessKey(text),
-        sourceLang,
-        targetLang,
-      },
-    });
+    const saved = dto.plain
+      ? null
+      : await this.words.findOne({
+          where: {
+            userId: user.id,
+            normalizedText: uniquenessKey(text),
+            sourceLang,
+            targetLang,
+          },
+        });
 
-    await this.lookups.save(
-      this.lookups.create({
-        userId: user.id,
-        wordId: saved?.id || null,
-        text,
-        translation: translated.translatedText,
-        sourceLang,
-        targetLang,
-        pronunciation,
-        partOfSpeech,
-        example,
-        sourceUrl: dto.sourceUrl || null,
-      }),
-    );
+    if (!dto.plain) {
+      await this.lookups.save(
+        this.lookups.create({
+          userId: user.id,
+          wordId: saved?.id || null,
+          text,
+          translation: translated.translatedText,
+          sourceLang,
+          targetLang,
+          pronunciation,
+          partOfSpeech,
+          example,
+          sourceUrl: dto.sourceUrl || null,
+        }),
+      );
+    }
 
     return {
       text,

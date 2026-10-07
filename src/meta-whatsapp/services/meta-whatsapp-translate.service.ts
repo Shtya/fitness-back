@@ -9,6 +9,7 @@ export type TranslateResult = {
 	sourceLang: 'ar' | 'en';
 	targetLang: 'ar' | 'en';
 	provider: string;
+	partOfSpeech?: string | null;
 };
 
 @Injectable()
@@ -40,15 +41,15 @@ export class MetaWhatsAppTranslateService {
 		}
 
 		try {
-			return await this.translateMyMemory(cleaned, sourceLang, to);
-		} catch (err: any) {
-			this.logger.warn(`MyMemory failed: ${err?.message || err}`);
-		}
-
-		try {
 			return await this.translateGoogleGtx(cleaned, sourceLang, to);
 		} catch (err: any) {
 			this.logger.warn(`Google gtx failed: ${err?.message || err}`);
+		}
+
+		try {
+			return await this.translateMyMemory(cleaned, sourceLang, to);
+		} catch (err: any) {
+			this.logger.warn(`MyMemory failed: ${err?.message || err}`);
 			throw new BadRequestException('Translation failed. Try again in a moment.');
 		}
 	}
@@ -168,29 +169,36 @@ export class MetaWhatsAppTranslateService {
 		sourceLang: 'ar' | 'en',
 		targetLang: 'ar' | 'en',
 	): Promise<TranslateResult> {
-		const { data } = await axios.get('https://translate.googleapis.com/translate_a/single', {
-			params: {
-				client: 'gtx',
-				sl: sourceLang,
-				tl: targetLang,
-				dt: 't',
-				q: text,
-			},
-			timeout: 15000,
-		});
+		const params = new URLSearchParams();
+		params.set('client', 'gtx');
+		params.set('sl', sourceLang);
+		params.set('tl', targetLang);
+		params.append('dt', 't');
+		params.append('dt', 'bd');
+		params.set('q', text);
+		const { data } = await axios.get(
+			`https://translate.googleapis.com/translate_a/single?${params.toString()}`,
+			{ timeout: 15000 },
+		);
 
 		const parts = Array.isArray(data?.[0]) ? data[0] : [];
 		const translated = parts
 			.map((chunk: any) => (Array.isArray(chunk) ? String(chunk[0] || '') : ''))
 			.join('')
 			.trim();
-		if (!translated) throw new Error('Google gtx empty response');
+		if (!translated || translated.toLowerCase() === text.toLowerCase()) {
+			throw new Error('Google gtx empty response');
+		}
+
+		const dict = Array.isArray(data?.[1]) ? data[1] : [];
+		const partOfSpeech = typeof dict?.[0]?.[0] === 'string' ? String(dict[0][0]) : null;
 
 		return {
 			translatedText: translated,
 			sourceLang,
 			targetLang,
 			provider: 'google-gtx',
+			partOfSpeech,
 		};
 	}
 }

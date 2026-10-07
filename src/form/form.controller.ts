@@ -37,6 +37,26 @@ export class FormController {
 	}
 
 	@UseGuards(JwtAuthGuard)
+	@Get('submissions')
+	async submissions(@Req() req: any) {
+		return this.formService.listSubmissions({
+			id: req.user.id,
+			role: req.user.role,
+			adminId: req.user.adminId,
+		});
+	}
+
+	@UseGuards(JwtAuthGuard)
+	@Get('submissions/by-email')
+	async submissionsByEmail(@Query('email') email = '', @Req() req: any) {
+		return this.formService.listSubmissionsByEmail(email, {
+			id: req.user.id,
+			role: req.user.role,
+			adminId: req.user.adminId,
+		});
+	}
+
+	@UseGuards(JwtAuthGuard)
 	@Get(':id')
 	async getFormById(@Param('id') id: string, @Req() req: any) {
 		return this.formService.getFormByIdScoped(+id, { id: req.user.id, role: req.user.role });
