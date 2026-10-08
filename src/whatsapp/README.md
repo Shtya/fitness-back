@@ -38,6 +38,6 @@ Initial Load (Postgres) → Cached UI → Background hydrate → Incremental rec
 
 HTTP endpoints are under `/api/v1/whatsapp`. The Socket.IO namespace is `/whatsapp`. Clients must explicitly watch an account or conversation; each watch request is authorized against the account ACL and assignment policy.
 
-Baileys supplies QR/pairing, recent chat history, groups, media metadata, and status. Full archive history is opt-in. Incoming media stays metadata-only until the download endpoint is requested.
+Baileys supplies QR/pairing, recent chat history, groups, media metadata, and status. Full archive history is opt-in. Live media is downloaded from the WhatsApp CDN with the `mediaKey` already in the message and stored on disk; the primary phone is asked to re-upload only when that CDN URL has expired. A linked device keeps receiving new messages while the phone is offline. The phone still has to reach the internet about once every 14 days or WhatsApp unlinks companion devices, and the first history sync after pairing is pushed from the phone.
 
 Provider tokens/sessions are encrypted with AES-256-GCM in `whatsapp_provider_sessions`.

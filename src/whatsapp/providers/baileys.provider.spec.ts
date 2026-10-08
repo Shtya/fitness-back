@@ -4,6 +4,7 @@ import {
 	attachFullMediaUrls,
 	classifyBaileysDisconnect,
 	computeReconnectDelayMs,
+	downloadLinkedDeviceMedia,
 	RECONNECT_ALERT_AFTER,
 	isHistoryMessageUpsert,
 	mapBaileysMessageStatus,
@@ -302,12 +303,17 @@ describe('classifyBaileysDisconnect', () => {
 		).toBe('replaced');
 	});
 
-	it('still recognizes a real phone/network drop and a logout', () => {
+	it('treats a companion socket close as connection loss, not a closed phone', () => {
 		expect(
 			classifyBaileysDisconnect({
 				lastDisconnect: { error: { output: { statusCode: 428 } } },
 			}),
-		).toBe('phone_closed');
+		).toBe('connection_lost');
+		expect(
+			classifyBaileysDisconnect({
+				lastDisconnect: { error: { output: { statusCode: 408 } } },
+			}),
+		).toBe('connection_lost');
 		expect(
 			classifyBaileysDisconnect({
 				lastDisconnect: { error: { output: { statusCode: 401 } } },
@@ -435,6 +441,126 @@ describe('BaileysProvider media download helpers', () => {
 				key: { remoteJid: '201551495772@s.whatsapp.net', id: 'CHAT1' },
 			}),
 		).toBe(false);
+	});
+
+	it('downloads decrypted bytes from the CDN without asking the phone', async () => {
+		const calls: string[] = [];
+		const raw = {
+			key: { id: 'VOICE1', remoteJid: '201000000000@s.whatsapp.net' },
+			message: {
+				audioMessage: {
+					directPath: '/v/t62/voice.ogg',
+					mediaKey: Buffer.from('key'),
+					mimetype: 'audio/ogg; codecs=opus',
+				},
+			},
+		};
+		const result = await downloadLinkedDeviceMedia(raw, { id: 'VOICE1' }, {
+			downloadContentFromMessage: async () => {
+				calls.push('cdn');
+				return (async function* () {
+					yield Buffer.from('OggS-voice');
+				})();
+			},
+			downloadMediaMessage: async () => {
+				calls.push('library');
+				return Buffer.from('unused');
+			},
+			updateMediaMessage: async () => {
+				calls.push('phone');
+				return raw;
+			},
+		});
+		expect(calls).toEqual(['cdn']);
+		expect(result.data?.toString()).toBe('OggS-voice');
+	});
+
+	it('asks the phone to re-upload only after CDN and library download fail', async () => {
+		const calls: string[] = [];
+		let cdnAttempts = 0;
+		const raw = {
+			key: { id: 'IMG1', remoteJid: '201000000000@s.whatsapp.net' },
+			message: {
+				imageMessage: {
+					directPath: '/v/t62/full.jpg',
+					mediaKey: Buffer.from('key'),
+				},
+			},
+		};
+		const result = await downloadLinkedDeviceMedia(raw, { id: 'IMG1' }, {
+			downloadContentFromMessage: async () => {
+				cdnAttempts += 1;
+				calls.push('cdn');
+				if (cdnAttempts === 1) throw new Error('404 from cdn');
+				return (async function* () {
+					yield Buffer.from('jpeg-bytes');
+				})();
+			},
+			downloadMediaMessage: async () => {
+				calls.push('library');
+				throw new Error('library miss');
+			},
+			updateMediaMessage: async (message) => {
+				calls.push('phone');
+				return message;
+			},
+		});
+		expect(calls).toEqual(['cdn', 'library', 'phone', 'cdn']);
+		expect(result.data?.toString()).toBe('jpeg-bytes');
+	});
+
+	it('does not wait forever when the phone is offline and cannot re-upload', async () => {
+		const raw = {
+			key: { id: 'VID1', remoteJid: '201000000000@s.whatsapp.net' },
+			message: {
+				videoMessage: { url: 'https://mmg.whatsapp.net/v/clip.mp4', mediaKey: Buffer.from('k') },
+			},
+		};
+		const started = Date.now();
+		await expect(
+			downloadLinkedDeviceMedia(raw, { id: 'VID1' }, {
+				reuploadTimeoutMs: 40,
+				timeoutMs: 1_000,
+				downloadContentFromMessage: async () => {
+					throw new Error('404 from cdn');
+				},
+				downloadMediaMessage: async () => {
+					throw new Error('library miss');
+				},
+				updateMediaMessage: () => new Promise(() => undefined),
+			}),
+		).rejects.toThrow(/timed out/);
+		expect(Date.now() - started).toBeLessThan(1_500);
+	});
+
+	it('rejects an oversized media declaration before downloading', async () => {
+		const calls: string[] = [];
+		const raw = {
+			key: { id: 'BIG1', remoteJid: '201000000000@s.whatsapp.net' },
+			message: {
+				documentMessage: {
+					directPath: '/v/t62/file.pdf',
+					mediaKey: Buffer.from('key'),
+					fileLength: 50_000_000,
+				},
+			},
+		};
+		await expect(
+			downloadLinkedDeviceMedia(raw, { id: 'BIG1' }, {
+				maxBytes: 1024,
+				downloadContentFromMessage: async () => {
+					calls.push('cdn');
+					return (async function* () {
+						yield Buffer.from('pdf');
+					})();
+				},
+				updateMediaMessage: async () => {
+					calls.push('phone');
+					return raw;
+				},
+			}),
+		).rejects.toThrow(/exceeds limit/);
+		expect(calls).toEqual([]);
 	});
 
 	it('fills url from directPath so Baileys does not download thumbnailDirectPath', () => {

@@ -12,6 +12,12 @@ function isOggBuffer(buffer: Buffer): boolean {
 export const WHATSAPP_VOICE_MIME = 'audio/ogg; codecs=opus';
 
 /**
+ * Phones play WhatsApp voice notes encoded as Opus mono at 48 kHz.
+ * A 16 kHz "voip" file is delivered, then the play button does nothing.
+ */
+export const WHATSAPP_VOICE_SAMPLE_RATE = 48_000;
+
+/**
  * A raw space is not legal in a data URL media type. wa-js validates with
  * `valid-data-url`, whose parameter group rejects `; codecs=opus`, so passing
  * `WHATSAPP_VOICE_MIME` straight into a data URL fails with `invalid_data_url`
@@ -58,13 +64,41 @@ export function runFfmpeg(args: string[], timeoutMs = 30_000): Promise<void> {
 	});
 }
 
-export function probeAudioSeconds(filePath: string): Promise<number> {
+export function parseFfmpegAudioProfile(stderr: string): {
+	codec: string;
+	sampleRate: number;
+	channels: 'mono' | 'stereo';
+} | null {
+	const match = String(stderr || '').match(
+		/Audio:\s*([a-z0-9_]+)[^,\n]*,\s*(\d+)\s*Hz,\s*(mono|stereo)/i,
+	);
+	if (!match) return null;
+	const sampleRate = Number(match[2]);
+	if (!Number.isFinite(sampleRate) || sampleRate <= 0) return null;
+	return {
+		codec: match[1].toLowerCase(),
+		sampleRate,
+		channels: match[3].toLowerCase() === 'stereo' ? 'stereo' : 'mono',
+	};
+}
+
+export function isPlayableWhatsAppVoiceProfile(
+	profile: { codec: string; sampleRate: number; channels: 'mono' | 'stereo' } | null,
+): boolean {
+	return (
+		profile?.codec === 'opus' &&
+		profile.sampleRate === WHATSAPP_VOICE_SAMPLE_RATE &&
+		profile.channels === 'mono'
+	);
+}
+
+function probeAudioDetails(filePath: string): Promise<{ seconds: number; stderr: string }> {
 	return new Promise((resolve) => {
 		const processHandle = spawn(resolveFfmpeg(), ['-i', filePath], { windowsHide: true });
 		let stderr = '';
 		const timer = setTimeout(() => {
 			processHandle.kill();
-			resolve(0);
+			resolve({ seconds: 0, stderr });
 		}, 12_000);
 		processHandle.stderr?.on('data', (chunk: Buffer) => {
 			stderr += chunk.toString();
@@ -73,18 +107,22 @@ export function probeAudioSeconds(filePath: string): Promise<number> {
 			clearTimeout(timer);
 			const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
 			if (!match) {
-				resolve(0);
+				resolve({ seconds: 0, stderr });
 				return;
 			}
 			const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-			resolve(Number.isFinite(seconds) ? seconds : 0);
+			resolve({ seconds: Number.isFinite(seconds) ? seconds : 0, stderr });
 		};
 		processHandle.once('error', () => {
 			clearTimeout(timer);
-			resolve(0);
+			resolve({ seconds: 0, stderr });
 		});
 		processHandle.once('close', finish);
 	});
+}
+
+export function probeAudioSeconds(filePath: string): Promise<number> {
+	return probeAudioDetails(filePath).then((details) => details.seconds);
 }
 
 export function guessVoiceSeconds(filePath: string, fileName?: string | null): number | undefined {
@@ -214,9 +252,8 @@ export async function resolveVoiceSeconds(
 }
 
 /**
- * WhatsApp PTT is OGG/Opus mono (16 kHz). Chrome records WebM/Opus and even
- * browser OGG can ACK locally while the recipient phone shows "audio no longer available".
- * Always re-encode through FFmpeg so mobile clients can decrypt and play the note.
+ * WhatsApp PTT that phones will play is OGG/Opus, mono, 48 kHz.
+ * Chrome records WebM/Opus. A 16 kHz voip file reaches the phone and then will not play.
  */
 export async function ensureWhatsAppVoiceOgg(
 	filePath: string,
@@ -244,13 +281,23 @@ export async function ensureWhatsAppVoiceOgg(
 			'-ac',
 			'1',
 			'-ar',
-			'16000',
+			String(WHATSAPP_VOICE_SAMPLE_RATE),
 			'-c:a',
 			'libopus',
 			'-b:a',
-			'24k',
+			'64k',
+			'-vbr',
+			'on',
+			'-compression_level',
+			'10',
+			'-frame_duration',
+			'20',
 			'-application',
-			'voip',
+			'audio',
+			'-avoid_negative_ts',
+			'make_zero',
+			'-map_metadata',
+			'-1',
 			'-f',
 			'ogg',
 			outputPath,
@@ -262,7 +309,12 @@ export async function ensureWhatsAppVoiceOgg(
 		await fs.rm(outputPath, { force: true }).catch(() => undefined);
 		throw new Error('Converted voice file is not valid OGG/Opus');
 	}
-	const probedSeconds = await probeAudioSeconds(outputPath);
+	const probed = await probeAudioDetails(outputPath);
+	const probedSeconds = probed.seconds;
+	if (!isPlayableWhatsAppVoiceProfile(parseFfmpegAudioProfile(probed.stderr))) {
+		await fs.rm(outputPath, { force: true }).catch(() => undefined);
+		throw new Error('Converted voice file is not 48 kHz mono Opus');
+	}
 	if (probedSeconds <= 0) {
 		await fs.rm(outputPath, { force: true }).catch(() => undefined);
 		throw new Error('Converted voice file has no playable audio duration');
@@ -317,8 +369,11 @@ export function looksLikeOutgoingVoiceUpload(
 export async function isValidWhatsAppVoiceOggFile(filePath: string): Promise<boolean> {
 	try {
 		if (!isOggBuffer(await readFileHeader(filePath, 4))) return false;
-		const seconds = await probeAudioSeconds(filePath);
-		return seconds > 0;
+		const probed = await probeAudioDetails(filePath);
+		return (
+			probed.seconds > 0 &&
+			isPlayableWhatsAppVoiceProfile(parseFfmpegAudioProfile(probed.stderr))
+		);
 	} catch {
 		return false;
 	}

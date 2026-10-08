@@ -4,8 +4,10 @@ import {
 	ensureWhatsAppVoiceOgg,
 	fallbackVoiceWaveform,
 	guessVoiceSeconds,
+	isPlayableWhatsAppVoiceProfile,
 	isValidWhatsAppVoiceOggFile,
 	looksLikeOutgoingVoiceUpload,
+	parseFfmpegAudioProfile,
 	WHATSAPP_VOICE_MIME,
 } from './whatsapp-voice-ogg';
 import { promises as fs } from 'fs';
@@ -17,6 +19,25 @@ describe('whatsapp voice ogg helper', () => {
 		expect(guessVoiceSeconds('/tmp/x', 'voice-12s.webm')).toBe(12);
 		expect(guessVoiceSeconds('/tmp/abc-voice-5s.webm')).toBe(5);
 		expect(guessVoiceSeconds('/tmp/photo.jpg')).toBeUndefined();
+	});
+
+	it('accepts only 48 kHz mono Opus as a phone-playable voice note', () => {
+		expect(
+			isPlayableWhatsAppVoiceProfile(
+				parseFfmpegAudioProfile('Stream #0:0: Audio: opus, 48000 Hz, mono, fltp, 64000 bit/s'),
+			),
+		).toBe(true);
+		expect(
+			isPlayableWhatsAppVoiceProfile(
+				parseFfmpegAudioProfile('Stream #0:0: Audio: opus, 16000 Hz, mono, fltp'),
+			),
+		).toBe(false);
+		expect(
+			isPlayableWhatsAppVoiceProfile(
+				parseFfmpegAudioProfile('Stream #0:0: Audio: vorbis, 48000 Hz, stereo, fltp'),
+			),
+		).toBe(false);
+		expect(parseFfmpegAudioProfile('no audio stream')).toBeNull();
 	});
 
 	it('builds a 64-sample fallback waveform WhatsApp can render', () => {
@@ -88,4 +109,41 @@ describe('whatsapp voice ogg helper', () => {
 		readFileSpy.mockRestore();
 		await fs.rm(dir, { recursive: true, force: true });
 	});
+
+	it('re-encodes a wav into 48 kHz mono Opus that phones can play', async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-voice-opus-'));
+		const wavPath = path.join(dir, 'voice-1s.wav');
+		const sampleRate = 16_000;
+		const samples = sampleRate;
+		const dataSize = samples * 2;
+		const wav = Buffer.alloc(44 + dataSize);
+		wav.write('RIFF', 0);
+		wav.writeUInt32LE(36 + dataSize, 4);
+		wav.write('WAVE', 8);
+		wav.write('fmt ', 12);
+		wav.writeUInt32LE(16, 16);
+		wav.writeUInt16LE(1, 20);
+		wav.writeUInt16LE(1, 22);
+		wav.writeUInt32LE(sampleRate, 24);
+		wav.writeUInt32LE(sampleRate * 2, 28);
+		wav.writeUInt16LE(2, 32);
+		wav.writeUInt16LE(16, 34);
+		wav.write('data', 36);
+		wav.writeUInt32LE(dataSize, 40);
+		for (let i = 0; i < samples; i += 1) {
+			wav.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 8000), 44 + i * 2);
+		}
+		await fs.writeFile(wavPath, wav);
+		try {
+			const converted = await ensureWhatsAppVoiceOgg(wavPath, {
+				mimeType: 'audio/wav',
+				fileName: 'voice-1s.wav',
+			});
+			await expect(isValidWhatsAppVoiceOggFile(converted.filePath)).resolves.toBe(true);
+			expect(converted.mimeType).toBe(WHATSAPP_VOICE_MIME);
+			await converted.cleanup?.();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 20_000);
 });

@@ -16,6 +16,7 @@ import { loadBaileysModule } from './baileys-loader';
 import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
+import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
@@ -175,6 +176,237 @@ export function attachFullMediaUrls(
 		}
 	}
 	return content;
+}
+
+/** Companion CDN download. Phone re-upload is a later fallback and must not run first. */
+export const DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
+export const DEFAULT_MEDIA_MAX_BYTES = 128 * 1024 * 1024;
+export const PHONE_REUPLOAD_TIMEOUT_MS = 12_000;
+
+const LINKED_DEVICE_MEDIA_NODES = [
+	['imageMessage', 'image'],
+	['videoMessage', 'video'],
+	['audioMessage', 'audio'],
+	['documentMessage', 'document'],
+	['stickerMessage', 'sticker'],
+] as const;
+
+function declaredMediaBytes(node: any): number {
+	const raw = node?.fileLength;
+	const value = typeof raw?.toNumber === 'function' ? raw.toNumber() : Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+	if (!ms || ms <= 0) return work;
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			work,
+			new Promise<T>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+				timer.unref?.();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+async function readPlaintextStream(stream: AsyncIterable<any>, maxBytes: number): Promise<Buffer> {
+	const chunks: Buffer[] = [];
+	let total = 0;
+	for await (const chunk of stream) {
+		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		total += buf.length;
+		if (total > maxBytes) {
+			throw new Error(`Media file exceeds limit (${maxBytes} bytes)`);
+		}
+		chunks.push(buf);
+	}
+	return Buffer.concat(chunks);
+}
+
+export type LinkedDeviceMediaDeps = {
+	downloadContentFromMessage?: (message: any, type: string) => Promise<AsyncIterable<any>>;
+	downloadMediaMessage?: (
+		raw: any,
+		kind: 'buffer' | 'stream',
+		options: Record<string, never>,
+		extra: Record<string, unknown>,
+	) => Promise<any>;
+	updateMediaMessage?: (raw: any) => Promise<any>;
+	getUrlFromDirectPath?: (directPath: string, host?: string) => string;
+	logger?: { log?: (message: string) => void; warn?: (message: string) => void };
+	timeoutMs?: number;
+	maxBytes?: number;
+	reuploadTimeoutMs?: number;
+};
+
+/**
+ * Download and decrypt media for a linked device.
+ *
+ * The message already carries `mediaKey` and a CDN `directPath`. Baileys
+ * `downloadContentFromMessage` fetches ciphertext from the WhatsApp media host
+ * and decrypts it. `updateMediaMessage` asks the primary phone to re-upload and,
+ * in Baileys 7, waits with no timeout — so it runs only after the CDN path fails.
+ */
+export async function downloadLinkedDeviceMedia(
+	rawInput: any,
+	options: { id?: string; toFile?: string | null },
+	deps: LinkedDeviceMediaDeps,
+): Promise<{ data?: Buffer; filePath?: string; raw: any }> {
+	const maxBytes = deps.maxBytes || DEFAULT_MEDIA_MAX_BYTES;
+	const timeoutMs = deps.timeoutMs || DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS;
+	const reuploadTimeoutMs = deps.reuploadTimeoutMs || PHONE_REUPLOAD_TIMEOUT_MS;
+	const id = options.id || String(rawInput?.key?.id || '');
+	let raw = rawInput;
+	const log = (message: string) => deps.logger?.log?.(message);
+	const warn = (message: string) => deps.logger?.warn?.(message);
+	let lastError = 'Baileys returned empty media';
+
+	const mediaType = () => {
+		const content = unwrapMessageContent(raw?.message);
+		for (const [key, type] of LINKED_DEVICE_MEDIA_NODES) {
+			if (content?.[key]) return type;
+		}
+		return 'unknown';
+	};
+
+	log(`[WA] Media download started type=${mediaType()} id=${id.slice(0, 12)}`);
+
+	const tryCdn = async (): Promise<{ data?: Buffer; filePath?: string } | null> => {
+		if (typeof deps.downloadContentFromMessage !== 'function') return null;
+		const content = unwrapMessageContent(raw?.message);
+		attachFullMediaUrls(content, deps.getUrlFromDirectPath);
+		for (const [key, type] of LINKED_DEVICE_MEDIA_NODES) {
+			const node = content?.[key];
+			if (!node?.directPath && !node?.url) continue;
+			const declared = declaredMediaBytes(node);
+			if (declared > maxBytes) {
+				throw new Error(`Media file exceeds limit (${declared} bytes)`);
+			}
+			try {
+				const stream = await withTimeout(
+					Promise.resolve(
+						deps.downloadContentFromMessage(
+							{
+								mediaKey: node.mediaKey,
+								directPath: node.directPath,
+								url: node.url,
+							},
+							type,
+						),
+					),
+					timeoutMs,
+					'Media download',
+				);
+				if (options.toFile) {
+					const streamedBytes = await withTimeout(
+						writeMediaStreamToFile(stream, options.toFile),
+						timeoutMs,
+						'Media download',
+					);
+					if (streamedBytes > maxBytes) {
+						await fs.rm(options.toFile, { force: true }).catch(() => undefined);
+						throw new Error(`Media file exceeds limit (${streamedBytes} bytes)`);
+					}
+					if (streamedBytes) {
+						log(`[WA] Media decryption completed type=${type} bytes=${streamedBytes} source=cdn`);
+						log(`[WA] Media download completed type=${type} bytes=${streamedBytes} source=cdn`);
+						return { filePath: options.toFile };
+					}
+					continue;
+				}
+				const buffer = await withTimeout(
+					readPlaintextStream(stream, maxBytes),
+					timeoutMs,
+					'Media download',
+				);
+				if (buffer.length) {
+					log(`[WA] Media decryption completed type=${type} bytes=${buffer.length} source=cdn`);
+					log(`[WA] Media download completed type=${type} bytes=${buffer.length} source=cdn`);
+					return { data: buffer };
+				}
+			} catch (error) {
+				lastError = error instanceof Error ? error.message : String(error);
+				warn(`[WA] Media download failed type=${type} source=cdn reason=${redactMediaLog(lastError)}`);
+				if (/exceeds limit/i.test(lastError)) throw error;
+			}
+		}
+		return null;
+	};
+
+	const tryLibrary = async (): Promise<{ data?: Buffer; filePath?: string } | null> => {
+		if (typeof deps.downloadMediaMessage !== 'function') return null;
+		try {
+			const downloaded = await withTimeout(
+				Promise.resolve(deps.downloadMediaMessage(raw, options.toFile ? 'stream' : 'buffer', {}, {})),
+				timeoutMs,
+				'Media download',
+			);
+			if (options.toFile) {
+				const streamedBytes = await writeMediaStreamToFile(downloaded, options.toFile);
+				if (streamedBytes > maxBytes) {
+					await fs.rm(options.toFile, { force: true }).catch(() => undefined);
+					throw new Error(`Media file exceeds limit (${streamedBytes} bytes)`);
+				}
+				if (!streamedBytes) return null;
+				log(`[WA] Media decryption completed bytes=${streamedBytes} source=library`);
+				log(`[WA] Media download completed bytes=${streamedBytes} source=library`);
+				return { filePath: options.toFile };
+			}
+			const buffer = Buffer.isBuffer(downloaded)
+				? downloaded
+				: downloaded instanceof Uint8Array
+					? Buffer.from(downloaded)
+					: null;
+			if (!buffer?.length) return null;
+			if (buffer.length > maxBytes) {
+				throw new Error(`Media file exceeds limit (${buffer.length} bytes)`);
+			}
+			log(`[WA] Media decryption completed bytes=${buffer.length} source=library`);
+			log(`[WA] Media download completed bytes=${buffer.length} source=library`);
+			return { data: buffer };
+		} catch (error) {
+			lastError = error instanceof Error ? error.message : String(error);
+			warn(`[WA] Media download failed source=library reason=${redactMediaLog(lastError)}`);
+			if (/exceeds limit/i.test(lastError)) throw error;
+			return null;
+		}
+	};
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		const fromCdn = await tryCdn();
+		if (fromCdn) return { ...fromCdn, raw };
+		const fromLibrary = await tryLibrary();
+		if (fromLibrary) return { ...fromLibrary, raw };
+		if (
+			pass > 0 ||
+			shouldSkipMediaReupload(raw) ||
+			typeof deps.updateMediaMessage !== 'function'
+		) {
+			break;
+		}
+		try {
+			log('[WA] Media CDN miss; requesting phone re-upload');
+			const refreshed = await withTimeout(
+				Promise.resolve(deps.updateMediaMessage(raw)),
+				reuploadTimeoutMs,
+				'Phone media re-upload',
+			);
+			if (refreshed?.message) raw = refreshed;
+		} catch (error) {
+			lastError = error instanceof Error ? error.message : String(error);
+			warn(
+				`[WA] Media download failed source=phone-reupload reason=${redactMediaLog(lastError)}`,
+			);
+			break;
+		}
+	}
+
+	warn(`[WA] Media download failed reason=${redactMediaLog(lastError)}`);
+	throw new Error(lastError || 'Baileys returned empty media');
 }
 
 function toBaileysJid(jid: string): string {
@@ -459,16 +691,9 @@ export function classifyBaileysDisconnect(
 	}
 	if (replaced) return 'replaced';
 	if (handshakeFailure) return 'connection_lost';
-	const phoneLikelyClosed =
-		statusCode === DisconnectReason?.connectionClosed ||
-		statusCode === DisconnectReason?.connectionLost ||
-		statusCode === DisconnectReason?.timedOut ||
-		statusCode === 408 ||
-		statusCode === 428 ||
-		statusCode === 500 ||
-		statusCode === 503 ||
-		!statusCode;
-	return phoneLikelyClosed ? 'phone_closed' : 'connection_lost';
+	// 408/428/500/503 close the companion WebSocket. Multi-device keeps delivering
+	// to this socket while the phone is offline, so these are not "phone closed".
+	return 'connection_lost';
 }
 
 const RECONNECT_BASE_MS = 2_000;
@@ -1722,7 +1947,7 @@ export class BaileysProvider implements WhatsAppProvider {
 					reason: kind === 'phone_closed' ? 'phone_closed' : 'connection_lost',
 					error:
 						kind === 'phone_closed'
-							? 'WhatsApp on the phone looks closed or offline. Open WhatsApp and keep it in the foreground.'
+							? 'Linked device socket closed. Reconnecting.'
 							: undefined,
 				});
 				const handshakeFailure = /connection failure/i.test(String(err?.message || ''));
@@ -1754,6 +1979,14 @@ export class BaileysProvider implements WhatsAppProvider {
 					this.recentHistoryMessageIds.has(normalized.providerMessageId)
 				) {
 					continue;
+				}
+				if (!fromHistory) {
+					const mediaTypes = (normalized.attachments || [])
+						.map((item) => item.type)
+						.filter(Boolean)
+						.join(',');
+					this.logger.log(`[WA] Message received type=${normalized.type || 'text'}`);
+					if (mediaTypes) this.logger.log(`[WA] Media detected type=${mediaTypes}`);
 				}
 				this.emit({ type: 'message', message: normalized });
 			}
@@ -2840,114 +3073,30 @@ export class BaileysProvider implements WhatsAppProvider {
 		const baileys = await loadBaileysModule();
 		const { downloadMediaMessage, downloadContentFromMessage, getUrlFromDirectPath } =
 			baileys as any;
-
-		// Stories cannot be re-uploaded by the phone for linked devices (NOT_FOUND),
-		// and Baileys waitForMsgMediaUpdate can emit TimeoutNegativeWarning (-1).
-		if (
-			!shouldSkipMediaReupload(raw) &&
-			typeof this.socket.updateMediaMessage === 'function' &&
-			raw.key
-		) {
-			try {
-				const refreshed = await this.socket.updateMediaMessage(raw);
-				if (refreshed?.message) {
-					raw = refreshed;
-					this.rawByMessageId.set(id, refreshed);
-				}
-			} catch (error) {
-				this.logger.warn(
-					`updateMediaMessage failed for ${id}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			}
-		}
-
-		const content = unwrapMessageContent(raw.message);
-		attachFullMediaUrls(content, getUrlFromDirectPath);
-
-		let buffer: Buffer | Uint8Array | null = null;
-		const toFile = options.toFile || null;
-		let streamedBytes = 0;
-		const mediaNodes: Array<{ node: any; type: string }> = [
-			{ node: content?.imageMessage, type: 'image' },
-			{ node: content?.videoMessage, type: 'video' },
-			{ node: content?.audioMessage, type: 'audio' },
-			{ node: content?.documentMessage, type: 'document' },
-			{ node: content?.stickerMessage, type: 'sticker' },
-		].filter((item) => item.node?.directPath || item.node?.url);
-
-		// Prefer the full media directPath. Baileys downloadMediaMessage treats
-		// `thumbnailDirectPath` without `url` as a thumbnail-only download.
-		if (typeof downloadContentFromMessage === 'function') {
-			for (const candidate of mediaNodes) {
-				try {
-					const stream = await downloadContentFromMessage(
-						{
-							mediaKey: candidate.node.mediaKey,
-							directPath: candidate.node.directPath,
-							url: candidate.node.url,
-						},
-						candidate.type,
-					);
-					if (toFile) {
-						streamedBytes = await writeMediaStreamToFile(stream, toFile);
-						if (streamedBytes) break;
-						continue;
-					}
-					const chunks: Buffer[] = [];
-					for await (const chunk of stream) {
-						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-					}
-					buffer = Buffer.concat(chunks);
-					if (buffer.length) break;
-				} catch (error) {
-					this.logger.warn(
-						`downloadContentFromMessage(${candidate.type}) failed for ${id}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
-			}
-		}
-
-		if (
-			!streamedBytes &&
-			(!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) &&
-			typeof downloadMediaMessage === 'function'
-		) {
-			try {
-				const downloaded = await downloadMediaMessage(
-					raw,
-					toFile ? 'stream' : 'buffer',
-					{},
-					shouldSkipMediaReupload(raw)
-						? {}
-						: {
-								reuploadRequest: this.socket.updateMediaMessage?.bind(this.socket),
-							},
-				);
-				if (toFile) streamedBytes = await writeMediaStreamToFile(downloaded, toFile);
-				else buffer = downloaded;
-			} catch (error) {
-				this.logger.warn(
-					`downloadMediaMessage failed for ${id}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			}
-		}
-
-		if (streamedBytes && toFile) {
-			this.rawByMessageId.set(id, raw);
-			return { filePath: toFile };
-		}
-		if (!buffer || !(Buffer.isBuffer(buffer) || buffer instanceof Uint8Array) || !buffer.length) {
-			throw new Error('Baileys returned empty media');
-		}
-		// Keep a live copy so retries are cheap.
-		this.rawByMessageId.set(id, raw);
-		return { data: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer) };
+		const downloaded = await downloadLinkedDeviceMedia(
+			raw,
+			{ id, toFile: options.toFile || null },
+			{
+				downloadContentFromMessage,
+				downloadMediaMessage,
+				updateMediaMessage:
+					typeof this.socket.updateMediaMessage === 'function'
+						? (message) => this.socket.updateMediaMessage(message)
+						: undefined,
+				getUrlFromDirectPath,
+				logger: this.logger,
+				timeoutMs:
+					Number(process.env.WHATSAPP_MEDIA_DOWNLOAD_TIMEOUT_MS) ||
+					DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
+				maxBytes: Number(process.env.WHATSAPP_MEDIA_MAX_BYTES) || DEFAULT_MEDIA_MAX_BYTES,
+				reuploadTimeoutMs:
+					Number(process.env.WHATSAPP_MEDIA_REUPLOAD_TIMEOUT_MS) || PHONE_REUPLOAD_TIMEOUT_MS,
+			},
+		);
+		this.rawByMessageId.set(id, downloaded.raw || raw);
+		if (downloaded.filePath) return { filePath: downloaded.filePath };
+		if (!downloaded.data?.length) throw new Error('Baileys returned empty media');
+		return { data: downloaded.data };
 	}
 
 	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {

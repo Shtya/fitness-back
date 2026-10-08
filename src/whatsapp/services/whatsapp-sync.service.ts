@@ -52,6 +52,11 @@ import {
 	readFileHeader,
 } from '../utils/whatsapp-media-decode';
 import {
+	mediaDownloadOutcome,
+	mediaDownloadRetryDelayMs,
+	redactMediaLog,
+} from '../utils/whatsapp-media-download-policy';
+import {
 	commitConvertedVoiceOgg,
 	ensureWhatsAppVoiceOgg,
 	isValidWhatsAppVoiceOggFile,
@@ -710,6 +715,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private conversationUpdatePayloads = new Map<string, Record<string, unknown>>();
 	private conversationUpdateScopes = new Map<string, ConversationEventScope>();
 	private attachmentDownloads = new Map<string, Promise<any>>();
+	private readonly mediaDownloadAttempts = new Map<string, number>();
+	private readonly mediaDownloadGaveUp = new Set<string>();
+	private readonly mediaRetryTimers = new Map<string, NodeJS.Timeout>();
 	private activeMediaDownloads = 0;
 	private readonly resolvedAttachmentFiles = new TtlCacheStore(60_000, 2_000);
 	private readonly maxConcurrentMediaDownloads = Number(
@@ -799,6 +807,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.inboxReconcileTimers.clear();
 		for (const timer of this.historyInboxDebounceTimers.values()) clearTimeout(timer);
 		this.historyInboxDebounceTimers.clear();
+		for (const timer of this.mediaRetryTimers.values()) clearTimeout(timer);
+		this.mediaRetryTimers.clear();
 		this.historyInboxTotals.clear();
 		this.conversationHotCache.clear();
 		this.lastInboxSyncAt.clear();
@@ -1114,6 +1124,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (event.type === 'connection' && event.status === 'connected') {
 			this.startInboxReconciliation(accountId);
 			void this.scheduleBootstrap(accountId);
+			void this.retryFailedMediaAfterReconnect();
 			// Let the socket settle, then force presenceSubscribe for chats + contacts.
 			setTimeout(() => {
 				void this.contactPresence
@@ -1145,8 +1156,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					accountId,
 					progress: 15,
 					stage: 'phone_wait',
-					message:
-						'Keep WhatsApp open on your phone — reconnecting to finish sync…',
+					message: 'Linked device reconnecting. Inbox sync resumes when the socket is back.',
 				});
 			}
 		}
@@ -1737,10 +1747,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.bootstrapping.delete(accountId);
 		const message =
 			reason === 'phone_closed'
-				? 'Please open WhatsApp on your phone and keep it open — sync paused because the phone connection dropped.'
+				? 'Inbox sync paused because the linked device socket closed. It will reconnect on its own.'
 				: reason === 'timeout'
-					? 'Inbox sync is taking longer than expected. Keep WhatsApp open on your phone, then tap Sync.'
-					: 'WhatsApp connection dropped during sync. Open WhatsApp on your phone and try Sync again.';
+					? 'Inbox sync is taking longer than expected. Tap Sync to continue.'
+					: 'WhatsApp connection dropped during sync. The linked device will reconnect.';
 		this.gateway.emitAccountEvent(accountId, 'sync_failed', {
 			message,
 			reason,
@@ -1824,8 +1834,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					return;
 				}
 				this.gateway.emitAccountEvent(accountId, 'sync_failed', {
-					message:
-						'Please keep WhatsApp open on your phone until sync finishes, then tap Sync.',
+					message: 'Inbox sync did not finish. Tap Sync to try again.',
 					reason: 'timeout',
 				});
 			})();
@@ -1840,7 +1849,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					if (!this.bootstrapping.has(accountId)) return null;
 					if (!ready) {
 						throw new Error(
-							'WhatsApp is not ready yet — keep WhatsApp open on your phone.',
+							'WhatsApp is not ready yet. The linked device is still connecting.',
 						);
 					}
 					return this.bootstrapAccount(accountId);
@@ -4735,6 +4744,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			for (const attachment of message.attachments || []) {
 				if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
 				if (!attachment.id) continue;
+				if (this.mediaDownloadGaveUp.has(attachment.id)) continue;
 				// Skip envelopes that cannot decrypt yet (no mediaKey/path) unless
 				// the file was already marked failed — then retry after raw refresh.
 				if (rawScore < 5 && attachment.downloadStatus !== 'failed') continue;
@@ -6593,6 +6603,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await this.assertConversationVisible(user, attachment.message.conversationId);
 		const inFlight = this.attachmentDownloads.get(attachmentId);
 		if (inFlight) return inFlight;
+		this.clearScheduledMediaRetry(attachmentId);
+		this.mediaDownloadGaveUp.delete(attachmentId);
+		this.mediaDownloadAttempts.delete(attachmentId);
 		const download = this.downloadAttachmentInternal(attachment).finally(() => {
 			this.attachmentDownloads.delete(attachmentId);
 		});
@@ -6600,10 +6613,58 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return download;
 	}
 
+	/** A socket blip must not leave media dead-lettered. One fresh cycle after reconnect. */
+	private async retryFailedMediaAfterReconnect() {
+		const ids = [...this.mediaDownloadGaveUp].slice(0, 40);
+		if (!ids.length) return;
+		this.mediaDownloadGaveUp.clear();
+		this.mediaDownloadAttempts.clear();
+		for (const id of ids) {
+			const attachment = await this.attachmentRepo
+				.findOne({ where: { id }, relations: ['message'] })
+				.catch(() => null);
+			if (!attachment?.message) continue;
+			if (attachment.downloadStatus === 'downloaded' && attachment.storagePath) continue;
+			this.scheduleMediaRetry(attachment, 1);
+		}
+	}
+
+	private clearScheduledMediaRetry(attachmentId: string) {
+		const timer = this.mediaRetryTimers.get(attachmentId);
+		if (timer) clearTimeout(timer);
+		this.mediaRetryTimers.delete(attachmentId);
+	}
+
+	private scheduleMediaRetry(attachment: WhatsAppMessageAttachment, attempt: number) {
+		if (this.mediaRetryTimers.has(attachment.id) || this.mediaDownloadGaveUp.has(attachment.id)) {
+			return;
+		}
+		const delay = mediaDownloadRetryDelayMs(attempt);
+		const timer = setTimeout(() => {
+			this.mediaRetryTimers.delete(attachment.id);
+			if (this.mediaDownloadGaveUp.has(attachment.id)) return;
+			if (this.attachmentDownloads.has(attachment.id)) return;
+			const download = this.downloadAttachmentInternal(attachment, {
+				reconnectWaitMs: 0,
+				background: true,
+			})
+				.catch(() => undefined)
+				.finally(() => {
+					this.attachmentDownloads.delete(attachment.id);
+				});
+			this.attachmentDownloads.set(attachment.id, download);
+		}, delay);
+		timer.unref?.();
+		this.mediaRetryTimers.set(attachment.id, timer);
+	}
+
 	private async downloadAttachmentInternal(
 		attachment: WhatsAppMessageAttachment,
-		options: { reconnectWaitMs?: number } = {},
+		options: { reconnectWaitMs?: number; background?: boolean } = {},
 	) {
+		if (options.background && this.mediaDownloadGaveUp.has(attachment.id)) {
+			return { ok: false, supported: true };
+		}
 		const debugMedia = process.env.WHATSAPP_MEDIA_DEBUG === '1';
 		const started = Date.now();
 		const reconnectWaitMs = Number.isFinite(options.reconnectWaitMs)
@@ -6725,7 +6786,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			attachment.downloadStatus = 'pending';
 			await this.attachmentRepo.save(attachment);
 			throw new BadRequestException(
-				'WhatsApp is not connected. Keep WhatsApp open on your phone, wait until the account shows Connected, then retry.',
+				'Linked device is not connected. Wait until the account shows Connected, then retry.',
 			);
 		}
 		if (!provider.capabilities.mediaDownload) {
@@ -6783,7 +6844,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			attachment.fileSizeBytes = String(size);
 			attachment.downloadStatus = 'downloaded';
 			await this.attachmentRepo.save(attachment);
+			this.mediaDownloadAttempts.delete(attachment.id);
+			this.mediaDownloadGaveUp.delete(attachment.id);
+			this.clearScheduledMediaRetry(attachment.id);
 			logStep(`downloaded bytes=${size}`);
+			this.logger.log(
+				`[WA] Media stored type=${attachment.type || 'file'} bytes=${size}`,
+			);
+			this.logger.log('[WA] Media URL generated');
 			this.emitAttachmentReady(attachment, false);
 			return {
 				ok: true,
@@ -6795,13 +6863,29 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			};
 		} catch (error: any) {
 			if (partPath) await fs.rm(partPath, { force: true }).catch(() => {});
-			attachment.downloadStatus = 'failed';
-			await this.attachmentRepo.save(attachment);
 			const detail = String(error?.message || error || '');
-			logStep(`failed ${detail}`);
-			throw new BadRequestException(
-				detail && detail !== 'Object' ? detail : 'WhatsApp media is not available',
-			);
+			const safeDetail = redactMediaLog(detail && detail !== 'Object' ? detail : 'WhatsApp media is not available');
+			const attempt = (this.mediaDownloadAttempts.get(attachment.id) || 0) + 1;
+			this.mediaDownloadAttempts.set(attachment.id, attempt);
+			const outcome = mediaDownloadOutcome(attempt, safeDetail);
+			if (outcome === 'retry') {
+				attachment.downloadStatus = 'pending';
+				await this.attachmentRepo.save(attachment);
+				this.logger.warn(
+					`[WA] Media download failed reason=${safeDetail} attempt=${attempt} retry=scheduled`,
+				);
+				this.scheduleMediaRetry(attachment, attempt);
+			} else {
+				this.mediaDownloadGaveUp.add(attachment.id);
+				this.clearScheduledMediaRetry(attachment.id);
+				attachment.downloadStatus = 'failed';
+				await this.attachmentRepo.save(attachment);
+				this.logger.warn(
+					`[WA] Media download failed reason=${safeDetail} attempt=${attempt} status=failed`,
+				);
+			}
+			logStep(`failed ${safeDetail}`);
+			throw new BadRequestException(safeDetail);
 		}
 	}
 
