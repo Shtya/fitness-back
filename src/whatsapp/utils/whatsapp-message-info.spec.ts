@@ -4,7 +4,7 @@ import {
 } from './whatsapp-message-info';
 
 describe('buildInboundSenderReceiptView', () => {
-	it('maps offline→delivered as grey ticks for the sender', () => {
+	it('never invents their ✓✓ from CRM presence', () => {
 		const view = buildInboundSenderReceiptView({
 			sentAt: '2026-10-09T08:00:00.000Z',
 			receivedAt: '2026-10-09T10:00:00.000Z',
@@ -12,31 +12,23 @@ describe('buildInboundSenderReceiptView', () => {
 			readReceiptsEnabled: true,
 		});
 		expect(view.sent).toBe(true);
-		expect(view.delivered).toBe(true);
+		expect(view.delivered).toBe(false);
 		expect(view.read).toBe(false);
-		expect(view.status).toBe('delivered');
+		expect(view.status).toBe('sent');
+		expect(view.arrivedLocallyAt).toBe('2026-10-09T10:00:00.000Z');
+		expect(view.readLocally).toBe(false);
 	});
 
-	it('marks read (blue) once we cleared unread and receipts are on', () => {
+	it('tracks local read without claiming their blue ticks', () => {
 		const view = buildInboundSenderReceiptView({
 			sentAt: '2026-10-09T08:00:00.000Z',
 			receivedAt: '2026-10-09T10:00:00.000Z',
 			stillUnreadLocally: false,
 			readReceiptsEnabled: true,
 		});
-		expect(view.read).toBe(true);
-		expect(view.status).toBe('read');
-	});
-
-	it('keeps delivered (grey) when read receipts are disabled', () => {
-		const view = buildInboundSenderReceiptView({
-			sentAt: '2026-10-09T08:00:00.000Z',
-			receivedAt: '2026-10-09T10:00:00.000Z',
-			stillUnreadLocally: false,
-			readReceiptsEnabled: false,
-		});
 		expect(view.read).toBe(false);
-		expect(view.status).toBe('delivered');
+		expect(view.readLocally).toBe(true);
+		expect(view.status).toBe('sent');
 	});
 });
 

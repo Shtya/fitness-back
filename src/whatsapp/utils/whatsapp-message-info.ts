@@ -112,24 +112,33 @@ export function buildWhatsAppMessageAckInfo(input: {
 }
 
 /**
- * What the *sender* likely sees on an inbound message (they sent → we received).
- * WhatsApp does not expose their tick UI to us; we infer from local delivery/read.
+ * Local facts for an *inbound* message (they sent → we received).
  *
- * - ✓ sent: message reached WA servers (we have it / know send time)
- * - ✓✓ grey delivered: message landed on our linked device / CRM
- * - ✓✓ blue read: we cleared unread for this message AND read receipts are enabled
+ * WhatsApp does **not** expose the sender's tick UI (✓ / ✓✓ / blue) to the
+ * recipient. Never invent "they see double grey/blue" just because the CRM
+ * has the row — a message can sit in our DB while their phone still shows ✓.
+ *
+ * We only confirm:
+ * - sent: we know they sent it (we have providerTimestamp / the message)
+ * - arrivedLocally: it is present on our side (CRM/device sync time)
+ * - readLocally: our unread window no longer includes this message
+ * - theirDelivered / theirRead: always unknown from protocol (false here)
  */
 export type InboundSenderReceiptView = {
 	sent: boolean;
+	/** Always false — we cannot observe their delivery tick. */
 	delivered: boolean;
+	/** Always false — we cannot observe their read tick. */
 	read: boolean;
 	sentAt: string | null;
-	deliveredAt: string | null;
+	/** When the message appeared on our side (local fact, not their ✓✓). */
+	arrivedLocallyAt: string | null;
+	readLocally: boolean;
 	readAt: string | null;
-	status: 'pending' | 'sent' | 'delivered' | 'read';
+	status: 'sent' | 'unknown';
 	readReceiptsEnabled: boolean;
 	stillUnreadLocally: boolean;
-	source: 'inferred';
+	source: 'local';
 };
 
 export function buildInboundSenderReceiptView(input: {
@@ -138,9 +147,8 @@ export function buildInboundSenderReceiptView(input: {
 	receivedAt?: Date | string | null;
 	/** True when this inbound message is still inside the conversation unread window. */
 	stillUnreadLocally?: boolean;
-	/** Account privacy: if 'never', sender never gets blue ticks from us. */
+	/** Account privacy: if 'never', we never send blue ticks to them. */
 	readReceiptsEnabled?: boolean;
-	/** Optional timestamp when we last marked the chat read (best-effort). */
 	readAt?: Date | string | null;
 }): InboundSenderReceiptView {
 	const toIso = (value?: Date | string | null) => {
@@ -149,30 +157,22 @@ export function buildInboundSenderReceiptView(input: {
 		return Number.isNaN(date.getTime()) ? null : date.toISOString();
 	};
 	const sentAt = toIso(input.sentAt);
-	const deliveredAt = toIso(input.receivedAt) || sentAt;
+	const arrivedLocallyAt = toIso(input.receivedAt) || sentAt;
 	const stillUnreadLocally = Boolean(input.stillUnreadLocally);
 	const readReceiptsEnabled = input.readReceiptsEnabled !== false;
-	const sent = Boolean(sentAt || deliveredAt);
-	const delivered = Boolean(deliveredAt);
-	const read = delivered && readReceiptsEnabled && !stillUnreadLocally;
-	const readAt = read ? toIso(input.readAt) || deliveredAt : null;
-	const status: InboundSenderReceiptView['status'] = !sent
-		? 'pending'
-		: read
-			? 'read'
-			: delivered
-				? 'delivered'
-				: 'sent';
+	const sent = Boolean(sentAt || arrivedLocallyAt);
+	const readLocally = sent && !stillUnreadLocally;
 	return {
 		sent,
-		delivered,
-		read,
+		delivered: false,
+		read: false,
 		sentAt,
-		deliveredAt,
-		readAt,
-		status,
+		arrivedLocallyAt,
+		readLocally,
+		readAt: readLocally ? toIso(input.readAt) || arrivedLocallyAt : null,
+		status: sent ? 'sent' : 'unknown',
 		readReceiptsEnabled,
 		stillUnreadLocally,
-		source: 'inferred',
+		source: 'local',
 	};
 }

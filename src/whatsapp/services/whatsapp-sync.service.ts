@@ -5821,7 +5821,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			providerMessageId: message.providerMessageId,
 			direction: message.direction,
 			type: message.type,
-			status: fromMe ? liveStatus : senderReceiptView?.status || liveStatus,
+			// Inbound: never promote DB "delivered" into a fake sender-tick status.
+			status: fromMe ? liveStatus : senderReceiptView?.status || 'sent',
 			statusUpdatedAt: message.statusUpdatedAt,
 			sentAt: message.providerTimestamp,
 			isStarred: message.isStarred,
@@ -5831,17 +5832,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			acknowledgements: fromMe
 				? acknowledgements
 				: {
-						delivered: Boolean(senderReceiptView?.delivered),
-						read: Boolean(senderReceiptView?.read),
+						// Do not invent their ✓✓ — WhatsApp does not expose sender ticks to us.
+						delivered: false,
+						read: false,
 						played: false,
-						deliveryRemaining: senderReceiptView?.delivered ? 0 : 1,
-						readRemaining: senderReceiptView?.read ? 0 : 1,
+						deliveryRemaining: null,
+						readRemaining: null,
 						playedRemaining: null,
-						status: senderReceiptView?.status || 'delivered',
-						statusUpdatedAt: senderReceiptView?.deliveredAt || null,
-						source: 'inferred' as const,
+						status: 'sent',
+						statusUpdatedAt: senderReceiptView?.sentAt || null,
+						source: 'local' as const,
 						sentAt: senderReceiptView?.sentAt || null,
-						deliveredAt: senderReceiptView?.deliveredAt || null,
+						arrivedLocallyAt: senderReceiptView?.arrivedLocallyAt || null,
+						readLocally: Boolean(senderReceiptView?.readLocally),
 						readAt: senderReceiptView?.readAt || null,
 						readReceiptsEnabled: senderReceiptView?.readReceiptsEnabled ?? true,
 						stillUnreadLocally: Boolean(senderReceiptView?.stillUnreadLocally),
