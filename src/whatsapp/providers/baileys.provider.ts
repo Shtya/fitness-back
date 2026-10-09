@@ -779,7 +779,14 @@ export class BaileysProvider implements WhatsAppProvider {
 	private readonly chats = new Map<string, any>();
 	private readonly contacts = new Map<
 		string,
-		{ id: string; name?: string | null; notify?: string | null; phoneNumber?: string | null; lid?: string | null }
+		{
+			id: string;
+			name?: string | null;
+			notify?: string | null;
+			phoneNumber?: string | null;
+			lid?: string | null;
+			imgUrl?: string | null;
+		}
 	>();
 	/** LID chat id → phone digits (no @domain). */
 	private readonly lidToPn = new Map<string, string>();
@@ -1002,6 +1009,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		const pushRaw = [contact.notify, contact.pushname, contact.pushName]
 			.map((v) => String(v || '').trim())
 			.find((v) => v && !isWeakDisplayName(v, id, phoneDigits)) || null;
+		const picUrl =
+			resolveWhatsAppPictureUrl(contact.imgUrl) ||
+			resolveWhatsAppPictureUrl(contact.profilePictureUrl) ||
+			null;
 		const merge = (key: string) => {
 			if (!key) return;
 			const prev = this.contacts.get(key) || { id: key };
@@ -1011,6 +1022,7 @@ export class BaileysProvider implements WhatsAppProvider {
 					? prev.name
 					: null);
 			const nextNotify = pushRaw || prev.notify || null;
+			const nextPic = picUrl || resolveWhatsAppPictureUrl(prev.imgUrl) || null;
 			if (this.contacts.has(key)) this.contacts.delete(key);
 			this.contacts.set(key, {
 				...prev,
@@ -1020,7 +1032,9 @@ export class BaileysProvider implements WhatsAppProvider {
 				notify: nextNotify,
 				phoneNumber: phoneDigits || prev.phoneNumber || null,
 				lid: lid || prev.lid || null,
+				imgUrl: nextPic,
 			});
+			if (nextPic) this.attachChatPicture(key, nextPic);
 		};
 		merge(id);
 		if (lid) merge(lid);
@@ -2032,12 +2046,17 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (!id) continue;
 				const incoming = Number(chat.unreadCount);
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
+				const pic =
+					resolveWhatsAppPictureUrl(chat?.imgUrl) ||
+					resolveWhatsAppPictureUrl(chat?.profilePictureUrl) ||
+					null;
 				this.rememberChat(id, {
 					name:
 						this.savedContactName(id) ||
 						extractChatDisplayName(chat),
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || 0,
 					unreadCount: Number.isFinite(incoming) && incoming > 0 ? incoming : prev,
+					...(pic ? { imgUrl: pic, profilePicThumbObj: { eurl: pic } } : {}),
 				});
 			}
 		});
@@ -2048,6 +2067,10 @@ export class BaileysProvider implements WhatsAppProvider {
 				if (!id) continue;
 				const prev = Number(this.chats.get(id)?.unreadCount) || 0;
 				const applied = applyLiveChatUnread(prev, chat.unreadCount);
+				const pic =
+					resolveWhatsAppPictureUrl(chat?.imgUrl) ||
+					resolveWhatsAppPictureUrl(chat?.profilePictureUrl) ||
+					null;
 				this.rememberChat(id, {
 					name:
 						this.savedContactName(id) ||
@@ -2056,6 +2079,7 @@ export class BaileysProvider implements WhatsAppProvider {
 						null,
 					t: Number(chat.conversationTimestamp) || Number(chat.t) || this.chats.get(id)?.t || 0,
 					unreadCount: applied.next,
+					...(pic ? { imgUrl: pic, profilePicThumbObj: { eurl: pic } } : {}),
 				});
 				if (applied.phoneRead) {
 					this.emit({
@@ -2146,10 +2170,15 @@ export class BaileysProvider implements WhatsAppProvider {
 				const id = jidOf(chat?.id);
 				if (!id) continue;
 				const contactName = this.contactDisplayName(id);
+				const pic =
+					resolveWhatsAppPictureUrl(chat?.imgUrl) ||
+					resolveWhatsAppPictureUrl(chat?.profilePictureUrl) ||
+					null;
 				this.rememberChat(id, {
 					name: this.savedContactName(id) || extractChatDisplayName(chat) || contactName || null,
 					t: Number(chat.conversationTimestamp) || 0,
 					unreadCount: Number(chat.unreadCount) || 0,
+					...(pic ? { imgUrl: pic, profilePicThumbObj: { eurl: pic } } : {}),
 				});
 			}
 			const historyMessages: NormalizedWhatsAppMessage[] = [];
@@ -2415,22 +2444,96 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async getContacts() {
-		return [...this.contacts.values()].map((contact) => ({
-			id: { _serialized: contact.id },
-			// Keep fields separate so sync can prefer address-book over pushName.
-			name: contact.name || null,
-			pushname: contact.notify || null,
-			notify: contact.notify || null,
-			number: contact.phoneNumber || null,
-		}));
+		return [...this.contacts.values()].map((contact) => {
+			const id = String(contact.id || '');
+			const fromChat = resolveWhatsAppPictureUrl(this.chats.get(id)?.imgUrl);
+			const pic =
+				resolveWhatsAppPictureUrl(contact.imgUrl) ||
+				fromChat ||
+				resolveWhatsAppPictureUrl(this.chats.get(id)?.profilePicThumbObj?.eurl);
+			return {
+				id: { _serialized: contact.id },
+				// Keep fields separate so sync can prefer address-book over pushName.
+				name: contact.name || null,
+				pushname: contact.notify || null,
+				notify: contact.notify || null,
+				number: contact.phoneNumber || null,
+				...(pic ? { profilePicThumbObj: { eurl: pic } } : {}),
+			};
+		});
+	}
+
+	private pictureUrlFromStore(chatId: string): string | null {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return null;
+		const keys = new Set<string>([id]);
+		const phone =
+			this.lidToPn.get(id) ||
+			this.contacts.get(id)?.phoneNumber ||
+			null;
+		if (phone) {
+			const digits = String(phone).replace(/\D/g, '');
+			if (digits) {
+				keys.add(`${digits}@c.us`);
+				keys.add(`${digits}@s.whatsapp.net`);
+			}
+		}
+		for (const key of keys) {
+			const chat = this.chats.get(key);
+			const fromChat =
+				resolveWhatsAppPictureUrl(chat?.imgUrl) ||
+				resolveWhatsAppPictureUrl(chat?.profilePicThumbObj?.eurl);
+			if (fromChat) return fromChat;
+			const fromContact = resolveWhatsAppPictureUrl(this.contacts.get(key)?.imgUrl);
+			if (fromContact) return fromContact;
+		}
+		return null;
+	}
+
+	private async resolveProfilePictureJid(chatId: string): Promise<string> {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (!id) return id;
+		if (id.endsWith('@g.us') || id.endsWith('@newsletter') || id.endsWith('@broadcast')) {
+			return toBaileysJid(id) || id;
+		}
+		if (id.endsWith('@c.us') || id.endsWith('@s.whatsapp.net')) {
+			return toBaileysJid(id) || id;
+		}
+		if (id.endsWith('@lid') || id.endsWith('@hosted.lid')) {
+			const mapped =
+				this.lidToPn.get(id) ||
+				this.contacts.get(id)?.phoneNumber ||
+				null;
+			const digits = String(mapped || '').replace(/\D/g, '');
+			if (digits) return `${digits}@s.whatsapp.net`;
+			if (this.socket?.signalRepository?.lidMapping?.getPNForLID) {
+				try {
+					const pnJid = await this.socket.signalRepository.lidMapping.getPNForLID(
+						toBaileysJid(id) || id,
+					);
+					const resolved = jidOf(pnJid);
+					if (resolved) return toBaileysJid(resolved) || resolved;
+				} catch {
+					/* ignore */
+				}
+			}
+		}
+		return toBaileysJid(id) || id;
 	}
 
 	async getProfilePictureUrl(chatId: string): Promise<string | null> {
 		const id = jidOf(chatId) || String(chatId || '').trim();
 		if (!id) return null;
 		const cached = this.avatarUrlCache.get(id);
-		if (cached && Date.now() - cached.at < 6 * 60 * 60 * 1000) {
+		const cacheTtlMs = cached?.url ? 6 * 60 * 60 * 1000 : 12 * 60 * 1000;
+		if (cached && Date.now() - cached.at < cacheTtlMs) {
 			return cached.url;
+		}
+		const fromStore = this.pictureUrlFromStore(id);
+		if (fromStore) {
+			this.avatarUrlCache.set(id, { url: fromStore, at: Date.now() });
+			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
+			return fromStore;
 		}
 		if (!this.socket || this.state !== 'connected') {
 			return cached?.url || null;
@@ -2440,11 +2543,16 @@ export class BaileysProvider implements WhatsAppProvider {
 			return meta.pictureUrl;
 		}
 		try {
-			const jid = toBaileysJid(id) || id;
-			const url = await this.socket.profilePictureUrl(jid, 'preview');
-			const next = String(url || '').trim() || null;
+			const jid = await this.resolveProfilePictureJid(id);
+			let url = await this.socket.profilePictureUrl(jid, 'preview');
+			let next = String(url || '').trim() || null;
+			if (!next) {
+				url = await this.socket.profilePictureUrl(jid, 'image');
+				next = String(url || '').trim() || null;
+			}
 			this.avatarUrlCache.set(id, { url: next, at: Date.now() });
 			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
+			if (next) this.attachChatPicture(id, next);
 			return next;
 		} catch (error) {
 			this.logger.debug(
@@ -2531,9 +2639,27 @@ export class BaileysProvider implements WhatsAppProvider {
 					: null;
 			const participants = Array.isArray(meta?.participants) ? meta.participants : [];
 			return participants.map((participant: any) => {
-				const id = String(participant?.id || participant?.jid || '');
+				const rawId = String(participant?.id || participant?.jid || '');
+				const id = jidOf(rawId) || rawId;
+				const phoneDigits =
+					this.lidToPn.get(id) ||
+					this.contacts.get(id)?.phoneNumber ||
+					(id.endsWith('@s.whatsapp.net') || id.endsWith('@c.us')
+						? id.split('@')[0].split(':')[0].replace(/\D/g, '')
+						: null);
+				const name =
+					this.savedContactName(id) ||
+					this.contactDisplayName(id) ||
+					(phoneDigits
+						? this.savedContactName(`${phoneDigits}@c.us`) ||
+							this.contactDisplayName(`${phoneDigits}@c.us`)
+						: null) ||
+					null;
 				return {
 					id,
+					name,
+					pushname: name,
+					phoneNumber: phoneDigits || null,
 					isAdmin: Boolean(participant?.admin),
 					isSuperAdmin: participant?.admin === 'superadmin',
 				};

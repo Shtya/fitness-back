@@ -726,6 +726,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private sendOperations = new Map<string, Promise<unknown>>();
 	private inboxReconcileTimers = new Map<string, NodeJS.Timeout>();
 	private inboxReconcileInFlight = new Set<string>();
+	private avatarHydrateTimers = new Map<string, NodeJS.Timeout>();
+	private avatarHydrateInFlight = new Set<string>();
 	private inboxSyncTail = new Map<string, Promise<unknown>>();
 	private conversationHotCache = new Map<string, { conversation: WhatsAppConversation; at: number }>();
 	private eventScopeCache = new Map<string, { scope: ConversationEventScope; at: number }>();
@@ -809,6 +811,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.historyInboxDebounceTimers.clear();
 		for (const timer of this.mediaRetryTimers.values()) clearTimeout(timer);
 		this.mediaRetryTimers.clear();
+		for (const timer of this.avatarHydrateTimers.values()) clearTimeout(timer);
+		this.avatarHydrateTimers.clear();
 		this.historyInboxTotals.clear();
 		this.conversationHotCache.clear();
 		this.lastInboxSyncAt.clear();
@@ -1152,6 +1156,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				void this.contactPresence
 					.subscribeRecentDirectChats(accountId, 200, true)
 					.catch(() => undefined);
+				this.scheduleAvatarHydration(accountId, 5_000);
 			}, 2500);
 		} else if (event.type === 'connection') {
 			this.contactPresence.clearAccount(accountId);
@@ -3390,10 +3395,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				!avatarUrl &&
 				!existingAvatar &&
 				typeof provider.getProfilePictureUrl === 'function' &&
-				(id.endsWith('@newsletter') || avatarFetches < 20)
+				(id.endsWith('@newsletter') || avatarFetches < 80)
 			) {
 				avatarUrl = await provider.getProfilePictureUrl(id).catch(() => null);
 				if (!id.endsWith('@newsletter')) avatarFetches += 1;
+				if (avatarFetches > 0 && avatarFetches % 8 === 0) {
+					await new Promise((resolve) => setTimeout(resolve, 200));
+				}
 			}
 			avatarUrl = avatarUrl || existingAvatar || null;
 			if (conversation.contact) {
@@ -3514,6 +3522,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.logger.log(
 			`Inbox sync finished for ${accountId}: chats=${count} changed=${changed || Boolean(merged)} durationMs=${Date.now() - started}`,
 		);
+		this.scheduleAvatarHydration(accountId, 2_000);
 		return { supported: true, count, changed: changed || Boolean(merged) };
 	}
 
@@ -3527,20 +3536,96 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		if (!group) return;
 		const participants = await provider.getGroupParticipants(groupWaId);
+		const participantIds = (participants || [])
+			.map((item: any) => waId(item) || String(item?.id || '').trim())
+			.filter(Boolean);
+		const contactNameByWaId = new Map<string, string>();
+		if (participantIds.length) {
+			const contacts = await this.contactRepo.find({
+				where: { accountId, waId: In(participantIds) },
+			});
+			for (const contact of contacts) {
+				const label =
+					preferWhatsAppContactName(
+						contact.name,
+						null,
+						contact.waId,
+						contact.phoneNumber,
+					) || null;
+				if (label && !isWeakWhatsAppContactName(label, contact.waId, contact.phoneNumber)) {
+					contactNameByWaId.set(contact.waId, label);
+				}
+			}
+			const missingPhones = participantIds
+				.map((id) => phoneFromWaId(id))
+				.filter((digits): digits is string => Boolean(digits));
+			if (missingPhones.length) {
+				const byPhone = await this.contactRepo
+					.createQueryBuilder('c')
+					.where('c.account_id = :accountId', { accountId })
+					.andWhere(
+						`regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') IN (:...digits)`,
+						{ digits: [...new Set(missingPhones)] },
+					)
+					.getMany();
+				for (const contact of byPhone) {
+					const digits = String(contact.phoneNumber || '').replace(/\D/g, '');
+					const label =
+						preferWhatsAppContactName(
+							contact.name,
+							null,
+							contact.waId,
+							contact.phoneNumber,
+						) || null;
+					if (
+						!label ||
+						isWeakWhatsAppContactName(label, contact.waId, contact.phoneNumber)
+					) {
+						continue;
+					}
+					if (digits) {
+						contactNameByWaId.set(`${digits}@c.us`, label);
+						contactNameByWaId.set(`${digits}@s.whatsapp.net`, label);
+					}
+					contactNameByWaId.set(contact.waId, label);
+				}
+			}
+		}
 		await this.participantRepo.manager.transaction(async (manager) => {
 			await manager.delete(WhatsAppGroupParticipant, { groupId: group.id });
 			if (participants?.length) {
 				await manager.save(
 					WhatsAppGroupParticipant,
-					participants.map((item: any) =>
-						manager.create(WhatsAppGroupParticipant, {
+					participants.map((item: any) => {
+						const id = waId(item) || String(item?.id || '').trim();
+						const phone =
+							String(item?.phoneNumber || '').replace(/\D/g, '') ||
+							phoneFromWaId(id);
+						const fromProvider =
+							String(item?.name || item?.pushname || item?.notify || '').trim() ||
+							null;
+						const fromContacts =
+							contactNameByWaId.get(id) ||
+							(phone
+								? contactNameByWaId.get(`${phone}@c.us`) ||
+									contactNameByWaId.get(`${phone}@s.whatsapp.net`)
+								: null) ||
+							null;
+						const displayName =
+							(fromProvider &&
+							!isWeakWhatsAppContactName(fromProvider, id, phone)
+								? fromProvider
+								: null) ||
+							fromContacts ||
+							null;
+						return manager.create(WhatsAppGroupParticipant, {
 							groupId: group.id,
-							waId: waId(item),
-							displayName: item?.name || item?.pushname || null,
+							waId: id,
+							displayName,
 							isAdmin: Boolean(item?.isAdmin || item?.isSuperAdmin),
 							isSuperAdmin: Boolean(item?.isSuperAdmin),
-						}),
-					),
+						});
+					}),
 				);
 			}
 			await manager.update(WhatsAppGroup, group.id, {
@@ -3698,6 +3783,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
 			void this.contactPresence.subscribeRecentDirectChats(accountId).catch(() => undefined);
+			const needsAvatar = result.items.some(
+				(item) =>
+					!String(item?.contact?.avatarUrl || item?.group?.avatarUrl || '').trim(),
+			);
+			if (needsAvatar) {
+				this.scheduleAvatarHydration(accountId, 1_500);
+			}
 		}
 		return result;
 	}
@@ -4038,13 +4130,84 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true };
 	}
 
+	private avatarFetchChatId(conversation: WhatsAppConversation): string {
+		const raw = String(conversation.providerChatId || conversation.contact?.waId || '').trim();
+		const phone = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+		if (
+			phone &&
+			(!raw ||
+				raw.endsWith('@lid') ||
+				raw.endsWith('@hosted.lid') ||
+				raw.endsWith('@c.us') ||
+				raw.endsWith('@s.whatsapp.net'))
+		) {
+			return `${phone}@c.us`;
+		}
+		return raw;
+	}
+
+	private scheduleAvatarHydration(accountId: string, delayMs = 4_000) {
+		const prev = this.avatarHydrateTimers.get(accountId);
+		if (prev) clearTimeout(prev);
+		const timer = setTimeout(() => {
+			this.avatarHydrateTimers.delete(accountId);
+			void this.hydrateMissingAvatars(accountId).catch((error) =>
+				this.logger.debug(
+					`Avatar hydration failed for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+		}, delayMs);
+		this.avatarHydrateTimers.set(accountId, timer);
+	}
+
+	private async hydrateMissingAvatars(accountId: string) {
+		if (this.avatarHydrateInFlight.has(accountId)) return;
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected') return;
+		if (typeof provider.getProfilePictureUrl !== 'function') return;
+		this.avatarHydrateInFlight.add(accountId);
+		try {
+			const rows = await this.conversationRepo
+				.createQueryBuilder('conversation')
+				.leftJoinAndSelect('conversation.contact', 'contact')
+				.leftJoinAndSelect('conversation.group', 'group')
+				.where('conversation.accountId = :accountId', { accountId })
+				.andWhere(
+					`(contact.id IS NOT NULL AND (contact.avatarUrl IS NULL OR contact.avatarUrl = '')) OR (group.id IS NOT NULL AND (group.avatarUrl IS NULL OR group.avatarUrl = ''))`,
+				)
+				.orderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
+				.take(150)
+				.getMany();
+			let fetched = 0;
+			const maxPerRun = 90;
+			for (const conversation of rows) {
+				if (fetched >= maxPerRun) break;
+				if (conversation.contact?.avatarUrl || conversation.group?.avatarUrl) continue;
+				await this.hydrateConversationAvatar(conversation);
+				fetched += 1;
+				if (fetched % 5 === 0) {
+					await new Promise((resolve) => setTimeout(resolve, 220));
+				}
+			}
+			if (rows.length > fetched && fetched >= maxPerRun) {
+				this.scheduleAvatarHydration(accountId, 15_000);
+			}
+		} finally {
+			this.avatarHydrateInFlight.delete(accountId);
+		}
+	}
+
 	private async hydrateConversationAvatar(conversation: WhatsAppConversation) {
 		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
 		if (existing) return;
 		const provider = this.providers.getProvider(conversation.accountId);
 		if (!provider || provider.getState() !== 'connected') return;
 		if (typeof provider.getProfilePictureUrl !== 'function') return;
-		const url = await provider.getProfilePictureUrl(conversation.providerChatId).catch(() => null);
+		const chatId = this.avatarFetchChatId(conversation);
+		if (!chatId) return;
+		const url = await provider.getProfilePictureUrl(chatId).catch(() => null);
 		if (!url) return;
 		if (conversation.contact) {
 			await this.contactRepo.update(conversation.contact.id, { avatarUrl: url });
