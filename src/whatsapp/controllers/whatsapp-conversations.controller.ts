@@ -423,10 +423,25 @@ export class WhatsAppConversationsController {
 		return this.sync.markConversationUnread(req.user, conversationId);
 	}
 
-	/** Re-fetch profile picture when WhatsApp CDN signatures expire (403). */
+	/**
+	 * Re-fetch profile picture from WhatsApp.
+	 * Body/query `quality=full` → Baileys profilePictureUrl(jid, 'image')
+	 * (WA IQ xmlns w:profile:picture, type image) for the large CDN URL.
+	 * Default is preview (small thumb used in the inbox).
+	 */
 	@Post('conversations/:conversationId/avatar/refresh')
-	refreshAvatar(@Req() req: any, @Param('conversationId') conversationId: string) {
-		return this.sync.refreshConversationAvatar(req.user, conversationId);
+	refreshAvatar(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body?: { quality?: string },
+	) {
+		const raw = String(body?.quality || req.query?.quality || '')
+			.toLowerCase()
+			.trim();
+		const quality = raw === 'full' || raw === 'image' ? 'full' : 'preview';
+		return this.sync.refreshConversationAvatar(req.user, conversationId, {
+			quality,
+		});
 	}
 
 	@Post('conversations/:conversationId/presence')

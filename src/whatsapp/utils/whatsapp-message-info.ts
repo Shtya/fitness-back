@@ -110,3 +110,69 @@ export function buildWhatsAppMessageAckInfo(input: {
 		source: status && status !== 'pending' ? 'status' : 'none',
 	};
 }
+
+/**
+ * What the *sender* likely sees on an inbound message (they sent → we received).
+ * WhatsApp does not expose their tick UI to us; we infer from local delivery/read.
+ *
+ * - ✓ sent: message reached WA servers (we have it / know send time)
+ * - ✓✓ grey delivered: message landed on our linked device / CRM
+ * - ✓✓ blue read: we cleared unread for this message AND read receipts are enabled
+ */
+export type InboundSenderReceiptView = {
+	sent: boolean;
+	delivered: boolean;
+	read: boolean;
+	sentAt: string | null;
+	deliveredAt: string | null;
+	readAt: string | null;
+	status: 'pending' | 'sent' | 'delivered' | 'read';
+	readReceiptsEnabled: boolean;
+	stillUnreadLocally: boolean;
+	source: 'inferred';
+};
+
+export function buildInboundSenderReceiptView(input: {
+	sentAt?: Date | string | null;
+	/** When the message first appeared on our side (device/CRM). */
+	receivedAt?: Date | string | null;
+	/** True when this inbound message is still inside the conversation unread window. */
+	stillUnreadLocally?: boolean;
+	/** Account privacy: if 'never', sender never gets blue ticks from us. */
+	readReceiptsEnabled?: boolean;
+	/** Optional timestamp when we last marked the chat read (best-effort). */
+	readAt?: Date | string | null;
+}): InboundSenderReceiptView {
+	const toIso = (value?: Date | string | null) => {
+		if (!value) return null;
+		const date = new Date(value);
+		return Number.isNaN(date.getTime()) ? null : date.toISOString();
+	};
+	const sentAt = toIso(input.sentAt);
+	const deliveredAt = toIso(input.receivedAt) || sentAt;
+	const stillUnreadLocally = Boolean(input.stillUnreadLocally);
+	const readReceiptsEnabled = input.readReceiptsEnabled !== false;
+	const sent = Boolean(sentAt || deliveredAt);
+	const delivered = Boolean(deliveredAt);
+	const read = delivered && readReceiptsEnabled && !stillUnreadLocally;
+	const readAt = read ? toIso(input.readAt) || deliveredAt : null;
+	const status: InboundSenderReceiptView['status'] = !sent
+		? 'pending'
+		: read
+			? 'read'
+			: delivered
+				? 'delivered'
+				: 'sent';
+	return {
+		sent,
+		delivered,
+		read,
+		sentAt,
+		deliveredAt,
+		readAt,
+		status,
+		readReceiptsEnabled,
+		stillUnreadLocally,
+		source: 'inferred',
+	};
+}

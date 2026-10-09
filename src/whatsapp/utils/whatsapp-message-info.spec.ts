@@ -1,4 +1,44 @@
-import { buildWhatsAppMessageAckInfo } from './whatsapp-message-info';
+import {
+	buildInboundSenderReceiptView,
+	buildWhatsAppMessageAckInfo,
+} from './whatsapp-message-info';
+
+describe('buildInboundSenderReceiptView', () => {
+	it('maps offline→delivered as grey ticks for the sender', () => {
+		const view = buildInboundSenderReceiptView({
+			sentAt: '2026-10-09T08:00:00.000Z',
+			receivedAt: '2026-10-09T10:00:00.000Z',
+			stillUnreadLocally: true,
+			readReceiptsEnabled: true,
+		});
+		expect(view.sent).toBe(true);
+		expect(view.delivered).toBe(true);
+		expect(view.read).toBe(false);
+		expect(view.status).toBe('delivered');
+	});
+
+	it('marks read (blue) once we cleared unread and receipts are on', () => {
+		const view = buildInboundSenderReceiptView({
+			sentAt: '2026-10-09T08:00:00.000Z',
+			receivedAt: '2026-10-09T10:00:00.000Z',
+			stillUnreadLocally: false,
+			readReceiptsEnabled: true,
+		});
+		expect(view.read).toBe(true);
+		expect(view.status).toBe('read');
+	});
+
+	it('keeps delivered (grey) when read receipts are disabled', () => {
+		const view = buildInboundSenderReceiptView({
+			sentAt: '2026-10-09T08:00:00.000Z',
+			receivedAt: '2026-10-09T10:00:00.000Z',
+			stillUnreadLocally: false,
+			readReceiptsEnabled: false,
+		});
+		expect(view.read).toBe(false);
+		expect(view.status).toBe('delivered');
+	});
+});
 
 describe('buildWhatsAppMessageAckInfo', () => {
 	it('maps outbound read status to delivery + read checks', () => {

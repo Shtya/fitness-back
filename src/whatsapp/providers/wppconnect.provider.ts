@@ -1879,14 +1879,30 @@ export class WppConnectProvider implements WhatsAppProvider {
 
 	async getProfilePictureUrl(
 		chatId: string,
-		_options?: { force?: boolean },
+		options?: { force?: boolean; quality?: 'preview' | 'full' },
 	): Promise<string | null> {
 		if (!chatId || !this.client) return null;
+		const wantFull = options?.quality === 'full' || Boolean(options?.force);
 		try {
 			if (typeof this.client.getProfilePicFromServer === 'function') {
 				const pic = await this.client.getProfilePicFromServer(chatId);
-				const url = String(pic?.eurl || pic?.imgFull || pic?.imgUrl || '').trim();
-				if (url) return url;
+				// imgFull is the large photo; eurl/imgUrl are often the small preview.
+				const preferFull = [
+					pic?.imgFull,
+					pic?.img,
+					pic?.eurl,
+					pic?.imgUrl,
+				];
+				const preferPreview = [
+					pic?.eurl,
+					pic?.imgUrl,
+					pic?.imgFull,
+					pic?.img,
+				];
+				for (const candidate of wantFull ? preferFull : preferPreview) {
+					const url = String(candidate || '').trim();
+					if (url) return url;
+				}
 			}
 		} catch {
 			/* ignore */

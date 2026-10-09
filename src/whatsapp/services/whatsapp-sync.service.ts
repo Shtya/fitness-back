@@ -91,7 +91,10 @@ import {
 	mergeContactIntoPersistableRaw,
 	needsContactHydration,
 } from '../utils/whatsapp-contact';
-import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
+import {
+	buildInboundSenderReceiptView,
+	buildWhatsAppMessageAckInfo,
+} from '../utils/whatsapp-message-info';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -4300,11 +4303,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	private async hydrateConversationAvatar(
 		conversation: WhatsAppConversation,
-		options?: { force?: boolean },
+		options?: { force?: boolean; quality?: 'preview' | 'full' },
 	) {
 		const force = Boolean(options?.force);
+		const quality = options?.quality === 'full' ? 'full' : 'preview';
 		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl || null;
-		if (existing && !force && !isExpiringWhatsAppCdnUrl(existing)) return;
+		if (existing && !force && quality !== 'full' && !isExpiringWhatsAppCdnUrl(existing)) return;
 
 		// Prefer a twin contact that already has a fresh-looking URL (same phone / @c.us).
 		if (!force || !existing) {
@@ -4355,10 +4359,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const chatId = this.avatarFetchChatId(conversation);
 		if (!chatId) return;
 		const url = await provider
-			.getProfilePictureUrl(chatId, { force: force || isExpiringWhatsAppCdnUrl(existing) })
+			.getProfilePictureUrl(chatId, {
+				force: force || quality === 'full' || isExpiringWhatsAppCdnUrl(existing),
+				quality,
+			})
 			.catch(() => null);
 		if (!url) return;
-		if (url === existing && !force) return;
+		if (url === existing && !force && quality !== 'full') return;
 		if (conversation.contact) {
 			await this.contactRepo.update(conversation.contact.id, { avatarUrl: url });
 			conversation.contact.avatarUrl = url;
@@ -4373,12 +4380,25 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
-	async refreshConversationAvatar(user: User, conversationId: string) {
+	async refreshConversationAvatar(
+		user: User,
+		conversationId: string,
+		options?: { quality?: 'preview' | 'full' },
+	) {
 		const { conversation } = await this.assertConversationVisible(user, conversationId);
-		await this.hydrateConversationAvatar(conversation, { force: true });
+		const quality = options?.quality === 'full' ? 'full' : 'preview';
+		await this.hydrateConversationAvatar(conversation, {
+			force: true,
+			quality,
+		});
 		const avatarUrl =
 			conversation.contact?.avatarUrl || conversation.group?.avatarUrl || null;
-		return { ok: true, conversationId: conversation.id, avatarUrl };
+		return {
+			ok: true,
+			conversationId: conversation.id,
+			avatarUrl,
+			quality,
+		};
 	}
 
 	async listMessages(
@@ -5741,7 +5761,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async getMessageInfo(user: User, conversationId: string, messageId: string) {
-		const { message, provider } = await this.resolveMessageAction(
+		const { conversation, message, provider } = await this.resolveMessageAction(
 			user,
 			conversationId,
 			messageId,
@@ -5763,19 +5783,70 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			statusUpdatedAt: message.statusUpdatedAt || message.providerTimestamp,
 			acknowledgements: providerInfo?.acknowledgements || null,
 		});
+
+		let senderReceiptView = null;
+		if (!fromMe) {
+			const unread = Math.max(0, Number(conversation.unreadCount) || 0);
+			let stillUnreadLocally = false;
+			if (unread > 0) {
+				const recentInbound = await this.messageRepo.find({
+					where: {
+						conversationId,
+						direction: WhatsAppMessageDirection.INBOUND,
+					},
+					order: { providerTimestamp: 'DESC' },
+					take: unread,
+					select: ['id'],
+				});
+				stillUnreadLocally = recentInbound.some(item => item.id === message.id);
+			}
+			const account = await this.accountRepo.findOne({
+				where: { id: conversation.accountId },
+			});
+			const privacy = getWhatsAppPrivacySettings(
+				account || ({ providerCapabilities: null } as WhatsAppAccount),
+			);
+			const readReceiptsEnabled = privacy.readReceiptMode !== 'never';
+			senderReceiptView = buildInboundSenderReceiptView({
+				sentAt: message.providerTimestamp,
+				receivedAt: (message as any).createdAt || message.providerTimestamp,
+				stillUnreadLocally,
+				readReceiptsEnabled,
+				readAt: stillUnreadLocally ? null : message.statusUpdatedAt,
+			});
+		}
+
 		return {
 			id: message.id,
 			providerMessageId: message.providerMessageId,
 			direction: message.direction,
 			type: message.type,
-			status: liveStatus,
+			status: fromMe ? liveStatus : senderReceiptView?.status || liveStatus,
 			statusUpdatedAt: message.statusUpdatedAt,
 			sentAt: message.providerTimestamp,
 			isStarred: message.isStarred,
 			isPinned: message.isPinned,
 			pinnedUntil: message.pinnedUntil,
 			deletedMode: message.deletedMode,
-			acknowledgements,
+			acknowledgements: fromMe
+				? acknowledgements
+				: {
+						delivered: Boolean(senderReceiptView?.delivered),
+						read: Boolean(senderReceiptView?.read),
+						played: false,
+						deliveryRemaining: senderReceiptView?.delivered ? 0 : 1,
+						readRemaining: senderReceiptView?.read ? 0 : 1,
+						playedRemaining: null,
+						status: senderReceiptView?.status || 'delivered',
+						statusUpdatedAt: senderReceiptView?.deliveredAt || null,
+						source: 'inferred' as const,
+						sentAt: senderReceiptView?.sentAt || null,
+						deliveredAt: senderReceiptView?.deliveredAt || null,
+						readAt: senderReceiptView?.readAt || null,
+						readReceiptsEnabled: senderReceiptView?.readReceiptsEnabled ?? true,
+						stillUnreadLocally: Boolean(senderReceiptView?.stillUnreadLocally),
+					},
+			senderReceiptView,
 			provider: {
 				...(providerInfo && typeof providerInfo === 'object' ? providerInfo : {}),
 				acknowledgements,

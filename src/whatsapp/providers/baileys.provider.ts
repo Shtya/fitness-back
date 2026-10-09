@@ -2533,19 +2533,24 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async getProfilePictureUrl(
 		chatId: string,
-		options?: { force?: boolean },
+		options?: { force?: boolean; quality?: 'preview' | 'full' },
 	): Promise<string | null> {
 		const id = jidOf(chatId) || String(chatId || '').trim();
 		if (!id) return null;
 		const force = Boolean(options?.force);
+		// Baileys: profilePictureUrl(jid, 'preview' | 'image') → WA IQ xmlns w:profile:picture.
+		// 'image' is the full-resolution CDN URL; 'preview' is the tiny thumb.
+		const wantFull = options?.quality === 'full' || force;
+		const cacheKey = wantFull ? `full:${id}` : id;
+		if (force || wantFull) this.avatarUrlCache.delete(cacheKey);
 		if (force) this.avatarUrlCache.delete(id);
-		const cached = this.avatarUrlCache.get(id);
+		const cached = this.avatarUrlCache.get(cacheKey);
 		// Positive hits keep longer; null misses must retry soon (CDN / LID resolve race).
 		const cacheTtlMs = cached?.url ? 6 * 60 * 60 * 1000 : 45 * 1000;
-		if (!force && cached && Date.now() - cached.at < cacheTtlMs) {
+		if (!force && !wantFull && cached && Date.now() - cached.at < cacheTtlMs) {
 			return cached.url;
 		}
-		if (!force) {
+		if (!force && !wantFull) {
 			const fromStore = this.pictureUrlFromStore(id);
 			if (fromStore) {
 				this.avatarUrlCache.set(id, { url: fromStore, at: Date.now() });
@@ -2562,13 +2567,18 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		try {
 			const jid = await this.resolveProfilePictureJid(id);
-			let url = await this.socket.profilePictureUrl(jid, 'preview');
+			const primaryType: 'preview' | 'image' = wantFull ? 'image' : 'preview';
+			const fallbackType: 'preview' | 'image' = wantFull ? 'preview' : 'image';
+			let url = await this.socket.profilePictureUrl(jid, primaryType);
 			let next = String(url || '').trim() || null;
 			if (!next) {
-				url = await this.socket.profilePictureUrl(jid, 'image');
+				url = await this.socket.profilePictureUrl(jid, fallbackType);
 				next = String(url || '').trim() || null;
 			}
-			this.avatarUrlCache.set(id, { url: next, at: Date.now() });
+			this.avatarUrlCache.set(cacheKey, { url: next, at: Date.now() });
+			if (!wantFull || next) {
+				this.avatarUrlCache.set(id, { url: next, at: Date.now() });
+			}
 			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
 			if (next) this.attachChatPicture(id, next);
 			return next;
@@ -2578,9 +2588,9 @@ export class BaileysProvider implements WhatsAppProvider {
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
-			this.avatarUrlCache.set(id, { url: null, at: Date.now() });
+			this.avatarUrlCache.set(cacheKey, { url: null, at: Date.now() });
 			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
-			return force ? null : cached?.url || null;
+			return force || wantFull ? null : cached?.url || null;
 		}
 	}
 
