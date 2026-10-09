@@ -136,6 +136,26 @@ describe('WhatsAppContactPresenceService', () => {
 		expect(withOffline.items[0].lastSeen).toBe(1_700_000_000_000);
 	});
 
+	it('stamps lastSeen from prior online observation when WA omits it', async () => {
+		const { service } = createService();
+		const conversation = directConversation();
+		const onlineAt = Date.now() - 5_000;
+		service.applyPresenceEvent('acc-1', conversation as any, {
+			state: 'available',
+			isOnline: true,
+			t: onlineAt,
+		});
+		service.applyPresenceEvent('acc-1', conversation as any, {
+			state: 'unavailable',
+			isOnline: false,
+			t: onlineAt + 2_000,
+		});
+		const withOffline = await service.listOnline('acc-1', { includeOffline: true });
+		expect(withOffline.items).toHaveLength(1);
+		expect(withOffline.items[0].online).toBe(false);
+		expect(withOffline.items[0].lastSeen).toBe(onlineAt);
+	});
+
 	it('treats composing as typing/online', async () => {
 		const { service } = createService();
 		service.applyPresenceEvent('acc-1', directConversation() as any, {

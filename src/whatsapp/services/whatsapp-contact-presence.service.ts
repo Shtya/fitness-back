@@ -278,6 +278,19 @@ export class WhatsAppContactPresenceService
 				? Boolean(payload.confirmed)
 				: state === 'available' || state === 'unavailable';
 		const prev = this.byConversation.get(mapKey);
+		// WhatsApp often sends unavailable without lastSeen. If we just saw them
+		// online, stamp the last observation time so the CRM header can show
+		// "last online …" instead of a bare Offline label.
+		let resolvedLastSeen = lastSeen || prev?.lastSeen || 0;
+		if (
+			!resolvedLastSeen &&
+			prev?.online &&
+			!online &&
+			!typing &&
+			!recording
+		) {
+			resolvedLastSeen = Number(prev.updatedAt || updatedAt) || updatedAt;
+		}
 
 		const next: ContactPresenceItem = {
 			accountId,
@@ -293,7 +306,7 @@ export class WhatsAppContactPresenceService
 			typing,
 			recording,
 			state,
-			lastSeen: lastSeen || prev?.lastSeen || 0,
+			lastSeen: resolvedLastSeen,
 			updatedAt,
 		};
 
@@ -439,6 +452,9 @@ export class WhatsAppContactPresenceService
 				this.logger.log(
 					`[WHATSAPP PRESENCE] Soft-stale online→unknown session=${accountId} jid=${entry.chatId} ageMs=${age}`,
 				);
+				if (!entry.lastSeen) {
+					entry.lastSeen = Number(entry.updatedAt || now) || now;
+				}
 				entry.online = false;
 				entry.status = 'unknown';
 				entry.typing = false;

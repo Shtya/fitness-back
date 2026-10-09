@@ -5752,11 +5752,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			typeof provider.getMessageInfo === 'function'
 				? await provider.getMessageInfo(message.providerMessageId).catch(() => null)
 				: null;
-		const liveStatus =
-			String(providerInfo?.status || providerInfo?.acknowledgements?.status || '').toLowerCase() ||
-			String(message.status || '').toLowerCase();
+		const providerStatus =
+			providerInfo?.status || providerInfo?.acknowledgements?.status || null;
+		// Prefer the higher ack rank so a stale provider default ("sent") cannot
+		// hide a DB/socket "read" that already landed in Message info.
+		const liveStatus = preferWhatsAppAckStatus(message.status, providerStatus);
 		const acknowledgements = buildWhatsAppMessageAckInfo({
-			status: liveStatus || message.status,
+			status: liveStatus,
 			fromMe,
 			statusUpdatedAt: message.statusUpdatedAt || message.providerTimestamp,
 			acknowledgements: providerInfo?.acknowledgements || null,
@@ -5766,7 +5768,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			providerMessageId: message.providerMessageId,
 			direction: message.direction,
 			type: message.type,
-			status: liveStatus || message.status,
+			status: liveStatus,
 			statusUpdatedAt: message.statusUpdatedAt,
 			sentAt: message.providerTimestamp,
 			isStarred: message.isStarred,
@@ -5777,7 +5779,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			provider: {
 				...(providerInfo && typeof providerInfo === 'object' ? providerInfo : {}),
 				acknowledgements,
-				status: liveStatus || message.status,
+				status: liveStatus,
 				fromMe,
 			},
 		};
