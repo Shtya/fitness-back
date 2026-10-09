@@ -166,11 +166,14 @@ describe('WhatsAppContactPresenceService', () => {
 		expect((await service.listOnline('acc-1')).items).toHaveLength(1);
 		expect((await service.listOnline('acc-1')).items[0].online).toBe(true);
 
-		// Soft-stale safety after many hours without any presence event.
+		// Soft-stale safety after many hours without any presence event → unknown, not offline.
 		jest.setSystemTime(now + 7 * 60 * 60_000);
 		(service as any).pruneAllAccounts();
 		const snap = await service.listOnline('acc-1');
 		expect(snap.items).toHaveLength(0);
+		const stale = service.getMemorySnapshot('acc-1')[0];
+		expect(stale?.online).toBe(false);
+		expect(stale?.status).toBe('unknown');
 		expect(gateway.emitAccountSnapshotScoped).toHaveBeenCalledWith(
 			'acc-1',
 			'online_contacts',
@@ -204,7 +207,7 @@ describe('WhatsAppContactPresenceService', () => {
 		expect(online.items).toHaveLength(0);
 		const memory = service.getMemorySnapshot('acc-1');
 		expect(memory[0].online).toBe(false);
-		expect(memory[0].status).toBe('offline');
+		expect(memory[0].status).toBe('unknown');
 	});
 
 	it('ignores group chats for presence', async () => {

@@ -16,7 +16,12 @@ import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { resolveWhatsAppContactLabel } from '../utils/whatsapp-contact-name';
 
-export type ContactPresenceStatus = 'online' | 'offline' | 'typing' | 'recording';
+export type ContactPresenceStatus =
+	| 'online'
+	| 'offline'
+	| 'typing'
+	| 'recording'
+	| 'unknown';
 
 export type ContactPresenceItem = {
 	accountId: string;
@@ -172,11 +177,16 @@ export class WhatsAppContactPresenceService
 		).trim();
 	}
 
-	private resolveStatus(state: string, online: boolean): ContactPresenceStatus {
+	private resolveStatus(
+		state: string,
+		online: boolean,
+		options?: { confirmed?: boolean },
+	): ContactPresenceStatus {
 		if (state === 'recording') return 'recording';
 		if (state === 'composing') return 'typing';
 		if (online) return 'online';
-		return 'offline';
+		if (state === 'unavailable' && options?.confirmed !== false) return 'offline';
+		return 'unknown';
 	}
 
 	private async persist(entry: ContactPresenceItem) {
@@ -240,6 +250,8 @@ export class WhatsAppContactPresenceService
 			typing?: boolean;
 			recording?: boolean;
 			lastSeen?: number;
+			lastSeenRestricted?: boolean;
+			confirmed?: boolean;
 			t?: number;
 		},
 	) {
@@ -261,6 +273,10 @@ export class WhatsAppContactPresenceService
 			state === 'recording';
 		const updatedAt = Number(payload?.t) || Date.now();
 		const lastSeen = Number(payload?.lastSeen || 0) || 0;
+		const confirmed =
+			payload?.confirmed !== undefined
+				? Boolean(payload.confirmed)
+				: state === 'available' || state === 'unavailable';
 		const prev = this.byConversation.get(mapKey);
 
 		const next: ContactPresenceItem = {
@@ -272,7 +288,7 @@ export class WhatsAppContactPresenceService
 			phoneNumber:
 				conversation.contact?.phoneNumber || prev?.phoneNumber || null,
 			avatarUrl: conversation.contact?.avatarUrl || prev?.avatarUrl || null,
-			status: this.resolveStatus(state, online),
+			status: this.resolveStatus(state, online, { confirmed }),
 			online,
 			typing,
 			recording,
@@ -369,11 +385,11 @@ export class WhatsAppContactPresenceService
 				name,
 				phoneNumber,
 				avatarUrl,
-				status: 'offline',
+				status: 'unknown',
 				online: false,
 				typing: false,
 				recording: false,
-				state: 'unavailable',
+				state: 'unknown',
 				lastSeen: 0,
 				updatedAt: now,
 			};
@@ -418,16 +434,16 @@ export class WhatsAppContactPresenceService
 				changed = true;
 			}
 
-			// Soft safety only — WhatsApp normally sends unavailable.
+			// Soft safety only — no explicit unavailable arrived, so presence is unknown.
 			if (entry.online && age > this.onlineStaleMs) {
 				this.logger.log(
-					`[WHATSAPP PRESENCE] Soft-stale online→offline session=${accountId} jid=${entry.chatId} ageMs=${age}`,
+					`[WHATSAPP PRESENCE] Soft-stale online→unknown session=${accountId} jid=${entry.chatId} ageMs=${age}`,
 				);
 				entry.online = false;
-				entry.status = 'offline';
+				entry.status = 'unknown';
 				entry.typing = false;
 				entry.recording = false;
-				entry.state = 'unavailable';
+				entry.state = 'unknown';
 				entry.updatedAt = now;
 				this.byConversation.set(mapKey, entry);
 				void this.persist(entry);
@@ -685,7 +701,19 @@ export class WhatsAppContactPresenceService
 				pushIds(String(row.providerChatId || '').trim(), row.contact?.phoneNumber);
 			}
 			for (const contact of contacts) {
-				pushIds(String(contact.waId || '').trim(), contact.phoneNumber);
+				let phone = contact.phoneNumber;
+				const waId = String(contact.waId || '').trim();
+				if (
+					!phone &&
+					(waId.endsWith('@lid') || waId.endsWith('@hosted.lid')) &&
+					typeof provider.resolveContactIdentity === 'function'
+				) {
+					const identity = await provider
+						.resolveContactIdentity(waId)
+						.catch(() => null);
+					phone = identity?.phoneNumber || null;
+				}
+				pushIds(waId, phone);
 			}
 
 			const chatIds = [...idSet].slice(0, PRESENCE_SUBSCRIBE_JID_CAP);

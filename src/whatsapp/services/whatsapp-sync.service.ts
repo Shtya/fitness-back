@@ -863,6 +863,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					syncGroupParticipants: false,
 					emitProgress: false,
 				});
+				// Presence subscriptions go stale; refresh while the session stays up.
+				void this.contactPresence
+					.subscribeRecentDirectChats(accountId, 200, false)
+					.catch(() => undefined);
 			})()
 				.catch((error) =>
 					this.logger.warn(
@@ -1043,17 +1047,31 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		if (event.type === 'presence') {
 			const chatId = String(event.payload?.chatId || '');
-			if (!chatId || !isSupportedInboxChatId(chatId)) {
+			const chatIdRaw = String(event.payload?.chatIdRaw || '').trim();
+			const phoneDigits = String(event.payload?.phoneDigits || '').replace(/\D/g, '') || null;
+			const aliasList = [
+				chatId,
+				chatIdRaw,
+				...(Array.isArray(event.payload?.chatIdAliases)
+					? event.payload.chatIdAliases.map((id: unknown) => String(id || '').trim())
+					: []),
+			].filter((id) => id && isSupportedInboxChatId(id));
+			if (!aliasList.length) {
 				this.logger.debug(
 					`[WHATSAPP PRESENCE] Sync DROP unsupported chatId=${chatId || '(empty)'} session=${accountId}`,
 				);
 				return;
 			}
-			let conversation =
-				(await this.conversationRepo.findOne({
-					where: { accountId, providerChatId: chatId },
-					relations: ['contact'],
-				})) || (await this.findDirectConversationAlias(accountId, chatId, null));
+			let conversation: WhatsAppConversation | null = null;
+			for (const candidate of [...new Set(aliasList)]) {
+				conversation =
+					(await this.conversationRepo.findOne({
+						where: { accountId, providerChatId: candidate },
+						relations: ['contact'],
+					})) ||
+					(await this.findDirectConversationAlias(accountId, candidate, phoneDigits));
+				if (conversation) break;
+			}
 			if (!conversation) {
 				const pendingState = String(event.payload?.state || 'unavailable').toLowerCase();
 				const pendingOnline =
@@ -1074,6 +1092,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						String(event.payload?.senderName || '').trim() || null;
 					conversation = await this.ensureConversation(accountId, chatId, {
 						title,
+						phone: phoneDigits,
 					});
 					this.logger.log(
 						`[WHATSAPP PRESENCE] Sync CREATE conversation for presence session=${accountId} jid=${chatId} conv=${conversation?.id}`,
@@ -1095,17 +1114,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					})) || conversation;
 			}
 			const state = String(event.payload?.state || 'unavailable');
-			const typing = state === 'composing' || state === 'recording';
+			const typing = state === 'composing' || Boolean(event.payload?.typing);
+			const recording = state === 'recording' || Boolean(event.payload?.recording);
 			const presencePayload = {
 				conversationId: conversation.id,
 				chatId: conversation.providerChatId || chatId,
 				state,
 				isOnline: Boolean(event.payload?.isOnline),
 				typing,
-				recording: state === 'recording',
+				recording,
 				t: event.payload?.t || Date.now(),
 				senderName: String(event.payload?.senderName || ''),
 				lastSeen: Number(event.payload?.lastSeen || 0),
+				lastSeenRestricted: Boolean(event.payload?.lastSeenRestricted),
+				confirmed: state === 'available' || state === 'unavailable',
 			};
 			this.logger.debug(
 				`[WHATSAPP PRESENCE] Sync APPLY session=${accountId} conv=${conversation.id} jid=${presencePayload.chatId} state=${state} isOnline=${presencePayload.isOnline}`,
@@ -3981,10 +4003,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async subscribeConversationPresence(conversation: WhatsAppConversation) {
 		const provider = this.providers.getProvider(conversation.accountId);
 		if (!provider?.subscribePresence || !conversation.providerChatId) return;
-		const ids = expandPresenceSubscribeIds(
-			String(conversation.providerChatId || '').trim(),
-			conversation.contact?.phoneNumber,
-		);
+		let phoneHint = conversation.contact?.phoneNumber || null;
+		const chatId = String(conversation.providerChatId || '').trim();
+		if (
+			!phoneHint &&
+			(chatId.endsWith('@lid') || chatId.endsWith('@hosted.lid')) &&
+			typeof provider.resolveContactIdentity === 'function'
+		) {
+			const identity = await provider.resolveContactIdentity(chatId).catch(() => null);
+			phoneHint = identity?.phoneNumber || null;
+		}
+		const ids = expandPresenceSubscribeIds(chatId, phoneHint);
 		this.logger.log(
 			`[WHATSAPP PRESENCE] Open-chat subscribe session=${conversation.accountId} conv=${conversation.id} jids=${ids.join(',')}`,
 		);

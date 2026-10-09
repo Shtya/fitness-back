@@ -17,6 +17,7 @@ import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baile
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
+import { normalizeBaileysPresenceUpdate } from '../utils/whatsapp-presence-normalize';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
@@ -2080,65 +2081,33 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		socket.ev.on('presence.update', (update: any) => {
 			const rawId = String(update?.id || '');
-			const chatId = normalizeInboxJid(jidOf(update?.id) || rawId);
-			const presences =
-				update?.presences && typeof update.presences === 'object' ? update.presences : {};
-			const firstKey = Object.keys(presences)[0];
-			const first = firstKey ? presences[firstKey] : null;
-			const lastKnown =
-				String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
-				String(update?.lastKnownPresence || '').toLowerCase();
+			const normalized = normalizeBaileysPresenceUpdate(update, (jid) => {
+				const mapped = this.lidToPn.get(jid) || this.contacts.get(jid)?.phoneNumber || null;
+				return mapped ? String(mapped).replace(/\D/g, '') : null;
+			});
 
 			this.logger.debug(
-				`[WHATSAPP PRESENCE] Baileys RAW session=${this.accountId} id=${rawId} jid=${chatId || 'empty'} lastKnown=${lastKnown || '(empty)'} participants=${Object.keys(presences).join(',') || 'none'} lastSeen=${first?.lastSeen ?? 'n/a'}`,
+				`[WHATSAPP PRESENCE] Baileys RAW session=${this.accountId} id=${rawId} normalized=${
+					normalized
+						? `${normalized.chatId}/${normalized.state}`
+						: 'empty-or-unknown'
+				}`,
 			);
 
-			if (!chatId) return;
-			// Empty payloads are common after subscribe; do not force offline.
-			if (!lastKnown) {
-				this.logger.debug(
-					`[WHATSAPP PRESENCE] Baileys EMPTY (no lastKnownPresence) — waiting for real update session=${this.accountId} jid=${chatId}`,
-				);
-				return;
-			}
+			if (!normalized) return;
 
-			let state = 'unavailable';
-			if (lastKnown === 'composing') state = 'composing';
-			else if (lastKnown === 'recording') state = 'recording';
-			else if (
-				lastKnown === 'available' ||
-				lastKnown === 'online' ||
-				lastKnown === 'paused'
-			) {
-				// `paused` = stopped typing, still considered present in the chat.
-				state = 'available';
-			} else if (lastKnown === 'unavailable' || lastKnown === 'offline') {
-				state = 'unavailable';
-			} else {
-				this.logger.debug(
-					`[WHATSAPP PRESENCE] Baileys UNKNOWN lastKnown=${lastKnown} session=${this.accountId} jid=${chatId}`,
-				);
-				return;
-			}
-			const isOnline = state === 'available' || state === 'composing' || state === 'recording';
-
-			// Resolve sender display name (useful for group "X is typing")
-			const senderJid = firstKey ? normalizeInboxJid(jidOf(firstKey) || firstKey) : '';
 			const senderName =
-				(senderJid && senderJid !== chatId ? this.contactDisplayName(senderJid) : null) || '';
-
-			// Baileys may report lastSeen as epoch seconds in the presence object
-			const rawLastSeen = Number(first?.lastSeen || first?.t || 0);
-			const lastSeen = rawLastSeen > 0
-				? (rawLastSeen < 1e12 ? rawLastSeen * 1000 : rawLastSeen)
-				: 0;
+				this.contactDisplayName(normalized.chatId) ||
+				this.contactDisplayName(normalized.chatIdRaw) ||
+				'';
 
 			this.logger.debug(
 				`[WHATSAPP PRESENCE]\n` +
 					`  Session: ${this.accountId}\n` +
-					`  JID: ${chatId}\n` +
-					`  Status: ${state}\n` +
-					`  LastSeen: ${lastSeen || 'n/a'}\n` +
+					`  JID: ${normalized.chatId}\n` +
+					`  RawJID: ${normalized.chatIdRaw}\n` +
+					`  Status: ${normalized.state}\n` +
+					`  LastSeen: ${normalized.lastSeen || 'n/a'}\n` +
 					`  Timestamp: ${new Date().toISOString()}\n` +
 					`  Source: baileys.presence.update`,
 			);
@@ -2146,13 +2115,19 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.emit({
 				type: 'presence',
 				payload: {
-					chatId,
-					isOnline,
-					isGroup: chatId.endsWith('@g.us'),
-					state,
+					chatId: normalized.chatId,
+					chatIdRaw: normalized.chatIdRaw,
+					chatIdAliases: normalized.chatIdAliases,
+					phoneDigits: normalized.phoneDigits,
+					isOnline: normalized.isOnline,
+					isGroup: normalized.chatId.endsWith('@g.us'),
+					state: normalized.state,
+					typing: normalized.typing,
+					recording: normalized.recording,
 					t: Date.now(),
 					senderName,
-					lastSeen,
+					lastSeen: normalized.lastSeen,
+					lastSeenRestricted: normalized.lastSeenRestricted,
 				},
 			});
 		});
