@@ -1,6 +1,6 @@
 // --- File: src/auth/auth.controller.ts ---
-import { Controller, Post, Get, Put, Delete, Body, Res, Req, UseGuards, Query, Param, BadRequestException, ForbiddenException } from '@nestjs/common';
-import { Response, Request } from 'express';
+import { Controller, Post, Get, Put, Delete, Body, Req, UseGuards, Query, Param, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { Roles } from './decorators/roles.decorator';
@@ -18,9 +18,10 @@ export class AuthController {
 	}
 
 	@Post('login')
-	async login(@Body() dto: LoginDto, @Res() res: Response) {
-		const result = await this.authService.login(dto);
-		return res.json(result);
+	async login(@Body() dto: LoginDto) {
+		// Do not inject bare `@Res()` + `return res.json(...)`: Nest then serializes the
+		// Express Response object and the client receives `{}` (missing tokens → UI login fail).
+		return this.authService.login(dto);
 	}
 
 	@Post('refresh')
@@ -31,8 +32,8 @@ export class AuthController {
 
 	@Post('logout')
 	@UseGuards(JwtAuthGuard)
-	async logout(@Res() res: Response) {
-		return res.json({ message: 'Logged out' });
+	async logout() {
+		return { message: 'Logged out' };
 	}
 
 	@Post('forgot-password')

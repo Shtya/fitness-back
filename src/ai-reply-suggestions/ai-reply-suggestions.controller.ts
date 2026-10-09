@@ -14,6 +14,7 @@ import {
   GenerateAiReplySuggestionsDto,
   TestAiReplyProviderDto,
   UpdateAiReplySettingsDto,
+  WritingAssistDto,
 } from "./dto/ai-reply-suggestions.dto";
 import { AiReplySuggestionsService } from "./services/ai-reply-suggestions.service";
 
@@ -48,5 +49,14 @@ export class AiReplySuggestionsController {
     @Body() body: GenerateAiReplySuggestionsDto,
   ) {
     return this.suggestions.generate(req.user, conversationId, body);
+  }
+
+  @Post("conversations/:conversationId/writing-assist")
+  writingAssist(
+    @Req() req: any,
+    @Param("conversationId") conversationId: string,
+    @Body() body: WritingAssistDto,
+  ) {
+    return this.suggestions.writingAssist(req.user, conversationId, body);
   }
 }

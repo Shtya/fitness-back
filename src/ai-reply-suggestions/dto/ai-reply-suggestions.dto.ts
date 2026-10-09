@@ -99,6 +99,24 @@ export class GenerateAiReplySuggestionsDto {
   contextThroughMessageId?: string;
 }
 
+export const WRITING_ASSIST_MODES = [
+  "ar_to_en",
+  "en_polish",
+  "en_stronger",
+] as const;
+
+export type WritingAssistMode = (typeof WRITING_ASSIST_MODES)[number];
+
+export class WritingAssistDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(4000)
+  text: string;
+
+  @IsIn(WRITING_ASSIST_MODES)
+  mode: WritingAssistMode;
+}
+
 export class TestAiReplyMessageDto {
   @IsIn(["customer", "agent"])
   role: "customer" | "agent";

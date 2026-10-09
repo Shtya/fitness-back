@@ -22,6 +22,8 @@ const OPTIONAL_TABLES = [
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS account_id uuid`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS provider_chat_id varchar(160)`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_pinned boolean NOT NULL DEFAULT false`,
+	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS pinned_at timestamptz`,
+	`UPDATE whatsapp_conversation_preferences SET pinned_at = COALESCE(updated_at, created_at, now()) WHERE is_pinned = true AND pinned_at IS NULL`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_muted boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS muted_until timestamptz`,

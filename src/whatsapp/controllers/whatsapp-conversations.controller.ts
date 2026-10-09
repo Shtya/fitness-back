@@ -423,6 +423,12 @@ export class WhatsAppConversationsController {
 		return this.sync.markConversationUnread(req.user, conversationId);
 	}
 
+	/** Re-fetch profile picture when WhatsApp CDN signatures expire (403). */
+	@Post('conversations/:conversationId/avatar/refresh')
+	refreshAvatar(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.sync.refreshConversationAvatar(req.user, conversationId);
+	}
+
 	@Post('conversations/:conversationId/presence')
 	sendPresence(
 		@Req() req: any,

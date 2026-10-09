@@ -29,6 +29,7 @@ import {
 	WHATSAPP_VOICE_MIME,
 } from '../utils/whatsapp-voice-ogg';
 import { enrichContactMessageNormalized, isContactMessageType } from '../utils/whatsapp-contact';
+import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
 
 declare const require: any;
 
@@ -1876,7 +1877,10 @@ export class WppConnectProvider implements WhatsAppProvider {
 		}
 	}
 
-	async getProfilePictureUrl(chatId: string): Promise<string | null> {
+	async getProfilePictureUrl(
+		chatId: string,
+		_options?: { force?: boolean },
+	): Promise<string | null> {
 		if (!chatId || !this.client) return null;
 		try {
 			if (typeof this.client.getProfilePicFromServer === 'function') {
@@ -2336,7 +2340,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 				? await this.client.getMessageById(providerMessageId)
 				: null;
 		const page = this.client?.page;
-		const acknowledgements = page?.evaluate
+		const rawAck = page?.evaluate
 			? await page
 					.evaluate((messageId: string) => {
 						const wpp = (globalThis as any).WPP;
@@ -2344,6 +2348,33 @@ export class WppConnectProvider implements WhatsAppProvider {
 					}, providerMessageId)
 					.catch(() => null)
 			: null;
+		const fromMe = Boolean(message?.fromMe || message?.id?.fromMe);
+		const ackRank =
+			typeof message?.ack === 'number'
+				? message.ack
+				: null;
+		const statusFromAck =
+			ackRank === 0
+				? 'failed'
+				: ackRank === 1
+					? 'pending'
+					: ackRank === 2
+						? 'sent'
+						: ackRank === 3
+							? 'delivered'
+							: ackRank === 4
+								? 'read'
+								: ackRank != null && ackRank >= 5
+									? 'played'
+									: fromMe
+										? 'sent'
+										: 'delivered';
+		const acknowledgements = buildWhatsAppMessageAckInfo({
+			status: statusFromAck,
+			fromMe,
+			statusUpdatedAt: message?.timestamp || message?.t || null,
+			acknowledgements: rawAck,
+		});
 		return {
 			message: message
 				? {
@@ -2351,10 +2382,12 @@ export class WppConnectProvider implements WhatsAppProvider {
 						type: message.type,
 						timestamp: message.timestamp || message.t,
 						ack: message.ack,
-						fromMe: Boolean(message.fromMe || message.id?.fromMe),
+						fromMe,
 					}
 				: null,
 			acknowledgements,
+			status: statusFromAck,
+			fromMe,
 		};
 	}
 

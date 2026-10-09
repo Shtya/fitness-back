@@ -377,6 +377,10 @@ export class WhatsAppConversationPreference extends CoreEntity {
 	@Column({ name: 'is_pinned', type: 'boolean', default: false })
 	isPinned: boolean;
 
+	/** When the user pinned this chat. Controls stable order among pinned rows. */
+	@Column({ name: 'pinned_at', type: 'timestamptz', nullable: true })
+	pinnedAt: Date | null;
+
 	@Column({ name: 'is_archived', type: 'boolean', default: false })
 	isArchived: boolean;
 

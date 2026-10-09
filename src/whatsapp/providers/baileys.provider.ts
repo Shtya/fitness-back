@@ -18,6 +18,7 @@ import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
 import { normalizeBaileysPresenceUpdate } from '../utils/whatsapp-presence-normalize';
+import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
@@ -2023,6 +2024,15 @@ export class BaileysProvider implements WhatsAppProvider {
 				}
 				const status = mapBaileysMessageStatus(item?.update?.status);
 				if (providerMessageId && status) {
+					const remembered = this.findRememberedMessage(providerMessageId);
+					if (remembered) {
+						(remembered as any).status = status;
+						(remembered as any).statusUpdatedAt = new Date();
+					}
+					const raw = this.rawByMessageId.get(providerMessageId);
+					if (raw && typeof raw === 'object') {
+						(raw as any).status = item?.update?.status;
+					}
 					this.emit({ type: 'message_status', providerMessageId, status });
 				}
 				if (status !== 'read' && status !== 'played') continue;
@@ -2521,19 +2531,27 @@ export class BaileysProvider implements WhatsAppProvider {
 		return toBaileysJid(id) || id;
 	}
 
-	async getProfilePictureUrl(chatId: string): Promise<string | null> {
+	async getProfilePictureUrl(
+		chatId: string,
+		options?: { force?: boolean },
+	): Promise<string | null> {
 		const id = jidOf(chatId) || String(chatId || '').trim();
 		if (!id) return null;
+		const force = Boolean(options?.force);
+		if (force) this.avatarUrlCache.delete(id);
 		const cached = this.avatarUrlCache.get(id);
-		const cacheTtlMs = cached?.url ? 6 * 60 * 60 * 1000 : 12 * 60 * 1000;
-		if (cached && Date.now() - cached.at < cacheTtlMs) {
+		// Positive hits keep longer; null misses must retry soon (CDN / LID resolve race).
+		const cacheTtlMs = cached?.url ? 6 * 60 * 60 * 1000 : 45 * 1000;
+		if (!force && cached && Date.now() - cached.at < cacheTtlMs) {
 			return cached.url;
 		}
-		const fromStore = this.pictureUrlFromStore(id);
-		if (fromStore) {
-			this.avatarUrlCache.set(id, { url: fromStore, at: Date.now() });
-			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
-			return fromStore;
+		if (!force) {
+			const fromStore = this.pictureUrlFromStore(id);
+			if (fromStore) {
+				this.avatarUrlCache.set(id, { url: fromStore, at: Date.now() });
+				trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
+				return fromStore;
+			}
 		}
 		if (!this.socket || this.state !== 'connected') {
 			return cached?.url || null;
@@ -2562,7 +2580,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			);
 			this.avatarUrlCache.set(id, { url: null, at: Date.now() });
 			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
-			return cached?.url || null;
+			return force ? null : cached?.url || null;
 		}
 	}
 
@@ -3025,8 +3043,51 @@ export class BaileysProvider implements WhatsAppProvider {
 		return { ok: false };
 	}
 
-	async getMessageInfo() {
-		return null;
+	async getMessageInfo(providerMessageId: string) {
+		const id = String(providerMessageId || '').trim();
+		if (!id) return null;
+		const remembered = this.findRememberedMessage(id);
+		const raw = this.rawByMessageId.get(id) || null;
+		const fromMe = Boolean(remembered?.fromMe ?? raw?.key?.fromMe);
+		const status =
+			String((remembered as any)?.status || '').toLowerCase() ||
+			mapBaileysMessageStatus(raw?.status) ||
+			(fromMe ? 'sent' : 'delivered');
+		const statusUpdatedAt =
+			(remembered as any)?.statusUpdatedAt || remembered?.timestamp || toDate(raw?.messageTimestamp);
+		const acknowledgements = buildWhatsAppMessageAckInfo({
+			status,
+			fromMe,
+			statusUpdatedAt,
+		});
+		return {
+			message: remembered
+				? {
+						id: remembered.providerMessageId,
+						type: remembered.type,
+						timestamp: remembered.timestamp,
+						ack: status,
+						fromMe,
+					}
+				: raw
+					? {
+							id,
+							type: null,
+							timestamp: toDate(raw.messageTimestamp),
+							ack: status,
+							fromMe,
+						}
+					: {
+							id,
+							type: null,
+							timestamp: null,
+							ack: status,
+							fromMe,
+						},
+			acknowledgements,
+			status,
+			fromMe,
+		};
 	}
 
 	async markChatRead(chatId: string) {

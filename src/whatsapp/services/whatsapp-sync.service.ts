@@ -91,6 +91,7 @@ import {
 	mergeContactIntoPersistableRaw,
 	needsContactHydration,
 } from '../utils/whatsapp-contact';
+import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -557,6 +558,25 @@ function phoneFromWaId(id: string): string | null {
 	}
 	const user = id.split('@')[0] || '';
 	return /^\d{8,15}$/.test(user) ? user : null;
+}
+
+/** LID user ids are often stored into phone_number by mistake — never treat those as PN. */
+function isLidDigitsStoredAsPhone(waId: string, phone: string | null | undefined): boolean {
+	const digits = String(phone || '').replace(/\D/g, '');
+	if (!digits) return false;
+	const id = String(waId || '');
+	if (!id.endsWith('@lid') && !id.endsWith('@hosted.lid')) return false;
+	const lidUser = id.split('@')[0].replace(/\D/g, '');
+	return Boolean(lidUser) && lidUser === digits;
+}
+
+function isExpiringWhatsAppCdnUrl(url: string | null | undefined): boolean {
+	const value = String(url || '').toLowerCase();
+	return (
+		value.includes('pps.whatsapp.net') ||
+		value.includes('mmg.whatsapp.net') ||
+		value.includes('media.fna.whatsapp.net')
+	);
 }
 
 /** Contact/group labels that are just raw WhatsApp ids (LID / phone digits). */
@@ -2484,7 +2504,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						this.contactRepo.create({
 							accountId,
 							waId: chatId,
-							phoneNumber: phone || phoneFromWaId(chatId),
+							phoneNumber: phone || phoneFromWaId(chatId) || null,
 							name: options.title || null,
 							avatarUrl: null,
 							isBusiness: false,
@@ -3738,7 +3758,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const [rows, total, archivedCount] = await Promise.all([
 			query
 				.addSelect(PREFERENCE_COALESCE('is_pinned'), 'preference_is_pinned')
+				.addSelect(PREFERENCE_COALESCE('pinned_at'), 'preference_pinned_at')
 				.orderBy('preference_is_pinned', 'DESC', 'NULLS LAST')
+				// Pinned chats keep the order the user chose — not last-message activity.
+				.addOrderBy('preference_pinned_at', 'DESC', 'NULLS LAST')
 				.addOrderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
 				.addOrderBy('conversation.created_at', 'DESC')
 				.limit(take)
@@ -3764,6 +3787,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					hasMoreProviderHistory: Boolean(item.hasMoreProviderHistory),
 					isFavorite: Boolean(preference?.isFavorite),
 					isPinned: Boolean(preference?.isPinned),
+					pinnedAt: preference?.pinnedAt
+						? new Date(preference.pinnedAt).toISOString()
+						: null,
 					isArchived: Boolean(preference?.isArchived),
 					isMuted: this.preferenceIsActivelyMuted(preference || {}),
 					mutedUntil: preference?.mutedUntil
@@ -3783,12 +3809,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
 			void this.contactPresence.subscribeRecentDirectChats(accountId).catch(() => undefined);
-			const needsAvatar = result.items.some(
-				(item) =>
-					!String(item?.contact?.avatarUrl || item?.group?.avatarUrl || '').trim(),
-			);
+			const needsAvatar = result.items.some((item) => {
+				const url = String(item?.contact?.avatarUrl || item?.group?.avatarUrl || '').trim();
+				return !url || isExpiringWhatsAppCdnUrl(url);
+			});
 			if (needsAvatar) {
-				this.scheduleAvatarHydration(accountId, 1_500);
+				this.scheduleAvatarHydration(accountId, 1_200);
 			}
 		}
 		return result;
@@ -3804,10 +3830,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	async setConversationPinned(user: User, conversationId: string, isPinned: boolean) {
 		await this.assertConversationVisible(user, conversationId);
+		const pinned = Boolean(isPinned);
+		const pinnedAt = pinned ? new Date() : null;
 		await this.saveConversationPreference(user.id, conversationId, {
-			isPinned: Boolean(isPinned),
+			isPinned: pinned,
+			pinnedAt,
 		});
-		return { ok: true, conversationId, isPinned: Boolean(isPinned) };
+		return {
+			ok: true,
+			conversationId,
+			isPinned: pinned,
+			pinnedAt: pinnedAt ? pinnedAt.toISOString() : null,
+		};
 	}
 
 	async setConversationMuted(
@@ -3991,6 +4025,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		conversationId: string,
 		patch: {
 			isPinned?: boolean;
+			pinnedAt?: Date | null;
 			isFavorite?: boolean;
 			isArchived?: boolean;
 			isMuted?: boolean;
@@ -4002,6 +4037,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.preferenceRepo.create({
 				userId,
 				isPinned: false,
+				pinnedAt: null,
 				isFavorite: false,
 				isArchived: false,
 				isMuted: false,
@@ -4012,7 +4048,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		row.conversationId = conversation.id;
 		row.accountId = conversation.accountId;
 		row.providerChatId = conversation.providerChatId;
-		if (patch.isPinned != null) row.isPinned = patch.isPinned;
+		if (patch.isPinned != null) {
+			row.isPinned = patch.isPinned;
+			if (patch.pinnedAt !== undefined) {
+				row.pinnedAt = patch.pinnedAt;
+			} else if (patch.isPinned) {
+				row.pinnedAt = row.pinnedAt || new Date();
+			} else {
+				row.pinnedAt = null;
+			}
+		} else if (patch.pinnedAt !== undefined) {
+			row.pinnedAt = patch.pinnedAt;
+		}
 		if (patch.isFavorite != null) row.isFavorite = patch.isFavorite;
 		if (patch.isArchived != null) row.isArchived = patch.isArchived;
 		if (patch.isMuted != null) row.isMuted = patch.isMuted;
@@ -4131,8 +4178,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private avatarFetchChatId(conversation: WhatsAppConversation): string {
-		const raw = String(conversation.providerChatId || conversation.contact?.waId || '').trim();
-		const phone = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+		const raw = String(
+			conversation.providerChatId || conversation.contact?.waId || conversation.group?.waId || '',
+		).trim();
+		const phoneRaw = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+		const phone =
+			phoneRaw && !isLidDigitsStoredAsPhone(raw || conversation.contact?.waId || '', phoneRaw)
+				? phoneRaw
+				: '';
 		if (
 			phone &&
 			(!raw ||
@@ -4141,7 +4194,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				raw.endsWith('@c.us') ||
 				raw.endsWith('@s.whatsapp.net'))
 		) {
-			return `${phone}@c.us`;
+			return `${phone}@s.whatsapp.net`;
 		}
 		return raw;
 	}
@@ -4169,46 +4222,143 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (typeof provider.getProfilePictureUrl !== 'function') return;
 		this.avatarHydrateInFlight.add(accountId);
 		try {
+			// Include CDN-backed avatars: WhatsApp pps/mmg signatures expire and become 403.
 			const rows = await this.conversationRepo
 				.createQueryBuilder('conversation')
 				.leftJoinAndSelect('conversation.contact', 'contact')
 				.leftJoinAndSelect('conversation.group', 'group')
 				.where('conversation.accountId = :accountId', { accountId })
 				.andWhere(
-					`(contact.id IS NOT NULL AND (contact.avatarUrl IS NULL OR contact.avatarUrl = '')) OR (group.id IS NOT NULL AND (group.avatarUrl IS NULL OR group.avatarUrl = ''))`,
+					`(
+						(contact.id IS NOT NULL AND (
+							contact.avatarUrl IS NULL OR contact.avatarUrl = ''
+							OR contact.avatarUrl LIKE :pps OR contact.avatarUrl LIKE :mmg OR contact.avatarUrl LIKE :fna
+						))
+						OR (group.id IS NOT NULL AND (
+							group.avatarUrl IS NULL OR group.avatarUrl = ''
+							OR group.avatarUrl LIKE :pps OR group.avatarUrl LIKE :mmg OR group.avatarUrl LIKE :fna
+						))
+					)`,
+					{
+						pps: '%pps.whatsapp.net%',
+						mmg: '%mmg.whatsapp.net%',
+						fna: '%media.fna.whatsapp.net%',
+					},
 				)
 				.orderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
-				.take(150)
+				.take(160)
 				.getMany();
-			let fetched = 0;
-			const maxPerRun = 90;
+			let attempted = 0;
+			let refreshed = 0;
+			const maxPerRun = 60;
 			for (const conversation of rows) {
-				if (fetched >= maxPerRun) break;
-				if (conversation.contact?.avatarUrl || conversation.group?.avatarUrl) continue;
-				await this.hydrateConversationAvatar(conversation);
-				fetched += 1;
-				if (fetched % 5 === 0) {
-					await new Promise((resolve) => setTimeout(resolve, 220));
+				if (attempted >= maxPerRun) break;
+				const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
+				const force = isExpiringWhatsAppCdnUrl(existing);
+				const before = existing || null;
+				attempted += 1;
+				await this.hydrateConversationAvatar(conversation, { force });
+				const after = conversation.contact?.avatarUrl || conversation.group?.avatarUrl || null;
+				if (after && after !== before) refreshed += 1;
+				if (attempted % 4 === 0) {
+					await new Promise((resolve) => setTimeout(resolve, 280));
 				}
 			}
-			if (rows.length > fetched && fetched >= maxPerRun) {
-				this.scheduleAvatarHydration(accountId, 15_000);
+			if (rows.length > attempted) {
+				this.scheduleAvatarHydration(accountId, refreshed > 0 ? 8_000 : 18_000);
 			}
 		} finally {
 			this.avatarHydrateInFlight.delete(accountId);
 		}
 	}
 
-	private async hydrateConversationAvatar(conversation: WhatsAppConversation) {
-		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl;
-		if (existing) return;
+	private async copyAvatarFromPhoneTwin(conversation: WhatsAppConversation): Promise<string | null> {
+		if (!conversation.contact) return null;
+		const waId = String(conversation.contact.waId || '');
+		const phone = String(conversation.contact.phoneNumber || '').replace(/\D/g, '');
+		const digits =
+			phone && !isLidDigitsStoredAsPhone(waId, phone) ? phone : phoneFromWaId(waId);
+		if (!digits) return null;
+		const twin = await this.contactRepo
+			.createQueryBuilder('c')
+			.where('c.account_id = :accountId', { accountId: conversation.accountId })
+			.andWhere('c.id <> :id', { id: conversation.contact.id })
+			.andWhere('c.avatar_url IS NOT NULL')
+			.andWhere(`TRIM(c.avatar_url) <> ''`)
+			.andWhere(
+				`(c.wa_id IN (:...ids) OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') = :digits)`,
+				{
+					ids: [`${digits}@c.us`, `${digits}@s.whatsapp.net`],
+					digits,
+				},
+			)
+			.orderBy('c.updated_at', 'DESC')
+			.getOne();
+		const url = String(twin?.avatarUrl || '').trim();
+		return url || null;
+	}
+
+	private async hydrateConversationAvatar(
+		conversation: WhatsAppConversation,
+		options?: { force?: boolean },
+	) {
+		const force = Boolean(options?.force);
+		const existing = conversation.contact?.avatarUrl || conversation.group?.avatarUrl || null;
+		if (existing && !force && !isExpiringWhatsAppCdnUrl(existing)) return;
+
+		// Prefer a twin contact that already has a fresh-looking URL (same phone / @c.us).
+		if (!force || !existing) {
+			const twinUrl = await this.copyAvatarFromPhoneTwin(conversation).catch(() => null);
+			if (twinUrl && twinUrl !== existing && !isExpiringWhatsAppCdnUrl(twinUrl)) {
+				if (conversation.contact) {
+					await this.contactRepo.update(conversation.contact.id, { avatarUrl: twinUrl });
+					conversation.contact.avatarUrl = twinUrl;
+				}
+				this.gateway.emitAccountEvent(conversation.accountId, 'conversation_updated', {
+					reason: 'avatar_hydrated',
+					conversationId: conversation.id,
+					avatarUrl: twinUrl,
+				});
+				return;
+			}
+		}
+
 		const provider = this.providers.getProvider(conversation.accountId);
 		if (!provider || provider.getState() !== 'connected') return;
 		if (typeof provider.getProfilePictureUrl !== 'function') return;
+
+		// Resolve real PN for @lid before asking WhatsApp for the picture.
+		if (conversation.contact) {
+			const waId = String(conversation.contact.waId || conversation.providerChatId || '');
+			const storedPhone = String(conversation.contact.phoneNumber || '').replace(/\D/g, '');
+			const needsPn =
+				waId.endsWith('@lid') ||
+				waId.endsWith('@hosted.lid') ||
+				isLidDigitsStoredAsPhone(waId, storedPhone);
+			if (needsPn && typeof provider.resolveContactIdentity === 'function') {
+				const identity = await provider.resolveContactIdentity(waId).catch(() => null);
+				const resolved = String(identity?.phoneNumber || '').replace(/\D/g, '');
+				if (resolved && resolved !== storedPhone) {
+					await this.contactRepo.update(conversation.contact.id, {
+						phoneNumber: resolved,
+					});
+					conversation.contact.phoneNumber = resolved;
+				} else if (resolved && isLidDigitsStoredAsPhone(waId, storedPhone)) {
+					await this.contactRepo.update(conversation.contact.id, {
+						phoneNumber: resolved,
+					});
+					conversation.contact.phoneNumber = resolved;
+				}
+			}
+		}
+
 		const chatId = this.avatarFetchChatId(conversation);
 		if (!chatId) return;
-		const url = await provider.getProfilePictureUrl(chatId).catch(() => null);
+		const url = await provider
+			.getProfilePictureUrl(chatId, { force: force || isExpiringWhatsAppCdnUrl(existing) })
+			.catch(() => null);
 		if (!url) return;
+		if (url === existing && !force) return;
 		if (conversation.contact) {
 			await this.contactRepo.update(conversation.contact.id, { avatarUrl: url });
 			conversation.contact.avatarUrl = url;
@@ -4219,7 +4369,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_updated', {
 			reason: 'avatar_hydrated',
 			conversationId: conversation.id,
+			avatarUrl: url,
 		});
+	}
+
+	async refreshConversationAvatar(user: User, conversationId: string) {
+		const { conversation } = await this.assertConversationVisible(user, conversationId);
+		await this.hydrateConversationAvatar(conversation, { force: true });
+		const avatarUrl =
+			conversation.contact?.avatarUrl || conversation.group?.avatarUrl || null;
+		return { ok: true, conversationId: conversation.id, avatarUrl };
 	}
 
 	async listMessages(
@@ -4237,7 +4396,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversationId,
 		);
 		void this.subscribeConversationPresence(conversation).catch(() => undefined);
-		void this.hydrateConversationAvatar(conversation).catch(() => undefined);
+		void this.hydrateConversationAvatar(conversation, {
+			force: isExpiringWhatsAppCdnUrl(
+				conversation.contact?.avatarUrl || conversation.group?.avatarUrl,
+			),
+		}).catch(() => undefined);
 		const take = Math.min(Math.max(Number(limit) || 100, 1), search ? 200 : 200);
 		const loadLocal = async (cursorId?: string) => {
 			const query = this.messageRepo
@@ -5584,20 +5747,39 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			messageId,
 			false,
 		);
-		const providerInfo = await provider.getMessageInfo(message.providerMessageId).catch(() => null);
+		const fromMe = String(message.direction || '').toLowerCase() === 'outbound';
+		const providerInfo =
+			typeof provider.getMessageInfo === 'function'
+				? await provider.getMessageInfo(message.providerMessageId).catch(() => null)
+				: null;
+		const liveStatus =
+			String(providerInfo?.status || providerInfo?.acknowledgements?.status || '').toLowerCase() ||
+			String(message.status || '').toLowerCase();
+		const acknowledgements = buildWhatsAppMessageAckInfo({
+			status: liveStatus || message.status,
+			fromMe,
+			statusUpdatedAt: message.statusUpdatedAt || message.providerTimestamp,
+			acknowledgements: providerInfo?.acknowledgements || null,
+		});
 		return {
 			id: message.id,
 			providerMessageId: message.providerMessageId,
 			direction: message.direction,
 			type: message.type,
-			status: message.status,
+			status: liveStatus || message.status,
 			statusUpdatedAt: message.statusUpdatedAt,
 			sentAt: message.providerTimestamp,
 			isStarred: message.isStarred,
 			isPinned: message.isPinned,
 			pinnedUntil: message.pinnedUntil,
 			deletedMode: message.deletedMode,
-			provider: providerInfo,
+			acknowledgements,
+			provider: {
+				...(providerInfo && typeof providerInfo === 'object' ? providerInfo : {}),
+				acknowledgements,
+				status: liveStatus || message.status,
+				fromMe,
+			},
 		};
 	}
 
