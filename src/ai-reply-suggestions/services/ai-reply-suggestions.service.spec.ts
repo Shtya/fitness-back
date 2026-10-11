@@ -79,6 +79,17 @@ describe("writing assist prompt handling", () => {
     expect(prompt).toContain("قول له السعر كام؟");
   });
 
+  it("builds a dictate-to-English prompt for spoken Arabic transcripts", () => {
+    const prompt = buildWritingAssistPrompt(
+      "dictate_to_en",
+      "اقصد إن الفاتورة تتبعت النهارده مش بكره",
+    );
+    expect(prompt).toContain("spoken Arabic");
+    expect(prompt).toContain("OCR");
+    expect(prompt).toContain("اقصد إن الفاتورة");
+    expect(prompt).toContain("finalText");
+  });
+
   it("parses writing assist JSON and plain-text fallbacks", () => {
     expect(
       parseWritingAssistResult(

@@ -91,6 +91,8 @@ export function buildAiReplyPrompt(
 
 export function buildWritingAssistPrompt(mode: WritingAssistMode, text: string) {
   const modeInstructions: Record<WritingAssistMode, string> = {
+    dictate_to_en:
+      "The text is a spoken Arabic (or mixed Arabic/English) transcript. The agent is dictating what they meant — often because Word/OCR extraction was unclear. Turn it into one clear, polished English WhatsApp business message: translate accurately, fix grammar and awkward phrasing, keep a natural professional tone, and preserve politeness. Do not invent facts or add questions the speaker did not ask.",
     ar_to_en:
       "The agent drafting text may be Arabic (or mixed). Translate it into clear, natural English suitable for a WhatsApp business message. Preserve meaning and politeness. Do not add new facts.",
     en_polish:

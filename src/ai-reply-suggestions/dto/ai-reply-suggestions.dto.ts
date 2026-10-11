@@ -100,6 +100,7 @@ export class GenerateAiReplySuggestionsDto {
 }
 
 export const WRITING_ASSIST_MODES = [
+  "dictate_to_en",
   "ar_to_en",
   "en_polish",
   "en_stronger",
