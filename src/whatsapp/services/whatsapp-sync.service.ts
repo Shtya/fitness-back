@@ -510,7 +510,14 @@ const PREFERENCE_COALESCE = (column: string) =>
 type ConversationPreviewMessage = Pick<
 	WhatsAppMessage,
 	'id' | 'providerMessageId' | 'text' | 'type' | 'direction' | 'status' | 'providerTimestamp'
->;
+> & {
+	reactions?: Array<{
+		id?: string;
+		actorKey: string;
+		emoji: string;
+		reactedAt?: Date | string | null;
+	}>;
+};
 
 type ConversationWithPreferences = WhatsAppConversation & {
 	preferenceByConversation?: WhatsAppConversationPreference | null;
@@ -1378,13 +1385,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { messageId: message.id },
 			order: { created_at: 'ASC' },
 		});
+		const reactionConversation = await this.conversationRepo
+			.findOne({ where: { id: message.conversationId }, select: ['id', 'groupId'] })
+			.catch(() => null);
+		const identities = await this.reactionActorIdentities(
+			accountId,
+			reactionConversation?.groupId,
+			saved.map((reaction) => reaction.actorKey),
+		).catch(() => new Map());
 		const serialized = saved.map((reaction) => ({
 			id: reaction.id,
 			actorKey: reaction.actorKey,
 			emoji: reaction.emoji,
 			reactedAt: reaction.reactedAt,
+			...(identities.get(reaction.actorKey) || {}),
 		}));
-		await this.emitScopedConversationEvent(
+		const scope = await this.emitScopedConversationEvent(
 			message.conversationId,
 			'message_reactions',
 			{
@@ -1394,6 +1410,56 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			},
 			accountId,
 		);
+		// WhatsApp inbox: only rewrite the chat-list row when the reacted message is
+		// still the latest previewable message (do not clobber a newer reply).
+		const lastPreviewById = await this.findLastPreviewMessages([message.conversationId]);
+		const lastPreview = lastPreviewById.get(message.conversationId);
+		if (lastPreview?.id === message.id) {
+			const peerReactions = serialized.filter(
+				(reaction) => String(reaction.actorKey || '') !== 'me',
+			);
+			let newestPeerAt: Date | null = null;
+			for (const reaction of peerReactions) {
+				const at = reaction.reactedAt ? new Date(reaction.reactedAt) : null;
+				if (!at || Number.isNaN(at.getTime())) continue;
+				if (!newestPeerAt || at.getTime() > newestPeerAt.getTime()) {
+					newestPeerAt = at;
+				}
+			}
+			if (newestPeerAt) {
+				const conversation = await this.conversationRepo.findOne({
+					where: { id: message.conversationId },
+				});
+				if (conversation) {
+					const previous = conversation.lastMessageAt
+						? new Date(conversation.lastMessageAt).getTime()
+						: 0;
+					if (newestPeerAt.getTime() >= previous) {
+						await this.conversationRepo.update(conversation.id, {
+							lastMessageAt: newestPeerAt,
+						});
+					}
+				}
+			}
+			this.scheduleConversationUpdated(
+				accountId,
+				{
+					conversationId: message.conversationId,
+					...(newestPeerAt ? { lastMessageAt: newestPeerAt } : {}),
+					preview: {
+						id: message.id,
+						providerMessageId: message.providerMessageId,
+						providerTimestamp: message.providerTimestamp,
+						type: message.type,
+						text: message.text,
+						direction: message.direction,
+						status: message.status,
+						reactions: serialized,
+					},
+				},
+				scope,
+			);
+		}
 		return serialized;
 	}
 
@@ -3989,8 +4055,47 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				) lm`,
 				[conversationIds, CONVERSATION_PREVIEW_MEDIA_TYPES],
 			);
+		const messageIds = rows.map((row) => row.id).filter(Boolean);
+		const reactionsByMessageId = new Map<
+			string,
+			NonNullable<ConversationPreviewMessage['reactions']>
+		>();
+		if (messageIds.length) {
+			const reactionRows: Array<{
+				id: string;
+				messageId: string;
+				actorKey: string;
+				emoji: string;
+				reactedAt: Date | null;
+			}> = await this.reactionRepo.query(
+				`SELECT
+					r.id,
+					r.message_id AS "messageId",
+					r.actor_key AS "actorKey",
+					r.emoji,
+					r.reacted_at AS "reactedAt"
+				FROM whatsapp_message_reactions r
+				WHERE r.message_id = ANY($1::uuid[])
+					AND r.deleted_at IS NULL
+				ORDER BY r.created_at ASC`,
+				[messageIds],
+			);
+			for (const reaction of reactionRows) {
+				const list = reactionsByMessageId.get(reaction.messageId) || [];
+				list.push({
+					id: reaction.id,
+					actorKey: reaction.actorKey,
+					emoji: reaction.emoji,
+					reactedAt: reaction.reactedAt,
+				});
+				reactionsByMessageId.set(reaction.messageId, list);
+			}
+		}
 		for (const { conversationId, ...message } of rows) {
-			byConversationId.set(conversationId, message);
+			byConversationId.set(conversationId, {
+				...message,
+				reactions: reactionsByMessageId.get(message.id) || [],
+			});
 		}
 		return byConversationId;
 	}
@@ -4919,6 +5024,115 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	/**
+	 * Who reacted: reactions only store the actor's JID (or 'me'), so the client could
+	 * not name anyone. Resolve each actor from saved contacts and group participants —
+	 * by JID, by JID without the device suffix, and by phone — and attach a display name,
+	 * phone and avatar. Nothing is written; unknown actors simply stay unnamed.
+	 */
+	private async reactionActorIdentities(
+		accountId: string,
+		groupId: string | null | undefined,
+		actorKeys: string[],
+	): Promise<Map<string, { actorName: string | null; actorPhone: string | null; actorAvatarUrl: string | null }>> {
+		const result = new Map<
+			string,
+			{ actorName: string | null; actorPhone: string | null; actorAvatarUrl: string | null }
+		>();
+		const keys = [...new Set(actorKeys.map((key) => String(key || '').trim()))].filter(
+			(key) => key && key !== 'me',
+		);
+		if (!keys.length) return result;
+		const baseOf = (key: string) => {
+			const [user, server] = key.split('@');
+			const bare = String(user || '').split(':')[0];
+			return server ? `${bare}@${server}` : bare;
+		};
+		const isLid = (key: string) => /@(hosted\.)?lid$/i.test(key);
+		const digitsOf = (key: string) => String(key.split('@')[0] || '').split(':')[0].replace(/\D/g, '');
+		const candidates = new Set<string>();
+		const phones = new Set<string>();
+		for (const key of keys) {
+			candidates.add(key);
+			candidates.add(baseOf(key));
+			if (!isLid(key)) {
+				const digits = digitsOf(key);
+				if (digits) {
+					phones.add(digits);
+					candidates.add(`${digits}@c.us`);
+					candidates.add(`${digits}@s.whatsapp.net`);
+				}
+			}
+		}
+		const [contacts, phoneContacts, participants] = await Promise.all([
+			this.contactRepo.find({ where: { accountId, waId: In([...candidates]) } }),
+			phones.size
+				? this.contactRepo.find({ where: { accountId, phoneNumber: In([...phones]) } })
+				: Promise.resolve([] as WhatsAppContact[]),
+			groupId
+				? this.participantRepo.find({ where: { groupId, waId: In([...candidates]) } })
+				: Promise.resolve([] as WhatsAppGroupParticipant[]),
+		]);
+		const contactByWaId = new Map(contacts.map((contact) => [contact.waId, contact]));
+		const contactByPhone = new Map(
+			phoneContacts.filter((contact) => contact.phoneNumber).map((contact) => [String(contact.phoneNumber), contact]),
+		);
+		const participantByWaId = new Map(participants.map((participant) => [participant.waId, participant]));
+		for (const key of keys) {
+			const base = baseOf(key);
+			const digits = isLid(key) ? '' : digitsOf(key);
+			const contact =
+				contactByWaId.get(key) ||
+				contactByWaId.get(base) ||
+				(digits ? contactByWaId.get(`${digits}@c.us`) || contactByWaId.get(`${digits}@s.whatsapp.net`) : undefined) ||
+				(digits ? contactByPhone.get(digits) : undefined);
+			const participant = participantByWaId.get(key) || participantByWaId.get(base);
+			const phone = String(contact?.phoneNumber || digits || '').replace(/\D/g, '') || null;
+			const contactName =
+				contact?.name && !isWeakContactDisplayName(contact.name, contact.waId, contact.phoneNumber)
+					? contact.name
+					: null;
+			const participantName =
+				participant?.displayName && !isWeakContactDisplayName(participant.displayName, participant.waId)
+					? participant.displayName
+					: null;
+			result.set(key, {
+				actorName: contactName || participantName || null,
+				actorPhone: phone,
+				actorAvatarUrl: contact?.avatarUrl || null,
+			});
+		}
+		return result;
+	}
+
+	private async decorateMessageReactions(
+		conversation: WhatsAppConversation,
+		messages: WhatsAppMessage[],
+	) {
+		const actorKeys: string[] = [];
+		for (const message of messages || []) {
+			for (const reaction of ((message as any)?.reactions || []) as WhatsAppMessageReaction[]) {
+				if (reaction?.actorKey) actorKeys.push(reaction.actorKey);
+			}
+		}
+		if (!actorKeys.length) return;
+		try {
+			const identities = await this.reactionActorIdentities(
+				conversation.accountId,
+				conversation.groupId,
+				actorKeys,
+			);
+			for (const message of messages || []) {
+				for (const reaction of ((message as any)?.reactions || []) as any[]) {
+					const identity = identities.get(String(reaction?.actorKey || '').trim());
+					if (identity) Object.assign(reaction, identity);
+				}
+			}
+		} catch {
+			// Names are a convenience; reactions still render without them.
+		}
+	}
+
 	private async decorateGroupMessages(
 		conversation: WhatsAppConversation,
 		messages: WhatsAppMessage[],
@@ -5098,6 +5312,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.attachMessageLocations(messages);
 		this.attachSharedContacts(messages);
 		await this.decorateGroupMessages(conversation, messages);
+		await this.decorateMessageReactions(conversation, messages);
 		await this.decorateMessageMentions(conversation, messages);
 		// Last step on purpose: everything above may read the media-crypto fields,
 		// and server-side re-downloads reload `raw` from the DB, not from here.
