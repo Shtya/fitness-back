@@ -4,6 +4,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { isUUID } from 'class-validator';
 import { User, UserRole } from 'entities/global.entity';
 
 @Injectable()
@@ -30,7 +31,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    const user = await this.userRepo.findOne({ where: { id: payload.id } });
+    const userId = payload?.id || payload?.sub;
+    // Legacy numeric ids ("1") must 401 — not QueryFailedError → 400 "Invalid story id"
+    // (axios only hard-logouts on 401, so stale tokens otherwise look like empty data).
+    if (!userId || !isUUID(String(userId))) {
+      throw new UnauthorizedException('Invalid session');
+    }
+    const user = await this.userRepo.findOne({ where: { id: String(userId) } });
     if (!user) throw new UnauthorizedException('User not found');
     // Prefer DB tenantId; JWT claim is advisory and must not override a different DB tenant.
     if (payload.tenantId && user.tenantId && payload.tenantId !== user.tenantId && user.role !== UserRole.SUPER_ADMIN) {

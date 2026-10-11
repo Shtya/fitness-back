@@ -12,6 +12,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
+import { isUUID } from 'class-validator';
 import { corsOriginDelegate } from 'common/cors-origin';
 import { User, UserRole } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
@@ -134,8 +135,9 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 				secret: process.env.JWT_SECRET,
 			});
 			const userId = decoded?.id || decoded?.sub;
-			if (!userId) return null;
-			const user = await this.userRepo.findOne({ where: { id: userId } });
+			// Reject legacy numeric JWT ids before Postgres UUID cast errors.
+			if (!userId || !isUUID(String(userId))) return null;
+			const user = await this.userRepo.findOne({ where: { id: String(userId) } });
 			if (!user) return null;
 			client.data.user = user;
 			client.data.tokenExpiresAt =
