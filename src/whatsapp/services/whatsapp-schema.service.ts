@@ -190,6 +190,20 @@ const OPTIONAL_TABLES = [
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_message_reactions_message_id
 		ON whatsapp_message_reactions(message_id)`,
+	`CREATE TABLE IF NOT EXISTS whatsapp_message_receipts (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz,
+		message_id uuid NOT NULL REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
+		participant_key varchar(200) NOT NULL,
+		delivered_at timestamptz,
+		read_at timestamptz,
+		played_at timestamptz,
+		CONSTRAINT uq_whatsapp_message_receipt_participant UNIQUE (message_id, participant_key)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_whatsapp_message_receipts_message_id
+		ON whatsapp_message_receipts(message_id)`,
 ];
 
 @Injectable()

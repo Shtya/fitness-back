@@ -558,6 +558,8 @@ export class WhatsAppConversationsController {
 				body.text.trim(),
 				body.quotedProviderMessageId,
 				body.clientMessageId,
+				undefined,
+				body.mentions,
 			);
 		}
 		if (body.type === 'contact') {

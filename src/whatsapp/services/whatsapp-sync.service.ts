@@ -30,6 +30,7 @@ import {
 	WhatsAppMessageAttachment,
 	WhatsAppMessageDirection,
 	WhatsAppMessageReaction,
+	WhatsAppMessageReceipt,
 	WhatsAppMessageStatus,
 } from '../entities/whatsapp.entity';
 import {
@@ -38,12 +39,18 @@ import {
 } from '../gateways/whatsapp.gateway';
 import {
 	NormalizedWhatsAppMessage,
+	NormalizedWhatsAppParticipantReceipt,
 	WhatsAppEmbeddedQuote,
 	WhatsAppProvider,
 	WhatsAppProviderEvent,
 	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
+import {
+	buildWhatsAppGroupReceiptView,
+	whatsAppReceiptBaseKey,
+} from '../utils/whatsapp-group-receipts';
+import { sanitizeWhatsAppOutboundMentions } from '../utils/whatsapp-outbound-mentions';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import {
@@ -1272,6 +1279,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 			return;
 		}
+		if (event.type === 'message_receipts') {
+			this.enqueuePersist(
+				() => this.persistMessageReceipts(accountId, event.providerMessageId, event.receipts),
+				`message_receipts:${accountId}:${event.providerMessageId}`,
+				undefined,
+				this.persistLaneForMessage(accountId, event.providerMessageId),
+			);
+			return;
+		}
 		if (event.type === 'message_deleted') {
 			this.enqueuePersist(async () => {
 				const message = await this.messageRepo.findOne({
@@ -1295,6 +1311,123 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				);
 			}, `message_deleted:${accountId}:${event.providerMessageId}`, undefined, this.persistLaneForMessage(accountId, event.providerMessageId));
 		}
+	}
+
+	/** Group member receipts can land before the sent row is persisted — retry briefly. */
+	private async persistMessageReceipts(
+		accountId: string,
+		providerMessageIdValue: string,
+		receipts: NormalizedWhatsAppParticipantReceipt[],
+		attempt = 0,
+	): Promise<void> {
+		const message = await this.messageRepo.findOne({
+			where: { accountId, providerMessageId: providerMessageIdValue },
+			select: ['id', 'conversationId', 'direction'],
+		});
+		if (!message) {
+			if (attempt < 3) {
+				const timer = setTimeout(() => {
+					this.enqueuePersist(
+						() => this.persistMessageReceipts(accountId, providerMessageIdValue, receipts, attempt + 1),
+						`message_receipts:${accountId}:${providerMessageIdValue}`,
+						undefined,
+						this.persistLaneForMessage(accountId, providerMessageIdValue),
+					);
+				}, 2000 * (attempt + 1));
+				timer.unref?.();
+			}
+			return;
+		}
+		if (message.direction !== WhatsAppMessageDirection.OUTBOUND) return;
+
+		const byParticipant = new Map<
+			string,
+			{ deliveredAt: Date | null; readAt: Date | null; playedAt: Date | null }
+		>();
+		const earliest = (a: Date | null, b?: Date | null) =>
+			!a ? b || null : !b ? a : a.getTime() <= b.getTime() ? a : b;
+		for (const receipt of receipts || []) {
+			const key = whatsAppReceiptBaseKey(receipt?.participantJid || '').slice(0, 200);
+			if (!key || !key.includes('@')) continue;
+			const row = byParticipant.get(key) || { deliveredAt: null, readAt: null, playedAt: null };
+			row.deliveredAt = earliest(row.deliveredAt, receipt.deliveredAt);
+			row.readAt = earliest(row.readAt, receipt.readAt);
+			row.playedAt = earliest(row.playedAt, receipt.playedAt);
+			byParticipant.set(key, row);
+		}
+		if (!byParticipant.size) return;
+
+		const params: unknown[] = [];
+		const values = [...byParticipant.entries()].map(([key, row], index) => {
+			params.push(message.id, key, row.deliveredAt, row.readAt, row.playedAt);
+			const base = index * 5;
+			return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+		});
+		await this.messageRepo.manager.query(
+			`INSERT INTO whatsapp_message_receipts (message_id, participant_key, delivered_at, read_at, played_at)
+			VALUES ${values.join(', ')}
+			ON CONFLICT (message_id, participant_key) DO UPDATE SET
+				delivered_at = COALESCE(LEAST(whatsapp_message_receipts.delivered_at, EXCLUDED.delivered_at), whatsapp_message_receipts.delivered_at, EXCLUDED.delivered_at),
+				read_at = COALESCE(LEAST(whatsapp_message_receipts.read_at, EXCLUDED.read_at), whatsapp_message_receipts.read_at, EXCLUDED.read_at),
+				played_at = COALESCE(LEAST(whatsapp_message_receipts.played_at, EXCLUDED.played_at), whatsapp_message_receipts.played_at, EXCLUDED.played_at),
+				deleted_at = NULL,
+				updated_at = now()`,
+			params,
+		);
+		await this.emitScopedConversationEvent(
+			message.conversationId,
+			'message_receipts',
+			{ messageId: message.id, providerMessageId: providerMessageIdValue },
+			accountId,
+		);
+	}
+
+	private async buildGroupReceipts(
+		conversation: WhatsAppConversation,
+		message: WhatsAppMessage,
+		provider: WhatsAppProvider,
+	) {
+		if (!conversation.groupId) return null;
+		const [participants, receipts, account] = await Promise.all([
+			this.participantRepo.find({ where: { groupId: conversation.groupId } }),
+			this.messageRepo.manager
+				.getRepository(WhatsAppMessageReceipt)
+				.find({ where: { messageId: message.id } }),
+			this.accountRepo.findOne({
+				where: { id: conversation.accountId },
+				select: ['id', 'phoneNumber'],
+			}),
+		]);
+		const ownJids = (typeof provider.getOwnJids === 'function' ? provider.getOwnJids() : []) || [];
+		const identities = await this.reactionActorIdentities(conversation.accountId, conversation.groupId, [
+			...participants.map((participant) => participant.waId),
+			...receipts.map((receipt) => receipt.participantKey),
+			...ownJids,
+		]).catch(() => new Map());
+		const identityOf = (key: string) => {
+			const phone = String(identities.get(key)?.actorPhone || '').replace(/\D/g, '');
+			return phone ? `p:${phone}` : `k:${whatsAppReceiptBaseKey(key)}`;
+		};
+		const selfIdentities = new Set(ownJids.map(identityOf));
+		const accountPhone = String(account?.phoneNumber || '').replace(/\D/g, '');
+		if (accountPhone) selfIdentities.add(`p:${accountPhone}`);
+		const describe = (key: string) => {
+			const identity = identities.get(key);
+			return identity
+				? { name: identity.actorName, phone: identity.actorPhone, avatarUrl: identity.actorAvatarUrl }
+				: undefined;
+		};
+		const view = buildWhatsAppGroupReceiptView({
+			members: participants.map((participant) => ({
+				key: participant.waId,
+				...(describe(participant.waId) || {}),
+			})),
+			receipts,
+			selfIdentities,
+			identityOf,
+			describe,
+		});
+		return { ...view, participantsKnown: participants.length > 0 };
 	}
 
 	/** Serialize reaction writes per message — sendReaction emits an event that
@@ -6031,7 +6164,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		}
 
+		const groupReceipts =
+			fromMe && conversation.type === WhatsAppConversationType.GROUP
+				? await this.buildGroupReceipts(conversation, message, provider).catch((error) => {
+						this.logger.warn(
+							`Group receipts unavailable for message ${message.id}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+						return null;
+					})
+				: null;
+
 		return {
+			groupReceipts,
 			id: message.id,
 			providerMessageId: message.providerMessageId,
 			direction: message.direction,
@@ -6534,6 +6680,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		quote?: string | WhatsAppSendQuoteOptions,
 		clientMessageId?: string,
 		persistClientMessageId?: string,
+		mentions?: string[],
 	) {
 		if (clientMessageId) {
 			return this.runIdempotentSend(user.id, conversationId, clientMessageId, () =>
@@ -6544,6 +6691,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					quote,
 					undefined,
 					clientMessageId,
+					mentions,
 				),
 			);
 		}
@@ -6583,10 +6731,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				};
 			}
 		}
+		const mentionJids =
+			conversation.type === WhatsAppConversationType.GROUP
+				? sanitizeWhatsAppOutboundMentions(text, mentions)
+				: [];
 		const result = await provider.sendText(
 			conversation.providerChatId,
 			text,
 			quoteForProvider,
+			mentionJids.length ? { mentions: mentionJids } : undefined,
 		);
 		const id =
 			providerMessageId(result) ||

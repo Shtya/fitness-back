@@ -10,6 +10,7 @@ import {
 	WhatsAppProviderCapabilities,
 	WhatsAppProviderEvent,
 	WhatsAppSendQuoteOptions,
+	WhatsAppSendTextOptions,
 } from './whatsapp-provider';
 import {
 	forceReleaseWppBrowserProfile,
@@ -2005,7 +2006,15 @@ export class WppConnectProvider implements WhatsAppProvider {
 		);
 	}
 
-	async sendText(chatId: string, text: string, quote?: string | WhatsAppSendQuoteOptions) {
+	async sendText(
+		chatId: string,
+		text: string,
+		quote?: string | WhatsAppSendQuoteOptions,
+		options?: WhatsAppSendTextOptions,
+	) {
+		const mentionedList = (options?.mentions || [])
+			.map(jid => String(jid || '').trim().replace(/@s\.whatsapp\.net$/, '@c.us'))
+			.filter(Boolean);
 		const quoteOptions = normalizeSendQuoteOptions(quote);
 		const quotedProviderMessageId = quoteOptions?.quotedProviderMessageId;
 		const outbound = quoteOptions?.embeddedQuote
@@ -2016,7 +2025,7 @@ export class WppConnectProvider implements WhatsAppProvider {
 		for (const target of targets) {
 			try {
 				const sendPromise = async () => {
-					if (quotedProviderMessageId && this.client.reply) {
+					if (quotedProviderMessageId && this.client.reply && !mentionedList.length) {
 						return this.client.reply(target, outbound, quotedProviderMessageId);
 					}
 					try {
@@ -2026,10 +2035,11 @@ export class WppConnectProvider implements WhatsAppProvider {
 							...(quotedProviderMessageId
 								? { quotedMsg: quotedProviderMessageId }
 								: {}),
+							...(mentionedList.length ? { mentionedList } : {}),
 						});
 					} catch (error) {
 						// Older clients reject unknown options — retry plain send.
-						if (quotedProviderMessageId) throw error;
+						if (quotedProviderMessageId || mentionedList.length) throw error;
 						return this.client.sendText(target, outbound);
 					}
 				};

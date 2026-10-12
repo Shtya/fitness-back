@@ -1,5 +1,6 @@
 import {
 	IsArray,
+	ArrayMaxSize,
 	ArrayNotEmpty,
 	IsBoolean,
 	IsIn,
@@ -126,6 +127,14 @@ export class SendWhatsAppMessageDto {
 	@IsOptional()
 	@IsString()
 	clientMessageId?: string;
+
+	/** Group member JIDs referenced as `@<digits>` in `text`. */
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(256)
+	@IsString({ each: true })
+	@MaxLength(160, { each: true })
+	mentions?: string[];
 
 	@IsOptional()
 	@ValidateNested()

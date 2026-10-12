@@ -15,6 +15,12 @@ export type WhatsAppProviderEvent =
 			providerMessageId: string;
 			reactions: NormalizedWhatsAppReaction[];
 	  }
+	| {
+			type: 'message_receipts';
+			providerMessageId: string;
+			chatId: string;
+			receipts: NormalizedWhatsAppParticipantReceipt[];
+	  }
 	| { type: 'message_deleted'; providerMessageId: string; mode: 'everyone' }
 	| { type: 'status_changed' }
 	// The linked device was removed / taken over on WhatsApp's side: the stored
@@ -35,6 +41,18 @@ export interface NormalizedWhatsAppAttachment {
 	fileName?: string | null;
 	fileSizeBytes?: number | null;
 	providerMediaId?: string | null;
+}
+
+export interface NormalizedWhatsAppParticipantReceipt {
+	participantJid: string;
+	deliveredAt?: Date | null;
+	readAt?: Date | null;
+	playedAt?: Date | null;
+}
+
+export interface WhatsAppSendTextOptions {
+	/** Member JIDs referenced as `@<digits>` in the text. */
+	mentions?: string[];
 }
 
 export interface NormalizedWhatsAppReaction {
@@ -147,10 +165,13 @@ export interface WhatsAppProvider {
 	): Promise<string | null>;
 	getGroups(): Promise<any[]>;
 	getGroupParticipants(groupId: string): Promise<any[]>;
+	/** The linked account's own JIDs (phone and LID) when the socket knows them. */
+	getOwnJids?(): string[];
 	sendText(
 		chatId: string,
 		text: string,
 		quote?: string | WhatsAppSendQuoteOptions,
+		options?: WhatsAppSendTextOptions,
 	): Promise<any>;
 	sendContact?(
 		chatId: string,

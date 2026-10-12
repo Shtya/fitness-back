@@ -11,6 +11,7 @@ import {
 	WhatsAppProviderEvent,
 	WhatsAppEmbeddedQuote,
 	WhatsAppSendQuoteOptions,
+	WhatsAppSendTextOptions,
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
 import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
@@ -1289,6 +1290,17 @@ export class BaileysProvider implements WhatsAppProvider {
 		return jidOf(`${bare}@${domain}`) || jidOf(full);
 	}
 
+	getOwnJids(): string[] {
+		const ids = [this.socket?.user?.id, this.socket?.user?.lid]
+			.map((value) => String(value || '').trim())
+			.filter(Boolean)
+			.map((full) => {
+				const [user, server] = full.split('@');
+				return `${String(user || '').split(':')[0]}@${server || 's.whatsapp.net'}`;
+			});
+		return [...new Set(ids)];
+	}
+
 	private statusSerializedId(raw: any): string {
 		const id = String(raw?.key?.id || '').trim();
 		const fromMe = Boolean(raw?.key?.fromMe);
@@ -2050,6 +2062,44 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 		});
 
+		// Group (and status) receipts arrive per member here, never on messages.update.
+		socket.ev.on('message-receipt.update', (updates: any[]) => {
+			if (!Array.isArray(updates)) return;
+			const grouped = new Map<
+				string,
+				{ chatId: string; receipts: Array<{ participantJid: string; deliveredAt: Date | null; readAt: Date | null; playedAt: Date | null }> }
+			>();
+			for (const item of updates) {
+				const providerMessageId = String(item?.key?.id || '').trim();
+				const chatId = jidOf(item?.key?.remoteJid) || '';
+				const participantJid = String(item?.receipt?.userJid || '').trim();
+				if (!providerMessageId || !chatId || !participantJid) continue;
+				if (isStatusBroadcastJid(chatId)) continue;
+				const toDate = (value: unknown) => {
+					const seconds = Number(value);
+					return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
+				};
+				const receipt = {
+					participantJid,
+					deliveredAt: toDate(item?.receipt?.receiptTimestamp),
+					readAt: toDate(item?.receipt?.readTimestamp),
+					playedAt: toDate(item?.receipt?.playedTimestamp),
+				};
+				if (!receipt.deliveredAt && !receipt.readAt && !receipt.playedAt) continue;
+				const entry = grouped.get(providerMessageId) || { chatId, receipts: [] };
+				entry.receipts.push(receipt);
+				grouped.set(providerMessageId, entry);
+			}
+			for (const [providerMessageId, entry] of grouped) {
+				this.emit({
+					type: 'message_receipts',
+					providerMessageId,
+					chatId: entry.chatId,
+					receipts: entry.receipts,
+				});
+			}
+		});
+
 		socket.ev.on('chats.upsert', (chats: any[]) => {
 			for (const chat of chats || []) {
 				const id = jidOf(chat?.id);
@@ -2767,12 +2817,18 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
-	async sendText(chatId: string, text: string, quote?: string | WhatsAppSendQuoteOptions) {
+	async sendText(
+		chatId: string,
+		text: string,
+		quote?: string | WhatsAppSendQuoteOptions,
+		options?: WhatsAppSendTextOptions,
+	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const jid = toBaileysJid(chatId);
-		const content = { text };
+		const mentions = (options?.mentions || []).map(toBaileysJid).filter(Boolean);
+		const content = mentions.length ? { text, mentions } : { text };
 		// Baileys expects `quoted` in the 3rd options arg — putting it on the
 		// content object is ignored, so WhatsApp receives a plain text message.
 		const quotedPayload = this.resolveQuotedPayload(chatId, quote);

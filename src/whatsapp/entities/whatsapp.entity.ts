@@ -511,6 +511,31 @@ export class WhatsAppMessageReaction extends CoreEntity {
 	reactedAt: Date | null;
 }
 
+/** Per-member delivery/read receipts for outbound group messages. */
+@Entity('whatsapp_message_receipts')
+@Unique('uq_whatsapp_message_receipt_participant', ['messageId', 'participantKey'])
+export class WhatsAppMessageReceipt extends CoreEntity {
+	@Index()
+	@Column({ name: 'message_id', type: 'uuid' })
+	messageId: string;
+
+	@ManyToOne(() => WhatsAppMessage, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'message_id' })
+	message: WhatsAppMessage;
+
+	@Column({ name: 'participant_key', type: 'varchar', length: 200 })
+	participantKey: string;
+
+	@Column({ name: 'delivered_at', type: 'timestamptz', nullable: true })
+	deliveredAt: Date | null;
+
+	@Column({ name: 'read_at', type: 'timestamptz', nullable: true })
+	readAt: Date | null;
+
+	@Column({ name: 'played_at', type: 'timestamptz', nullable: true })
+	playedAt: Date | null;
+}
+
 @Entity('whatsapp_message_attachments')
 export class WhatsAppMessageAttachment extends CoreEntity {
 	@Index()
