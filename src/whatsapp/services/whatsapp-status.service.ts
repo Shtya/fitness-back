@@ -47,6 +47,17 @@ function normalizeStatusType(value: unknown) {
 	return type || 'text';
 }
 
+/** Phone digits for a story sender — LID senders only resolve through a saved contact. */
+function statusSenderPhone(senderWaId: string | null | undefined, contactPhones: Map<string, string>) {
+	const raw = String(senderWaId || '').trim();
+	if (!raw) return null;
+	const known = contactPhones.get(raw);
+	if (known) return known;
+	if (/@(hosted\.)?lid$/i.test(raw)) return null;
+	const digits = raw.replace(/@.*$/, '').split(':')[0].replace(/\D/g, '');
+	return digits.length >= 8 ? digits : null;
+}
+
 function isUuid(value: unknown) {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
 		String(value || '').trim(),
@@ -438,6 +449,7 @@ export class WhatsAppStatusService {
 			...new Set(dedupedItems.map(item => item.senderWaId).filter(Boolean) as string[]),
 		];
 		const contactAvatars = new Map<string, string>();
+		const contactPhones = new Map<string, string>();
 		if (senderIds.length) {
 			const contacts = await this.contactRepo.find({
 				where: { accountId, waId: In(senderIds) },
@@ -445,6 +457,8 @@ export class WhatsAppStatusService {
 			// Address-book / DB labels win over ephemeral status pushNames.
 			for (const contact of contacts) {
 				const phone = contact.phoneNumber;
+				const phoneDigits = String(phone || '').replace(/\D/g, '');
+				if (phoneDigits) contactPhones.set(contact.waId, phoneDigits);
 				if (contact.avatarUrl) {
 					contactAvatars.set(contact.waId, contact.avatarUrl);
 				}
@@ -480,6 +494,7 @@ export class WhatsAppStatusService {
 					contactAvatarUrl: item.senderWaId
 						? contactAvatars.get(item.senderWaId) || null
 						: null,
+					senderPhone: statusSenderPhone(item.senderWaId, contactPhones),
 					mediaReady,
 					inSession,
 				};
@@ -550,12 +565,15 @@ export class WhatsAppStatusService {
 			...new Set(items.map(item => item.senderWaId).filter(Boolean) as string[]),
 		];
 		const contactAvatars = new Map<string, string>();
+		const contactPhones = new Map<string, string>();
 		if (senderIds.length) {
 			const contacts = await this.contactRepo.find({
 				where: { accountId, waId: In(senderIds) },
 			});
 			for (const contact of contacts) {
 				const phone = contact.phoneNumber;
+				const phoneDigits = String(phone || '').replace(/\D/g, '');
+				if (phoneDigits) contactPhones.set(contact.waId, phoneDigits);
 				if (contact.avatarUrl) {
 					contactAvatars.set(contact.waId, contact.avatarUrl);
 				}
@@ -588,6 +606,7 @@ export class WhatsAppStatusService {
 					contactAvatarUrl: item.senderWaId
 						? contactAvatars.get(item.senderWaId) || null
 						: null,
+					senderPhone: statusSenderPhone(item.senderWaId, contactPhones),
 					isHistory: true,
 					mediaReady: isText || hasDiskMedia,
 				};
