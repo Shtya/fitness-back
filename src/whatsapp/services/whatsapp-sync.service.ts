@@ -1380,12 +1380,57 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			{ messageId: message.id, providerMessageId: providerMessageIdValue },
 			accountId,
 		);
+		await this.promoteGroupMessageStatus(accountId, message.id, providerMessageIdValue).catch(
+			(error) =>
+				this.logger.warn(
+					`Group tick update failed for ${providerMessageIdValue}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+		);
+	}
+
+	private readonly groupMemberSyncAt = new Map<string, number>();
+
+	/** WhatsApp group ticks: ✓✓ grey once every member has it, blue once every member read it. */
+	private async promoteGroupMessageStatus(
+		accountId: string,
+		messageId: string,
+		providerMessageIdValue: string,
+	) {
+		const message = await this.messageRepo.findOne({ where: { id: messageId } });
+		if (!message) return;
+		const conversation = await this.conversationRepo.findOne({
+			where: { id: message.conversationId },
+		});
+		if (!conversation?.groupId || conversation.type !== WhatsAppConversationType.GROUP) return;
+		const provider = this.providers.getProvider(accountId);
+		let view = await this.buildGroupReceipts(conversation, message, provider);
+		if (view && !view.participantsKnown && provider?.capabilities.groupParticipants) {
+			const lastSync = this.groupMemberSyncAt.get(conversation.groupId) || 0;
+			if (Date.now() - lastSync > 10 * 60_000) {
+				this.groupMemberSyncAt.set(conversation.groupId, Date.now());
+				await this.syncGroupMetadata(provider, accountId, conversation.providerChatId).catch(
+					() => undefined,
+				);
+				view = await this.buildGroupReceipts(conversation, message, provider);
+			}
+		}
+		if (!view?.participantsKnown || !view.total) return;
+		if (view.remaining.length) return;
+		const next = view.delivered.length ? 'delivered' : 'read';
+		if (preferWhatsAppAckStatus(message.status, next) === message.status) return;
+		void this.handleProviderEvent(accountId, {
+			type: 'message_status',
+			providerMessageId: providerMessageIdValue,
+			status: next,
+		});
 	}
 
 	private async buildGroupReceipts(
 		conversation: WhatsAppConversation,
 		message: WhatsAppMessage,
-		provider: WhatsAppProvider,
+		provider: WhatsAppProvider | null | undefined,
 	) {
 		if (!conversation.groupId) return null;
 		const [participants, receipts, account] = await Promise.all([
@@ -1398,7 +1443,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				select: ['id', 'phoneNumber'],
 			}),
 		]);
-		const ownJids = (typeof provider.getOwnJids === 'function' ? provider.getOwnJids() : []) || [];
+		const ownJids = (typeof provider?.getOwnJids === 'function' ? provider.getOwnJids() : []) || [];
 		const identities = await this.reactionActorIdentities(conversation.accountId, conversation.groupId, [
 			...participants.map((participant) => participant.waId),
 			...receipts.map((receipt) => receipt.participantKey),
