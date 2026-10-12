@@ -2661,6 +2661,13 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 
 		let phoneNumber: string | null = this.lidToPn.get(id) || this.contacts.get(id)?.phoneNumber || null;
+		if (
+			phoneNumber &&
+			(id.endsWith('@lid') || id.endsWith('@hosted.lid')) &&
+			String(phoneNumber).replace(/\D/g, '') === id.split('@')[0].split(':')[0]
+		) {
+			phoneNumber = null;
+		}
 
 		if (
 			!phoneNumber &&

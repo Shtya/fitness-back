@@ -17,6 +17,7 @@ import {
 	WhatsAppStatusHistory,
 } from '../entities/whatsapp.entity';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
+import { WhatsAppProvider } from '../providers/whatsapp-provider';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -474,6 +475,7 @@ export class WhatsAppStatusService {
 				}
 			}
 		}
+		await this.resolveLidSenderPhones(accountId, provider, senderIds, contactPhones, contactNames);
 		const mapped = dedupedItems
 			.map(item => {
 				const fromMap = item.senderWaId ? contactNames.get(item.senderWaId) : null;
@@ -547,6 +549,85 @@ export class WhatsAppStatusService {
 		};
 	}
 
+	/**
+	 * Stories from LID senders need the real phone so the inbox can ring the
+	 * matching phone-based chat. Saved LID contacts often carry the LID digits as
+	 * their "phone", so those are discarded and re-resolved via the live LID map,
+	 * then by an exact same-name contact that has a real number.
+	 */
+	private async resolveLidSenderPhones(
+		accountId: string,
+		provider: WhatsAppProvider | null | undefined,
+		senderIds: string[],
+		contactPhones: Map<string, string>,
+		contactNames: Map<string, string>,
+	) {
+		const isLid = (id: string) => /@(hosted\.)?lid$/i.test(id);
+		const lidDigits = (id: string) => id.replace(/@.*$/, '').split(':')[0].replace(/\D/g, '');
+		const validPhone = (id: string, digits: string) =>
+			/^\d{8,15}$/.test(digits) && digits !== lidDigits(id);
+		const missing: string[] = [];
+		for (const id of senderIds) {
+			if (!isLid(id)) continue;
+			const known = contactPhones.get(id);
+			if (known && validPhone(id, known)) continue;
+			contactPhones.delete(id);
+			missing.push(id);
+		}
+		if (!missing.length) return;
+
+		const canResolve =
+			typeof provider?.resolveContactIdentity === 'function' && provider.getState() === 'connected';
+		if (canResolve) {
+			const healed: Array<{ waId: string; phone: string }> = [];
+			await Promise.all(
+				missing.slice(0, 80).map(async id => {
+					const identity = await Promise.race([
+						provider!.resolveContactIdentity!(id).catch(() => null),
+						new Promise<null>(resolve => setTimeout(() => resolve(null), 1500)),
+					]);
+					const digits = String(identity?.phoneNumber || '').replace(/\D/g, '');
+					if (!validPhone(id, digits)) return;
+					contactPhones.set(id, digits);
+					healed.push({ waId: id, phone: digits });
+				}),
+			);
+			for (const { waId, phone } of healed) {
+				void this.contactRepo
+					.update({ accountId, waId }, { phoneNumber: phone })
+					.catch(() => undefined);
+			}
+		}
+
+		const byName = new Map<string, string[]>();
+		for (const id of missing) {
+			if (contactPhones.has(id)) continue;
+			const name = String(contactNames.get(id) || '').trim();
+			if (!name || isWeakWhatsAppContactName(name, id, null)) continue;
+			byName.set(name, [...(byName.get(name) || []), id]);
+		}
+		if (!byName.size) return;
+		const namesakes = await this.contactRepo.find({
+			where: { accountId, name: In([...byName.keys()]) },
+			select: ['waId', 'name', 'phoneNumber'],
+		});
+		const phonesByName = new Map<string, Set<string>>();
+		for (const contact of namesakes) {
+			if (isLid(contact.waId)) continue;
+			const digits = String(contact.phoneNumber || '').replace(/\D/g, '');
+			if (!/^\d{8,15}$/.test(digits)) continue;
+			const name = String(contact.name || '').trim();
+			if (!phonesByName.has(name)) phonesByName.set(name, new Set());
+			phonesByName.get(name)!.add(digits);
+		}
+		for (const [name, ids] of byName) {
+			const phones = phonesByName.get(name);
+			if (!phones || phones.size !== 1) continue;
+			const [phone] = [...phones];
+			for (const id of ids) contactPhones.set(id, phone);
+		}
+	}
+
 	async listHistory(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
 		const historyCount = await this.historyRepo.count({ where: { accountId } });
@@ -589,6 +670,13 @@ export class WhatsAppStatusService {
 				}
 			}
 		}
+		await this.resolveLidSenderPhones(
+			accountId,
+			this.providers.getProvider(accountId),
+			senderIds,
+			contactPhones,
+			contactNames,
+		);
 		const mapped = items
 			.map(item => {
 				const fromMap = item.senderWaId ? contactNames.get(item.senderWaId) : null;
