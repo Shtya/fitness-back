@@ -116,6 +116,12 @@ export class SendWhatsAppMessageDto {
 	@IsString()
 	fileId?: string;
 
+	/** Original file name shown to the recipient; `fileId` is only the storage key. */
+	@IsOptional()
+	@IsString()
+	@MaxLength(255)
+	fileName?: string;
+
 	@IsOptional()
 	@IsString()
 	caption?: string;

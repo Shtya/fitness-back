@@ -40,6 +40,11 @@ export class CreateWhatsAppMessageScheduleDto {
 
 	@IsOptional()
 	@IsString()
+	@MaxLength(255)
+	fileName?: string;
+
+	@IsOptional()
+	@IsString()
 	@MaxLength(128)
 	quotedProviderMessageId?: string;
 

@@ -30,6 +30,7 @@ import {
 	everyDayOfWeek,
 	normalizeDaysOfWeek,
 } from '../utils/whatsapp-schedule-time';
+import { sanitizeDisplayFileName } from '../utils/whatsapp-display-file-name';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppSyncService } from './whatsapp-sync.service';
@@ -125,6 +126,7 @@ export class WhatsAppMessageSchedulesService {
 				text: text || null,
 				caption: dto.caption?.trim() || null,
 				fileId: dto.fileId || null,
+				fileName: dto.fileId ? sanitizeDisplayFileName(dto.fileName) : null,
 				quotedProviderMessageId: dto.quotedProviderMessageId || null,
 				scheduleKind,
 				scheduledAt: scheduleKind === WhatsAppMessageScheduleKind.ONCE ? nextRunAt : null,
@@ -461,6 +463,7 @@ export class WhatsAppMessageSchedulesService {
 		return this.sync.sendMedia(user, conversationId, {
 			type: schedule.type,
 			fileId: schedule.fileId,
+			fileName: schedule.fileName,
 			caption: schedule.caption || undefined,
 			quotedProviderMessageId: schedule.quotedProviderMessageId || undefined,
 			clientMessageId,
@@ -504,6 +507,7 @@ export class WhatsAppMessageSchedulesService {
 			text: schedule.text,
 			caption: schedule.caption,
 			fileId: schedule.fileId,
+			fileName: schedule.fileName,
 			scheduleKind: schedule.scheduleKind,
 			scheduledAt: schedule.scheduledAt,
 			timeOfDay: schedule.timeOfDay,

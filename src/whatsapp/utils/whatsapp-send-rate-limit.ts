@@ -78,6 +78,39 @@ export function assertVoicePreviewRateLimit(key: string, now = Date.now()) {
 	);
 }
 
+/**
+ * Number checks go to WhatsApp's servers from the linked account. Bulk checking
+ * looks like number enumeration and can get the account restricted, so both the
+ * person and the account are capped.
+ */
+export function assertNumberLookupRateLimit(
+	userKey: string,
+	accountKey: string,
+	now = Date.now(),
+) {
+	assertBucketLimit(
+		'lookup-user',
+		userKey,
+		{
+			windowMs: 60_000,
+			max: 15,
+			message: 'Too many number lookups. Wait a minute before checking more numbers.',
+		},
+		now,
+	);
+	assertBucketLimit(
+		'lookup-account-hour',
+		accountKey,
+		{
+			windowMs: 60 * 60_000,
+			max: 200,
+			message:
+				'This WhatsApp account has checked many numbers this hour. Try again later to keep the account safe.',
+		},
+		now,
+	);
+}
+
 export function resetSendRateLimit() {
 	buckets.clear();
 }

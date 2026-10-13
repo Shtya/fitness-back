@@ -176,7 +176,60 @@ export class WhatsAppContact extends CoreEntity {
 
 	@Column({ name: 'is_business', type: 'boolean', default: false })
 	isBusiness: boolean;
+
+	/** Name the user typed in the contact manager. `name` stays the WhatsApp-sourced label. */
+	@Column({ name: 'local_name', type: 'varchar', length: 200, nullable: true })
+	localName: string | null;
+
+	@Column({ type: 'text', nullable: true })
+	notes: string | null;
+
+	/** Saved in this app's contact manager (rows from chats/address-book sync are not). */
+	@Column({ name: 'is_saved', type: 'boolean', default: false })
+	isSaved: boolean;
+
+	@Column({ type: 'varchar', length: 20, default: 'whatsapp' })
+	source: WhatsAppContactSource;
+
+	@Column({ name: 'saved_by_user_id', type: 'uuid', nullable: true })
+	savedByUserId: string | null;
+
+	@Column({ name: 'wa_registration', type: 'varchar', length: 20, nullable: true })
+	waRegistration: WhatsAppContactRegistration | null;
+
+	@Column({ name: 'wa_checked_at', type: 'timestamptz', nullable: true })
+	waCheckedAt: Date | null;
+
+	/** Write of this contact into the linked WhatsApp account's contact list (app state). */
+	@Column({ name: 'wa_sync_status', type: 'varchar', length: 20, default: 'not_requested' })
+	waSyncStatus: WhatsAppContactSyncStatus;
+
+	@Column({ name: 'wa_sync_op', type: 'varchar', length: 10, nullable: true })
+	waSyncOp: WhatsAppContactSyncOp | null;
+
+	@Column({ name: 'wa_sync_error', type: 'varchar', length: 300, nullable: true })
+	waSyncError: string | null;
+
+	@Column({ name: 'wa_sync_attempts', type: 'int', default: 0 })
+	waSyncAttempts: number;
+
+	@Column({ name: 'wa_sync_next_at', type: 'timestamptz', nullable: true })
+	waSyncNextAt: Date | null;
+
+	@Column({ name: 'wa_synced_at', type: 'timestamptz', nullable: true })
+	waSyncedAt: Date | null;
 }
+
+export type WhatsAppContactSource = 'whatsapp' | 'manual' | 'lookup';
+export type WhatsAppContactRegistration = 'registered' | 'not_registered';
+export type WhatsAppContactSyncStatus =
+	| 'not_requested'
+	| 'pending'
+	| 'syncing'
+	| 'synced'
+	| 'failed'
+	| 'unsupported';
+export type WhatsAppContactSyncOp = 'upsert' | 'remove';
 
 @Entity('whatsapp_groups')
 @Unique('uq_whatsapp_group_account_wa_id', ['accountId', 'waId'])
@@ -1127,6 +1180,10 @@ export class WhatsAppMessageSchedule extends CoreEntity {
 
 	@Column({ name: 'file_id', type: 'varchar', length: 1024, nullable: true })
 	fileId: string | null;
+
+	/** Original name of the scheduled file; `fileId` is only the storage key. */
+	@Column({ name: 'file_name', type: 'varchar', length: 255, nullable: true })
+	fileName: string | null;
 
 	@Column({ name: 'quoted_provider_message_id', type: 'varchar', length: 128, nullable: true })
 	quotedProviderMessageId: string | null;

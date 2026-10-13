@@ -212,6 +212,7 @@ export class WhatsAppStatusService {
 			try {
 				await this.resolveStatusMedia(row, 'active', accountId, {
 					allowSyncRetry: false,
+					allowPhoneRequest: false,
 				});
 			} catch (error) {
 				this.logger.debug(
@@ -1311,12 +1312,13 @@ export class WhatsAppStatusService {
 		status: StatusRow,
 		source: StatusRowSource,
 		accountId: string,
-		options?: { allowSyncRetry?: boolean },
+		options?: { allowSyncRetry?: boolean; allowPhoneRequest?: boolean },
 	) {
 		if (normalizeStatusType(status.type) === 'text') {
 			throw new BadRequestException('Text status does not have media content');
 		}
 		const allowSyncRetry = options?.allowSyncRetry !== false;
+		const allowPhoneRequest = options?.allowPhoneRequest !== false;
 		const root = path.resolve(
 			process.env.WHATSAPP_MEDIA_ROOT ||
 				path.join(process.cwd(), 'storage', 'whatsapp-media'),
@@ -1372,6 +1374,7 @@ export class WhatsAppStatusService {
 				data = await liveProvider.downloadStatus(
 					status.providerStatusId,
 					status.senderWaId,
+					{ allowPhoneRequest },
 				);
 				const liveBuffer = decodeProviderMedia(data);
 				const liveMime =
@@ -1405,7 +1408,9 @@ export class WhatsAppStatusService {
 			try {
 				data =
 					typeof provider.downloadStatus === 'function'
-						? await provider.downloadStatus(status.providerStatusId, status.senderWaId)
+						? await provider.downloadStatus(status.providerStatusId, status.senderWaId, {
+								allowPhoneRequest,
+							})
 						: await provider.downloadMedia(status.providerStatusId);
 			} catch (error: any) {
 				lastDownloadError = error;
@@ -1423,6 +1428,7 @@ export class WhatsAppStatusService {
 								? await provider.downloadStatus(
 										status.providerStatusId,
 										status.senderWaId,
+										{ allowPhoneRequest },
 									)
 								: await provider.downloadMedia(status.providerStatusId);
 						lastDownloadError = null;

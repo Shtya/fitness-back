@@ -67,6 +67,16 @@ export interface NormalizedWhatsAppReaction {
 	timestamp?: Date | null;
 }
 
+export interface WhatsAppFetchMessageOptions {
+	/** Stop at the first copy this accepts. Default: one that carries a location. */
+	accept?: (message: NormalizedWhatsAppMessage | null) => boolean;
+	/**
+	 * A user opened this message, so the primary phone may be asked for it
+	 * (on-demand history, placeholder resend). Background work leaves this false.
+	 */
+	allowPhoneRequest?: boolean;
+}
+
 export interface NormalizedWhatsAppMessage {
 	providerMessageId: string;
 	chatId: string;
@@ -116,6 +126,44 @@ export interface WhatsAppSendQuoteOptions {
 	quotedProviderMessageId?: string;
 	embeddedQuote?: WhatsAppEmbeddedQuote;
 	statusQuote?: WhatsAppStatusQuote;
+}
+
+/** The live socket cannot do this right now (offline) or at all (provider lacks it). */
+export class WhatsAppProviderUnavailableError extends Error {
+	constructor(
+		readonly reason: 'not_connected' | 'unsupported',
+		message: string,
+	) {
+		super(message);
+	}
+}
+
+export interface WhatsAppNumberCheck {
+	/** Digits that were asked about. */
+	phoneDigits: string;
+	exists: boolean;
+	/** Chat id WhatsApp answered with (app form, e.g. `<digits>@c.us`); may differ from the input digits. */
+	chatId: string | null;
+}
+
+/** Each field says whether WhatsApp gave it, hid it, or the request failed. */
+export interface WhatsAppNumberProfile {
+	picture: { status: 'available' | 'hidden' | 'error'; url: string | null };
+	about: { status: 'available' | 'hidden' | 'error'; text: string | null; setAt: Date | null };
+	business:
+		| { status: 'not_business' | 'error' }
+		| {
+				status: 'available';
+				description: string | null;
+				category: string | null;
+				email: string | null;
+				websites: string[];
+				address: string | null;
+		  };
+	/** Name the person set on WhatsApp, only known after they messaged / were synced. */
+	pushName: string | null;
+	/** Name saved for this number in the linked account's WhatsApp contacts. */
+	savedName: string | null;
 }
 
 export interface WhatsAppProviderCapabilities {
@@ -168,7 +216,11 @@ export interface WhatsAppProvider {
 	): Promise<NormalizedWhatsAppMessage[]>;
 	findMessage?(providerMessageId: string): NormalizedWhatsAppMessage | null;
 	/** Fetch a chat message from the live provider (RAM first, then WhatsApp). */
-	fetchMessage?(chatId: string, providerMessageId: string): Promise<NormalizedWhatsAppMessage | null>;
+	fetchMessage?(
+		chatId: string,
+		providerMessageId: string,
+		options?: WhatsAppFetchMessageOptions,
+	): Promise<NormalizedWhatsAppMessage | null>;
 	getContacts(): Promise<any[]>;
 	/** Re-download the phone address book. Implemented by Baileys only. */
 	pullAddressBook?(): Promise<void>;
@@ -179,6 +231,16 @@ export interface WhatsAppProvider {
 		chatId: string,
 		options?: { force?: boolean; quality?: 'preview' | 'full' },
 	): Promise<string | null>;
+	/** Ask WhatsApp's servers whether numbers have an account. Throws when it cannot answer. */
+	checkWhatsAppNumbers?(phoneDigits: string[]): Promise<WhatsAppNumberCheck[]>;
+	getNumberProfile?(chatId: string): Promise<WhatsAppNumberProfile>;
+	/**
+	 * Add or rename the contact in the linked account's WhatsApp contact list (app-state
+	 * sync). Resolves once WhatsApp's server accepts it; the phone address book copy is
+	 * requested, not confirmed.
+	 */
+	saveContactToWhatsApp?(chatId: string, contact: { fullName: string; firstName?: string | null }): Promise<void>;
+	removeContactFromWhatsApp?(chatId: string): Promise<void>;
 	getGroups(): Promise<any[]>;
 	getGroupParticipants(groupId: string): Promise<any[]>;
 	/** The linked account's own JIDs (phone and LID) when the socket knows them. */
@@ -228,7 +290,12 @@ export interface WhatsAppProvider {
 	 */
 	downloadMedia(
 		providerMessageId: string,
-		options?: { rawHint?: any; toFile?: string },
+		options?: {
+			rawHint?: any;
+			toFile?: string;
+			/** A user opened this media; the phone may be asked to re-upload it. */
+			allowPhoneRequest?: boolean;
+		},
 	): Promise<any>;
 	/** Subscribe to typing/online presence for a chat. */
 	subscribePresence?(chatId: string | string[]): Promise<number | void>;
@@ -238,7 +305,11 @@ export interface WhatsAppProvider {
 		state?: 'composing' | 'recording' | 'paused' | 'available',
 	): Promise<void>;
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
-	downloadStatus?(providerStatusId: string, senderWaId?: string | null): Promise<any>;
+	downloadStatus?(
+		providerStatusId: string,
+		senderWaId?: string | null,
+		options?: { allowPhoneRequest?: boolean },
+	): Promise<any>;
 	getStatuses(): Promise<any[]>;
 	publishStatus(
 		content: string,

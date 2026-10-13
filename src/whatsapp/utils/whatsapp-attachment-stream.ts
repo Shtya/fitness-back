@@ -4,6 +4,7 @@ import type { Request, Response } from 'express';
 import { StreamableFile } from '@nestjs/common';
 import { parseByteRange } from './whatsapp-byte-range';
 import { quietStreamableFile } from './whatsapp-stream-errors';
+import { contentDispositionHeader } from './whatsapp-display-file-name';
 
 const INLINE_TYPES = new Set([
 	'image/jpeg',
@@ -36,10 +37,7 @@ export async function streamResolvedAttachment(
 	res.setHeader('X-Content-Type-Options', 'nosniff');
 	res.setHeader('Content-Type', inline ? mimeType : 'application/octet-stream');
 	res.setHeader('Cache-Control', options.cacheControl || 'private, max-age=604800, immutable');
-	res.setHeader(
-		'Content-Disposition',
-		`${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.fileName || 'attachment')}"`,
-	);
+	res.setHeader('Content-Disposition', contentDispositionHeader(inline ? 'inline' : 'attachment', file.fileName));
 
 	let size: number | null = null;
 	try {

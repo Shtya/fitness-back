@@ -22,6 +22,11 @@ describe('isWhatsAppViewOnceRaw', () => {
 		expect(isWhatsAppViewOnceRaw({ isViewOnce: true })).toBe(true);
 	});
 
+	it('detects the content-less stub a linked device receives (key.isViewOnce)', () => {
+		expect(isWhatsAppViewOnceRaw({ key: { id: 'V1', isViewOnce: true } })).toBe(true);
+		expect(isWhatsAppViewOnceRaw({ key: { id: 'V2', isViewOnce: false } })).toBe(false);
+	});
+
 	it('leaves ordinary media alone', () => {
 		expect(isWhatsAppViewOnceRaw({ message: { imageMessage: { viewOnce: false } } })).toBe(false);
 		expect(isWhatsAppViewOnceRaw({ message: { imageMessage: {} } })).toBe(false);

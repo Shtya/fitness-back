@@ -127,6 +127,23 @@ export class WhatsAppProviderManagerService
 		}
 	}
 
+	private async waitForLockExpiry(accountId: string): Promise<boolean> {
+		const deadline = Date.now() + (this.lockTtlSeconds + 5) * 1000;
+		while (Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 3_000));
+			if (await this.acquireLock(accountId)) {
+				this.logger.log(
+					`[WA] connection account=${accountId} event=lock_acquired after=expired_owner`,
+				);
+				return true;
+			}
+		}
+		this.logger.warn(
+			`[WA] connection account=${accountId} event=lock_refused reason=owner_still_renewing`,
+		);
+		return false;
+	}
+
 	private async releaseLock(accountId: string) {
 		if (!(await this.redis.isAvailable())) {
 			this.warnRedisUnavailableOnce();
@@ -178,6 +195,20 @@ export class WhatsAppProviderManagerService
 				const current = await client.get(key);
 				if (current === this.instanceId) {
 					await client.expire(key, this.lockTtlSeconds);
+				} else if (!current) {
+					// Expired during a Redis blip while this process still holds the socket.
+					const result = await client.set(key, this.instanceId, {
+						NX: true,
+						EX: this.lockTtlSeconds,
+					});
+					this.logger.warn(
+						`[WA] connection account=${accountId} event=lock_expired action=${
+							result === 'OK' ? 'reacquired' : 'lost_race'
+						}`,
+					);
+					if (result !== 'OK') await this.yieldToOtherOwner(accountId);
+				} else {
+					await this.yieldToOtherOwner(accountId);
 				}
 			} catch (error) {
 				this.logger.warn(
@@ -189,6 +220,23 @@ export class WhatsAppProviderManagerService
 		}, Math.floor((this.lockTtlSeconds * 1000) / 3));
 		timer.unref?.();
 		this.lockRenewTimers.set(accountId, timer);
+	}
+
+	/**
+	 * Another process now owns this account. Two sockets on one linked device make
+	 * WhatsApp replace them back and forth, so this process closes its socket
+	 * (keeping the device keys) instead of reconnecting against the owner.
+	 */
+	private async yieldToOtherOwner(accountId: string) {
+		this.stopLockRenewal(accountId);
+		const provider = this.providers.get(accountId);
+		this.providers.delete(accountId);
+		this.connecting.delete(accountId);
+		this.connectStartedAt.delete(accountId);
+		this.logger.error(
+			`[WA] connection account=${accountId} event=lock_lost action=yield_socket owner=other_instance`,
+		);
+		await provider?.disconnect().catch(() => undefined);
 	}
 
 	private stopLockRenewal(accountId: string) {
@@ -319,15 +367,15 @@ export class WhatsAppProviderManagerService
 			);
 		}
 		if (!locked) {
-			// Stale/foreign locks are common after overlapping local backends or a
-			// shared Redis with another environment. User-initiated connect should
-			// reclaim ownership instead of staying blocked forever.
+			// A live owner renews the lock every lockTtl/3, so it never expires while
+			// that process holds the socket. Deleting it would put two sockets on one
+			// linked device; WhatsApp then replaces them back and forth and the phone
+			// keeps re-syncing. Only a dead owner's lock expires, so wait for that.
 			this.logger.warn(
-				`Reclaiming WhatsApp connection lock for ${accountId} from another instance`,
+				`[WA] connection account=${accountId} event=lock_held_elsewhere action=wait_for_expiry ttlS=${this.lockTtlSeconds}`,
 			);
 			this.stopLockRenewal(accountId);
-			await this.forceReleaseLock(accountId);
-			locked = await this.acquireLock(accountId);
+			locked = await this.waitForLockExpiry(accountId);
 		}
 		if (!locked) {
 			throw new Error(

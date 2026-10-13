@@ -20,6 +20,7 @@ import { WhatsAppStickersController } from './controllers/whatsapp-stickers.cont
 import { WhatsAppMessageSchedulesController } from './controllers/whatsapp-message-schedules.controller';
 import { WhatsAppBoardsController } from './controllers/whatsapp-boards.controller';
 import { WhatsAppAutoForwardController } from './controllers/whatsapp-auto-forward.controller';
+import { WhatsAppContactsController } from './controllers/whatsapp-contacts.controller';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
 import { WHATSAPP_AI_IMAGE_PROVIDERS } from './ai-media/whatsapp-ai-image.provider';
@@ -88,6 +89,7 @@ import { WhatsAppBoardsService } from './services/whatsapp-boards.service';
 import { WhatsAppMessageSchedulesService } from './services/whatsapp-message-schedules.service';
 import { WhatsAppMessageSchedulesScheduler } from './whatsapp-message-schedules.scheduler';
 import { WhatsAppAutoForwardService } from './services/whatsapp-auto-forward.service';
+import { WhatsAppContactsService } from './services/whatsapp-contacts.service';
 import { AiContentStudioModule } from '../ai-content-studio/ai-content-studio.module';
 import { TranscriptionModule } from '../transcription/transcription.module';
 import { AiModule } from '../ai/ai.module';
@@ -162,6 +164,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppMessageSchedulesController,
 		WhatsAppBoardsController,
 		WhatsAppAutoForwardController,
+		WhatsAppContactsController,
 		WhatsAppAiMediaController,
 	],
 	providers: [
@@ -189,6 +192,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppBoardsService,
 		WhatsAppMessageSchedulesScheduler,
 		WhatsAppAutoForwardService,
+		WhatsAppContactsService,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
 		HuggingFaceWhatsAppImageProvider,

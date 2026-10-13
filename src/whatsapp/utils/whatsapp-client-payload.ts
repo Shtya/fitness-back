@@ -1,4 +1,5 @@
 import { redactMessagesRawForClient } from './whatsapp-raw-redact';
+import { isInternalStorageFileName, resolveOutgoingDisplayFileName } from './whatsapp-display-file-name';
 import {
 	isWhatsAppViewOnceRaw,
 	stripViewOnceQuotedPreviews,
@@ -27,6 +28,24 @@ function hideViewOnceReplyPreview(message: { raw?: unknown }) {
 	target.replyTo = { ...replyTo, isViewOnce: true, text: null, previewDataUrl: null };
 }
 
+/**
+ * Rows sent before original names were forwarded to `sendMedia` stored the internal
+ * storage name (`share_<ms>_<hex>_…`, `<ms>-<rand>.ext`). Show the original part only.
+ * Voice notes keep theirs: the `voice-<n>s` tag carries the duration.
+ */
+function withOriginalFileName(attachment: any) {
+	if (!attachment || typeof attachment !== 'object' || !attachment.fileName) return attachment;
+	const type = String(attachment.type || '').toLowerCase();
+	if (type === 'ptt' || type === 'voice' || /voice-\d/i.test(attachment.fileName)) return attachment;
+	if (!isInternalStorageFileName(attachment.fileName)) return attachment;
+	const fileName = resolveOutgoingDisplayFileName({
+		requested: attachment.fileName,
+		storagePath: attachment.fileName,
+		type,
+	});
+	return fileName === attachment.fileName ? attachment : { ...attachment, fileName };
+}
+
 /** Mutates and returns `messages`; pass a shallow copy when the entity is persisted afterwards. */
 export function prepareMessagesForClient<
 	T extends { raw?: unknown; attachments?: any; senderUser?: unknown },
@@ -53,6 +72,12 @@ export function prepareMessagesForClient<
 	}
 	redactMessagesRawForClient(messages);
 	for (const message of messages || []) {
+		if (message && Array.isArray(message.attachments)) {
+			const renamed = message.attachments.map(withOriginalFileName);
+			if (renamed.some((item: unknown, index: number) => item !== message.attachments[index])) {
+				message.attachments = renamed;
+			}
+		}
 		if (message && message.senderUser !== undefined) {
 			(message as { senderUser?: unknown }).senderUser = toWhatsAppClientUser(message.senderUser);
 		}

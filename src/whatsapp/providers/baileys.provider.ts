@@ -11,6 +11,10 @@ import {
 	WhatsAppProviderCapabilities,
 	WhatsAppProviderEvent,
 	WhatsAppEmbeddedQuote,
+	WhatsAppFetchMessageOptions,
+	WhatsAppNumberCheck,
+	WhatsAppNumberProfile,
+	WhatsAppProviderUnavailableError,
 	WhatsAppSendQuoteOptions,
 	WhatsAppSendTextOptions,
 } from './whatsapp-provider';
@@ -19,6 +23,7 @@ import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baile
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
+import { PhoneRequestGate, type PhoneRequestOutcome } from '../utils/whatsapp-phone-request-gate';
 import { normalizeBaileysPresenceUpdate } from '../utils/whatsapp-presence-normalize';
 import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
 import {
@@ -488,6 +493,30 @@ function waitMs(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** The gate refused for the whole account, so trying another id shape is pointless. */
+function phoneRequestBlocked(outcome: PhoneRequestOutcome) {
+	return (
+		outcome === 'skipped_background' ||
+		outcome === 'skipped_rate_limit' ||
+		outcome === 'skipped_phone_unresponsive'
+	);
+}
+
+function phoneReuploadErrorMessage(outcome: PhoneRequestOutcome) {
+	switch (outcome) {
+		case 'skipped_background':
+			return 'Media expired on WhatsApp servers; the phone is asked to re-upload only when you open it';
+		case 'skipped_phone_unresponsive':
+			return 'The phone is not answering media requests. Open WhatsApp on the phone, then retry in a few minutes';
+		case 'skipped_rate_limit':
+			return 'Too many media requests to the phone. Retry in a minute';
+		case 'skipped_duplicate':
+			return 'The phone was already asked to re-upload this media. Open WhatsApp on the phone, then retry';
+		default:
+			return 'The phone did not re-upload this media. Open WhatsApp on the phone, then retry';
+	}
+}
+
 /** True when a label is just an id/phone — not a real contact/group name. */
 function isWeakDisplayName(
 	name: string | null | undefined,
@@ -877,7 +906,14 @@ export class BaileysProvider implements WhatsAppProvider {
 		| ((providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>)
 		| null = null;
 
-	constructor(private readonly accountId: string) {}
+	/** Every request that makes the primary phone do work goes through this gate. */
+	private readonly phoneRequests: PhoneRequestGate;
+
+	constructor(private readonly accountId: string) {
+		this.phoneRequests = new PhoneRequestGate(accountId, {
+			log: (line) => this.logger.log?.(line),
+		});
+	}
 
 	onEvent(listener: (event: WhatsAppProviderEvent) => void | Promise<void>) {
 		this.listeners.add(listener);
@@ -1522,6 +1558,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private async hydrateStatusRaw(
 		providerStatusId: string,
 		senderWaId?: string | null,
+		allowPhoneRequest = false,
 	): Promise<any | null> {
 		let raw = this.resolveStatusRaw(providerStatusId, senderWaId);
 		if (raw?.message) return raw;
@@ -1563,22 +1600,27 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (sock?.requestPlaceholderResend && messageIds.length) {
 			for (const messageId of messageIds) {
 				if (!messageId || messageId.includes('@')) continue;
-				try {
-					await sock.requestPlaceholderResend({
-						remoteJid: 'status@broadcast',
-						id: messageId,
-						fromMe,
-						participant: participant || undefined,
-					});
-					await waitMs(2500);
-					raw =
-						this.resolveStatusRaw(providerStatusId, senderWaId) ||
-						this.statusRawById.get(messageId) ||
-						null;
-					if (raw?.message) return raw;
-				} catch {
-					/* try next id */
-				}
+				const outcome = await this.phoneRequests.run(
+					'placeholder_resend',
+					messageId,
+					async () => {
+						await sock.requestPlaceholderResend({
+							remoteJid: 'status@broadcast',
+							id: messageId,
+							fromMe,
+							participant: participant || undefined,
+						});
+						await waitMs(2500);
+						raw =
+							this.resolveStatusRaw(providerStatusId, senderWaId) ||
+							this.statusRawById.get(messageId) ||
+							null;
+						return Boolean(raw?.message);
+					},
+					{ background: !allowPhoneRequest },
+				);
+				if (outcome === 'ok' && raw?.message) return raw;
+				if (phoneRequestBlocked(outcome)) break;
 			}
 		}
 
@@ -1605,33 +1647,42 @@ export class BaileysProvider implements WhatsAppProvider {
 		return remembered;
 	}
 
+	/**
+	 * RAM and socket store first. Only `allowPhoneRequest` (a user opening this
+	 * message) may fall through to on-demand history / placeholder resend.
+	 */
 	async fetchMessage(
 		chatId: string,
 		providerMessageId: string,
+		options: WhatsAppFetchMessageOptions = {},
 	): Promise<NormalizedWhatsAppMessage | null> {
 		const id = String(providerMessageId || '').trim();
 		if (!id) return null;
+		const accept =
+			options.accept || ((message: NormalizedWhatsAppMessage | null) => Boolean(extractWhatsAppLocation(message)));
 		const located = this.messageWithLocation(this.findMessage(id));
-		if (extractWhatsAppLocation(located)) return located;
+		if (accept(located)) return located;
 
 		const loaded = await this.loadMessageFromSocket(chatId, id);
-		if (extractWhatsAppLocation(loaded)) return loaded;
+		if (accept(loaded)) return loaded;
 
 		try {
 			const recent = await this.getMessages(chatId, { limit: 200 });
 			const found = recent.find((item) => item.providerMessageId === id) || null;
 			if (found) this.rememberMessage(found);
 			const fromList = this.messageWithLocation(found);
-			if (extractWhatsAppLocation(fromList)) return fromList;
+			if (accept(fromList)) return fromList;
 		} catch {
 			/* RAM lookup only */
 		}
 
-		const fromHistory = await this.pullHistoryThenFind(chatId, id);
-		if (extractWhatsAppLocation(fromHistory)) return fromHistory;
+		if (options.allowPhoneRequest) {
+			const fromHistory = await this.pullHistoryThenFind(chatId, id);
+			if (accept(fromHistory)) return fromHistory;
 
-		const fromPhone = await this.requestMessageFromPhone(chatId, id);
-		if (extractWhatsAppLocation(fromPhone)) return fromPhone;
+			const fromPhone = await this.requestMessageFromPhone(chatId, id);
+			if (accept(fromPhone)) return fromPhone;
+		}
 
 		return this.messageWithLocation(this.findMessage(id)) || loaded || located;
 	}
@@ -1694,23 +1745,26 @@ export class BaileysProvider implements WhatsAppProvider {
 		const raw = this.rawByMessageId.get(providerMessageId);
 		const fromMe = Boolean(raw?.key?.fromMe ?? remembered?.fromMe);
 		const jids = this.loadMessageJids(chatId || remembered?.chatId || raw?.key?.remoteJid);
-		let requested = false;
-		for (const jid of jids) {
-			try {
-				await sock.requestPlaceholderResend({
-					remoteJid: toBaileysJid(jid) || jid,
-					id: providerMessageId,
-					fromMe,
-					participant: raw?.key?.participant || undefined,
-				});
-				requested = true;
-				break;
-			} catch {
-				/* try the next JID shape */
+		await this.phoneRequests.run('placeholder_resend', providerMessageId, async () => {
+			let requested = false;
+			for (const jid of jids) {
+				try {
+					await sock.requestPlaceholderResend({
+						remoteJid: toBaileysJid(jid) || jid,
+						id: providerMessageId,
+						fromMe,
+						participant: raw?.key?.participant || undefined,
+					});
+					requested = true;
+					break;
+				} catch {
+					/* try the next JID shape */
+				}
 			}
-		}
-		if (!requested) return null;
-		await waitMs(2000);
+			if (!requested) throw new Error('Placeholder resend was not accepted');
+			await waitMs(2000);
+			return Boolean(this.rawByMessageId.get(providerMessageId)?.message);
+		});
 		return this.messageWithLocation(this.findMessage(providerMessageId));
 	}
 
@@ -1751,12 +1805,17 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (typeof sock.fetchMessageHistory !== 'function') return null;
 		const anchor = this.historyAnchorForChat(chatId);
 		if (!anchor) return null;
-		try {
-			await sock.fetchMessageHistory(30, anchor.key, anchor.timestamp);
-		} catch {
-			return null;
-		}
-		await waitMs(1500);
+		const outcome = await this.phoneRequests.run(
+			'history_on_demand',
+			String(anchor.key.remoteJid || chatId),
+			async () => {
+				const chunksBefore = this.historySyncChunks;
+				await sock.fetchMessageHistory(30, anchor.key, anchor.timestamp);
+				await waitMs(1500);
+				return this.historySyncChunks > chunksBefore || Boolean(this.findMessage(providerMessageId));
+			},
+		);
+		if (outcome !== 'ok' && outcome !== 'no_response') return null;
 		return this.messageWithLocation(this.findMessage(providerMessageId));
 	}
 
@@ -2010,7 +2069,11 @@ export class BaileysProvider implements WhatsAppProvider {
 					sessionHadOpened: this.socketOpened,
 				});
 				this.logger.warn(
-					`Baileys connection closed for ${this.accountId} (${kind}, code=${statusCode || 'n/a'})`,
+					`[WA] connection account=${this.accountId} event=close kind=${kind} code=${
+						statusCode || 'n/a'
+					} uptimeMs=${this.connectedAtMs ? Date.now() - this.connectedAtMs : 0} reconnectAttempt=${
+						this.reconnectAttempt
+					} generation=${generation}`,
 				);
 				if (kind === 'logged_out') {
 					this.setState('error', {
@@ -2337,6 +2400,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			});
 		}
 		const delay = computeReconnectDelayMs(this.reconnectAttempt, minDelayMs);
+		this.logger.warn(
+			`[WA] connection account=${this.accountId} event=reconnect_scheduled attempt=${this.reconnectAttempt} delayMs=${delay}`,
+		);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			if (this.closing || this.opening) return;
@@ -2677,6 +2743,163 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.avatarUrlCache.set(cacheKey, { url: null, at: Date.now() });
 			trimMapToMax(this.avatarUrlCache, CACHE_MAX.avatarUrl);
 			return force || wantFull ? null : cached?.url || null;
+		}
+	}
+
+	private requireLiveSocket(feature: string, method: string) {
+		const socket = this.socket;
+		if (!socket || this.state !== 'connected') {
+			throw new WhatsAppProviderUnavailableError(
+				'not_connected',
+				'WhatsApp account is not connected',
+			);
+		}
+		if (typeof socket[method] !== 'function') {
+			throw new WhatsAppProviderUnavailableError(
+				'unsupported',
+				`This WhatsApp library version cannot ${feature}`,
+			);
+		}
+		return socket;
+	}
+
+	/** Phone-number JID for contact actions; LIDs are mapped back to their number. */
+	private contactPhoneJid(chatId: string): string {
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		if (id.endsWith('@c.us') || id.endsWith('@s.whatsapp.net')) return toBaileysJid(id);
+		const digits = String(this.lidToPn.get(id) || this.contacts.get(id)?.phoneNumber || '').replace(
+			/\D/g,
+			'',
+		);
+		if (!digits) {
+			throw new Error('No phone number is known for this chat');
+		}
+		return `${digits}@s.whatsapp.net`;
+	}
+
+	async checkWhatsAppNumbers(phoneDigits: string[]): Promise<WhatsAppNumberCheck[]> {
+		const socket = this.requireLiveSocket('check numbers', 'onWhatsApp');
+		const digits = [
+			...new Set(phoneDigits.map((value) => String(value || '').replace(/\D/g, '')).filter(Boolean)),
+		];
+		if (!digits.length) return [];
+		const results = await withTimeout(
+			socket.onWhatsApp(...digits.map((value) => `${value}@s.whatsapp.net`)) as Promise<
+				Array<{ jid?: string; exists?: boolean }> | undefined
+			>,
+			15_000,
+			'WhatsApp number check',
+		);
+		if (!Array.isArray(results)) {
+			throw new Error('WhatsApp did not answer the number check');
+		}
+		// Baileys only returns numbers that have an account; WhatsApp may answer with a
+		// slightly different user part (e.g. Brazil's 9th digit), so a single query takes
+		// the one answer instead of matching digits exactly.
+		const found = results
+			.filter((item) => item?.exists && item?.jid)
+			.map((item) => jidOf(String(item.jid)));
+		return digits.map((value) => {
+			const exact = found.find((jid) => jid.split('@')[0] === value);
+			const chatId = exact || (digits.length === 1 ? found[0] || null : null);
+			return { phoneDigits: value, exists: Boolean(chatId), chatId };
+		});
+	}
+
+	async getNumberProfile(chatId: string): Promise<WhatsAppNumberProfile> {
+		const socket = this.requireLiveSocket('read profiles', 'profilePictureUrl');
+		const id = jidOf(chatId) || String(chatId || '').trim();
+		const jid = toBaileysJid(id);
+		const refused = (error: any) => {
+			const code = Number(error?.data ?? error?.output?.statusCode);
+			const text = String(error?.message || '').toLowerCase();
+			return code === 401 || code === 404 || /not-authorized|item-not-found/.test(text);
+		};
+
+		const [picture, about, business] = await Promise.allSettled([
+			withTimeout(socket.profilePictureUrl(jid, 'image') as Promise<string | undefined>, 10_000, 'profile picture'),
+			typeof socket.fetchStatus === 'function'
+				? withTimeout(socket.fetchStatus(jid) as Promise<any[] | undefined>, 10_000, 'about')
+				: Promise.reject(new Error('unsupported')),
+			typeof socket.getBusinessProfile === 'function'
+				? withTimeout(socket.getBusinessProfile(jid) as Promise<any>, 10_000, 'business profile')
+				: Promise.reject(new Error('unsupported')),
+		]);
+
+		const pictureUrl =
+			picture.status === 'fulfilled' ? String(picture.value || '').trim() || null : null;
+		const aboutEntry =
+			about.status === 'fulfilled' && Array.isArray(about.value) ? about.value[0]?.status : null;
+		const aboutText = String(aboutEntry?.status || '').trim() || null;
+		const aboutSetAt =
+			aboutEntry?.setAt instanceof Date && aboutEntry.setAt.getTime() > 0 ? aboutEntry.setAt : null;
+		const biz = business.status === 'fulfilled' ? business.value : null;
+		const text = (value: unknown) => String(value || '').trim() || null;
+		const known = this.contacts.get(id) || this.contacts.get(jid) || null;
+
+		return {
+			picture: pictureUrl
+				? { status: 'available', url: pictureUrl }
+				: {
+						status:
+							picture.status === 'fulfilled' || refused((picture as PromiseRejectedResult).reason)
+								? 'hidden'
+								: 'error',
+						url: null,
+					},
+			about:
+				about.status === 'rejected'
+					? { status: refused(about.reason) ? 'hidden' : 'error', text: null, setAt: null }
+					: aboutText
+						? { status: 'available', text: aboutText, setAt: aboutSetAt }
+						: { status: 'hidden', text: null, setAt: null },
+			business:
+				business.status === 'rejected'
+					? { status: refused(business.reason) ? 'not_business' : 'error' }
+					: biz
+						? {
+								status: 'available',
+								description: text(biz.description),
+								category: text(biz.category),
+								email: text(biz.email),
+								websites: (Array.isArray(biz.website) ? biz.website : [])
+									.map((site: unknown) => String(site || '').trim())
+									.filter(Boolean),
+								address: text(biz.address),
+							}
+						: { status: 'not_business' },
+			pushName: text(known?.notify),
+			savedName: this.savedContactName(id),
+		};
+	}
+
+	async saveContactToWhatsApp(chatId: string, contact: { fullName: string; firstName?: string | null }) {
+		const socket = this.requireLiveSocket('write contacts', 'addOrEditContact');
+		const fullName = String(contact.fullName || '').trim();
+		if (!fullName) throw new Error('Contact name is required');
+		const jid = this.contactPhoneJid(chatId);
+		const lid = this.contacts.get(jidOf(jid))?.lid || null;
+		await withTimeout(
+			socket.addOrEditContact(jid, {
+				fullName,
+				firstName: String(contact.firstName || '').trim() || fullName.split(/\s+/)[0],
+				// Ask the primary phone to keep it in its own address book too.
+				saveOnPrimaryAddressbook: true,
+				...(lid ? { lidJid: toBaileysJid(lid) } : {}),
+			}) as Promise<void>,
+			20_000,
+			'WhatsApp contact save',
+		);
+		this.rememberContact({ id: jid, name: fullName, ...(lid ? { lid } : {}) });
+	}
+
+	async removeContactFromWhatsApp(chatId: string) {
+		const socket = this.requireLiveSocket('remove contacts', 'removeContact');
+		const jid = this.contactPhoneJid(chatId);
+		await withTimeout(socket.removeContact(jid) as Promise<void>, 20_000, 'WhatsApp contact removal');
+		for (const key of [jidOf(jid), jid]) {
+			const known = this.contacts.get(key);
+			if (known) this.contacts.set(key, { ...known, name: null });
 		}
 	}
 
@@ -3319,7 +3542,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async downloadMedia(
 		providerMessageId: string,
-		options: { rawHint?: any; toFile?: string } = {},
+		options: { rawHint?: any; toFile?: string; allowPhoneRequest?: boolean } = {},
 	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
@@ -3363,24 +3586,44 @@ export class BaileysProvider implements WhatsAppProvider {
 		const baileys = await loadBaileysModule();
 		const { downloadMediaMessage, downloadContentFromMessage, getUrlFromDirectPath } =
 			baileys as any;
+		const reuploadTimeoutMs =
+			Number(process.env.WHATSAPP_MEDIA_REUPLOAD_TIMEOUT_MS) || PHONE_REUPLOAD_TIMEOUT_MS;
+		const socket = this.socket;
+		const updateMediaMessage =
+			typeof socket.updateMediaMessage === 'function'
+				? async (message: any) => {
+						let refreshed: any = null;
+						const outcome = await this.phoneRequests.run(
+							'media_reupload',
+							id,
+							async () => {
+								refreshed = await withTimeout(
+									Promise.resolve(socket.updateMediaMessage(message)),
+									reuploadTimeoutMs,
+									'Phone media re-upload',
+								);
+								return Boolean(refreshed?.message);
+							},
+							{ background: !options.allowPhoneRequest },
+						);
+						if (outcome === 'ok') return refreshed;
+						throw new Error(phoneReuploadErrorMessage(outcome));
+					}
+				: undefined;
 		const downloaded = await downloadLinkedDeviceMedia(
 			raw,
 			{ id, toFile: options.toFile || null },
 			{
 				downloadContentFromMessage,
 				downloadMediaMessage,
-				updateMediaMessage:
-					typeof this.socket.updateMediaMessage === 'function'
-						? (message) => this.socket.updateMediaMessage(message)
-						: undefined,
+				updateMediaMessage,
 				getUrlFromDirectPath,
 				logger: this.logger,
 				timeoutMs:
 					Number(process.env.WHATSAPP_MEDIA_DOWNLOAD_TIMEOUT_MS) ||
 					DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
 				maxBytes: Number(process.env.WHATSAPP_MEDIA_MAX_BYTES) || DEFAULT_MEDIA_MAX_BYTES,
-				reuploadTimeoutMs:
-					Number(process.env.WHATSAPP_MEDIA_REUPLOAD_TIMEOUT_MS) || PHONE_REUPLOAD_TIMEOUT_MS,
+				reuploadTimeoutMs,
 			},
 		);
 		this.rawByMessageId.set(id, downloaded.raw || raw);
@@ -3389,13 +3632,18 @@ export class BaileysProvider implements WhatsAppProvider {
 		return { data: downloaded.data };
 	}
 
-	async downloadStatus(providerStatusId: string, senderWaId?: string | null) {
-		let raw = await this.hydrateStatusRaw(providerStatusId, senderWaId);
+	async downloadStatus(
+		providerStatusId: string,
+		senderWaId?: string | null,
+		options: { allowPhoneRequest?: boolean } = {},
+	) {
+		const allowPhoneRequest = options.allowPhoneRequest === true;
+		const raw = await this.hydrateStatusRaw(providerStatusId, senderWaId, allowPhoneRequest);
 		if (!raw?.message) {
 			throw new Error('Status media is not available in the current session cache');
 		}
 		const id = String(raw?.key?.id || providerStatusId || '').trim();
-		return this.downloadMedia(id, { rawHint: raw });
+		return this.downloadMedia(id, { rawHint: raw, allowPhoneRequest });
 	}
 
 	async getStatuses() {

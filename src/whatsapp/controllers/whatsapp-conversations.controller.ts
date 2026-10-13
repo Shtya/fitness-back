@@ -573,6 +573,7 @@ export class WhatsAppConversationsController {
 		return this.sync.sendMedia(req.user, conversationId, {
 			type: body.type,
 			fileId: body.fileId,
+			fileName: body.fileName,
 			caption: body.caption,
 			quotedProviderMessageId: body.quotedProviderMessageId,
 			clientMessageId: body.clientMessageId,

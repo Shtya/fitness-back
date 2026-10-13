@@ -97,6 +97,30 @@ describe('whatsapp client payload', () => {
 		expect(message.replyTo).toBe(replyTo);
 	});
 
+	it('shows the original name for rows saved with an internal storage name', () => {
+		const shared = { id: 'a1', type: 'document', fileName: 'share_1791833788952_b722a5c7_Plan.docx' };
+		const uploaded = { id: 'a2', type: 'document', fileName: '1791833788952-x7k2p9qa.pdf' };
+		const original = { id: 'a3', type: 'document', fileName: 'تقرير.xlsx' };
+		const voice = { id: 'a4', type: 'ptt', fileName: '1791833788952-x7k2p9qa-voice-12s.ogg' };
+		const [message] = prepareMessagesForClient([
+			{ id: 'm8', raw: null, attachments: [shared, uploaded, original, voice] },
+		]) as any[];
+		expect(message.attachments.map((a: any) => a.fileName)).toEqual([
+			'Plan.docx',
+			'document.pdf',
+			'تقرير.xlsx',
+			'1791833788952-x7k2p9qa-voice-12s.ogg',
+		]);
+		expect(message.attachments[2]).toBe(original);
+		expect(shared.fileName).toBe('share_1791833788952_b722a5c7_Plan.docx');
+	});
+
+	it('keeps the attachments array when no name needs fixing', () => {
+		const attachments = [{ id: 'a5', type: 'document', fileName: 'Plan.docx' }];
+		const [message] = prepareMessagesForClient([{ id: 'm9', raw: null, attachments }]) as any[];
+		expect(message.attachments).toBe(attachments);
+	});
+
 	it('flags key-only view-once stubs from linked devices', () => {
 		const [message] = prepareMessagesForClient([
 			{ id: 'm4', raw: { protocol: 'baileys', id: 'X', isViewOnce: true } },

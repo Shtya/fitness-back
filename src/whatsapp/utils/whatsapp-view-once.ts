@@ -16,6 +16,8 @@ export function isWhatsAppViewOnceRaw(raw: unknown): boolean {
 	const source = raw as Record<string, any>;
 	// WPPConnect payloads flag it on the message itself.
 	if (source.isViewOnce === true) return true;
+	// Linked devices get `<unavailable type="view_once"/>` with no content; Baileys flags the key.
+	if (source.key?.isViewOnce === true) return true;
 	const message = unwrapEphemeral(source.message);
 	if (!message) return false;
 	if (VIEW_ONCE_WRAPPERS.some((key) => message[key])) return true;

@@ -88,6 +88,7 @@ import {
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
+import { resolveOutgoingDisplayFileName } from '../utils/whatsapp-display-file-name';
 import { isWhatsAppViewOnceQuoted, isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
@@ -4949,7 +4950,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						String((message as any)?.raw?.key?.remoteJid || '').trim() ||
 						conversationChatId;
 					if (chatId && message.providerMessageId) {
-						live = await provider.fetchMessage(chatId, message.providerMessageId);
+						live = await provider.fetchMessage(chatId, message.providerMessageId, {
+							allowPhoneRequest: true,
+						});
 						location = live?.location || extractWhatsAppLocation(live);
 					}
 				}
@@ -5001,7 +5004,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 								'',
 						).trim() || conversationChatId;
 					if (chatId && message.providerMessageId) {
-						live = await provider.fetchMessage(chatId, message.providerMessageId);
+						// Runs in the background on every chat open: never wake the phone.
+						live = await provider.fetchMessage(chatId, message.providerMessageId, {
+							accept: (candidate) => {
+								const normalized = candidate ? enrichContactMessageNormalized(candidate) : null;
+								return Boolean(
+									normalized &&
+										extractSharedContactFromRaw(normalized.raw, normalized.text)?.phones?.length,
+								);
+							},
+							allowPhoneRequest: false,
+						});
 						enriched = live ? enrichContactMessageNormalized(live) : null;
 						shared = enriched
 							? extractSharedContactFromRaw(enriched.raw, enriched.text)
@@ -6054,6 +6067,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			await this.sendMedia(user, targetConversationId, {
 				type: sendType,
 				fileId,
+				fileName: primary.fileName,
 				caption: sendType === 'sticker' || sendType === 'voice' ? undefined : caption,
 				embeddedQuote: embeddedQuote || undefined,
 			});
@@ -7155,6 +7169,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		input: {
 			type: string;
 			fileId: string;
+			/** Original name the user picked; the stored file has an internal unique name. */
+			fileName?: string | null;
 			caption?: string;
 			quotedProviderMessageId?: string;
 			embeddedQuote?: WhatsAppEmbeddedQuote;
@@ -7201,7 +7217,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			guessMimeFromPath(absolutePath, input.type) ||
 			(input.type === 'voice' || input.type === 'audio' ? 'audio/ogg; codecs=opus' : null);
 		let sendPath = absolutePath;
-		let sendFileName = path.basename(absolutePath);
+		// Voice notes keep the storage name: its `voice-<n>s` tag carries the duration.
+		let sendFileName =
+			input.type === 'voice'
+				? path.basename(absolutePath)
+				: resolveOutgoingDisplayFileName({
+						requested: input.fileName,
+						storagePath: absolutePath,
+						type: input.type,
+					});
 		let durablePath = absolutePath;
 		if (input.type === 'voice') {
 			const alreadyValid = await isValidWhatsAppVoiceOggFile(absolutePath).catch(() => false);
@@ -7290,7 +7314,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					{
 						type: attachmentType,
 						mimeType: mimeGuess,
-						fileName: path.basename(durablePath),
+						fileName: sendFileName,
 						fileSizeBytes: stat.size,
 						providerMediaId: id,
 					},
@@ -7313,7 +7337,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			sourcePath: durablePath,
 			mimeType: mimeGuess,
 			attachmentType,
-			fileName: path.basename(durablePath),
+			fileName: sendFileName,
 			fileSizeBytes: stat.size,
 		});
 		const refreshed = await this.messageRepo.findOne({
@@ -7618,6 +7642,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return await this.sendMedia(user, conversationId, {
 				type: options.type as any,
 				fileId: path.relative(root, outgoingPath).replace(/\\/g, '/'),
+				fileName: options.fileName,
 				clientMessageId: options.clientMessageId,
 			});
 		} catch (error) {
@@ -7685,10 +7710,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	warmAttachment(user: User, attachmentId: string, attachment?: WhatsAppMessageAttachment) {
 		if (attachment?.storagePath && attachment.downloadStatus === 'downloaded') return;
-		void this.downloadAttachment(user, attachmentId).catch(() => undefined);
+		// Prefetch for whatever the chat rendered: expired media waits for an explicit open.
+		void this.downloadAttachment(user, attachmentId, { allowPhoneRequest: false }).catch(
+			() => undefined,
+		);
 	}
 
-	async downloadAttachment(user: User, attachmentId: string) {
+	async downloadAttachment(
+		user: User,
+		attachmentId: string,
+		options: { allowPhoneRequest?: boolean } = {},
+	) {
 		const attachment = await this.attachmentRepo.findOne({
 			where: { id: attachmentId },
 			relations: ['message'],
@@ -7701,7 +7733,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.clearScheduledMediaRetry(attachmentId);
 		this.mediaDownloadGaveUp.delete(attachmentId);
 		this.mediaDownloadAttempts.delete(attachmentId);
-		const download = this.downloadAttachmentInternal(attachment).finally(() => {
+		const download = this.downloadAttachmentInternal(attachment, {
+			allowPhoneRequest: options.allowPhoneRequest !== false,
+		}).finally(() => {
 			this.attachmentDownloads.delete(attachmentId);
 		});
 		this.attachmentDownloads.set(attachmentId, download);
@@ -7755,7 +7789,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 	private async downloadAttachmentInternal(
 		attachment: WhatsAppMessageAttachment,
-		options: { reconnectWaitMs?: number; background?: boolean } = {},
+		options: {
+			reconnectWaitMs?: number;
+			background?: boolean;
+			/** A user asked for this file; expired media may be re-uploaded by the phone. */
+			allowPhoneRequest?: boolean;
+		} = {},
 	) {
 		if (options.background && this.mediaDownloadGaveUp.has(attachment.id)) {
 			return { ok: false, supported: true };
@@ -7903,7 +7942,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			let rawHint = attachment.message?.raw || null;
 			const attemptDownload = async (hint: any) =>
 				this.withMediaDownloadSlot(() =>
-					provider.downloadMedia(mediaId, { rawHint: hint, toFile }),
+					provider.downloadMedia(mediaId, {
+						rawHint: hint,
+						toFile,
+						allowPhoneRequest: options.allowPhoneRequest === true,
+					}),
 				);
 
 			let data: any;
