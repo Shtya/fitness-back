@@ -43,6 +43,7 @@ const DEMO_MEDIA_TYPES: Record<string, { kind: DemoAttachmentKind; extension: st
   'audio/ogg': { kind: DemoAttachmentKind.AUDIO, extension: 'ogg' },
   'audio/webm': { kind: DemoAttachmentKind.AUDIO, extension: 'webm' },
   'audio/mp4': { kind: DemoAttachmentKind.AUDIO, extension: 'm4a' },
+  'audio/wav': { kind: DemoAttachmentKind.AUDIO, extension: 'wav' },
   'application/pdf': { kind: DemoAttachmentKind.DOCUMENT, extension: 'pdf' },
   'application/msword': { kind: DemoAttachmentKind.DOCUMENT, extension: 'doc' },
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {
@@ -67,11 +68,12 @@ const DEFAULT_FLAGS = {
   randomTyping: false,
   randomDelays: false,
   hideDemoBadge: false,
+  showcaseOnly: false,
 };
 
 type Owner = { userId: string; tenantAdminId: string };
 
-function hasDemoMediaSignature(buffer: Buffer, mimeType: string): boolean {
+export function hasDemoMediaSignature(buffer: Buffer, mimeType: string): boolean {
   if (!buffer.length) return false;
   const ascii = (start: number, end: number) => buffer.subarray(start, end).toString('ascii');
   switch (mimeType) {
@@ -89,6 +91,8 @@ function hasDemoMediaSignature(buffer: Buffer, mimeType: string): boolean {
       return buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
     case 'audio/ogg':
       return ascii(0, 4) === 'OggS';
+    case 'audio/wav':
+      return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE';
     case 'audio/mpeg':
       return ascii(0, 3) === 'ID3' || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0);
     case 'application/pdf':

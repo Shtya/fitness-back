@@ -14,7 +14,7 @@ import {
   WhatsAppDemoSettings,
 } from './entities/whatsapp-demo.entity';
 import { WHATSAPP_DEMO_ENTITIES } from './whatsapp-demo.module';
-import { WhatsAppDemoService } from './whatsapp-demo.service';
+import { WhatsAppDemoService, hasDemoMediaSignature } from './whatsapp-demo.service';
 
 const ENTITIES = [
   WhatsAppDemoSettings,
@@ -121,5 +121,20 @@ describe('WhatsAppDemoService tenant isolation', () => {
       Repository.name,
       DataSource.name,
     ]);
+  });
+});
+
+describe('hasDemoMediaSignature', () => {
+  const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVEfmt ')]);
+
+  it('accepts a RIFF/WAVE header for audio/wav', () => {
+    expect(hasDemoMediaSignature(wav, 'audio/wav')).toBe(true);
+  });
+
+  it('rejects other RIFF payloads and mismatched types', () => {
+    const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]);
+    expect(hasDemoMediaSignature(webp, 'audio/wav')).toBe(false);
+    expect(hasDemoMediaSignature(wav, 'image/webp')).toBe(false);
+    expect(hasDemoMediaSignature(Buffer.from('%PDF-1.4'), 'audio/wav')).toBe(false);
   });
 });

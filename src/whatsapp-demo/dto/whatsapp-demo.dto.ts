@@ -36,6 +36,7 @@ export class DemoFlagsDto {
   @IsOptional() @IsBoolean() randomTyping?: boolean;
   @IsOptional() @IsBoolean() randomDelays?: boolean;
   @IsOptional() @IsBoolean() hideDemoBadge?: boolean;
+  @IsOptional() @IsBoolean() showcaseOnly?: boolean;
 }
 
 export class UpdateDemoSettingsDto {
