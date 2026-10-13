@@ -83,6 +83,7 @@ import {
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
+import { isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
 	isWeakWhatsAppContactName,
@@ -122,6 +123,7 @@ function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | 
 		'live_location',
 		'contact',
 		'poll',
+		'view_once',
 	].includes(type);
 }
 
@@ -508,7 +510,9 @@ const CONVERSATION_PREVIEW_MEDIA_TYPES = [
 	'contact',
 	'contacts',
 	'poll',
+	'view_once',
 ];
+const VIEW_ONCE_CAPABLE_TYPES = new Set(['image', 'photo', 'video', 'audio', 'ptt', 'voice']);
 
 /** Effective preference column for rows joined by `joinConversationPreferences`. */
 const PREFERENCE_COALESCE = (column: string) =>
@@ -518,6 +522,7 @@ type ConversationPreviewMessage = Pick<
 	WhatsAppMessage,
 	'id' | 'providerMessageId' | 'text' | 'type' | 'direction' | 'status' | 'providerTimestamp'
 > & {
+	isViewOnce?: boolean;
 	reactions?: Array<{
 		id?: string;
 		actorKey: string;
@@ -674,6 +679,9 @@ function providerMessageId(value: any): string {
 
 function safeProviderMetadata(raw: any) {
 	if (!raw || typeof raw !== 'object') return null;
+	if (!raw.message && (raw.isViewOnce === true || raw.key?.isViewOnce === true)) {
+		return { protocol: 'baileys', id: providerMessageId(raw) || undefined, isViewOnce: true };
+	}
 	// Baileys WAMessage (live) or already sanitized envelope.
 	if (raw.protocol === 'baileys') {
 		return (
@@ -3237,9 +3245,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					normalized.contactName ||
 					conversation.contact?.phoneNumber ||
 					'New WhatsApp message';
+				const viewOnce =
+					normalized.type === 'view_once' || isWhatsAppViewOnceRaw(normalized.raw);
 				const message =
-					normalized.text?.trim().slice(0, 240) ||
-					(normalized.type === 'image'
+					(viewOnce ? '' : normalized.text?.trim().slice(0, 240)) ||
+					(viewOnce
+						? 'View once message'
+						: normalized.type === 'image'
 						? 'Photo'
 						: normalized.type === 'ptt' ||
 							  normalized.type === 'audio' ||
@@ -4269,13 +4281,42 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				reactionsByMessageId.set(reaction.messageId, list);
 			}
 		}
+		const viewOnceIds = await this.findViewOncePreviewIds(rows);
 		for (const { conversationId, ...message } of rows) {
+			const viewOnce = viewOnceIds.has(message.id);
 			byConversationId.set(conversationId, {
 				...message,
+				...(viewOnce ? { text: null, isViewOnce: true } : null),
 				reactions: reactionsByMessageId.get(message.id) || [],
 			});
 		}
 		return byConversationId;
+	}
+
+	/** The jsonb is read only for media previews, by primary key, so the list query stays light. */
+	private async findViewOncePreviewIds(rows: Array<Pick<ConversationPreviewMessage, 'id' | 'type'>>) {
+		const ids = new Set<string>();
+		const mediaIds: string[] = [];
+		for (const row of rows) {
+			const type = String(row.type || '').toLowerCase();
+			if (type === 'view_once') ids.add(row.id);
+			else if (row.id && VIEW_ONCE_CAPABLE_TYPES.has(type)) mediaIds.push(row.id);
+		}
+		if (!mediaIds.length) return ids;
+		const flagged: Array<{ id: string }> = await this.messageRepo.query(
+			`SELECT m.id FROM whatsapp_messages m
+			WHERE m.id = ANY($1::uuid[])
+				AND (
+					m.raw->>'isViewOnce' = 'true'
+					OR m.raw->'message'->'imageMessage'->>'viewOnce' = 'true'
+					OR m.raw->'message'->'videoMessage'->>'viewOnce' = 'true'
+					OR m.raw->'message'->'audioMessage'->>'viewOnce' = 'true'
+					OR m.raw->'message' ?| ARRAY['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension']
+				)`,
+			[mediaIds],
+		);
+		for (const row of flagged) ids.add(row.id);
+		return ids;
 	}
 
 	private async countArchivedConversations(
@@ -5792,6 +5833,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				'Messages can only be forwarded within the same WhatsApp account',
 			);
 		}
+		this.assertNotViewOnce(source.message);
 		await source.provider.forwardMessage(
 			target.conversation.providerChatId,
 			source.message.providerMessageId,
@@ -5850,6 +5892,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const results: Array<{ messageId: string; ok: boolean; error?: string }> = [];
 		for (const message of ordered) {
 			try {
+				this.assertNotViewOnce(message);
 				await this.resendMessageAsOriginal(user, targetConversationId, message);
 				results.push({ messageId: message.id, ok: true });
 				await new Promise(resolve => setTimeout(resolve, 180));
@@ -7452,6 +7495,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	 * attachment from `assertAttachmentVisible` to skip already-cached media —
 	 * otherwise a batch of 60 signed URLs re-stats 60 files for nothing.
 	 */
+	private assertNotViewOnce(message: { raw?: unknown } | null | undefined) {
+		if (message && isWhatsAppViewOnceRaw(message.raw)) {
+			throw new ForbiddenException('View once media can only be opened on the phone');
+		}
+	}
+
 	warmAttachment(user: User, attachmentId: string, attachment?: WhatsAppMessageAttachment) {
 		if (attachment?.storagePath && attachment.downloadStatus === 'downloaded') return;
 		void this.downloadAttachment(user, attachmentId).catch(() => undefined);
@@ -7464,6 +7513,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		if (!attachment) throw new NotFoundException('WhatsApp attachment not found');
 		await this.assertConversationVisible(user, attachment.message.conversationId);
+		this.assertNotViewOnce(attachment.message);
 		const inFlight = this.attachmentDownloads.get(attachmentId);
 		if (inFlight) return inFlight;
 		this.clearScheduledMediaRetry(attachmentId);
@@ -7545,6 +7595,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			relations: ['message'],
 		});
 		if (fresh?.message) attachment = fresh;
+		if (isWhatsAppViewOnceRaw(attachment.message?.raw)) {
+			return { ok: false, supported: false, viewOnce: true };
+		}
 
 		if (attachment.storagePath && attachment.downloadStatus === 'downloaded') {
 			const cachedPath = path.resolve(process.cwd(), attachment.storagePath);
@@ -7931,6 +7984,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			relations: ['message'],
 		});
 		if (!attachment) throw new NotFoundException('WhatsApp attachment not found');
+		this.assertNotViewOnce(attachment.message);
 
 		const resolveExisting = async () => {
 			if (!attachment.storagePath || attachment.downloadStatus !== 'downloaded') {

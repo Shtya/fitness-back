@@ -76,7 +76,7 @@ describe('WhatsAppSyncService read paths (audit P2)', () => {
 			{} as any, // participantRepo
 			messageRepo as any,
 			attachmentRepo as any,
-			{} as any, // reactionRepo
+			{ query: jest.fn().mockResolvedValue([]) } as any, // reactionRepo
 			access,
 			providers as any,
 			gateway as any,
@@ -130,8 +130,55 @@ describe('WhatsAppSyncService read paths (audit P2)', () => {
 				direction: 'inbound',
 				status: 'read',
 				providerTimestamp: at,
+				reactions: [],
 			});
 			expect(result.has('c2')).toBe(false);
+		});
+
+		it('hides view-once captions and reads raw only for media previews, by id', async () => {
+			const { service, messageRepo } = createService();
+			const at = new Date('2026-09-28T10:00:00Z');
+			const row = (conversationId: string, id: string, type: string, text: string | null) => ({
+				conversationId,
+				id,
+				providerMessageId: `P-${id}`,
+				text,
+				type,
+				direction: 'inbound',
+				status: 'delivered',
+				providerTimestamp: at,
+			});
+			messageRepo.query
+				.mockResolvedValueOnce([
+					row('c1', 'm-stub', 'view_once', null),
+					row('c2', 'm-photo', 'image', 'secret caption'),
+					row('c3', 'm-plain', 'image', 'holiday'),
+					row('c4', 'm-text', 'text', 'hello'),
+				])
+				.mockResolvedValueOnce([{ id: 'm-photo' }]);
+
+			const result = await (service as any).findLastPreviewMessages(['c1', 'c2', 'c3', 'c4']);
+
+			expect(messageRepo.query).toHaveBeenCalledTimes(2);
+			const [listSql] = messageRepo.query.mock.calls[0];
+			const [flagSql, flagParams] = messageRepo.query.mock.calls[1];
+			expect(listSql).not.toMatch(/\braw\b/);
+			expect(flagSql).toMatch(/m\.id = ANY\(\$1::uuid\[\]\)/);
+			expect(flagParams[0]).toEqual(['m-photo', 'm-plain']);
+			expect(result.get('c1')).toMatchObject({ isViewOnce: true, text: null });
+			expect(result.get('c2')).toMatchObject({ isViewOnce: true, text: null });
+			expect(result.get('c3').isViewOnce).toBeUndefined();
+			expect(result.get('c3').text).toBe('holiday');
+			expect(result.get('c4').text).toBe('hello');
+		});
+
+		it('skips the raw lookup when no preview is media', async () => {
+			const { service, messageRepo } = createService();
+			messageRepo.query.mockResolvedValueOnce([
+				{ conversationId: 'c1', id: 'm1', text: 'hi', type: 'text', providerTimestamp: new Date() },
+			]);
+			await (service as any).findLastPreviewMessages(['c1']);
+			expect(messageRepo.query).toHaveBeenCalledTimes(1);
 		});
 	});
 

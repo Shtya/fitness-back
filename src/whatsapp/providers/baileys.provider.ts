@@ -1759,12 +1759,15 @@ export class BaileysProvider implements WhatsAppProvider {
 		const remoteJid = jidOf(raw?.key?.remoteJid);
 		const remoteJidAlt = jidOf(raw?.key?.remoteJidAlt);
 		const id = String(raw?.key?.id || '').trim();
-		if (!remoteJid || !id || !raw?.message) return null;
+		// Linked devices never receive view-once content: WhatsApp sends an
+		// <unavailable type="view_once"/> stanza that Baileys surfaces as a key-only stub.
+		const viewOnceStub = !raw?.message && raw?.key?.isViewOnce === true;
+		if (!remoteJid || !id || (!raw?.message && !viewOnceStub)) return null;
 		if (isStatusBroadcastJid(remoteJid)) return null;
 
-		const content = unwrapMessageContent(raw.message);
-		if (isControlOnlyContent(content)) return null;
-		const type = detectType(content);
+		const content = viewOnceStub ? {} : unwrapMessageContent(raw.message);
+		if (!viewOnceStub && isControlOnlyContent(content)) return null;
+		const type = viewOnceStub ? 'view_once' : detectType(content);
 		const text = messageText(content) || null;
 		const contextInfo = contextInfoOf(content);
 		const quoted = contextInfo?.stanzaId || null;
@@ -1785,6 +1788,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			});
 		}
 		if (
+			!viewOnceStub &&
 			type === 'text' &&
 			!String(text || '')
 				.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\u00AD]/g, '')
@@ -1827,8 +1831,8 @@ export class BaileysProvider implements WhatsAppProvider {
 			// Never use your own pushName to title the peer conversation.
 			contactName: fromMe ? null : raw.pushName || null,
 			attachments,
-			location: extractWhatsAppLocation({ type, raw }),
-			raw,
+			location: viewOnceStub ? null : extractWhatsAppLocation({ type, raw }),
+			raw: viewOnceStub ? { ...raw, isViewOnce: true } : raw,
 		});
 	}
 

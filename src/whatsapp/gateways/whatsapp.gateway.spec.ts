@@ -319,10 +319,11 @@ describe('WhatsAppGateway JWT expiry (A8)', () => {
 	let gateway: WhatsAppGateway;
 	let jwt: { verify: jest.Mock };
 	let users: { findOne: jest.Mock };
+	const USER_ID = '6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f';
 
 	beforeEach(async () => {
 		jwt = { verify: jest.fn() };
-		users = { findOne: jest.fn().mockResolvedValue({ id: 'user-1', name: 'Staff' }) };
+		users = { findOne: jest.fn().mockResolvedValue({ id: USER_ID, name: 'Staff' }) };
 		const moduleRef = await Test.createTestingModule({
 			providers: [
 				WhatsAppGateway,
@@ -350,7 +351,7 @@ describe('WhatsAppGateway JWT expiry (A8)', () => {
 
 	it('disconnects the socket when its token expires and clears the timer on disconnect', async () => {
 		jest.useFakeTimers({ now: 1_000_000 });
-		jwt.verify.mockReturnValue({ id: 'user-1', exp: (1_000_000 + 60_000) / 1000 });
+		jwt.verify.mockReturnValue({ id: USER_ID, exp: (1_000_000 + 60_000) / 1000 });
 		const client = socketClient();
 
 		await gateway.handleConnection(client as any);
@@ -366,7 +367,7 @@ describe('WhatsAppGateway JWT expiry (A8)', () => {
 
 	it('rejects later events from a socket whose token has expired', async () => {
 		jest.useFakeTimers({ now: 1_000_000 });
-		jwt.verify.mockReturnValue({ id: 'user-1', exp: (1_000_000 + 1_000) / 1000 });
+		jwt.verify.mockReturnValue({ id: USER_ID, exp: (1_000_000 + 1_000) / 1000 });
 		const client = socketClient();
 		await gateway.handleConnection(client as any);
 		gateway.handleDisconnect(client as any);

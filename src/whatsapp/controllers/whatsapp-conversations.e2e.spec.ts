@@ -93,6 +93,8 @@ describe('WhatsApp conversations API (isolated HTTP integration)', () => {
 			'hello',
 			undefined,
 			undefined,
+			undefined,
+			undefined,
 		);
 	});
 

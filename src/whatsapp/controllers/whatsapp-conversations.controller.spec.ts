@@ -71,6 +71,8 @@ describe('WhatsAppConversationsController', () => {
 			'hello',
 			'quoted-1',
 			undefined,
+			undefined,
+			undefined,
 		);
 		expect(sync.sendMedia).not.toHaveBeenCalled();
 	});

@@ -1,4 +1,5 @@
 import { redactMessagesRawForClient } from './whatsapp-raw-redact';
+import { isWhatsAppViewOnceRaw, stripViewOnceRawPreview } from './whatsapp-view-once';
 
 export type WhatsAppClientUser = { id: string; name: string | null; role: string | null };
 
@@ -14,6 +15,25 @@ export function toWhatsAppClientUser(user: unknown): WhatsAppClientUser | null {
 export function prepareMessagesForClient<
 	T extends { raw?: unknown; attachments?: any; senderUser?: unknown },
 >(messages: T[]): T[] {
+	for (const message of messages || []) {
+		if (!message || !isWhatsAppViewOnceRaw(message.raw)) continue;
+		const target = message as T & {
+			isViewOnce?: boolean;
+			raw?: unknown;
+			attachments?: any;
+			text?: string | null;
+		};
+		target.isViewOnce = true;
+		target.text = null;
+		target.raw = stripViewOnceRawPreview(target.raw);
+		if (Array.isArray(target.attachments)) {
+			target.attachments = target.attachments.map((attachment: any) => {
+				if (!attachment || typeof attachment !== 'object') return attachment;
+				const { previewDataUrl: _preview, thumbnailUrl: _thumb, ...rest } = attachment;
+				return { ...rest, viewOnce: true };
+			});
+		}
+	}
 	redactMessagesRawForClient(messages);
 	for (const message of messages || []) {
 		if (message && message.senderUser !== undefined) {
