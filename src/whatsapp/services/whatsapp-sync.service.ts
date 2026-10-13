@@ -51,6 +51,11 @@ import {
 	whatsAppReceiptBaseKey,
 } from '../utils/whatsapp-group-receipts';
 import { sanitizeWhatsAppOutboundMentions } from '../utils/whatsapp-outbound-mentions';
+import {
+	isStatusReactionText,
+	statusActorKey,
+	statusQuoteFromContextInfo,
+} from '../utils/whatsapp-status-interactions';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation, mergeLocationIntoRaw } from '../utils/whatsapp-location';
 import {
@@ -83,7 +88,7 @@ import {
 } from '../utils/whatsapp-time';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
-import { isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
+import { isWhatsAppViewOnceQuoted, isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
 import {
 	isWeakWhatsAppContactName,
@@ -364,15 +369,24 @@ function baileysContextInfo(raw: any): any {
 	);
 }
 
+function quotedIsViewOnce(raw: any): boolean {
+	return isWhatsAppViewOnceQuoted(baileysContextInfo(raw)?.quotedMessage);
+}
+
 function quotedPreviewFromRaw(raw: any): string | null {
 	const quoted = baileysContextInfo(raw)?.quotedMessage;
-	if (!quoted) return null;
+	if (!quoted || isWhatsAppViewOnceQuoted(quoted)) return null;
 	return mediaPreviewDataUrlFromRaw({ message: quoted, protocol: 'baileys' });
 }
 
 function quotedTypeFromRaw(raw: any): string | null {
-	const quoted = baileysContextInfo(raw)?.quotedMessage;
-	if (!quoted || typeof quoted !== 'object') return null;
+	const context = baileysContextInfo(raw)?.quotedMessage;
+	if (!context || typeof context !== 'object') return null;
+	const quoted =
+		context.viewOnceMessage?.message ||
+		context.viewOnceMessageV2?.message ||
+		context.viewOnceMessageV2Extension?.message ||
+		context;
 	if (quoted.imageMessage) return 'image';
 	if (quoted.videoMessage) return 'video';
 	if (quoted.stickerMessage) return 'sticker';
@@ -385,7 +399,7 @@ function quotedTypeFromRaw(raw: any): string | null {
 
 function quotedTextFromRaw(raw: any): string | null {
 	const quoted = baileysContextInfo(raw)?.quotedMessage;
-	if (!quoted || typeof quoted !== 'object') return null;
+	if (!quoted || typeof quoted !== 'object' || isWhatsAppViewOnceQuoted(quoted)) return null;
 	const text =
 		quoted.conversation ||
 		quoted.extendedTextMessage?.text ||
@@ -1047,13 +1061,27 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				this.rememberMessagePersistLane(accountId, event.message.providerMessageId, lane);
 			}
 			this.enqueuePersist(
-				() =>
-					this.persistMessage(accountId, event.message, null, true, {
+				async () => {
+					const saved = await this.persistMessage(accountId, event.message, null, true, {
 						emitEvents: true,
-					}),
+					});
+					await this.recordStatusReactionFromMessage(accountId, event.message, saved?.id);
+				},
 				context,
 				(error) => this.deadLetters?.add(accountId, event.message, context, error),
 				lane,
+			);
+			return;
+		}
+		if (event.type === 'status_receipts') {
+			this.enqueuePersist(
+				() =>
+					this.statusService.recordStatusViewers(
+						accountId,
+						event.statusMessageId,
+						event.receipts,
+					),
+				`status_receipts:${accountId}:${event.statusMessageId}`,
 			);
 			return;
 		}
@@ -5131,10 +5159,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 			}
 		}
+		const viewOnce =
+			quoted.type === 'view_once' ||
+			isWhatsAppViewOnceRaw((quoted as any)?.raw) ||
+			quotedIsViewOnce(parentRaw);
 		return {
 			id: quoted.id,
 			providerMessageId: quoted.providerMessageId,
-			text: quoted.text,
+			text: viewOnce ? null : quoted.text,
 			type: quoted.type,
 			direction: quoted.direction,
 			durationSeconds: durationSeconds || durationFromAttachment || null,
@@ -5146,19 +5178,42 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						(quoted as any).raw?.pushName ||
 						'',
 				).trim() || null,
-			previewDataUrl:
-				mediaPreviewDataUrlFromRaw((quoted as any)?.raw) ||
-				quotedPreviewFromRaw(parentRaw) ||
-				null,
+			previewDataUrl: viewOnce
+				? null
+				: mediaPreviewDataUrlFromRaw((quoted as any)?.raw) ||
+					quotedPreviewFromRaw(parentRaw) ||
+					null,
+			...(viewOnce ? { isViewOnce: true } : null),
 		};
 	}
 
 	private attachReplyPreviews(messages: WhatsAppMessage[]) {
 		for (const message of messages || []) {
 			const raw = (message as any)?.raw;
+			const storyQuote = statusQuoteFromContextInfo(baileysContextInfo(raw));
+			if (storyQuote) {
+				const quotedType = quotedTypeFromRaw(raw);
+				(message as any).replyTo = {
+					...((message as any).replyTo || {}),
+					id: null,
+					providerMessageId: storyQuote.statusMessageId,
+					isStatus: true,
+					statusOwnerWaId: storyQuote.ownerJid,
+					text: quotedTextFromRaw(raw),
+					type: quotedType || 'text',
+					direction: message.direction === WhatsAppMessageDirection.INBOUND ? 'outbound' : 'inbound',
+					durationSeconds: null,
+					timestamp: null,
+					senderName: null,
+					previewDataUrl: quotedPreviewFromRaw(raw),
+				};
+				continue;
+			}
 			const replyTo = (message as any).replyTo;
 			if (replyTo) {
-				if (!replyTo.previewDataUrl) {
+				if (quotedIsViewOnce(raw)) {
+					Object.assign(replyTo, { isViewOnce: true, text: null, previewDataUrl: null });
+				} else if (!replyTo.previewDataUrl && !replyTo.isViewOnce) {
 					replyTo.previewDataUrl = quotedPreviewFromRaw(raw) || null;
 				}
 				if (!replyTo.durationSeconds) {
@@ -5182,6 +5237,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				timestamp: null,
 				senderName: null,
 				previewDataUrl: preview,
+				...(quotedIsViewOnce(raw) ? { isViewOnce: true } : null),
 			};
 		}
 	}
@@ -6787,6 +6843,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			typeof quote === 'string'
 				? quote
 				: quote?.quotedProviderMessageId || undefined;
+		const storyQuoteId =
+			typeof quote === 'object' ? quote?.statusQuote?.statusMessageId || undefined : undefined;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -6848,7 +6906,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				text,
 				timestamp: new Date(),
 				timestampReliable: true,
-				quotedProviderMessageId: quotedProviderMessageId || null,
+				quotedProviderMessageId: quotedProviderMessageId || storyQuoteId || null,
 				raw: result,
 			},
 			user.id,
@@ -6871,6 +6929,130 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		prepareMessagesForClient([saved]);
 		return { ok: true, message: saved, providerResult: { id } };
+	}
+
+	/**
+	 * A text reply to someone's story. It goes to the poster's chat quoting the story,
+	 * which is how WhatsApp itself links the reply to the status.
+	 */
+	async replyToStatus(
+		user: User,
+		accountId: string,
+		statusId: string,
+		text: string,
+		clientMessageId?: string,
+	) {
+		const body = String(text || '').trim();
+		if (!body) throw new BadRequestException('Reply text is required');
+		if (body.length > 4096) throw new BadRequestException('Reply is too long');
+		const target = await this.statusService.resolveStatusInteractionTarget(user, accountId, statusId);
+		const conversation = await this.openConversationByChatId(user, accountId, target.ownerJid, {
+			title: target.title,
+		});
+		const sent = await this.sendText(
+			user,
+			conversation.id,
+			body,
+			{ statusQuote: target.statusQuote },
+			clientMessageId,
+		);
+		await this.audit.write({
+			actorUserId: user.id,
+			accountId,
+			action: 'whatsapp.status.replied',
+			targetType: 'WhatsAppStatus',
+			targetId: target.statusId,
+			metadata: { conversationId: conversation.id, messageId: sent.message?.id || null },
+		});
+		return { ...sent, conversationId: conversation.id, conversation };
+	}
+
+	private readonly statusReactionsInFlight = new Set<string>();
+
+	/**
+	 * One reaction per story: repeating the same emoji is a no-op, a different one is
+	 * sent and replaces the stored reaction (WhatsApp delivers each as a story reply).
+	 */
+	async reactToStatus(user: User, accountId: string, statusId: string, emojiValue: string) {
+		const emoji = String(emojiValue || '').trim();
+		if (!isStatusReactionText(emoji)) {
+			throw new BadRequestException('A story reaction must be a single emoji');
+		}
+		const target = await this.statusService.resolveStatusInteractionTarget(user, accountId, statusId);
+		const statusKey = target.statusQuote.statusMessageId;
+		const lockKey = `${accountId}:${statusKey}`;
+		if (this.statusReactionsInFlight.has(lockKey)) {
+			throw new HttpException('A reaction to this story is already being sent', 409);
+		}
+		this.statusReactionsInFlight.add(lockKey);
+		try {
+			const existing = await this.statusService.getOwnStatusReaction(accountId, statusKey);
+			if (existing?.emoji === emoji) {
+				return { ok: true, duplicate: true, reaction: existing, conversationId: null, message: null };
+			}
+			const conversation = await this.openConversationByChatId(user, accountId, target.ownerJid, {
+				title: target.title,
+			});
+			const sent = await this.sendText(user, conversation.id, emoji, {
+				statusQuote: target.statusQuote,
+			});
+			const reaction = await this.statusService.saveStatusReaction(
+				accountId,
+				statusKey,
+				'me',
+				emoji,
+				sent.message?.id || null,
+				new Date(),
+			);
+			await this.audit.write({
+				actorUserId: user.id,
+				accountId,
+				action: 'whatsapp.status.reacted',
+				targetType: 'WhatsAppStatus',
+				targetId: target.statusId,
+				metadata: { conversationId: conversation.id, messageId: sent.message?.id || null },
+			});
+			return {
+				ok: true,
+				duplicate: false,
+				reaction,
+				conversationId: conversation.id,
+				conversation,
+				message: sent.message,
+			};
+		} finally {
+			this.statusReactionsInFlight.delete(lockKey);
+		}
+	}
+
+	/** Single-emoji story replies are reactions: from contacts on our stories, or ours from the phone. */
+	private async recordStatusReactionFromMessage(
+		accountId: string,
+		normalized: NormalizedWhatsAppMessage,
+		messageId?: string | null,
+	) {
+		const quote = statusQuoteFromContextInfo(baileysContextInfo(normalized?.raw));
+		if (!quote || !isStatusReactionText(normalized?.text)) return;
+		const actorKey = normalized.fromMe
+			? 'me'
+			: statusActorKey(normalized.senderWaId || normalized.chatId);
+		if (!actorKey) return;
+		await this.statusService
+			.saveStatusReaction(
+				accountId,
+				quote.statusMessageId,
+				actorKey,
+				String(normalized.text || '').trim(),
+				messageId || null,
+				normalized.timestamp || new Date(),
+			)
+			.catch((error) =>
+				this.logger.warn(
+					`Story reaction persist failed for ${accountId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
 	}
 
 	async sendContact(

@@ -1,4 +1,5 @@
 import { toCoord } from './whatsapp-location';
+import { isWhatsAppViewOnceQuoted } from './whatsapp-view-once';
 
 function bytesToBase64(value: any): string | undefined {
 	if (value == null) return undefined;
@@ -65,6 +66,7 @@ function contextInfoOf(content: any) {
 }
 
 function sanitizeQuotedMessage(quoted: any) {
+	const viewOnce = isWhatsAppViewOnceQuoted(quoted);
 	const content = unwrapBaileysContent(quoted);
 	if (!content || typeof content !== 'object') return undefined;
 	const out: Record<string, unknown> = {};
@@ -81,6 +83,13 @@ function sanitizeQuotedMessage(quoted: any) {
 	for (const key of mediaKeys) {
 		const node = content[key];
 		if (!node || typeof node !== 'object') continue;
+		if (viewOnce) {
+			out[key] = {
+				viewOnce: true,
+				...(typeof node.mimetype === 'string' ? { mimetype: node.mimetype } : {}),
+			};
+			continue;
+		}
 		const jpegThumbnail = bytesToBase64(node.jpegThumbnail);
 		out[key] = {
 			...(typeof node.caption === 'string' ? { caption: node.caption } : {}),

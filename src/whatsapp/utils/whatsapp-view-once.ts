@@ -52,3 +52,42 @@ export function stripViewOnceRawPreview<T>(raw: T): T {
 	delete output.body;
 	return output as T;
 }
+
+/** A reply's `contextInfo.quotedMessage` is a copy of the quoted message, preview included. */
+export function isWhatsAppViewOnceQuoted(quotedMessage: unknown): boolean {
+	return isWhatsAppViewOnceRaw({ message: quotedMessage });
+}
+
+const MAX_QUOTED_DEPTH = 12;
+
+/**
+ * Strips caption/thumbnail from every view-once `quotedMessage` inside `raw`.
+ * Returns the same object when nothing was quoted from a view-once message.
+ */
+export function stripViewOnceQuotedPreviews<T>(raw: T, depth = 0): T {
+	if (!raw || typeof raw !== 'object' || depth >= MAX_QUOTED_DEPTH) return raw;
+	if (raw instanceof Uint8Array) return raw;
+	if (Array.isArray(raw)) {
+		let changed = false;
+		const items = raw.map((item) => {
+			const next = stripViewOnceQuotedPreviews(item, depth + 1);
+			if (next !== item) changed = true;
+			return next;
+		});
+		return (changed ? items : raw) as T;
+	}
+	const source = raw as Record<string, any>;
+	let output: Record<string, any> | null = null;
+	for (const key of Object.keys(source)) {
+		const value = source[key];
+		if (!value || typeof value !== 'object') continue;
+		const next =
+			key === 'quotedMessage' && isWhatsAppViewOnceQuoted(value)
+				? stripViewOnceRawPreview({ message: value }).message
+				: stripViewOnceQuotedPreviews(value, depth + 1);
+		if (next === value) continue;
+		output ??= { ...source };
+		output[key] = next;
+	}
+	return (output ?? source) as T;
+}

@@ -96,6 +96,36 @@ describe('sanitizeBaileysWaMessage', () => {
 		).toBe(Buffer.from('thumb').toString('base64'));
 	});
 
+	it('keeps only the view-once flag for a quoted view-once photo', () => {
+		const sanitized = sanitizeBaileysWaMessage({
+			key: { remoteJid: '201000000000@s.whatsapp.net', id: 'msg-vo', fromMe: false },
+			message: {
+				extendedTextMessage: {
+					text: 'wow',
+					contextInfo: {
+						stanzaId: 'quoted-vo',
+						quotedMessage: {
+							viewOnceMessageV2: {
+								message: {
+									imageMessage: {
+										viewOnce: true,
+										caption: 'private',
+										mimetype: 'image/jpeg',
+										jpegThumbnail: Buffer.from('thumb'),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}) as any;
+
+		expect(sanitized?.message?.extendedTextMessage?.contextInfo?.quotedMessage).toEqual({
+			imageMessage: { viewOnce: true, mimetype: 'image/jpeg' },
+		});
+	});
+
 		it('marks forwarded video messages from contextInfo', () => {
 		const sanitized = sanitizeBaileysWaMessage({
 			key: {

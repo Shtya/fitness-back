@@ -532,3 +532,20 @@ export class ViewWhatsAppStatusDto {
 	@MaxLength(60)
 	senderWaId?: string;
 }
+
+export class ReplyWhatsAppStatusDto {
+	@IsString()
+	@MaxLength(4096)
+	text: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	clientMessageId?: string;
+}
+
+export class ReactWhatsAppStatusDto {
+	@IsString()
+	@MaxLength(32)
+	emoji: string;
+}

@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import * as qrcode from 'qrcode';
 import {
 	NormalizedWhatsAppMessage,
+	NormalizedWhatsAppParticipantReceipt,
 	NormalizedWhatsAppReaction,
 	WhatsAppProvider,
 	WhatsAppProviderCapabilities,
@@ -412,6 +413,68 @@ export async function downloadLinkedDeviceMedia(
 	throw new Error(lastError || 'Baileys returned empty media');
 }
 
+/**
+ * Splits Baileys per-member receipts into chat receipts (group ticks) and story views.
+ *
+ * A story view is a read receipt on a status we posted. Our own other devices report
+ * receipts on the same channel and are never viewers.
+ */
+export function routeBaileysReceiptUpdates(
+	updates: any[],
+	ownJids: string[] = [],
+): WhatsAppProviderEvent[] {
+	if (!Array.isArray(updates)) return [];
+	const toDate = (value: unknown) => {
+		const seconds = Number(value);
+		return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
+	};
+	const bareJid = (value: string) => jidOf(String(value || '').replace(/:\d+@/, '@'));
+	const own = new Set(ownJids.map(bareJid));
+	const grouped = new Map<
+		string,
+		{ chatId: string; receipts: NormalizedWhatsAppParticipantReceipt[] }
+	>();
+	const storyViews = new Map<string, NormalizedWhatsAppParticipantReceipt[]>();
+	for (const item of updates) {
+		const providerMessageId = String(item?.key?.id || '').trim();
+		const chatId = jidOf(item?.key?.remoteJid) || '';
+		const participantJid = String(item?.receipt?.userJid || '').trim();
+		if (!providerMessageId || !chatId || !participantJid) continue;
+		if (isStatusBroadcastJid(chatId)) {
+			const readAt = toDate(item?.receipt?.readTimestamp);
+			if (item?.key?.fromMe === false || !readAt) continue;
+			if (own.has(bareJid(participantJid))) continue;
+			const views = storyViews.get(providerMessageId) || [];
+			views.push({ participantJid, readAt });
+			storyViews.set(providerMessageId, views);
+			continue;
+		}
+		const receipt = {
+			participantJid,
+			deliveredAt: toDate(item?.receipt?.receiptTimestamp),
+			readAt: toDate(item?.receipt?.readTimestamp),
+			playedAt: toDate(item?.receipt?.playedTimestamp),
+		};
+		if (!receipt.deliveredAt && !receipt.readAt && !receipt.playedAt) continue;
+		const entry = grouped.get(providerMessageId) || { chatId, receipts: [] };
+		entry.receipts.push(receipt);
+		grouped.set(providerMessageId, entry);
+	}
+	const events: WhatsAppProviderEvent[] = [];
+	for (const [providerMessageId, entry] of grouped) {
+		events.push({
+			type: 'message_receipts',
+			providerMessageId,
+			chatId: entry.chatId,
+			receipts: entry.receipts,
+		});
+	}
+	for (const [statusMessageId, receipts] of storyViews) {
+		events.push({ type: 'status_receipts', statusMessageId, receipts });
+	}
+	return events;
+}
+
 function toBaileysJid(jid: string): string {
 	const raw = String(jid || '').trim();
 	if (!raw) return '';
@@ -566,7 +629,7 @@ function normalizeSendQuoteOptions(
 		const id = quote.trim();
 		return id ? { quotedProviderMessageId: id } : null;
 	}
-	if (quote.quotedProviderMessageId || quote.embeddedQuote) return quote;
+	if (quote.quotedProviderMessageId || quote.embeddedQuote || quote.statusQuote) return quote;
 	return null;
 }
 
@@ -2068,39 +2131,8 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		// Group (and status) receipts arrive per member here, never on messages.update.
 		socket.ev.on('message-receipt.update', (updates: any[]) => {
-			if (!Array.isArray(updates)) return;
-			const grouped = new Map<
-				string,
-				{ chatId: string; receipts: Array<{ participantJid: string; deliveredAt: Date | null; readAt: Date | null; playedAt: Date | null }> }
-			>();
-			for (const item of updates) {
-				const providerMessageId = String(item?.key?.id || '').trim();
-				const chatId = jidOf(item?.key?.remoteJid) || '';
-				const participantJid = String(item?.receipt?.userJid || '').trim();
-				if (!providerMessageId || !chatId || !participantJid) continue;
-				if (isStatusBroadcastJid(chatId)) continue;
-				const toDate = (value: unknown) => {
-					const seconds = Number(value);
-					return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
-				};
-				const receipt = {
-					participantJid,
-					deliveredAt: toDate(item?.receipt?.receiptTimestamp),
-					readAt: toDate(item?.receipt?.readTimestamp),
-					playedAt: toDate(item?.receipt?.playedTimestamp),
-				};
-				if (!receipt.deliveredAt && !receipt.readAt && !receipt.playedAt) continue;
-				const entry = grouped.get(providerMessageId) || { chatId, receipts: [] };
-				entry.receipts.push(receipt);
-				grouped.set(providerMessageId, entry);
-			}
-			for (const [providerMessageId, entry] of grouped) {
-				this.emit({
-					type: 'message_receipts',
-					providerMessageId,
-					chatId: entry.chatId,
-					receipts: entry.receipts,
-				});
+			for (const event of routeBaileysReceiptUpdates(updates, this.getOwnJids())) {
+				this.emit(event);
 			}
 		});
 
@@ -2770,6 +2802,25 @@ export class BaileysProvider implements WhatsAppProvider {
 		const options = normalizeSendQuoteOptions(quote || undefined);
 		if (!options) return null;
 		const jid = toBaileysJid(chatId);
+		if (options.statusQuote?.statusMessageId && options.statusQuote.ownerJid) {
+			// A quote keyed on status@broadcast is what WhatsApp renders as a story reply.
+			const story = options.statusQuote;
+			const cached = this.resolveStatusRaw(
+				story.providerStatusId || story.statusMessageId,
+				story.ownerJid,
+			);
+			return {
+				key: {
+					remoteJid: 'status@broadcast',
+					id: story.statusMessageId,
+					fromMe: false,
+					participant: toBaileysJid(story.ownerJid),
+				},
+				message:
+					cached?.message ||
+					buildEmbeddedQuotedMessage({ text: story.caption, type: story.type || 'text' }),
+			};
+		}
 		if (options.quotedProviderMessageId) {
 			const quotedId = String(options.quotedProviderMessageId).trim();
 			const stored = this.rawByMessageId.get(quotedId);

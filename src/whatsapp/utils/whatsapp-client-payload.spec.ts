@@ -59,6 +59,44 @@ describe('whatsapp client payload', () => {
 		expect(attachment.previewDataUrl).toBeDefined();
 	});
 
+	it('hides the quote preview of a reply to view-once media', () => {
+		const [message] = prepareMessagesForClient([
+			{
+				id: 'm5',
+				text: 'wow',
+				raw: {
+					message: {
+						extendedTextMessage: {
+							text: 'wow',
+							contextInfo: {
+								stanzaId: 'Q1',
+								quotedMessage: { imageMessage: { viewOnce: true, caption: 'private', jpegThumbnail: 'abc' } },
+							},
+						},
+					},
+				},
+				replyTo: { id: 'q1', type: 'image', text: 'private', previewDataUrl: 'data:image/jpeg;base64,abc' },
+			},
+		]) as any[];
+		expect(message.isViewOnce).toBeUndefined();
+		expect(message.text).toBe('wow');
+		expect(message.replyTo).toMatchObject({ id: 'q1', type: 'image', isViewOnce: true, text: null, previewDataUrl: null });
+		expect(JSON.stringify(message)).not.toContain('private');
+	});
+
+	it('hides the quote preview when only the quoted row is known to be view-once', () => {
+		const [message] = prepareMessagesForClient([
+			{ id: 'm6', raw: null, replyTo: { id: 'q2', type: 'view_once', text: 'x', previewDataUrl: 'y' } },
+		]) as any[];
+		expect(message.replyTo).toMatchObject({ isViewOnce: true, text: null, previewDataUrl: null });
+	});
+
+	it('keeps ordinary reply quotes intact', () => {
+		const replyTo = { id: 'q3', type: 'image', text: 'public', previewDataUrl: 'data:image/jpeg;base64,abc' };
+		const [message] = prepareMessagesForClient([{ id: 'm7', raw: null, replyTo }]) as any[];
+		expect(message.replyTo).toBe(replyTo);
+	});
+
 	it('flags key-only view-once stubs from linked devices', () => {
 		const [message] = prepareMessagesForClient([
 			{ id: 'm4', raw: { protocol: 'baileys', id: 'X', isViewOnce: true } },

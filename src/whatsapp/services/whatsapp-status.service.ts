@@ -17,7 +17,12 @@ import {
 	WhatsAppStatusHistory,
 } from '../entities/whatsapp.entity';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
-import { WhatsAppProvider } from '../providers/whatsapp-provider';
+import {
+	NormalizedWhatsAppParticipantReceipt,
+	WhatsAppProvider,
+	WhatsAppStatusQuote,
+} from '../providers/whatsapp-provider';
+import { statusActorKey, statusMessageKey } from '../utils/whatsapp-status-interactions';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -77,6 +82,17 @@ const STATUS_PRUNE_INTERVAL_MS = 5 * 60_000;
 
 type StatusRow = WhatsAppStatus | WhatsAppStatusHistory;
 type StatusRowSource = 'active' | 'history';
+
+export interface StatusReactionRow {
+	statusMessageId: string;
+	actorKey: string;
+	emoji: string;
+	messageId: string | null;
+	reactedAt: Date | null;
+}
+
+/** Upper bound on viewers returned for one story; WhatsApp audiences are capped well below. */
+const STATUS_VIEWERS_LIMIT = 2000;
 
 @Injectable()
 
@@ -533,7 +549,7 @@ export class WhatsAppStatusService {
 			sessionReady,
 			providerState,
 			hint: refreshHint,
-			items: mapped,
+			items: await this.withStatusInteractions(accountId, mapped),
 			...(debug || process.env.WHATSAPP_STATUS_DEBUG === '1'
 				? {
 						debug: {
@@ -704,7 +720,7 @@ export class WhatsAppStatusService {
 				// History without saved media cannot be recovered after WhatsApp expiry.
 				return Boolean(item.mediaReady);
 			});
-		return { items: mapped };
+		return { items: await this.withStatusInteractions(accountId, mapped) };
 	}
 
 	/**
@@ -823,6 +839,420 @@ export class WhatsAppStatusService {
 		}
 		await provider.viewStatus(statusProviderId, senderWaId);
 		return { ok: true };
+	}
+
+	/**
+	 * One person, one key: LID receipts are folded onto the phone JID when the live
+	 * session (or a saved contact) knows it, so a viewer who also reacts is counted once.
+	 */
+	private async canonicalStatusActor(accountId: string, jid: string): Promise<string> {
+		const key = statusActorKey(jid);
+		if (!/@(hosted\.)?lid$/.test(key)) return key;
+		const phones = new Map<string, string>();
+		const contact = await this.contactRepo
+			.findOne({ where: { accountId, waId: jid }, select: ['waId', 'phoneNumber'] })
+			.catch(() => null);
+		const saved = String(contact?.phoneNumber || '').replace(/\D/g, '');
+		if (saved) phones.set(jid, saved);
+		await this.resolveLidSenderPhones(
+			accountId,
+			this.providers.getProvider(accountId),
+			[jid],
+			phones,
+			new Map(),
+		).catch(() => undefined);
+		const phone = phones.get(jid);
+		return phone ? `${phone}@s.whatsapp.net` : key;
+	}
+
+	/** Persist contacts who opened one of our own stories (WhatsApp status read receipts). */
+	async recordStatusViewers(
+		accountId: string,
+		statusMessageIdValue: string,
+		receipts: NormalizedWhatsAppParticipantReceipt[],
+	) {
+		const statusMessageId = statusMessageKey(statusMessageIdValue);
+		if (!statusMessageId || !isUuid(accountId)) return;
+		const byViewer = new Map<string, Date>();
+		for (const receipt of receipts || []) {
+			const viewedAt = receipt?.readAt || receipt?.playedAt || null;
+			if (!(viewedAt instanceof Date) || Number.isNaN(viewedAt.getTime())) continue;
+			const jid = String(receipt?.participantJid || '').trim();
+			if (!statusActorKey(jid)) continue;
+			const key = await this.canonicalStatusActor(accountId, jid);
+			const previous = byViewer.get(key);
+			if (!previous || viewedAt < previous) byViewer.set(key, viewedAt);
+		}
+		if (!byViewer.size) return;
+		const params: unknown[] = [];
+		const values = [...byViewer.entries()].map(([key, viewedAt], index) => {
+			params.push(accountId, statusMessageId, key, viewedAt);
+			const base = index * 4;
+			return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+		});
+		await this.repo.manager.query(
+			`INSERT INTO whatsapp_status_viewers (account_id, status_message_id, viewer_key, viewed_at)
+			VALUES ${values.join(', ')}
+			ON CONFLICT (account_id, status_message_id, viewer_key) DO UPDATE SET
+				viewed_at = LEAST(whatsapp_status_viewers.viewed_at, EXCLUDED.viewed_at),
+				deleted_at = NULL,
+				updated_at = now()`,
+			params,
+		);
+		await this.emitStatusInteractionsUpdated(accountId, statusMessageId);
+	}
+
+	/**
+	 * Upsert one person's reaction to a story. `actorKey = 'me'` is this account
+	 * reacting to someone else's story; an older event never overwrites a newer one.
+	 */
+	async saveStatusReaction(
+		accountId: string,
+		statusMessageIdValue: string,
+		actorKeyValue: string,
+		emoji: string,
+		messageId: string | null,
+		reactedAt: Date | null,
+	): Promise<StatusReactionRow | null> {
+		const statusMessageId = statusMessageKey(statusMessageIdValue);
+		const actorKey =
+			actorKeyValue === 'me' ? 'me' : await this.canonicalStatusActor(accountId, actorKeyValue);
+		const value = String(emoji || '').trim().slice(0, 32);
+		if (!statusMessageId || !actorKey || !value || !isUuid(accountId)) return null;
+		const at = reactedAt instanceof Date && !Number.isNaN(reactedAt.getTime()) ? reactedAt : new Date();
+		await this.repo.manager.query(
+			`INSERT INTO whatsapp_status_reactions (account_id, status_message_id, actor_key, emoji, message_id, reacted_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (account_id, status_message_id, actor_key) DO UPDATE SET
+				emoji = EXCLUDED.emoji,
+				message_id = COALESCE(EXCLUDED.message_id, whatsapp_status_reactions.message_id),
+				reacted_at = EXCLUDED.reacted_at,
+				deleted_at = NULL,
+				updated_at = now()
+			WHERE whatsapp_status_reactions.reacted_at IS NULL
+				OR whatsapp_status_reactions.emoji = EXCLUDED.emoji
+				OR EXCLUDED.reacted_at >= whatsapp_status_reactions.reacted_at`,
+			[accountId, statusMessageId, actorKey, value, messageId, at],
+		);
+		const row = await this.findStatusReaction(accountId, statusMessageId, actorKey);
+		await this.emitStatusInteractionsUpdated(
+			accountId,
+			statusMessageId,
+			actorKey === 'me' ? { myReaction: row?.emoji || null } : {},
+		);
+		return row;
+	}
+
+	async getOwnStatusReaction(accountId: string, statusMessageIdValue: string) {
+		return this.findStatusReaction(accountId, statusMessageKey(statusMessageIdValue), 'me');
+	}
+
+	private async findStatusReaction(
+		accountId: string,
+		statusMessageId: string,
+		actorKey: string,
+	): Promise<StatusReactionRow | null> {
+		if (!statusMessageId || !isUuid(accountId)) return null;
+		const rows = await this.repo.manager.query(
+			`SELECT status_message_id, actor_key, emoji, message_id, reacted_at
+			FROM whatsapp_status_reactions
+			WHERE account_id = $1 AND status_message_id = $2 AND actor_key = $3 AND deleted_at IS NULL
+			LIMIT 1`,
+			[accountId, statusMessageId, actorKey],
+		);
+		const row = rows?.[0];
+		if (!row) return null;
+		return {
+			statusMessageId: row.status_message_id,
+			actorKey: row.actor_key,
+			emoji: row.emoji,
+			messageId: row.message_id || null,
+			reactedAt: row.reacted_at ? new Date(row.reacted_at) : null,
+		};
+	}
+
+	/** Viewer and reaction totals per story; a reaction implies a view. */
+	private async statusInteractionCounts(accountId: string, keys: string[]) {
+		const counts = new Map<string, { viewerCount: number; reactionCount: number }>();
+		if (!keys.length || !isUuid(accountId)) return counts;
+		const rows = await this.repo.manager.query(
+			`SELECT status_message_id,
+				COUNT(DISTINCT actor)::int AS viewer_count,
+				COUNT(DISTINCT actor) FILTER (WHERE is_reaction)::int AS reaction_count
+			FROM (
+				SELECT status_message_id, viewer_key AS actor, false AS is_reaction
+				FROM whatsapp_status_viewers
+				WHERE account_id = $1 AND status_message_id = ANY($2::varchar[]) AND deleted_at IS NULL
+				UNION ALL
+				SELECT status_message_id, actor_key AS actor, true AS is_reaction
+				FROM whatsapp_status_reactions
+				WHERE account_id = $1 AND status_message_id = ANY($2::varchar[])
+					AND actor_key <> 'me' AND deleted_at IS NULL
+			) interactions
+			GROUP BY status_message_id`,
+			[accountId, keys],
+		);
+		for (const row of rows || []) {
+			counts.set(row.status_message_id, {
+				viewerCount: Number(row.viewer_count) || 0,
+				reactionCount: Number(row.reaction_count) || 0,
+			});
+		}
+		return counts;
+	}
+
+	/**
+	 * Account rooms reach every staff member with view access, so the live event
+	 * carries totals only — never who viewed or reacted.
+	 */
+	private async emitStatusInteractionsUpdated(
+		accountId: string,
+		statusMessageId: string,
+		extra: Record<string, unknown> = {},
+	) {
+		const counts = await this.statusInteractionCounts(accountId, [statusMessageId]).catch(
+			() => new Map<string, { viewerCount: number; reactionCount: number }>(),
+		);
+		const total = counts.get(statusMessageId);
+		this.gateway.emitAccountEvent(accountId, 'status_interactions_updated', {
+			statusMessageId,
+			viewerCount: total?.viewerCount || 0,
+			reactionCount: total?.reactionCount || 0,
+			...extra,
+		});
+	}
+
+	/** Adds view totals to our own stories and our reaction to everyone else's. */
+	private async withStatusInteractions<T extends { providerStatusId: string; isOwn: boolean }>(
+		accountId: string,
+		items: T[],
+	): Promise<T[]> {
+		const keys = [
+			...new Set(items.map(item => statusMessageKey(item.providerStatusId)).filter(Boolean)),
+		];
+		if (!keys.length) return items;
+		try {
+			const [counts, mine] = await Promise.all([
+				this.statusInteractionCounts(accountId, keys),
+				this.repo.manager.query(
+					`SELECT status_message_id, emoji FROM whatsapp_status_reactions
+					WHERE account_id = $1 AND status_message_id = ANY($2::varchar[])
+						AND actor_key = 'me' AND deleted_at IS NULL`,
+					[accountId, keys],
+				),
+			]);
+			const myReactions = new Map<string, string>(
+				(mine || []).map((row: any) => [row.status_message_id, row.emoji]),
+			);
+			return items.map(item => {
+				const key = statusMessageKey(item.providerStatusId);
+				if (item.isOwn) {
+					const total = counts.get(key);
+					return {
+						...item,
+						viewerCount: total?.viewerCount || 0,
+						reactionCount: total?.reactionCount || 0,
+					};
+				}
+				return { ...item, myReaction: myReactions.get(key) || null };
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Story interaction totals unavailable for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return items;
+		}
+	}
+
+	/** Who opened one of our own stories, with any reaction they sent. Owner-only. */
+	async listStatusViewers(user: User, accountId: string, statusIdValue: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canView');
+		const found = await this.findStatusRow(accountId, statusIdValue);
+		if (!found) throw new NotFoundException('WhatsApp status not found');
+		if (!found.row.isOwn) {
+			throw new ForbiddenException('Only the story owner can see who viewed it');
+		}
+		const statusMessageId = statusMessageKey(found.row.providerStatusId);
+		const [viewerRows, reactionRows] = await Promise.all([
+			this.repo.manager.query(
+				`SELECT viewer_key, viewed_at FROM whatsapp_status_viewers
+				WHERE account_id = $1 AND status_message_id = $2 AND deleted_at IS NULL
+				ORDER BY viewed_at DESC NULLS LAST
+				LIMIT ${STATUS_VIEWERS_LIMIT}`,
+				[accountId, statusMessageId],
+			),
+			this.repo.manager.query(
+				`SELECT actor_key, emoji, reacted_at FROM whatsapp_status_reactions
+				WHERE account_id = $1 AND status_message_id = $2
+					AND actor_key <> 'me' AND deleted_at IS NULL
+				LIMIT ${STATUS_VIEWERS_LIMIT}`,
+				[accountId, statusMessageId],
+			),
+		]);
+		const people = new Map<
+			string,
+			{ viewedAt: Date | null; reaction: string | null; reactedAt: Date | null }
+		>();
+		for (const row of viewerRows || []) {
+			people.set(row.viewer_key, {
+				viewedAt: row.viewed_at ? new Date(row.viewed_at) : null,
+				reaction: null,
+				reactedAt: null,
+			});
+		}
+		for (const row of reactionRows || []) {
+			const entry = people.get(row.actor_key) || { viewedAt: null, reaction: null, reactedAt: null };
+			entry.reaction = row.emoji || null;
+			entry.reactedAt = row.reacted_at ? new Date(row.reacted_at) : null;
+			people.set(row.actor_key, entry);
+		}
+
+		const keys = [...people.keys()];
+		const contactIds = [
+			...new Set(keys.flatMap(key => [key, key.replace(/@s\.whatsapp\.net$/, '@c.us')])),
+		];
+		const contacts = contactIds.length
+			? await this.contactRepo.find({
+					where: { accountId, waId: In(contactIds) },
+					select: ['waId', 'name', 'phoneNumber', 'avatarUrl'],
+				})
+			: [];
+		const contactByKey = new Map<string, WhatsAppContact>();
+		for (const contact of contacts) {
+			const key = statusActorKey(contact.waId);
+			const current = contactByKey.get(key);
+			if (!current || (!current.name && contact.name)) contactByKey.set(key, contact);
+		}
+		const names = new Map<string, string>();
+		const phones = new Map<string, string>();
+		for (const key of keys) {
+			const contact = contactByKey.get(key);
+			if (contact?.name) names.set(key, contact.name);
+			const digits = String(contact?.phoneNumber || '').replace(/\D/g, '');
+			if (digits) phones.set(key, digits);
+		}
+		await this.resolveLidSenderPhones(
+			accountId,
+			this.providers.getProvider(accountId),
+			keys.filter(key => /@(hosted\.)?lid$/.test(key)),
+			phones,
+			names,
+		).catch(() => undefined);
+
+		const merged = new Map<
+			string,
+			{
+				id: string;
+				name: string | null;
+				phone: string | null;
+				avatarUrl: string | null;
+				viewedAt: Date | null;
+				reaction: string | null;
+				reactedAt: Date | null;
+			}
+		>();
+		const earliest = (a: Date | null, b: Date | null) => (!a ? b : !b ? a : a <= b ? a : b);
+		for (const [key, entry] of people) {
+			const phone = statusSenderPhone(key, phones);
+			const contact = contactByKey.get(key);
+			const rawName = names.get(key) || null;
+			const name =
+				rawName && !isWeakWhatsAppContactName(rawName, key, phone) ? rawName : null;
+			const identity = phone ? `phone:${phone}` : key;
+			const current = merged.get(identity);
+			if (!current) {
+				merged.set(identity, {
+					id: key,
+					name,
+					phone,
+					avatarUrl: contact?.avatarUrl || null,
+					viewedAt: entry.viewedAt,
+					reaction: entry.reaction,
+					reactedAt: entry.reactedAt,
+				});
+				continue;
+			}
+			current.name = current.name || name;
+			current.avatarUrl = current.avatarUrl || contact?.avatarUrl || null;
+			current.viewedAt = earliest(current.viewedAt, entry.viewedAt);
+			if (
+				entry.reaction &&
+				(!current.reactedAt || (entry.reactedAt && entry.reactedAt > current.reactedAt))
+			) {
+				current.reaction = entry.reaction;
+				current.reactedAt = entry.reactedAt;
+			}
+		}
+		const activity = (item: { viewedAt: Date | null; reactedAt: Date | null }) =>
+			Math.max(item.viewedAt?.getTime() || 0, item.reactedAt?.getTime() || 0);
+		const viewers = [...merged.values()].sort((a, b) => activity(b) - activity(a));
+		return {
+			statusId: found.row.id,
+			providerStatusId: found.row.providerStatusId,
+			viewerCount: viewers.length,
+			reactionCount: viewers.filter(item => item.reaction).length,
+			viewers,
+		};
+	}
+
+	/**
+	 * Validates a reply/reaction to someone else's live story and returns where it
+	 * goes. LID posters are answered in their phone chat when the number is known.
+	 */
+	async resolveStatusInteractionTarget(user: User, accountId: string, statusIdValue: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const found = await this.findStatusRow(accountId, statusIdValue);
+		if (!found) throw new NotFoundException('WhatsApp status not found');
+		const row = found.row;
+		if (row.isOwn) {
+			throw new BadRequestException('You cannot reply or react to your own story');
+		}
+		const expiresAt = row.expiresAt ? new Date(row.expiresAt).getTime() : null;
+		if (found.source === 'history' || (expiresAt !== null && expiresAt <= Date.now())) {
+			throw new BadRequestException('This story has expired');
+		}
+		const senderWaId = String(row.senderWaId || '').trim();
+		if (!senderWaId) throw new BadRequestException('The story sender is unknown');
+		const statusMessageId = statusMessageKey(row.providerStatusId);
+		if (!statusMessageId) throw new BadRequestException('The story id is unknown');
+
+		const contact = await this.contactRepo.findOne({
+			where: { accountId, waId: senderWaId },
+			select: ['waId', 'name', 'phoneNumber'],
+		});
+		const phones = new Map<string, string>();
+		const names = new Map<string, string>();
+		const savedDigits = String(contact?.phoneNumber || '').replace(/\D/g, '');
+		if (savedDigits) phones.set(senderWaId, savedDigits);
+		if (contact?.name) names.set(senderWaId, contact.name);
+		let chatJid = senderWaId;
+		if (/@(hosted\.)?lid$/i.test(senderWaId)) {
+			await this.resolveLidSenderPhones(
+				accountId,
+				this.providers.getProvider(accountId),
+				[senderWaId],
+				phones,
+				names,
+			).catch(() => undefined);
+			const phone = phones.get(senderWaId);
+			if (phone) chatJid = `${phone}@c.us`;
+		}
+		const name = names.get(senderWaId) || null;
+		const statusQuote: WhatsAppStatusQuote = {
+			statusMessageId,
+			providerStatusId: row.providerStatusId,
+			ownerJid: senderWaId,
+			type: normalizeStatusType(row.type),
+			caption: row.caption,
+		};
+		return {
+			statusId: row.id,
+			ownerJid: chatJid,
+			title: name && !isWeakWhatsAppContactName(name, senderWaId, null) ? name : null,
+			statusQuote,
+		};
 	}
 	private async findStatusRow(
 		accountId: string,

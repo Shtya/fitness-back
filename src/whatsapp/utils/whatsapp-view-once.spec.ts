@@ -1,4 +1,9 @@
-import { isWhatsAppViewOnceRaw, stripViewOnceRawPreview } from './whatsapp-view-once';
+import {
+	isWhatsAppViewOnceQuoted,
+	isWhatsAppViewOnceRaw,
+	stripViewOnceQuotedPreviews,
+	stripViewOnceRawPreview,
+} from './whatsapp-view-once';
 
 describe('isWhatsAppViewOnceRaw', () => {
 	it('detects the flag on an unwrapped media node (how Baileys rows are stored)', () => {
@@ -40,5 +45,47 @@ describe('stripViewOnceRawPreview', () => {
 		expect(result.message.viewOnceMessageV2.message.videoMessage).toEqual({ seconds: 3 });
 		expect(result.body).toBeUndefined();
 		expect(raw.message.imageMessage.jpegThumbnail).toBe('abc');
+	});
+});
+
+describe('stripViewOnceQuotedPreviews', () => {
+	const replyTo = (quotedMessage: any) => ({
+		key: { id: 'reply' },
+		message: {
+			extendedTextMessage: {
+				text: 'nice',
+				contextInfo: { stanzaId: 'Q1', quotedMessage },
+			},
+		},
+	});
+
+	it('detects quoted view-once copies, wrapped or flagged', () => {
+		expect(isWhatsAppViewOnceQuoted({ viewOnceMessageV2: { message: { imageMessage: {} } } })).toBe(true);
+		expect(isWhatsAppViewOnceQuoted({ imageMessage: { viewOnce: true } })).toBe(true);
+		expect(isWhatsAppViewOnceQuoted({ imageMessage: { caption: 'x' } })).toBe(false);
+		expect(isWhatsAppViewOnceQuoted(undefined)).toBe(false);
+	});
+
+	it('drops the caption and thumbnail of a quoted view-once photo', () => {
+		const raw = replyTo({
+			viewOnceMessageV2: {
+				message: { imageMessage: { viewOnce: true, caption: 'private', jpegThumbnail: 'abc', mimetype: 'image/jpeg' } },
+			},
+		});
+		const result = stripViewOnceQuotedPreviews(raw) as any;
+		expect(result).not.toBe(raw);
+		const quoted = result.message.extendedTextMessage.contextInfo.quotedMessage;
+		expect(quoted.viewOnceMessageV2.message.imageMessage).toEqual({ viewOnce: true, mimetype: 'image/jpeg' });
+		expect(result.message.extendedTextMessage.text).toBe('nice');
+		expect(JSON.stringify(result)).not.toContain('private');
+		expect(raw.message.extendedTextMessage.contextInfo.quotedMessage.viewOnceMessageV2.message.imageMessage.caption).toBe(
+			'private',
+		);
+	});
+
+	it('returns the same object when no view-once message is quoted', () => {
+		const raw = replyTo({ imageMessage: { caption: 'public', jpegThumbnail: 'abc' } });
+		expect(stripViewOnceQuotedPreviews(raw)).toBe(raw);
+		expect(stripViewOnceQuotedPreviews(null)).toBeNull();
 	});
 });

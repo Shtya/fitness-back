@@ -23,6 +23,12 @@ export type WhatsAppProviderEvent =
 	  }
 	| { type: 'message_deleted'; providerMessageId: string; mode: 'everyone' }
 	| { type: 'status_changed' }
+	/** Contacts who opened one of our own stories. */
+	| {
+			type: 'status_receipts';
+			statusMessageId: string;
+			receipts: NormalizedWhatsAppParticipantReceipt[];
+	  }
 	// The linked device was removed / taken over on WhatsApp's side: the stored
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
@@ -97,9 +103,19 @@ export interface WhatsAppEmbeddedQuote {
 	durationSeconds?: number | null;
 }
 
+/** The story a reply answers; the recipient's WhatsApp shows it as a status reply. */
+export interface WhatsAppStatusQuote {
+	statusMessageId: string;
+	providerStatusId?: string | null;
+	ownerJid: string;
+	type?: string | null;
+	caption?: string | null;
+}
+
 export interface WhatsAppSendQuoteOptions {
 	quotedProviderMessageId?: string;
 	embeddedQuote?: WhatsAppEmbeddedQuote;
+	statusQuote?: WhatsAppStatusQuote;
 }
 
 export interface WhatsAppProviderCapabilities {

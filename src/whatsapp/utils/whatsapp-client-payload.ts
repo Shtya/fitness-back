@@ -1,5 +1,9 @@
 import { redactMessagesRawForClient } from './whatsapp-raw-redact';
-import { isWhatsAppViewOnceRaw, stripViewOnceRawPreview } from './whatsapp-view-once';
+import {
+	isWhatsAppViewOnceRaw,
+	stripViewOnceQuotedPreviews,
+	stripViewOnceRawPreview,
+} from './whatsapp-view-once';
 
 export type WhatsAppClientUser = { id: string; name: string | null; role: string | null };
 
@@ -11,11 +15,24 @@ export function toWhatsAppClientUser(user: unknown): WhatsAppClientUser | null {
 	return { id: source.id, name: source.name ?? null, role: source.role ?? null };
 }
 
+/** A reply to view-once media must not carry its caption or thumbnail in the quote. */
+function hideViewOnceReplyPreview(message: { raw?: unknown }) {
+	const target = message as { raw?: unknown; replyTo?: Record<string, unknown> | null };
+	const raw = stripViewOnceQuotedPreviews(target.raw);
+	const quotedViewOnce = raw !== target.raw;
+	if (quotedViewOnce) target.raw = raw;
+	const replyTo = target.replyTo;
+	if (!replyTo || typeof replyTo !== 'object') return;
+	if (!quotedViewOnce && replyTo.isViewOnce !== true && replyTo.type !== 'view_once') return;
+	target.replyTo = { ...replyTo, isViewOnce: true, text: null, previewDataUrl: null };
+}
+
 /** Mutates and returns `messages`; pass a shallow copy when the entity is persisted afterwards. */
 export function prepareMessagesForClient<
 	T extends { raw?: unknown; attachments?: any; senderUser?: unknown },
 >(messages: T[]): T[] {
 	for (const message of messages || []) {
+		if (message) hideViewOnceReplyPreview(message);
 		if (!message || !isWhatsAppViewOnceRaw(message.raw)) continue;
 		const target = message as T & {
 			isViewOnce?: boolean;

@@ -13,15 +13,24 @@ import type { Response } from 'express';
 import { streamResolvedAttachment } from '../utils/whatsapp-attachment-stream';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
-import { PublishWhatsAppStatusDto, ViewWhatsAppStatusDto } from '../dto/whatsapp.dto';
+import {
+	PublishWhatsAppStatusDto,
+	ReactWhatsAppStatusDto,
+	ReplyWhatsAppStatusDto,
+	ViewWhatsAppStatusDto,
+} from '../dto/whatsapp.dto';
 import { WhatsAppStatusService } from '../services/whatsapp-status.service';
+import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 
 const STATUS_CONTENT_CACHE = 'private, max-age=3600';
 
 @Controller('whatsapp/accounts/:accountId/statuses')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class WhatsAppStatusController {
-	constructor(private readonly statuses: WhatsAppStatusService) {}
+	constructor(
+		private readonly statuses: WhatsAppStatusService,
+		private readonly sync: WhatsAppSyncService,
+	) {}
 
 	@Get()
 	list(
@@ -80,6 +89,41 @@ export class WhatsAppStatusController {
 			providerStatusId,
 			body?.senderWaId,
 		);
+	}
+
+	@Get(':statusId/viewers')
+	viewers(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+	) {
+		return this.statuses.listStatusViewers(req.user, accountId, statusId);
+	}
+
+	@Post(':statusId/reply')
+	reply(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+		@Body() body: ReplyWhatsAppStatusDto,
+	) {
+		return this.sync.replyToStatus(
+			req.user,
+			accountId,
+			statusId,
+			body.text,
+			body.clientMessageId,
+		);
+	}
+
+	@Post(':statusId/reactions')
+	react(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+		@Body() body: ReactWhatsAppStatusDto,
+	) {
+		return this.sync.reactToStatus(req.user, accountId, statusId, body.emoji);
 	}
 
 	@Get(':statusId/content')
