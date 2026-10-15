@@ -1,25 +1,34 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
-import { ExpectedEntry, GoldHolding, IncomeEntry, WalletAccount } from 'entities/money.entity';
+import { ExpectedEntry, GoldHolding, IncomeEntry, LentLoan, WalletAccount, WalletExpense } from 'entities/money.entity';
 import { isYmd, todayYmd } from '../billing/billing-rules';
 import { goldValue } from './gold-price';
 import { GoldPriceService } from './gold-price.service';
+import { FxRateService } from './fx-rate.service';
 import {
 	CreateGoldHoldingDto,
+	CreateLentLoanDto,
 	CreateTrackerItemDto,
+	CreateWalletExpenseDto,
 	TrackerBalanceDto,
 	UpdateGoldHoldingDto,
+	UpdateLentLoanDto,
 	UpdateTrackerItemDto,
+	UpdateWalletExpenseDto,
 } from './wallet-tracker.dto';
 import {
 	centsToDecimal,
 	fromCents,
+	monthRange,
 	nextBalanceCents,
+	normalizeTrackerCurrency,
 	summarizeTracker,
 	toCents,
+	TrackerCurrency,
 	TrackerItem,
 	TrackerItemKind,
+	usdToEgpCents,
 } from './wallet-tracker.rules';
 
 const LIST_LIMIT = 300;
@@ -40,11 +49,12 @@ export class WalletTrackerService {
 	constructor(
 		@InjectDataSource() private readonly dataSource: DataSource,
 		private readonly goldPrice: GoldPriceService,
+		private readonly fxRate: FxRateService,
 	) {}
 
 	async getTracker(userId: string) {
 		const m = this.dataSource.manager;
-		const [wallet, pending, received, gold] = await Promise.all([
+		const [wallet, pending, received, gold, lent, expenses, fx] = await Promise.all([
 			this.findWallet(m, userId, false),
 			m.find(ExpectedEntry, {
 				where: { userId },
@@ -57,17 +67,26 @@ export class WalletTrackerService {
 				take: LIST_LIMIT,
 			}),
 			this.getGold(userId),
+			this.getLent(userId),
+			this.getExpenses(userId),
+			this.fxRate.getQuote(),
 		]);
+		const liveRate = fx?.usdToEgp ?? null;
 		const items: TrackerItem[] = [
-			...pending.map((row) => this.toItem('pending', row.id, row.description, row.amount, row.expectedDate, row.notes)),
-			...received.map((row) => this.toItem('received', row.id, row.source, row.amount, row.date, row.notes)),
+			...pending.map((row) => this.toPendingItem(row, liveRate)),
+			...received.map((row) => this.toReceivedItem(row)),
 		];
 		const balanceCents = toCents(wallet?.openingBalance);
 		return {
 			wallet: wallet ? { id: wallet.id, name: wallet.name, currency: wallet.currency } : null,
 			summary: summarizeTracker(balanceCents, items, todayYmd()),
+			fx: fx
+				? { usdToEgp: fx.usdToEgp, updatedAt: fx.updatedAt, stale: fx.stale, source: fx.source }
+				: null,
 			items,
 			gold,
+			lent,
+			expenses,
 		};
 	}
 
@@ -142,6 +161,197 @@ export class WalletTrackerService {
 		}
 	}
 
+	async createLent(userId: string, dto: CreateLentLoanDto) {
+		const person = this.cleanName(dto.person);
+		const date = this.cleanDate(dto.date) ?? todayYmd();
+		const amount = centsToDecimal(toCents(dto.amount));
+		const notes = dto.notes?.trim() || null;
+		await this.withLentTable(() =>
+			this.dataSource.manager.save(
+				this.dataSource.manager.create(LentLoan, {
+					userId,
+					person,
+					amount,
+					lentDate: date,
+					notes,
+				}),
+			),
+		);
+		return this.getTracker(userId);
+	}
+
+	async updateLent(userId: string, id: string, dto: UpdateLentLoanDto) {
+		const date = this.cleanDate(dto.date);
+		await this.withLentTable(async () => {
+			const row = await this.findLent(userId, id);
+			if (dto.person !== undefined) row.person = this.cleanName(dto.person);
+			if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
+			if (date) row.lentDate = date;
+			if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
+			await this.dataSource.manager.save(row);
+		});
+		return this.getTracker(userId);
+	}
+
+	async deleteLent(userId: string, id: string) {
+		await this.withLentTable(async () => {
+			await this.dataSource.manager.softRemove(await this.findLent(userId, id));
+		});
+		return this.getTracker(userId);
+	}
+
+	async createExpense(userId: string, dto: CreateWalletExpenseDto) {
+		const name = this.cleanName(dto.name);
+		const date = this.cleanDate(dto.date) ?? todayYmd();
+		const amount = centsToDecimal(toCents(dto.amount));
+		const notes = dto.notes?.trim() || null;
+		await this.withExpenseTable(() =>
+			this.dataSource.transaction(async (m) => {
+				const wallet = await this.ensureWallet(m, userId);
+				await m.save(
+					m.create(WalletExpense, {
+						userId,
+						name,
+						amount,
+						spentDate: date,
+						notes,
+					}),
+				);
+				await this.moveBalance(m, wallet, -toCents(amount));
+			}),
+		);
+		return this.getTracker(userId);
+	}
+
+	async updateExpense(userId: string, id: string, dto: UpdateWalletExpenseDto) {
+		const date = this.cleanDate(dto.date);
+		await this.withExpenseTable(() =>
+			this.dataSource.transaction(async (m) => {
+				const row = await this.lockExpense(m, userId, id);
+				const before = toCents(row.amount);
+				if (dto.name !== undefined) row.name = this.cleanName(dto.name);
+				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
+				if (date) row.spentDate = date;
+				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
+				await m.save(row);
+				const delta = before - toCents(row.amount);
+				if (delta) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, delta);
+				}
+			}),
+		);
+		return this.getTracker(userId);
+	}
+
+	async deleteExpense(userId: string, id: string) {
+		await this.withExpenseTable(() =>
+			this.dataSource.transaction(async (m) => {
+				const row = await this.lockExpense(m, userId, id);
+				const wallet = await this.ensureWallet(m, userId);
+				await m.softRemove(row);
+				await this.moveBalance(m, wallet, toCents(row.amount));
+			}),
+		);
+		return this.getTracker(userId);
+	}
+
+	/** Money still with other people; `available: false` until the lent_loans migration is applied. */
+	private async getLent(userId: string) {
+		let rows: LentLoan[] = [];
+		let available = true;
+		try {
+			rows = await this.dataSource.manager.find(LentLoan, {
+				where: { userId },
+				order: { lentDate: 'DESC', created_at: 'DESC' },
+			});
+		} catch (error) {
+			if (!isMissingTable(error)) throw error;
+			available = false;
+		}
+		const loans = rows.map((row) => ({
+			id: row.id,
+			person: row.person,
+			amount: fromCents(toCents(row.amount)),
+			date: String(row.lentDate).slice(0, 10),
+			notes: row.notes ?? null,
+		}));
+		const total = fromCents(loans.reduce((sum, loan) => sum + toCents(loan.amount), 0));
+		return { available, loans, total };
+	}
+
+	private async findLent(userId: string, id: string) {
+		const row = await this.dataSource.manager.findOne(LentLoan, { where: { id, userId } });
+		if (!row) throw new NotFoundException('Lent item not found');
+		return row;
+	}
+
+	private async withLentTable<T>(run: () => Promise<T>): Promise<T> {
+		try {
+			return await run();
+		} catch (error) {
+			if (isMissingTable(error)) {
+				this.logger.warn('lent_loans table is missing; apply migrations/20261016_lent_loans.sql');
+				throw new ServiceUnavailableException('Lent money is not set up yet');
+			}
+			throw error;
+		}
+	}
+
+	/** Spending log; `available: false` until the wallet_expenses migration is applied. */
+	private async getExpenses(userId: string) {
+		const today = todayYmd();
+		const { start, end } = monthRange(today);
+		const empty = { available: false as const, items: [] as Array<{ id: string; name: string; amount: number; date: string; notes: string | null }>, total: 0, spentThisMonth: 0, month: start.slice(0, 7) };
+		try {
+			// Raw probe so a stale TypeORM metadata miss is not confused with "table missing".
+			await this.dataSource.query(`SELECT 1 FROM wallet_expenses WHERE false`);
+		} catch (error) {
+			if (isMissingTable(error)) {
+				this.logger.warn('wallet_expenses table is missing; apply migrations/20261016_wallet_expenses.sql');
+				return empty;
+			}
+			this.logger.warn(`wallet_expenses probe failed: ${error instanceof Error ? error.message : error}`);
+			throw error;
+		}
+		const rows = await this.dataSource.manager.find(WalletExpense, {
+			where: { userId },
+			order: { spentDate: 'DESC', created_at: 'DESC' },
+			take: LIST_LIMIT,
+		});
+		const items = rows.map((row) => ({
+			id: row.id,
+			name: row.name,
+			amount: fromCents(toCents(row.amount)),
+			date: String(row.spentDate).slice(0, 10),
+			notes: row.notes ?? null,
+		}));
+		const total = fromCents(items.reduce((sum, row) => sum + toCents(row.amount), 0));
+		const spentThisMonth = fromCents(
+			items.reduce((sum, row) => (row.date >= start && row.date <= end ? sum + toCents(row.amount) : sum), 0),
+		);
+		return { available: true, items, total, spentThisMonth, month: start.slice(0, 7) };
+	}
+
+	private async lockExpense(m: EntityManager, userId: string, id: string) {
+		const row = await m.findOne(WalletExpense, { where: { id, userId }, lock: { mode: 'pessimistic_write' } });
+		if (!row) throw new NotFoundException('Expense not found');
+		return row;
+	}
+
+	private async withExpenseTable<T>(run: () => Promise<T>): Promise<T> {
+		try {
+			await this.dataSource.query(`SELECT 1 FROM wallet_expenses WHERE false`);
+			return await run();
+		} catch (error) {
+			if (isMissingTable(error)) {
+				this.logger.warn('wallet_expenses table is missing; apply migrations/20261016_wallet_expenses.sql');
+				throw new ServiceUnavailableException('Expenses are not set up yet');
+			}
+			throw error;
+		}
+	}
+
 	async updateBalance(userId: string, dto: TrackerBalanceDto) {
 		await this.dataSource.transaction(async (m) => {
 			const wallet = await this.ensureWallet(m, userId);
@@ -155,27 +365,53 @@ export class WalletTrackerService {
 	async createItem(userId: string, dto: CreateTrackerItemDto) {
 		const name = this.cleanName(dto.name);
 		const date = this.cleanDate(dto.date) ?? todayYmd();
+		const currency = normalizeTrackerCurrency(dto.currency);
 		const amount = centsToDecimal(toCents(dto.amount));
 		const notes = dto.notes?.trim() || null;
 		await this.dataSource.transaction(async (m) => {
 			if (!dto.received) {
-				await m.save(m.create(ExpectedEntry, { userId, description: name, amount, expectedDate: date, notes }));
+				await m.save(
+					m.create(ExpectedEntry, {
+						userId,
+						description: name,
+						amount,
+						currency,
+						expectedDate: date,
+						notes,
+					}),
+				);
 				return;
 			}
 			const wallet = await this.ensureWallet(m, userId);
-			await m.save(m.create(IncomeEntry, { userId, accountId: wallet.id, source: name, amount, date, notes, isActive: true }));
-			await this.moveBalance(m, wallet, toCents(amount));
+			const settled = await this.settleToEgp(currency, amount);
+			await m.save(
+				m.create(IncomeEntry, {
+					userId,
+					accountId: wallet.id,
+					source: name,
+					amount: settled.egpAmount,
+					currency,
+					originalAmount: settled.originalAmount,
+					fxRate: settled.fxRate,
+					date,
+					notes,
+					isActive: true,
+				}),
+			);
+			await this.moveBalance(m, wallet, toCents(settled.egpAmount));
 		});
 		return this.getTracker(userId);
 	}
 
 	async updateItem(userId: string, kind: TrackerItemKind, id: string, dto: UpdateTrackerItemDto) {
 		const date = this.cleanDate(dto.date);
+		const currency = dto.currency !== undefined ? normalizeTrackerCurrency(dto.currency) : undefined;
 		await this.dataSource.transaction(async (m) => {
 			if (kind === 'pending') {
 				const row = await this.lockPending(m, userId, id);
 				if (dto.name !== undefined) row.description = this.cleanName(dto.name);
 				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
+				if (currency) row.currency = currency;
 				if (date) row.expectedDate = date;
 				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
 				await m.save(row);
@@ -185,42 +421,65 @@ export class WalletTrackerService {
 			const row = await this.lockReceived(m, userId, id);
 			const before = toCents(row.amount);
 			if (dto.name !== undefined) row.source = this.cleanName(dto.name);
-			if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
 			if (date) row.date = date;
 			if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
+			if (dto.amount !== undefined || currency) {
+				const nextCurrency = currency ?? normalizeTrackerCurrency(row.currency);
+				const nextAmount = dto.amount !== undefined ? centsToDecimal(toCents(dto.amount)) : row.originalAmount || row.amount;
+				if (nextCurrency === 'USD') {
+					const rate = row.fxRate ? Number(row.fxRate) : await this.fxRate.requireUsdToEgp();
+					row.currency = 'USD';
+					row.originalAmount = nextAmount;
+					row.fxRate = String(rate);
+					row.amount = centsToDecimal(usdToEgpCents(Number(nextAmount), rate));
+				} else {
+					row.currency = 'EGP';
+					row.originalAmount = null;
+					row.fxRate = null;
+					row.amount = nextAmount;
+				}
+			}
 			await m.save(row);
 			await this.moveBalance(m, wallet, toCents(row.amount) - before);
 		});
 		return this.getTracker(userId);
 	}
 
-	/** Received ⇄ not received. Receiving adds the amount to the balance; undoing takes it back out. */
+	/** Received ⇄ not received. Receiving locks USD at today's FX and adds EGP to the balance. */
 	async toggleItem(userId: string, kind: TrackerItemKind, id: string) {
 		await this.dataSource.transaction(async (m) => {
 			const wallet = await this.ensureWallet(m, userId);
 			if (kind === 'pending') {
 				const row = await this.lockPending(m, userId, id);
+				const currency = normalizeTrackerCurrency(row.currency);
+				const settled = await this.settleToEgp(currency, row.amount);
 				await m.save(
 					m.create(IncomeEntry, {
 						userId,
 						accountId: wallet.id,
 						source: row.description,
-						amount: row.amount,
+						amount: settled.egpAmount,
+						currency,
+						originalAmount: settled.originalAmount,
+						fxRate: settled.fxRate,
 						date: todayYmd(),
 						notes: row.notes ?? null,
 						isActive: true,
 					}),
 				);
 				await m.softRemove(row);
-				await this.moveBalance(m, wallet, toCents(row.amount));
+				await this.moveBalance(m, wallet, toCents(settled.egpAmount));
 				return;
 			}
 			const row = await this.lockReceived(m, userId, id);
+			const currency = normalizeTrackerCurrency(row.currency);
+			const pendingAmount = currency === 'USD' && row.originalAmount ? row.originalAmount : row.amount;
 			await m.save(
 				m.create(ExpectedEntry, {
 					userId,
 					description: row.source,
-					amount: row.amount,
+					amount: pendingAmount,
+					currency,
 					expectedDate: row.date,
 					notes: row.notes ?? null,
 				}),
@@ -246,8 +505,59 @@ export class WalletTrackerService {
 		return this.getTracker(userId);
 	}
 
-	private toItem(kind: TrackerItemKind, id: string, name: string, amount: string, date: string, notes?: string | null): TrackerItem {
-		return { id, kind, name, amount: fromCents(toCents(amount)), date: String(date).slice(0, 10), notes: notes ?? null };
+	private toPendingItem(row: ExpectedEntry, liveRate: number | null): TrackerItem {
+		const currency = normalizeTrackerCurrency(row.currency);
+		const amount = fromCents(toCents(row.amount));
+		const fxRate = currency === 'USD' ? liveRate : null;
+		const egpAmount = currency === 'USD' && liveRate ? fromCents(usdToEgpCents(amount, liveRate)) : amount;
+		return {
+			id: row.id,
+			kind: 'pending',
+			name: row.description,
+			amount,
+			egpAmount,
+			currency,
+			fxRate,
+			date: String(row.expectedDate).slice(0, 10),
+			notes: row.notes ?? null,
+		};
+	}
+
+	private toReceivedItem(row: IncomeEntry): TrackerItem {
+		const currency = normalizeTrackerCurrency(row.currency);
+		const egpAmount = fromCents(toCents(row.amount));
+		const fxRate = row.fxRate != null ? Number(row.fxRate) : null;
+		const amount =
+			currency === 'USD' && row.originalAmount != null ? fromCents(toCents(row.originalAmount)) : egpAmount;
+		return {
+			id: row.id,
+			kind: 'received',
+			name: row.source,
+			amount,
+			egpAmount,
+			currency,
+			fxRate: Number.isFinite(fxRate as number) ? fxRate : null,
+			date: String(row.date).slice(0, 10),
+			notes: row.notes ?? null,
+		};
+	}
+
+	/** Convert a nominal amount into the EGP that joins the wallet (locks today's FX for USD). */
+	private async settleToEgp(currency: TrackerCurrency, amount: string) {
+		if (currency !== 'USD') {
+			return { egpAmount: centsToDecimal(toCents(amount)), originalAmount: null as string | null, fxRate: null as string | null };
+		}
+		let rate: number;
+		try {
+			rate = await this.fxRate.requireUsdToEgp();
+		} catch {
+			throw new BadRequestException('USD exchange rate is unavailable right now');
+		}
+		return {
+			egpAmount: centsToDecimal(usdToEgpCents(Number(amount), rate)),
+			originalAmount: centsToDecimal(toCents(amount)),
+			fxRate: String(rate),
+		};
 	}
 
 	private cleanName(value: string): string {

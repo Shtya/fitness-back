@@ -16,10 +16,14 @@ import {
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import {
 	CreateGoldHoldingDto,
+	CreateLentLoanDto,
 	CreateTrackerItemDto,
+	CreateWalletExpenseDto,
 	TrackerBalanceDto,
 	UpdateGoldHoldingDto,
+	UpdateLentLoanDto,
 	UpdateTrackerItemDto,
+	UpdateWalletExpenseDto,
 } from './wallet-tracker.dto';
 import { TrackerItemKind } from './wallet-tracker.rules';
 import { WalletTrackerService } from './wallet-tracker.service';
@@ -83,6 +87,36 @@ export class WalletTrackerController {
 	@Delete('gold/:id')
 	deleteGold(@Req() req: any, @Param('id', ParseUUIDPipe) id: string) {
 		return this.tracker.deleteGold(userIdOf(req), id);
+	}
+
+	@Post('lent')
+	createLent(@Req() req: any, @Body() dto: CreateLentLoanDto) {
+		return this.tracker.createLent(userIdOf(req), dto);
+	}
+
+	@Patch('lent/:id')
+	updateLent(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateLentLoanDto) {
+		return this.tracker.updateLent(userIdOf(req), id, dto);
+	}
+
+	@Delete('lent/:id')
+	deleteLent(@Req() req: any, @Param('id', ParseUUIDPipe) id: string) {
+		return this.tracker.deleteLent(userIdOf(req), id);
+	}
+
+	@Post('expenses')
+	createExpense(@Req() req: any, @Body() dto: CreateWalletExpenseDto) {
+		return this.tracker.createExpense(userIdOf(req), dto);
+	}
+
+	@Patch('expenses/:id')
+	updateExpense(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateWalletExpenseDto) {
+		return this.tracker.updateExpense(userIdOf(req), id, dto);
+	}
+
+	@Delete('expenses/:id')
+	deleteExpense(@Req() req: any, @Param('id', ParseUUIDPipe) id: string) {
+		return this.tracker.deleteExpense(userIdOf(req), id);
 	}
 
 	@Delete('items/:kind/:id')

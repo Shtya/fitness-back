@@ -27,6 +27,10 @@ export class CreateTrackerItemDto {
 	amount!: number;
 
 	@IsOptional()
+	@IsIn(['EGP', 'USD', 'egp', 'usd'])
+	currency?: string;
+
+	@IsOptional()
 	@Matches(YMD)
 	date?: string;
 
@@ -76,6 +80,98 @@ export class UpdateGoldHoldingDto {
 	karat?: number;
 }
 
+export class CreateLentLoanDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	person!: string;
+
+	@Type(() => Number)
+	@IsNumber({ maxDecimalPlaces: 2 })
+	@Min(0.01)
+	@Max(100_000_000)
+	amount!: number;
+
+	@IsOptional()
+	@Matches(YMD)
+	date?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	notes?: string;
+}
+
+export class UpdateLentLoanDto {
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	person?: string;
+
+	@IsOptional()
+	@Type(() => Number)
+	@IsNumber({ maxDecimalPlaces: 2 })
+	@Min(0.01)
+	@Max(100_000_000)
+	amount?: number;
+
+	@IsOptional()
+	@Matches(YMD)
+	date?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	notes?: string;
+}
+
+export class CreateWalletExpenseDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(180)
+	name!: string;
+
+	@Type(() => Number)
+	@IsNumber({ maxDecimalPlaces: 2 })
+	@Min(0.01)
+	@Max(100_000_000)
+	amount!: number;
+
+	@IsOptional()
+	@Matches(YMD)
+	date?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	notes?: string;
+}
+
+export class UpdateWalletExpenseDto {
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(180)
+	name?: string;
+
+	@IsOptional()
+	@Type(() => Number)
+	@IsNumber({ maxDecimalPlaces: 2 })
+	@Min(0.01)
+	@Max(100_000_000)
+	amount?: number;
+
+	@IsOptional()
+	@Matches(YMD)
+	date?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	notes?: string;
+}
+
 export class UpdateTrackerItemDto {
 	@IsOptional()
 	@IsString()
@@ -89,6 +185,10 @@ export class UpdateTrackerItemDto {
 	@Min(0.01)
 	@Max(100_000_000)
 	amount?: number;
+
+	@IsOptional()
+	@IsIn(['EGP', 'USD', 'egp', 'usd'])
+	currency?: string;
 
 	@IsOptional()
 	@Matches(YMD)

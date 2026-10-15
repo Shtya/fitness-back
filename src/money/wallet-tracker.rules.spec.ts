@@ -1,10 +1,22 @@
-import { centsToDecimal, monthRange, nextBalanceCents, summarizeTracker, toCents, TrackerItem } from './wallet-tracker.rules';
+import {
+	centsToDecimal,
+	monthRange,
+	nextBalanceCents,
+	normalizeTrackerCurrency,
+	summarizeTracker,
+	toCents,
+	TrackerItem,
+	usdToEgpCents,
+} from './wallet-tracker.rules';
 
-const item = (kind: TrackerItem['kind'], amount: number, date: string): TrackerItem => ({
+const item = (kind: TrackerItem['kind'], amount: number, date: string, egpAmount = amount): TrackerItem => ({
 	id: `${kind}-${date}-${amount}`,
 	kind,
 	name: 'x',
 	amount,
+	egpAmount,
+	currency: amount === egpAmount ? 'EGP' : 'USD',
+	fxRate: amount === egpAmount ? null : egpAmount / amount,
 	date,
 	notes: null,
 });
@@ -21,7 +33,7 @@ describe('wallet tracker rules', () => {
 		expect(monthRange('2026-12-31')).toEqual({ start: '2026-12-01', end: '2026-12-31' });
 	});
 
-	it('summarizes received this month and pending now / next month', () => {
+	it('summarizes using egpAmount so USD pending converts for totals', () => {
 		const summary = summarizeTracker(
 			toCents(2500),
 			[
@@ -31,15 +43,16 @@ describe('wallet tracker rules', () => {
 				item('pending', 50, '2026-08-01'),
 				item('pending', 700, '2026-11-15'),
 				item('pending', 900, '2027-01-05'),
+				item('pending', 10, '2026-10-18', 530), // $10 → 530 EGP live
 			],
 			'2026-10-15',
 		);
 		expect(summary).toEqual({
 			balance: 2500,
 			receivedThisMonth: 1000,
-			pendingThisMonth: 450,
+			pendingThisMonth: 980,
 			pendingNextMonth: 700,
-			pendingTotal: 2050,
+			pendingTotal: 2580,
 			month: '2026-10',
 			nextMonth: '2026-11',
 		});
@@ -55,5 +68,12 @@ describe('wallet tracker rules', () => {
 		expect(nextBalanceCents(1000, 'set', 250)).toBe(250);
 		expect(nextBalanceCents(1000, 'add', 250)).toBe(1250);
 		expect(nextBalanceCents(1000, 'subtract', 250)).toBe(750);
+	});
+
+	it('converts USD to EGP cents at the given rate', () => {
+		expect(usdToEgpCents(400, 50)).toBe(20_000_00);
+		expect(centsToDecimal(usdToEgpCents(10.5, 53.1))).toBe('557.55');
+		expect(normalizeTrackerCurrency('usd')).toBe('USD');
+		expect(normalizeTrackerCurrency('EGP')).toBe('EGP');
 	});
 });

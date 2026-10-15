@@ -2,11 +2,18 @@ import { addDays, addMonths } from '../billing/billing-rules';
 
 export type TrackerItemKind = 'pending' | 'received';
 
+export type TrackerCurrency = 'EGP' | 'USD';
+
 export type TrackerItem = {
 	id: string;
 	kind: TrackerItemKind;
 	name: string;
+	/** Nominal amount in `currency` (USD stays USD until received). */
 	amount: number;
+	/** EGP value used for totals: live rate for pending USD, locked EGP for received. */
+	egpAmount: number;
+	currency: TrackerCurrency;
+	fxRate: number | null;
 	date: string;
 	notes: string | null;
 };
@@ -52,7 +59,7 @@ export function summarizeTracker(balanceCents: number, items: TrackerItem[], tod
 	let pendingNext = 0;
 	let pendingAll = 0;
 	for (const item of items) {
-		const cents = toCents(item.amount);
+		const cents = toCents(item.egpAmount ?? item.amount);
 		if (item.kind === 'received') {
 			if (item.date >= thisMonth.start && item.date <= thisMonth.end) received += cents;
 			continue;
@@ -76,4 +83,12 @@ export function summarizeTracker(balanceCents: number, items: TrackerItem[], tod
 export function nextBalanceCents(currentCents: number, mode: 'set' | 'add' | 'subtract', amountCents: number): number {
 	if (mode === 'set') return amountCents;
 	return mode === 'add' ? currentCents + amountCents : currentCents - amountCents;
+}
+
+export function usdToEgpCents(usdAmount: number, rate: number): number {
+	return toCents(fromCents(toCents(usdAmount)) * rate);
+}
+
+export function normalizeTrackerCurrency(value?: string | null): TrackerCurrency {
+	return String(value || '').toUpperCase() === 'USD' ? 'USD' : 'EGP';
 }

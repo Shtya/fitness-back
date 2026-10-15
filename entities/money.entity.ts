@@ -142,6 +142,16 @@ export class IncomeEntry extends CoreEntity {
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount!: string;
 
+	/** Wallet always moves EGP in `amount`. USD receipts keep `originalAmount` + locked `fxRate`. */
+	@Column({ type: 'varchar', length: 3, default: 'EGP' })
+	currency!: string;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, name: 'original_amount', nullable: true })
+	originalAmount?: string | null;
+
+	@Column({ type: 'decimal', precision: 12, scale: 6, name: 'fx_rate', nullable: true })
+	fxRate?: string | null;
+
 	@Index()
 	@Column({ type: 'date' })
 	date!: string;
@@ -408,6 +418,10 @@ export class ExpectedEntry extends CoreEntity {
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount!: string;
 
+	/** Nominal currency of `amount`. USD stays USD until the user marks it received. */
+	@Column({ type: 'varchar', length: 3, default: 'EGP' })
+	currency!: string;
+
 	@Index()
 	@Column({ type: 'date' })
 	expectedDate!: string;
@@ -439,6 +453,66 @@ export class GoldHolding extends CoreEntity {
 
 	@Column({ type: 'smallint', default: 21, name: 'karat' })
 	karat!: number;
+
+	@Column({ type: 'text', nullable: true, name: 'notes' })
+	notes?: string | null;
+}
+
+/* =========================================================
+ * Money lent to someone (still owed to the user)
+ * Table: migrations/20261016_lent_loans.sql
+ * ======================================================= */
+
+@Entity('lent_loans')
+export class LentLoan extends CoreEntity {
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user!: User;
+
+	@Index()
+	@Column({ type: 'uuid', name: 'user_id' })
+	userId!: string;
+
+	/** Person who still has the money. */
+	@Column({ type: 'varchar', length: 120, name: 'person' })
+	person!: string;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, name: 'amount' })
+	amount!: string;
+
+	@Index()
+	@Column({ type: 'date', name: 'lent_date' })
+	lentDate!: string;
+
+	@Column({ type: 'text', nullable: true, name: 'notes' })
+	notes?: string | null;
+}
+
+/* =========================================================
+ * Wallet tab spending log (what / how much / when)
+ * Table: migrations/20261016_wallet_expenses.sql
+ * ======================================================= */
+
+@Entity('wallet_expenses')
+export class WalletExpense extends CoreEntity {
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user!: User;
+
+	@Index()
+	@Column({ type: 'uuid', name: 'user_id' })
+	userId!: string;
+
+	/** What the money was spent on. */
+	@Column({ type: 'varchar', length: 180, name: 'name' })
+	name!: string;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, name: 'amount' })
+	amount!: string;
+
+	@Index()
+	@Column({ type: 'date', name: 'spent_date' })
+	spentDate!: string;
 
 	@Column({ type: 'text', nullable: true, name: 'notes' })
 	notes?: string | null;
