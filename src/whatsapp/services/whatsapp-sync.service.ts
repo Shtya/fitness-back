@@ -582,6 +582,45 @@ export function isSupportedInboxChatId(id: string): boolean {
 	return !normalized.includes('status@') && !normalized.includes('@broadcast');
 }
 
+const GROUP_SUBJECT_PLACEHOLDER = 'Group';
+
+export function isGroupChatId(id: string | null | undefined): boolean {
+	return String(id || '')
+		.trim()
+		.toLowerCase()
+		.endsWith('@g.us');
+}
+
+/** Group title from a provider chat row. Member pushName / notify never qualify. */
+export function providerGroupSubject(chat: any): string | null {
+	const candidates = [
+		chat?.name,
+		chat?.subject,
+		chat?.groupMetadata?.subject,
+		chat?.formattedTitle,
+		chat?.contact?.name,
+		chat?.contact?.formattedName,
+	];
+	for (const value of candidates) {
+		const text = typeof value === 'string' ? value.trim() : '';
+		if (text) return text;
+	}
+	return null;
+}
+
+/** Provider subject wins over any stored value, so a member name saved earlier gets repaired. */
+export function nextGroupSubject(
+	current: string | null | undefined,
+	incoming: string | null | undefined,
+	chatId: string,
+): string | null {
+	const next = String(incoming || '').trim();
+	if (!next || next === GROUP_SUBJECT_PLACEHOLDER || isWeakContactDisplayName(next, chatId)) {
+		return null;
+	}
+	return next === String(current || '').trim() ? null : next;
+}
+
 function phoneFromWaId(id: string): string | null {
 	if (!id) return null;
 	const lower = id.toLowerCase();
@@ -1189,8 +1228,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					return;
 				}
 				try {
-					const title =
-						String(event.payload?.senderName || '').trim() || null;
+					const title = isGroupChatId(chatId)
+						? null
+						: String(event.payload?.senderName || '').trim() || null;
 					conversation = await this.ensureConversation(accountId, chatId, {
 						title,
 						phone: phoneDigits,
@@ -1946,7 +1986,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		for (const chatId of byChat.keys()) {
 			const sample = byChat.get(chatId)?.[0];
 			const conversation = await this.ensureConversation(accountId, chatId, {
-				title: sample?.fromMe ? null : sample?.contactName || null,
+				title: sample?.fromMe || isGroupChatId(chatId) ? null : sample?.contactName || null,
 			});
 			conversationByChatId.set(chatId, conversation);
 		}
@@ -2559,9 +2599,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 		if (conversation.group && options.title) {
-			const weak = isWeakContactDisplayName(conversation.group.subject, chatId);
-			if (weak && !isWeakContactDisplayName(options.title, chatId)) {
-				conversation.group.subject = options.title;
+			const subject = nextGroupSubject(conversation.group.subject, options.title, chatId);
+			if (subject) {
+				conversation.group.subject = subject;
 				await this.groupRepo.save(conversation.group);
 			}
 		}
@@ -2758,7 +2798,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 							this.groupRepo.create({
 								accountId,
 								waId: chatId,
-								subject: options.title || 'Group',
+								subject: options.title || GROUP_SUBJECT_PLACEHOLDER,
 								description: null,
 								ownerWaId: null,
 								participantCount: 0,
@@ -2952,13 +2992,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const isSelfChat = Boolean(ownDigits && phoneHint && phonesMatch(ownDigits, phoneHint));
 		const isChannel = String(normalized.chatId || '').endsWith('@newsletter');
 		// fromMe pushName is usually YOUR WhatsApp name — never use it to rename the peer chat.
-		let title = normalized.fromMe
-			? isSelfChat
-				? 'You'
-				: null
-			: isSelfChat
-				? 'You'
-				: normalized.contactName || null;
+		// In groups contactName is the sender, not the group subject.
+		let title = isGroupChatId(normalized.chatId)
+			? null
+			: normalized.fromMe
+				? isSelfChat
+					? 'You'
+					: null
+				: isSelfChat
+					? 'You'
+					: normalized.contactName || null;
 		if (
 			isChannel &&
 			isWeakContactDisplayName(title, normalized.chatId, phoneHint)
@@ -3715,15 +3758,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const isGroup = id.endsWith('@g.us');
 			const isChannel = id.endsWith('@newsletter');
 			const isLidChat = id.endsWith('@lid') || id.endsWith('@hosted.lid');
-			const provisionalTitle =
-				chat?.name ||
-				chat?.contact?.name ||
-				chat?.contact?.pushname ||
-				chat?.contact?.notify ||
-				chat?.contact?.formattedName ||
-				chat?.formattedTitle ||
-				chat?.formattedName ||
-				null;
+			const provisionalTitle = isGroup
+				? providerGroupSubject(chat)
+				: chat?.name ||
+					chat?.contact?.name ||
+					chat?.contact?.pushname ||
+					chat?.contact?.notify ||
+					chat?.contact?.formattedName ||
+					chat?.formattedTitle ||
+					chat?.formattedName ||
+					null;
 			const needsIdentity =
 				!isGroup &&
 				typeof provider.resolveContactIdentity === 'function' &&
@@ -3787,13 +3831,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					changed = true;
 				}
 			}
-			if (conversation.group && title) {
-				const existingWeak = isWeakContactDisplayName(conversation.group.subject, id);
-				if (existingWeak || conversation.group.subject !== title) {
-					if (existingWeak || !conversation.group.subject) {
-						await this.groupRepo.update(conversation.group.id, { subject: title });
-						changed = true;
-					}
+			if (conversation.group) {
+				const subject = nextGroupSubject(conversation.group.subject, title, id);
+				if (subject) {
+					await this.groupRepo.update(conversation.group.id, { subject });
+					conversation.group.subject = subject;
+					changed = true;
 				}
 			}
 			if (conversation.group && avatarUrl && avatarUrl !== conversation.group.avatarUrl) {

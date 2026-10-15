@@ -22,7 +22,7 @@ import { RolesGuard } from '../auth/guard/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from 'entities/global.entity';
 import { PlatformAppearanceService } from './platform-appearance.service';
-import { UpdateDashboardBackgroundDto } from './dto/tenant.dto';
+import { UpdateDashboardBackgroundDto, UpdateDashboardOverlayDto } from './dto/tenant.dto';
 
 const IMAGE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -53,6 +53,13 @@ export class PlatformAppearanceController {
   @Put('dashboard-background')
   setDashboardBackground(@Req() req: any, @Body() dto: UpdateDashboardBackgroundDto) {
     return this.appearance.setDashboardBackground(req.user?.id, dto);
+  }
+
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN)
+  @Put('dashboard-overlay')
+  setDashboardOverlay(@Req() req: any, @Body() dto: UpdateDashboardOverlayDto) {
+    return this.appearance.setDashboardOverlay(req.user?.id, dto);
   }
 
   @UseGuards(RolesGuard)

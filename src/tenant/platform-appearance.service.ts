@@ -14,12 +14,15 @@ import {
   DASHBOARD_GALLERY_MAX,
   DashboardBackground,
   DashboardGalleryImage,
+  DashboardOverlay,
   normalizeDashboardBackground,
+  normalizeDashboardOverlay,
   sanitizeGallery,
 } from './dashboard-background';
 
 const DASHBOARD_BACKGROUND_KEY = 'appearance.dashboard_background';
 const DASHBOARD_GALLERY_KEY = 'appearance.dashboard_background_gallery';
+const DASHBOARD_OVERLAY_KEY = 'appearance.dashboard_overlay';
 
 const PLATFORM_SETTINGS_SCHEMA = `CREATE TABLE IF NOT EXISTS platform_settings (
   key varchar(120) PRIMARY KEY,
@@ -31,6 +34,7 @@ const PLATFORM_SETTINGS_SCHEMA = `CREATE TABLE IF NOT EXISTS platform_settings (
 export interface DashboardAppearance {
   background: DashboardBackground | null;
   gallery: DashboardGalleryImage[];
+  overlay: DashboardOverlay | null;
 }
 
 /** Platform-wide settings owned by the super admin (production runs with synchronize off). */
@@ -103,9 +107,33 @@ export class PlatformAppearanceService implements OnModuleInit {
     return gallery;
   }
 
+  private async readOverlay(): Promise<DashboardOverlay | null> {
+    const stored = await this.readSetting(DASHBOARD_OVERLAY_KEY);
+    if (!stored) return null;
+    try {
+      return normalizeDashboardOverlay(stored);
+    } catch {
+      return null;
+    }
+  }
+
   async getDashboardAppearance(): Promise<DashboardAppearance> {
     const background = await this.readBackground();
-    return { background, gallery: await this.readGallery(background) };
+    return {
+      background,
+      gallery: await this.readGallery(background),
+      overlay: await this.readOverlay(),
+    };
+  }
+
+  async setDashboardOverlay(
+    actorUserId: string,
+    input: { tone?: string | null; opacity?: number | null },
+  ): Promise<DashboardAppearance> {
+    const overlay = normalizeDashboardOverlay(input);
+    await this.writeSetting(DASHBOARD_OVERLAY_KEY, overlay, actorUserId);
+    const background = await this.readBackground();
+    return { background, gallery: await this.readGallery(background), overlay };
   }
 
   async setDashboardBackground(
@@ -118,7 +146,7 @@ export class PlatformAppearanceService implements OnModuleInit {
       throw new BadRequestException('Image is not in the background gallery');
     }
     await this.writeSetting(DASHBOARD_BACKGROUND_KEY, background, actorUserId);
-    return { background, gallery };
+    return { background, gallery, overlay: await this.readOverlay() };
   }
 
   /** Adds an uploaded file to the shared Images list and makes it the system background. */
@@ -134,7 +162,7 @@ export class PlatformAppearanceService implements OnModuleInit {
     const next = [...gallery, { id: randomUUID(), url, createdAt: new Date().toISOString() }];
     await this.writeSetting(DASHBOARD_GALLERY_KEY, next, actorUserId);
     await this.writeSetting(DASHBOARD_BACKGROUND_KEY, background, actorUserId);
-    return { background, gallery: next };
+    return { background, gallery: next, overlay: await this.readOverlay() };
   }
 
   async removeGalleryImage(actorUserId: string, id: string): Promise<DashboardAppearance> {
@@ -149,7 +177,7 @@ export class PlatformAppearanceService implements OnModuleInit {
       await this.writeSetting(DASHBOARD_BACKGROUND_KEY, null, actorUserId);
     }
     await this.deleteUploadedFile(target.url);
-    return { background, gallery: next };
+    return { background, gallery: next, overlay: await this.readOverlay() };
   }
 
   private async deleteUploadedFile(url: string) {

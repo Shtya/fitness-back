@@ -1,5 +1,24 @@
 import { BadRequestException } from '@nestjs/common';
-import { normalizeDashboardBackground } from './dashboard-background';
+import { normalizeDashboardBackground, normalizeDashboardOverlay } from './dashboard-background';
+
+describe('normalizeDashboardOverlay', () => {
+  it('keeps a tone and a whole-percent opacity', () => {
+    expect(normalizeDashboardOverlay({ tone: 'dark', opacity: 42.4 })).toEqual({
+      tone: 'dark',
+      opacity: 42,
+    });
+  });
+
+  it('treats 0% as no overlay', () => {
+    expect(normalizeDashboardOverlay({ tone: 'light', opacity: 0 })).toBeNull();
+  });
+
+  it('rejects unknown tones and out-of-range opacity', () => {
+    expect(() => normalizeDashboardOverlay({ tone: 'red', opacity: 20 })).toThrow(BadRequestException);
+    expect(() => normalizeDashboardOverlay({ tone: 'dark', opacity: 95 })).toThrow(BadRequestException);
+    expect(() => normalizeDashboardOverlay({ tone: 'dark', opacity: -1 })).toThrow(BadRequestException);
+  });
+});
 
 describe('normalizeDashboardBackground', () => {
   it('treats "default" as clearing the system background', () => {

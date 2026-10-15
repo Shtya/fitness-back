@@ -66,6 +66,21 @@ describe('PlatformAppearanceService gallery', () => {
     );
   });
 
+  it('stores the system overlay separately from the background', async () => {
+    const service = new PlatformAppearanceService(fakeDataSource() as any);
+
+    await service.setDashboardOverlay(actor, { tone: 'dark', opacity: 35 });
+    await service.setDashboardBackground(actor, { kind: 'preset', value: 'main-2' });
+
+    await expect(service.getDashboardAppearance()).resolves.toMatchObject({
+      background: { kind: 'preset', value: 'main-2' },
+      overlay: { tone: 'dark', opacity: 35 },
+    });
+    await expect(service.setDashboardOverlay(actor, { tone: 'dark', opacity: 0 })).resolves.toMatchObject({
+      overlay: null,
+    });
+  });
+
   it('gives a pre-gallery system image a stable id so it can be deleted', async () => {
     const data = fakeDataSource();
     data.rows.set('appearance.dashboard_background', {

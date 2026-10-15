@@ -141,6 +141,51 @@ describe('Baileys retry receipts and group metadata (audit P3)', () => {
 	});
 });
 
+describe('Baileys group titles', () => {
+	const GROUP = '120363000000000001@g.us';
+	const memberMessage = (id: string) => ({
+		chatId: GROUP,
+		providerMessageId: id,
+		fromMe: false,
+		senderWaId: '201000000001@s.whatsapp.net',
+		contactName: 'A. Gaber',
+		type: 'text',
+		text: 'hi',
+		timestamp: new Date(1_700_000_000_000),
+	});
+
+	it('never names a group after the member who sent a message', () => {
+		const provider = new BaileysProvider('account-group-title') as any;
+		provider.rememberMessage(memberMessage('g1'));
+		expect(provider.chats.get(GROUP)?.name || null).not.toBe('A. Gaber');
+
+		provider.rememberChat(GROUP, { name: 'Family' });
+		provider.rememberMessage(memberMessage('g2'));
+		expect(provider.chats.get(GROUP)?.name).toBe('Family');
+	});
+
+	it('replaces a stored member name with the real group subject in getChats', async () => {
+		const provider = new BaileysProvider('account-group-title') as any;
+		provider.rememberChat(GROUP, { name: 'A. Gaber', t: 10 });
+		provider.socket = {
+			groupMetadata: jest.fn().mockResolvedValue({
+				id: GROUP,
+				subject: 'Family',
+				participants: [],
+			}),
+		};
+		provider.state = 'connected';
+
+		const chats = await provider.getChats(10);
+		const row = chats.find((chat: any) => chat?.id?._serialized === GROUP);
+		expect(row?.name).toBe('Family');
+		expect(provider.socket.groupMetadata).toHaveBeenCalledTimes(1);
+
+		await provider.getChats(10);
+		expect(provider.socket.groupMetadata).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe('BaileysProvider message reactions', () => {
 	const connected = (accountId: string) => {
 		const provider = new BaileysProvider(accountId) as any;

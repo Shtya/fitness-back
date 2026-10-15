@@ -21,6 +21,16 @@ export class UpdateDashboardBackgroundDto {
   value?: string;
 }
 
+export class UpdateDashboardOverlayDto {
+  @IsIn(['light', 'dark', 'brand'])
+  tone!: 'light' | 'dark' | 'brand';
+
+  @IsInt()
+  @Min(0)
+  @Max(90)
+  opacity!: number;
+}
+
 export class DiscoverTenantByEmailDto {
   @IsEmail()
   email!: string;

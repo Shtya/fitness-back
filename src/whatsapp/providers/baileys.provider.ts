@@ -1203,9 +1203,11 @@ export class BaileysProvider implements WhatsAppProvider {
 		const id = jidOf(groupId) || String(groupId || '').trim();
 		if (!id.endsWith('@g.us')) return null;
 		if (this.groupSubjectCache.has(id)) return this.groupSubjectCache.get(id) || null;
-		if (!this.socket || this.state !== 'connected') return null;
+		const known = this.groupMetadataCache.get<any>(id);
+		if (!known && (!this.socket || this.state !== 'connected')) return null;
 		try {
-			const meta = this.rememberGroupMetadata(id, await this.socket.groupMetadata(id));
+			const meta =
+				known || this.rememberGroupMetadata(id, await this.socket.groupMetadata(id));
 			const subject = String(meta?.subject || '').trim() || null;
 			this.groupSubjectCache.set(id, subject);
 			trimMapToMax(this.groupSubjectCache, CACHE_MAX.groupSubject);
@@ -1351,13 +1353,15 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		const ts = normalized.timestamp?.getTime?.() || Date.now();
 		const existingName = this.chats.get(normalized.chatId)?.name || null;
-		const nextName =
-			this.contactDisplayName(normalized.chatId) ||
-			(normalized.contactName &&
-			!isWeakDisplayName(normalized.contactName, normalized.chatId)
-				? normalized.contactName
-				: null) ||
-			existingName;
+		// In groups contactName is the sender (a member), never the group title.
+		const nextName = normalized.chatId.endsWith('@g.us')
+			? this.groupSubjectCache.get(normalized.chatId) || existingName
+			: this.contactDisplayName(normalized.chatId) ||
+				(normalized.contactName &&
+				!isWeakDisplayName(normalized.contactName, normalized.chatId)
+					? normalized.contactName
+					: null) ||
+				existingName;
 		const fromHistory = Boolean((normalized as any).__fromHistory);
 		const prevUnread = Number(this.chats.get(normalized.chatId)?.unreadCount) || 0;
 		let nextUnread = prevUnread;
@@ -2030,7 +2034,16 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		socket.ev.on('groups.update', (updates: any[]) => {
 			for (const update of Array.isArray(updates) ? updates : []) {
-				if (update?.id) this.groupMetadataCache.del(String(update.id));
+				if (!update?.id) continue;
+				const id = String(update.id);
+				this.groupMetadataCache.del(id);
+				const subject = String(update.subject || '').trim();
+				if (subject) {
+					this.groupSubjectCache.set(id, subject);
+					this.rememberChat(id, { name: subject });
+				} else {
+					this.groupSubjectCache.delete(id);
+				}
 			}
 		});
 		socket.ev.on('group-participants.update', (update: any) => {
@@ -2482,6 +2495,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			.slice(0, count);
 		// Fill missing titles / channel pictures before CRM sync.
 		let newsletterFetches = 0;
+		let groupFetches = 0;
 		for (const chat of list) {
 			const id = String(chat?.id?._serialized || '');
 			if (!id) continue;
@@ -2494,12 +2508,22 @@ export class BaileysProvider implements WhatsAppProvider {
 				!id.endsWith('@newsletter')
 			) {
 				chat.name = saved;
-			} else if ((!current || isWeakDisplayName(current, id)) && fromContact) {
+			} else if (
+				(!current || isWeakDisplayName(current, id)) &&
+				fromContact &&
+				!id.endsWith('@g.us')
+			) {
 				chat.name = fromContact;
 			}
-			if (id.endsWith('@g.us') && (!chat.name || isWeakDisplayName(chat.name, id))) {
-				const subject = await this.fetchGroupSubject(id);
-				if (subject) chat.name = subject;
+			if (id.endsWith('@g.us')) {
+				// The stored name may be a member's pushName; the subject is authoritative.
+				const cached = this.groupSubjectCache.has(id);
+				const weak = !chat.name || isWeakDisplayName(chat.name, id);
+				if (cached || weak || groupFetches < 40) {
+					if (!cached) groupFetches += 1;
+					const subject = await this.fetchGroupSubject(id);
+					if (subject) chat.name = subject;
+				}
 			}
 			if (id.endsWith('@newsletter')) {
 				const missingName = !chat.name || isWeakDisplayName(String(chat.name), id);

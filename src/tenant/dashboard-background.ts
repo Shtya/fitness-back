@@ -42,6 +42,32 @@ export function sanitizeGallery(value: unknown): DashboardGalleryImage[] {
   return out;
 }
 
+export const DASHBOARD_OVERLAY_TONES = ['light', 'dark', 'brand'] as const;
+export const DASHBOARD_OVERLAY_MAX = 90;
+
+/** A tinted layer painted over the background image; opacity is a percentage. */
+export interface DashboardOverlay {
+  tone: (typeof DASHBOARD_OVERLAY_TONES)[number];
+  opacity: number;
+}
+
+/** `null` means no overlay (opacity 0). */
+export function normalizeDashboardOverlay(input: {
+  tone?: string | null;
+  opacity?: number | string | null;
+}): DashboardOverlay | null {
+  const tone = String(input?.tone || 'light').trim();
+  if (!(DASHBOARD_OVERLAY_TONES as readonly string[]).includes(tone)) {
+    throw new BadRequestException('Invalid overlay tone');
+  }
+  const opacity = Number(input?.opacity ?? 0);
+  if (!Number.isFinite(opacity) || opacity < 0 || opacity > DASHBOARD_OVERLAY_MAX) {
+    throw new BadRequestException(`Overlay opacity must be between 0 and ${DASHBOARD_OVERLAY_MAX}`);
+  }
+  const rounded = Math.round(opacity);
+  return rounded === 0 ? null : { tone: tone as DashboardOverlay['tone'], opacity: rounded };
+}
+
 /** `null` means "use the built-in default background". */
 export function normalizeDashboardBackground(input: {
   kind?: string | null;
