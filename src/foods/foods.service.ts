@@ -123,7 +123,7 @@ export class FoodsService {
 				${similarity} AS match_score
 			FROM foods f
 			WHERE f.deleted_at IS NULL AND ${scope} AND (${matchers.join(' OR ')})
-			ORDER BY match_rank ASC, match_score DESC, f.verified DESC, length(f.name_ar) ASC
+			ORDER BY match_rank ASC, match_score DESC, (f.source = 'usda') ASC, f.verified DESC, length(f.name_ar) ASC
 			LIMIT ${p(limit)}`;
 
 		const rows = await this.repo.query(sql, params);
