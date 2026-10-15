@@ -784,20 +784,26 @@ export class StatsService {
       take: 2,
     });
 
-    if (measurements.length < 2) {
-      return { hasEnoughData: false, changes: {} };
+    const [latest, previous] = measurements;
+    if (!latest) {
+      return { hasEnoughData: false, latest: null, changes: { weight: null, waist: null, chest: null } };
     }
 
-    const latest = measurements[0];
-    const previous = measurements[1];
+    // Postgres decimals arrive as strings.
+    const diff = (a: unknown, b: unknown) => {
+      const x = Number(a);
+      const y = Number(b);
+      if (a == null || b == null || !Number.isFinite(x) || !Number.isFinite(y) || x <= 0 || y <= 0) return null;
+      return Math.round((x - y) * 100) / 100;
+    };
 
     return {
-      hasEnoughData: true,
-      latest: latest,
+      hasEnoughData: Boolean(previous),
+      latest,
       changes: {
-        weight: latest.weight && previous.weight ? latest.weight - previous.weight : null,
-        waist: latest.waist && previous.waist ? latest.waist - previous.waist : null,
-        chest: latest.chest && previous.chest ? latest.chest - previous.chest : null,
+        weight: previous ? diff(latest.weight, previous.weight) : null,
+        waist: previous ? diff(latest.waist, previous.waist) : null,
+        chest: previous ? diff(latest.chest, previous.chest) : null,
       },
     };
   }
@@ -811,31 +817,41 @@ export class StatsService {
     };
   }
 
-  private async getWeeklySummary(userId: string) {
-    const startOfWeek = new Date();
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  /** Current gym week (Saturday → today) as Cairo calendar days, matching the client workouts page. */
+  private currentWeekRange() {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+    const d = new Date(`${today}T00:00:00Z`);
+    const sinceSaturday = (d.getUTCDay() + 1) % 7;
+    d.setUTCDate(d.getUTCDate() - sinceSaturday);
+    const weekStart = d.toISOString().slice(0, 10);
+    // Midnight Cairo for timestamp columns (Egypt is UTC+2/+3; +02:00 errs a little early, never late).
+    return { weekStart, today, weekStartAt: new Date(`${weekStart}T00:00:00+02:00`) };
+  }
 
-    const [workoutsThisWeek, mealsThisWeek, weeklyReport] = await Promise.all([
-      this.exerciseRecordRepo.count({
-        where: {
-          userId,
-          date: Between(startOfWeek.toISOString().split('T')[0], new Date().toISOString().split('T')[0]),
-        },
-      }),
+  private async getWeeklySummary(userId: string) {
+    const { weekStart, today, weekStartAt } = this.currentWeekRange();
+
+    const [workoutDays, mealsThisWeek, weeklyReport] = await Promise.all([
+      this.exerciseRecordRepo
+        .createQueryBuilder('r')
+        .select('COUNT(DISTINCT r.date)', 'days')
+        .where('r.userId = :userId', { userId })
+        .andWhere('r.date BETWEEN :from AND :to', { from: weekStart, to: today })
+        .getRawOne<{ days: string }>(),
       this.mealLogRepo.count({
         where: {
           userId,
-          eatenAt: Between(startOfWeek, new Date()),
+          eatenAt: Between(weekStartAt, new Date()),
         },
       }),
       this.weeklyReportRepo.findOne({
-        where: { userId },
+        where: { userId, created_at: MoreThanOrEqual(weekStartAt) },
         order: { created_at: 'DESC' },
       }),
     ]);
 
     return {
-      workouts: workoutsThisWeek,
+      workouts: Number(workoutDays?.days || 0),
       meals: mealsThisWeek,
       weeklyReportSubmitted: !!weeklyReport,
     };
