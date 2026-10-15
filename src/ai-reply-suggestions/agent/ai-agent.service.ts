@@ -118,7 +118,7 @@ export class AiAgentService {
 
 	async getSettings(user: User, accountId: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
-		return serializeAgentSettings(await this.runtime.getSettings(accountId, { fresh: true }));
+		return this.presentSettings(accountId, await this.runtime.getSettings(accountId, { fresh: true }));
 	}
 
 	async updateSettings(user: User, accountId: string, dto: UpdateAiAgentSettingsDto) {
@@ -153,7 +153,14 @@ export class AiAgentService {
 				metadata: { fields: Object.keys(patch), enabled: merged.enabled, scope: merged.scope },
 			})
 			.catch(() => undefined);
-		return serializeAgentSettings(await this.runtime.getSettings(accountId, { fresh: true }));
+		return this.presentSettings(accountId, await this.runtime.getSettings(accountId, { fresh: true }));
+	}
+
+	private presentSettings(accountId: string, settings: EffectiveAgentSettings) {
+		return {
+			...serializeAgentSettings(settings),
+			providerAlerts: this.runtime.getProviderAlerts(accountId),
+		};
 	}
 
 	private settingsPatch(dto: UpdateAiAgentSettingsDto): Partial<WhatsAppAiAgentSettings> {
@@ -633,17 +640,29 @@ export class AiAgentService {
 			.map(item => item.content)
 			.join('\n');
 		const agentReplies = messages.filter(item => item.role === 'agent').map(item => item.content);
-		const generated = await this.runtime.generate({
-			settings,
-			recent: messages.slice(-settings.contextMessageLimit),
-			relevantHistory: [],
-			knowledgeDocs: settings.useKnowledgeBase ? await this.runtime.knowledgeDocs(accountId) : [],
-			memory: null,
-			isFirstAgentReply: agentReplies.length === 0,
-			mediaNote: null,
-			query,
-			previousAgentReplies: agentReplies.slice(-5),
-		});
+		let generated;
+		try {
+			generated = await this.runtime.generate({
+				settings,
+				recent: messages.slice(-settings.contextMessageLimit),
+				relevantHistory: [],
+				knowledgeDocs: settings.useKnowledgeBase ? await this.runtime.knowledgeDocs(accountId) : [],
+				memory: null,
+				isFirstAgentReply: agentReplies.length === 0,
+				mediaNote: null,
+				query,
+				previousAgentReplies: agentReplies.slice(-5),
+			});
+		} catch (error) {
+			throw new HttpException(
+				{
+					statusCode: HttpStatus.BAD_GATEWAY,
+					message: error instanceof Error ? error.message : 'AI provider failed',
+					providerAlerts: this.runtime.getProviderAlerts(accountId),
+				},
+				HttpStatus.BAD_GATEWAY,
+			);
+		}
 		const mode = settings.defaultMode;
 		const delivery =
 			generated.decision === 'send'
@@ -667,6 +686,8 @@ export class AiAgentService {
 			provider: generated.provider,
 			model: generated.actualModel || generated.model,
 			latencyMs: generated.latencyMs,
+			fallbacks: generated.fallbacks,
+			providerAlerts: this.runtime.getProviderAlerts(accountId),
 		};
 	}
 

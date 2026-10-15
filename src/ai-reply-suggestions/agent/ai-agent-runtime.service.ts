@@ -29,6 +29,7 @@ import {
 import {
 	decryptAgentSecret,
 	generateOpenAiCompatible,
+	providerFallbackChain,
 } from './ai-agent-models';
 import {
 	AgentContextMessage,
@@ -182,6 +183,17 @@ function defaultHandoffMessage(sample: string) {
 		: 'Thanks for reaching out. A member of our team will follow up with you shortly.';
 }
 
+function errorText(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function shouldRetrySameProvider(error: unknown) {
+	const message = errorText(error);
+	if (/\b429\b|rate.?limit|too many requests/i.test(message)) return false;
+	if (/\b(401|403|404)\b/.test(message)) return false;
+	return /timed out|timeout|ECONNRESET|503|502|network|fetch failed/i.test(message);
+}
+
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	let timer: NodeJS.Timeout | undefined;
 	try {
@@ -208,6 +220,18 @@ export interface AgentGenerationInput {
 	previousAgentReplies: string[];
 }
 
+export interface ProviderFailure {
+	provider: string;
+	error: string;
+}
+
+export interface ProviderAlert {
+	provider: string;
+	error: string;
+	at: string;
+	recoveredBy: string | null;
+}
+
 export interface AgentGenerationOutput {
 	result: AgentModelResult;
 	decision: GuardDecision;
@@ -217,6 +241,7 @@ export interface AgentGenerationOutput {
 	model: string;
 	actualModel: string | null;
 	latencyMs: number;
+	fallbacks: ProviderFailure[];
 }
 
 interface PendingBurst {
@@ -241,6 +266,8 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 	private readonly settingsCache = new Map<string, { value: EffectiveAgentSettings; at: number }>();
 	/** Message ids the agent itself just sent (outbound echo must not pause the agent). */
 	private readonly ownMessageIds = new Map<string, number>();
+	/** Last provider failures for the Models tab / test-chat banner (per account). */
+	private readonly providerAlerts = new Map<string, ProviderAlert[]>();
 	private unsubscribers: Array<() => void> = [];
 
 	constructor(
@@ -619,7 +646,16 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
-	/** Build the prompt, call the provider (timeout + one retry), parse and guard. */
+	getProviderAlerts(accountId: string): ProviderAlert[] {
+		const cutoff = Date.now() - 30 * 60_000;
+		const live = (this.providerAlerts.get(accountId) || []).filter(item => Date.parse(item.at) >= cutoff);
+		if (live.length !== (this.providerAlerts.get(accountId) || []).length) {
+			this.providerAlerts.set(accountId, live);
+		}
+		return live;
+	}
+
+	/** Build the prompt, call the provider (timeout + fallbacks), parse and guard. */
 	async generate(input: AgentGenerationInput): Promise<AgentGenerationOutput> {
 		const hits = input.settings.useKnowledgeBase ? retrieveKnowledge(input.knowledgeDocs, input.query) : [];
 		const { prompt, knowledge } = buildAgentPrompt({
@@ -633,22 +669,30 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 		});
 		const model = String(input.settings.model || 'auto').trim() || 'auto';
 		const startedAt = Date.now();
-		const providerName = String(input.settings.provider || 'ai-free');
-		let raw: { text: string; actualModel: string | null };
-		if (providerName === 'external') {
-			raw = await this.generateExternal(input.settings, prompt);
-		} else {
-			const provider =
-				this.providers.tryGet(providerName) || this.providers.tryGet('ai-free');
-			if (!provider) throw new Error('No AI provider is available');
+		const selected = String(input.settings.provider || 'ai-free');
+		const fallbacks: ProviderFailure[] = [];
+		let raw: { text: string; actualModel: string | null } | null = null;
+		let usedProvider = selected;
+
+		for (const name of providerFallbackChain(selected)) {
 			try {
-				raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
-			} catch (firstError) {
-				this.logger.warn(
-					`AI agent provider ${provider.name} failed once, retrying: ${firstError instanceof Error ? firstError.message : firstError}`,
-				);
-				raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+				raw = await this.invokeProvider(name, input.settings, prompt, model);
+				if (!String(raw.text || '').trim()) throw new Error('Provider returned an empty reply');
+				usedProvider = name;
+				break;
+			} catch (error) {
+				const message = errorText(error);
+				fallbacks.push({ provider: name, error: message });
+				this.recordProviderAlert(input.settings.accountId, name, message);
+				this.logger.warn(`AI agent provider ${name} failed: ${message}`);
+				raw = null;
 			}
+		}
+		if (!raw) {
+			throw new Error(fallbacks[fallbacks.length - 1]?.error || 'No AI provider is available');
+		}
+		if (fallbacks.length) {
+			this.markProviderRecovery(input.settings.accountId, usedProvider, fallbacks);
 		}
 		const result = parseAgentResult(raw.text);
 		const knowledgeIds = new Set(knowledge.map(doc => doc.id));
@@ -670,11 +714,55 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 				memory: Boolean(input.memory?.facts?.length || input.memory?.commitments?.length),
 				history: input.relevantHistory.length,
 			}),
-			provider: providerName,
+			provider: usedProvider,
 			model,
 			actualModel: raw.actualModel ?? null,
 			latencyMs: Date.now() - startedAt,
+			fallbacks,
 		};
+	}
+
+	private async invokeProvider(
+		name: string,
+		settings: EffectiveAgentSettings,
+		prompt: string,
+		model: string,
+	) {
+		if (name === 'external') return this.generateExternal(settings, prompt);
+		const provider = this.providers.tryGet(name);
+		if (!provider) throw new Error(`Provider ${name} is not available`);
+		try {
+			return await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+		} catch (firstError) {
+			if (!shouldRetrySameProvider(firstError)) throw firstError;
+			this.logger.warn(
+				`AI agent provider ${provider.name} failed once, retrying: ${errorText(firstError)}`,
+			);
+			return await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+		}
+	}
+
+	private recordProviderAlert(accountId: string, provider: string, error: string) {
+		if (!accountId) return;
+		const next = this.getProviderAlerts(accountId).filter(item => item.provider !== provider);
+		next.push({
+			provider,
+			error: error.slice(0, 180),
+			at: new Date().toISOString(),
+			recoveredBy: null,
+		});
+		this.providerAlerts.set(accountId, next.slice(-8));
+	}
+
+	private markProviderRecovery(accountId: string, recoveredBy: string, failures: ProviderFailure[]) {
+		if (!accountId || !failures.length) return;
+		const failed = new Set(failures.map(item => item.provider));
+		this.providerAlerts.set(
+			accountId,
+			this.getProviderAlerts(accountId).map(item =>
+				failed.has(item.provider) ? { ...item, recoveredBy } : item,
+			),
+		);
 	}
 
 	private async generateExternal(settings: EffectiveAgentSettings, prompt: string) {

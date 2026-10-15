@@ -47,6 +47,22 @@ export const BUILT_IN_AGENT_PROVIDERS = [
 	},
 ] as const;
 
+/** Leaf providers tried after the selected one fails (rate-limit, reject, timeout). */
+const FALLBACK_LEAVES = ['pollinations-free', 'browser-chatgpt', 'llm7-free', 'dragify-free'] as const;
+
+/**
+ * Try the selected provider first, then up to two backups so a 429/reject
+ * still produces a reply. `ai-free` already chains internally, so it only
+ * needs Dragify as a last resort.
+ */
+export function providerFallbackChain(selected: string): string[] {
+	const name = String(selected || 'ai-free').trim() || 'ai-free';
+	if (name === 'external') return ['external', 'ai-free', 'dragify-free'];
+	if (name === 'ai-free') return ['ai-free', 'dragify-free'];
+	const rest = FALLBACK_LEAVES.filter(item => item !== name);
+	return [name, ...rest].slice(0, 3);
+}
+
 export const EXTERNAL_MODEL_PRESETS: Record<
 	string,
 	{ label: string; kind: ExternalModelKind; baseUrl: string }

@@ -105,7 +105,7 @@ function setup(options: {
 			actualModel: 'test-model',
 		})),
 	};
-	const providers = { tryGet: jest.fn(() => provider) };
+	const providers = { tryGet: jest.fn((_name?: string) => provider) };
 	const audit = { write: jest.fn(async () => undefined) };
 
 	const runtime = new AiAgentRuntimeService(
@@ -123,7 +123,7 @@ function setup(options: {
 		audit as any,
 	);
 	runtime.onModuleInit();
-	return { runtime, sync, provider, runRepo, states, runs, gateway, listeners, settingsRow };
+	return { runtime, sync, provider, providers, runRepo, states, runs, gateway, listeners, settingsRow };
 }
 
 describe('AiAgentRuntimeService', () => {
@@ -268,6 +268,48 @@ describe('AiAgentRuntimeService', () => {
 		const last = gateway.emitAccountEvent.mock.calls.at(-1);
 		expect(last?.[1]).toBe('ai_agent.state');
 		expect(last?.[2].status).toBe('paused');
+	});
+
+	it('falls through to the next provider after a 429 and records an alert', async () => {
+		const { runtime, providers } = setup({ settings: { provider: 'llm7-free' } });
+		const failing = jest.fn(async () => {
+			throw new Error('LLM7 free provider unavailable (429)');
+		});
+		const ok = jest.fn(async () => ({
+			text: JSON.stringify({
+				reply: 'The basic plan costs 300 EGP per month.',
+				action: 'reply',
+				confidence: 0.9,
+				usedKnowledgeIds: ['k1'],
+				memory: { facts: [], commitments: [] },
+				reasoning: 'Answered from the price entry.',
+			}),
+			actualModel: 'openai',
+		}));
+		providers.tryGet.mockImplementation((name?: string) => {
+			if (name === 'llm7-free') return { name, generate: failing };
+			if (name === 'pollinations-free') return { name, generate: ok };
+			return { name: name || 'missing', generate: failing };
+		});
+		const generated = await runtime.generate({
+			settings: mergeAgentSettings(ACCOUNT, { provider: 'llm7-free', useKnowledgeBase: true }),
+			recent: [{ role: 'customer', content: 'How much is the basic plan?' }],
+			relevantHistory: [],
+			knowledgeDocs: [{ id: 'k1', title: 'Basic plan price', content: 'The basic plan costs 300 EGP per month.', category: 'price', tags: [] }],
+			memory: null,
+			isFirstAgentReply: true,
+			mediaNote: null,
+			query: 'How much is the basic plan?',
+			previousAgentReplies: [],
+		});
+		expect(failing).toHaveBeenCalledTimes(1);
+		expect(ok).toHaveBeenCalledTimes(1);
+		expect(generated.provider).toBe('pollinations-free');
+		expect(generated.fallbacks).toEqual([
+			{ provider: 'llm7-free', error: 'LLM7 free provider unavailable (429)' },
+		]);
+		const alert = runtime.getProviderAlerts(ACCOUNT).find(item => item.provider === 'llm7-free');
+		expect(alert?.recoveredBy).toBe('pollinations-free');
 	});
 
 	it('pauses when a human sends from the phone', async () => {

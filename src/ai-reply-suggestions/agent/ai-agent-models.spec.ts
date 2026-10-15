@@ -5,6 +5,7 @@ import {
 	encryptAgentSecret,
 	last4,
 	normalizeExternalBaseUrl,
+	providerFallbackChain,
 } from './ai-agent-models';
 
 describe('ai-agent-models', () => {
@@ -22,6 +23,16 @@ describe('ai-agent-models', () => {
 	it('accepts https endpoints and local http Ollama', () => {
 		expect(normalizeExternalBaseUrl('https://api.openai.com/v1/')).toBe('https://api.openai.com/v1');
 		expect(normalizeExternalBaseUrl('http://127.0.0.1:11434/v1')).toBe('http://127.0.0.1:11434/v1');
+	});
+
+	it('tries the selected model first, then two backups', () => {
+		expect(providerFallbackChain('llm7-free')).toEqual([
+			'llm7-free',
+			'pollinations-free',
+			'browser-chatgpt',
+		]);
+		expect(providerFallbackChain('ai-free')).toEqual(['ai-free', 'dragify-free']);
+		expect(providerFallbackChain('external')).toEqual(['external', 'ai-free', 'dragify-free']);
 	});
 
 	it('rejects non-local http and metadata hosts', () => {
