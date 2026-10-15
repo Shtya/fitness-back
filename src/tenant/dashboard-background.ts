@@ -15,6 +15,33 @@ const GRADIENT_ID_RE = /^[a-z0-9-]{1,40}$/;
 /** Only files uploaded through the appearance endpoint, so the value is safe inside CSS url(). */
 const UPLOADED_IMAGE_RE = /^\/uploads\/branding\/[A-Za-z0-9_-]+\.(png|jpe?g|webp|gif)$/;
 
+/** Uploaded images the super admin added to the shared "Images" list. */
+export interface DashboardGalleryImage {
+  id: string;
+  url: string;
+  createdAt: string;
+}
+
+export const DASHBOARD_GALLERY_MAX = 24;
+
+export function isUploadedBackgroundUrl(value: unknown): value is string {
+  return typeof value === 'string' && UPLOADED_IMAGE_RE.test(value);
+}
+
+export function sanitizeGallery(value: unknown): DashboardGalleryImage[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: DashboardGalleryImage[] = [];
+  for (const item of value) {
+    const id = String(item?.id || '');
+    const url = item?.url;
+    if (!id || !isUploadedBackgroundUrl(url) || seen.has(url)) continue;
+    seen.add(url);
+    out.push({ id, url, createdAt: String(item?.createdAt || '') });
+  }
+  return out;
+}
+
 /** `null` means "use the built-in default background". */
 export function normalizeDashboardBackground(input: {
   kind?: string | null;

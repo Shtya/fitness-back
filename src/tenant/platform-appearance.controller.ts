@@ -2,7 +2,10 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
+  ParseUUIDPipe,
   Post,
   Put,
   Req,
@@ -42,7 +45,7 @@ export class PlatformAppearanceController {
 
   @Get('dashboard-background')
   getDashboardBackground() {
-    return this.appearance.getDashboardBackground();
+    return this.appearance.getDashboardAppearance();
   }
 
   @UseGuards(RolesGuard)
@@ -73,9 +76,13 @@ export class PlatformAppearanceController {
   )
   uploadDashboardBackground(@Req() req: any, @UploadedFile() file: { filename: string } | undefined) {
     if (!file) throw new BadRequestException('Image file is required');
-    return this.appearance.setDashboardBackground(req.user?.id, {
-      kind: 'image',
-      value: `/uploads/branding/${file.filename}`,
-    });
+    return this.appearance.addGalleryImage(req.user?.id, `/uploads/branding/${file.filename}`);
+  }
+
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN)
+  @Delete('dashboard-background/gallery/:id')
+  removeGalleryImage(@Req() req: any, @Param('id', ParseUUIDPipe) id: string) {
+    return this.appearance.removeGalleryImage(req.user?.id, id);
   }
 }
