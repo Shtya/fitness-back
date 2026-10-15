@@ -21,9 +21,11 @@ import {
 
 import { User, Notification as NotificationEntity } from 'entities/global.entity'; // ✅ خلي User/Notification من global
 import { Recipe } from 'entities/recipes.entity';
+import { FoodsModule } from '../foods/foods.module';
 
 @Module({
   imports: [
+    FoodsModule,
     TypeOrmModule.forFeature([
       MealPlan,
       MealPlanDay,

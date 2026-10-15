@@ -1,0 +1,335 @@
+-- Global Nutrition Database: one catalog of foods with nutrition per 100 g (or 100 ml),
+-- plus a per-item nutrition snapshot on meal plan items.
+-- Run: node scripts/run-sql-migration.mjs migrations/20261015_foods_database.sql
+
+BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS foods (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  deleted_at      timestamptz NULL,
+
+  name_ar         varchar(200) NOT NULL DEFAULT '',
+  name_en         varchar(200) NOT NULL DEFAULT '',
+  aliases         text NULL,
+  category        varchar(40) NOT NULL DEFAULT 'other',
+  brand           varchar(120) NULL,
+  barcode         varchar(64) NULL,
+
+  -- Every nutrient below is per 100 of base_unit ('g' or 'ml').
+  base_unit       varchar(4) NOT NULL DEFAULT 'g',
+  kcal            numeric(8,2) NOT NULL DEFAULT 0,
+  protein         numeric(8,2) NOT NULL DEFAULT 0,
+  carbs           numeric(8,2) NOT NULL DEFAULT 0,
+  fat             numeric(8,2) NOT NULL DEFAULT 0,
+  fiber           numeric(8,2) NULL,
+  sugar           numeric(8,2) NULL,
+  saturated_fat   numeric(8,2) NULL,
+  sodium_mg       numeric(10,2) NULL,
+
+  -- Weight of one piece, so "2 eggs" can be converted to grams.
+  piece_grams     numeric(8,2) NULL,
+  piece_label_ar  varchar(80) NULL,
+  piece_label_en  varchar(80) NULL,
+
+  -- NULL = global catalog (super admin). Otherwise private to that admin's team.
+  admin_id        uuid NULL,
+  created_by_id   uuid NULL,
+  source          varchar(20) NOT NULL DEFAULT 'manual',
+  source_ref      varchar(120) NULL,
+  verified        boolean NOT NULL DEFAULT false,
+  seed_key        varchar(80) NULL,
+
+  search_text     text GENERATED ALWAYS AS (
+    lower(regexp_replace(
+      translate(
+        coalesce(name_ar, '') || ' ' || coalesce(name_en, '') || ' ' || coalesce(aliases, '') || ' ' || coalesce(brand, ''),
+        'أإآٱىةؤئ', 'اااايهوي'
+      ),
+      '[\u064B-\u065F\u0670\u0640]', '', 'g'
+    ))
+  ) STORED,
+
+  CONSTRAINT foods_base_unit_chk CHECK (base_unit IN ('g', 'ml')),
+  CONSTRAINT foods_values_chk CHECK (kcal >= 0 AND protein >= 0 AND carbs >= 0 AND fat >= 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_foods_seed_key ON foods (seed_key);
+CREATE INDEX IF NOT EXISTS idx_foods_admin_id ON foods (admin_id);
+CREATE INDEX IF NOT EXISTS idx_foods_category ON foods (category);
+CREATE INDEX IF NOT EXISTS idx_foods_barcode ON foods (barcode) WHERE barcode IS NOT NULL;
+
+-- Trigram search ("similar" names). Optional: the API falls back to token matching without it.
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_foods_search_trgm ON foods USING gin (search_text gin_trgm_ops)';
+EXCEPTION WHEN insufficient_privilege OR undefined_file THEN
+  RAISE NOTICE 'pg_trgm not available; food search uses token matching only';
+END $$;
+
+-- Nutrition snapshot for each plan item: { grams, protein, carbs, fat, fiber, sugar }.
+ALTER TABLE meal_items ADD COLUMN IF NOT EXISTS nutrition jsonb NULL;
+
+INSERT INTO foods (seed_key, name_ar, name_en, category, base_unit, kcal, protein, carbs, fat, piece_grams, piece_label_ar, piece_label_en)
+VALUES
+  ('chicken_breast', 'صدور فراخ مطبوخة', 'Chicken Breast', 'meat', 'g', 165, 31, 0, 3.6, NULL, NULL, NULL),
+  ('chicken_thigh', 'ورك فراخ مطبوخ', 'Chicken Thigh', 'meat', 'g', 209, 26, 0, 10.9, NULL, NULL, NULL),
+  ('chicken_whole', 'دجاج كامل', 'Whole Chicken', 'meat', 'g', 239, 27, 0, 14, NULL, NULL, NULL),
+  ('turkey_breast', 'صدور رومي', 'Turkey Breast', 'meat', 'g', 135, 30, 0, 1, NULL, NULL, NULL),
+  ('duck', 'بط', 'Duck', 'meat', 'g', 337, 19, 0, 28, NULL, NULL, NULL),
+  ('beef_lean', 'لحم بقري خالي من الدهون', 'Lean Beef', 'meat', 'g', 250, 26, 0, 15, NULL, NULL, NULL),
+  ('beef_minced', 'لحم مفروم', 'Ground Beef', 'meat', 'g', 254, 26, 0, 17, NULL, NULL, NULL),
+  ('beef_ribeye', 'لحم ريب آي', 'Ribeye Steak', 'meat', 'g', 291, 25, 0, 21, NULL, NULL, NULL),
+  ('lamb', 'لحم ضأن', 'Lamb', 'meat', 'g', 294, 25, 0, 21, NULL, NULL, NULL),
+  ('fish_tuna', 'تونة بالماء', 'Tuna in Water', 'seafood', 'g', 116, 26, 0, 1, NULL, NULL, NULL),
+  ('fish_salmon', 'سالمون مشوي', 'Grilled Salmon', 'seafood', 'g', 208, 20, 0, 13, NULL, NULL, NULL),
+  ('fish_cod', 'سمك قد', 'Cod', 'seafood', 'g', 82, 18, 0, 0.7, NULL, NULL, NULL),
+  ('fish_sardines', 'سردين', 'Sardines', 'seafood', 'g', 208, 25, 0, 11, NULL, NULL, NULL),
+  ('shrimp', 'جمبري مطبوخ', 'Cooked Shrimp', 'seafood', 'g', 99, 24, 0, 0.3, NULL, NULL, NULL),
+  ('crab', 'كابوريا', 'Crab', 'seafood', 'g', 87, 18, 0, 1.1, NULL, NULL, NULL),
+  ('lobster', 'استاكوزا', 'Lobster', 'seafood', 'g', 89, 19, 0, 0.9, NULL, NULL, NULL),
+  ('mussels', 'بلح البحر', 'Mussels', 'seafood', 'g', 86, 12, 4, 2.2, NULL, NULL, NULL),
+  ('egg', 'بيضة (كبيرة)', 'Egg (Large)', 'dairy', 'g', 144, 12.6, 0.8, 9.6, 50, 'بيضة كبيرة', 'Large egg'),
+  ('egg_white', 'بياض بيضة', 'Egg White', 'dairy', 'g', 51.52, 10.91, 0.61, 0.3, 33, 'بياض بيضة', 'Egg white'),
+  ('egg_yolk', 'صفار بيضة', 'Egg Yolk', 'dairy', 'g', 323.53, 15.88, 3.53, 26.47, 17, 'صفار بيضة', 'Egg yolk'),
+  ('milk_2', 'لبن 2%', '2% Milk', 'dairy', 'ml', 50, 3.3, 5, 2, NULL, NULL, NULL),
+  ('milk_full', 'لبن كامل الدسم', 'Whole Milk', 'dairy', 'ml', 64, 3.3, 4.8, 3.7, NULL, NULL, NULL),
+  ('milk_skim', 'لبن خالي الدسم', 'Skim Milk', 'dairy', 'ml', 34, 3.4, 5, 0.1, NULL, NULL, NULL),
+  ('yogurt', 'زبادي سادة', 'Plain Yogurt', 'dairy', 'g', 59, 10, 3.6, 0.4, NULL, NULL, NULL),
+  ('greek_yogurt', 'زبادي يوناني', 'Greek Yogurt', 'dairy', 'g', 59, 10, 3.6, 0.4, NULL, NULL, NULL),
+  ('cheese_feta', 'جبنة فيتا', 'Feta Cheese', 'dairy', 'g', 264, 14, 4, 21, NULL, NULL, NULL),
+  ('cheese_cheddar', 'جبنة شيدر', 'Cheddar Cheese', 'dairy', 'g', 403, 25, 1.3, 33, NULL, NULL, NULL),
+  ('cheese_mozzarella', 'جبنة موتزاريلا', 'Mozzarella Cheese', 'dairy', 'g', 280, 28, 3.1, 17, NULL, NULL, NULL),
+  ('cheese_cottage', 'جبنة قريش', 'Cottage Cheese', 'dairy', 'g', 98, 11, 3.4, 4.3, NULL, NULL, NULL),
+  ('rice_white', 'أرز أبيض مطبوخ', 'White Rice Cooked', 'grains', 'g', 130, 2.7, 28, 0.3, NULL, NULL, NULL),
+  ('rice_brown', 'أرز بني مطبوخ', 'Brown Rice Cooked', 'grains', 'g', 111, 2.6, 23, 0.9, NULL, NULL, NULL),
+  ('oats', 'شوفان (جاف)', 'Oats (Dry)', 'grains', 'g', 389, 16.9, 66.3, 6.9, NULL, NULL, NULL),
+  ('quinoa', 'كينوا مطبوخة', 'Cooked Quinoa', 'grains', 'g', 120, 4.4, 21, 1.9, NULL, NULL, NULL),
+  ('bread_white', 'خبز أبيض', 'White Bread', 'grains', 'g', 265, 9, 49, 3.2, NULL, NULL, NULL),
+  ('bread_brown', 'خبز بني', 'Brown Bread', 'grains', 'g', 247, 9.6, 41, 3.4, NULL, NULL, NULL),
+  ('bread_whole_wheat', 'خبز قمح كامل', 'Whole Wheat Bread', 'grains', 'g', 247, 13, 41, 3.4, NULL, NULL, NULL),
+  ('pasta_white', 'مكرونة مطبوخة', 'Cooked Pasta', 'grains', 'g', 131, 5, 25, 1.1, NULL, NULL, NULL),
+  ('pasta_whole_wheat', 'مكرونة قمح كامل', 'Whole Wheat Pasta', 'grains', 'g', 124, 5, 25, 1.1, NULL, NULL, NULL),
+  ('banana', 'موزة (متوسطة)', 'Banana (Medium)', 'fruits', 'g', 88.98, 1.1, 22.88, 0.34, 118, 'موزة متوسطة', 'Medium banana'),
+  ('apple', 'تفاحة (متوسطة)', 'Apple (Medium)', 'fruits', 'g', 52.2, 0.27, 13.74, 0.16, 182, 'تفاحة متوسطة', 'Medium apple'),
+  ('orange', 'برتقالة (متوسطة)', 'Orange (Medium)', 'fruits', 'g', 47.33, 0.92, 11.76, 0.15, 131, 'برتقالة متوسطة', 'Medium orange'),
+  ('strawberries', 'فراولة', 'Strawberries', 'fruits', 'g', 32, 0.7, 7.7, 0.3, NULL, NULL, NULL),
+  ('blueberries', 'توت أزرق', 'Blueberries', 'fruits', 'g', 57, 0.7, 14, 0.3, NULL, NULL, NULL),
+  ('grapes', 'عنب', 'Grapes', 'fruits', 'g', 69, 0.7, 18, 0.2, NULL, NULL, NULL),
+  ('watermelon', 'بطيخ', 'Watermelon', 'fruits', 'g', 30, 0.6, 8, 0.2, NULL, NULL, NULL),
+  ('mango', 'مانجو', 'Mango', 'fruits', 'g', 60, 0.8, 15, 0.4, NULL, NULL, NULL),
+  ('pineapple', 'أناناس', 'Pineapple', 'fruits', 'g', 50, 0.5, 13, 0.1, NULL, NULL, NULL),
+  ('peach', 'خوخ', 'Peach', 'fruits', 'g', 39.33, 0.93, 9.33, 0.27, 150, 'خوخة متوسطة', 'Medium peach'),
+  ('broccoli', 'بروكلي مطبوخ', 'Cooked Broccoli', 'vegetables', 'g', 55, 3.7, 11, 0.6, NULL, NULL, NULL),
+  ('spinach', 'سبانخ مطبوخة', 'Cooked Spinach', 'vegetables', 'g', 23, 3, 3.6, 0.3, NULL, NULL, NULL),
+  ('tomato', 'طماطم', 'Tomato', 'vegetables', 'g', 18, 0.9, 3.9, 0.2, NULL, NULL, NULL),
+  ('cucumber', 'خيار', 'Cucumber', 'vegetables', 'g', 15, 0.7, 3.6, 0.1, NULL, NULL, NULL),
+  ('lettuce', 'خس', 'Lettuce', 'vegetables', 'g', 15, 1.4, 2.9, 0.2, NULL, NULL, NULL),
+  ('onion', 'بصل', 'Onion', 'vegetables', 'g', 40, 1.1, 9.3, 0.1, NULL, NULL, NULL),
+  ('garlic', 'ثوم', 'Garlic', 'vegetables', 'g', 149, 6.4, 33, 0.5, NULL, NULL, NULL),
+  ('carrot', 'جزر', 'Carrot', 'vegetables', 'g', 41, 0.9, 10, 0.2, NULL, NULL, NULL),
+  ('bell_pepper', 'فلفل رومي', 'Bell Pepper', 'vegetables', 'g', 31, 1, 6, 0.3, NULL, NULL, NULL),
+  ('mushrooms', 'مشروم', 'Mushrooms', 'vegetables', 'g', 22, 3.1, 3.3, 0.3, NULL, NULL, NULL),
+  ('sweet_potato', 'بطاطا حلوة', 'Sweet Potato', 'vegetables', 'g', 86, 1.6, 20, 0.1, NULL, NULL, NULL),
+  ('potato', 'بطاطس مسلوقة', 'Boiled Potato', 'vegetables', 'g', 87, 2, 20, 0.1, NULL, NULL, NULL),
+  ('corn', 'ذرة مطبوخة', 'Cooked Corn', 'vegetables', 'g', 96, 3.4, 21, 1.5, NULL, NULL, NULL),
+  ('beans_black', 'فاصوليا سوداء مطبوخة', 'Cooked Black Beans', 'legumes', 'g', 132, 8.9, 23.7, 0.5, NULL, NULL, NULL),
+  ('beans_kidney', 'فاصوليا حمراء', 'Kidney Beans', 'legumes', 'g', 127, 8.7, 22.8, 0.5, NULL, NULL, NULL),
+  ('lentils', 'عدس مطبوخ', 'Cooked Lentils', 'legumes', 'g', 116, 9, 20, 0.4, NULL, NULL, NULL),
+  ('chickpeas', 'حمص مطبوخ', 'Cooked Chickpeas', 'legumes', 'g', 164, 9, 27, 2.6, NULL, NULL, NULL),
+  ('soybeans', 'فول الصويا', 'Soybeans', 'legumes', 'g', 173, 17, 10, 9, NULL, NULL, NULL),
+  ('almonds', 'لوز', 'Almonds', 'nuts', 'g', 579, 21, 22, 50, NULL, NULL, NULL),
+  ('walnuts', 'عين جمل', 'Walnuts', 'nuts', 'g', 654, 15, 14, 65, NULL, NULL, NULL),
+  ('cashews', 'كاجو', 'Cashews', 'nuts', 'g', 553, 18, 30, 44, NULL, NULL, NULL),
+  ('peanuts', 'فول سوداني', 'Peanuts', 'nuts', 'g', 567, 26, 16, 49, NULL, NULL, NULL),
+  ('peanut_butter', 'زبدة فول سوداني', 'Peanut Butter', 'nuts', 'g', 588, 25, 20, 50, NULL, NULL, NULL),
+  ('sunflower_seeds', 'بذور دوار الشمس', 'Sunflower Seeds', 'nuts', 'g', 584, 21, 20, 51, NULL, NULL, NULL),
+  ('chia_seeds', 'بذور الشيا', 'Chia Seeds', 'nuts', 'g', 486, 17, 42, 31, NULL, NULL, NULL),
+  ('olive_oil', 'زيت زيتون', 'Olive Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('butter', 'زبدة', 'Butter', 'fats', 'g', 717, 0.9, 0.1, 81, NULL, NULL, NULL),
+  ('coconut_oil', 'زيت جوز الهند', 'Coconut Oil', 'fats', 'g', 862, 0, 0, 100, NULL, NULL, NULL),
+  ('avocado_oil', 'زيت أفوكادو', 'Avocado Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('honey', 'عسل نحل', 'Honey', 'sweets', 'g', 304, 0.3, 82, 0, NULL, NULL, NULL),
+  ('sugar_white', 'سكر أبيض', 'White Sugar', 'sweets', 'g', 387, 0, 100, 0, NULL, NULL, NULL),
+  ('maple_syrup', 'شراب القيقب', 'Maple Syrup', 'sweets', 'g', 260, 0, 67, 0, NULL, NULL, NULL),
+  ('apple_juice', 'عصير تفاح', 'Apple Juice', 'beverages', 'ml', 46, 0.1, 11, 0.1, NULL, NULL, NULL),
+  ('orange_juice', 'عصير برتقال', 'Orange Juice', 'beverages', 'ml', 45, 0.7, 10, 0.2, NULL, NULL, NULL),
+  ('coffee_black', 'قهوة سادة', 'Black Coffee', 'beverages', 'ml', 2, 0.3, 0, 0, NULL, NULL, NULL),
+  ('tea_black', 'شاي سادة', 'Black Tea', 'beverages', 'ml', 1, 0, 0, 0, NULL, NULL, NULL),
+  ('green_tea', 'شاي أخضر', 'Green Tea', 'beverages', 'ml', 1, 0, 0, 0, NULL, NULL, NULL),
+  ('water', 'ماء', 'Water', 'beverages', 'ml', 0, 0, 0, 0, NULL, NULL, NULL),
+  ('avocado', 'أفوكادو', 'Avocado', 'other', 'g', 160, 2, 9, 15, NULL, NULL, NULL),
+  ('dates', 'تمر', 'Dates', 'other', 'g', 277, 2, 75, 0.2, NULL, NULL, NULL),
+  ('dark_chocolate', 'شوكولاتة داكنة', 'Dark Chocolate', 'other', 'g', 546, 4.9, 61, 31, NULL, NULL, NULL),
+  ('milk_chocolate', 'شوكولاتة بالحليب', 'Milk Chocolate', 'other', 'g', 535, 7.7, 59, 30, NULL, NULL, NULL),
+  ('tofu', 'توفو', 'Tofu', 'other', 'g', 76, 8, 2, 4.8, NULL, NULL, NULL),
+  ('tempeh', 'تمبه', 'Tempeh', 'other', 'g', 193, 19, 9, 11, NULL, NULL, NULL),
+  ('pizza_cheese', 'بيتزا جبن', 'Cheese Pizza', 'fast_food', 'g', 266, 11, 33, 10, NULL, NULL, NULL),
+  ('burger_cheese', 'برجر بالجبن', 'Cheeseburger', 'fast_food', 'g', 265.79, 13.16, 26.32, 11.4, 114, 'ساندوتش', 'Sandwich'),
+  ('french_fries', 'بطاطس مقلية', 'French Fries', 'fast_food', 'g', 312, 3.4, 41, 15, NULL, NULL, NULL),
+  ('fried_chicken', 'دجاج مقلي', 'Fried Chicken', 'fast_food', 'g', 246, 23, 9, 13, NULL, NULL, NULL),
+  ('hummus', 'حمص بالطحينة', 'Hummus', 'arabic', 'g', 177, 8, 20, 8, NULL, NULL, NULL),
+  ('falafel', 'فلافل', 'Falafel', 'arabic', 'g', 335.29, 11.76, 29.41, 17.65, 17, 'قرص فلافل', 'Falafel patty'),
+  ('foul_medames', 'فول مدمس', 'Foul Medames', 'arabic', 'g', 127, 7, 19, 3, NULL, NULL, NULL),
+  ('tahini', 'طحينة', 'Tahini', 'arabic', 'g', 595, 17, 21, 51, NULL, NULL, NULL),
+  ('labneh', 'لبنة', 'Labneh', 'arabic', 'g', 110, 7, 4, 8, NULL, NULL, NULL),
+  ('pita_bread', 'خبز عربي', 'Pita Bread', 'arabic', 'g', 275, 10, 55, 1.67, 60, 'رغيف', 'Loaf'),
+  ('kabsa', 'كبسة', 'Kabsa', 'arabic', 'g', 180, 12, 20, 6, NULL, NULL, NULL),
+  ('mansaf', 'منسف', 'Mansaf', 'arabic', 'g', 220, 15, 18, 10, NULL, NULL, NULL),
+  ('beef_liver', 'كبد بقري', 'Beef Liver', 'meat', 'g', 135, 20, 3, 4, NULL, NULL, NULL),
+  ('chicken_liver', 'كبد فراخ', 'Chicken Liver', 'meat', 'g', 167, 24, 1, 6.5, NULL, NULL, NULL),
+  ('beef_sirloin', 'لحم سرلوين', 'Beef Sirloin', 'meat', 'g', 205, 25, 0, 12, NULL, NULL, NULL),
+  ('veal', 'لحم عجل', 'Veal', 'meat', 'g', 172, 24, 0, 8, NULL, NULL, NULL),
+  ('sausage_beef', 'سجق لحم', 'Beef Sausage', 'meat', 'g', 332, 14, 3, 29, NULL, NULL, NULL),
+  ('mackerel', 'أسقمري', 'Mackerel', 'seafood', 'g', 262, 19, 0, 21, NULL, NULL, NULL),
+  ('herring', 'رنجة', 'Herring', 'seafood', 'g', 158, 18, 0, 9, NULL, NULL, NULL),
+  ('trout', 'تراوت', 'Trout', 'seafood', 'g', 148, 21, 0, 6.6, NULL, NULL, NULL),
+  ('tilapia', 'بلطي', 'Tilapia', 'seafood', 'g', 96, 20, 0, 1.7, NULL, NULL, NULL),
+  ('octopus', 'أخطبوط', 'Octopus', 'seafood', 'g', 82, 15, 2.2, 1, NULL, NULL, NULL),
+  ('squid', 'كاليماري', 'Squid', 'seafood', 'g', 92, 16, 3.1, 1.4, NULL, NULL, NULL),
+  ('clams', 'محار', 'Clams', 'seafood', 'g', 74, 13, 2.6, 1, NULL, NULL, NULL),
+  ('buttermilk', 'لبن رائب', 'Buttermilk', 'dairy', 'ml', 41, 3.3, 4.8, 0.9, NULL, NULL, NULL),
+  ('sour_cream', 'قشدة حامضة', 'Sour Cream', 'dairy', 'g', 198, 2.1, 4.6, 19, NULL, NULL, NULL),
+  ('cream_cheese', 'جبنة كريمية', 'Cream Cheese', 'dairy', 'g', 342, 6, 4.1, 34, NULL, NULL, NULL),
+  ('goat_cheese', 'جبنة ماعز', 'Goat Cheese', 'dairy', 'g', 364, 22, 2.5, 30, NULL, NULL, NULL),
+  ('parmesan', 'جبنة بارميزان', 'Parmesan Cheese', 'dairy', 'g', 431, 38, 4.1, 29, NULL, NULL, NULL),
+  ('swiss_cheese', 'جبنة سويسرية', 'Swiss Cheese', 'dairy', 'g', 380, 27, 5, 28, NULL, NULL, NULL),
+  ('provolone', 'جبنة بروفولوني', 'Provolone Cheese', 'dairy', 'g', 351, 26, 2.1, 27, NULL, NULL, NULL),
+  ('almond_milk', 'حليب لوز', 'Almond Milk', 'dairy', 'ml', 17, 0.6, 0.6, 1.5, NULL, NULL, NULL),
+  ('soy_milk', 'حليب صويا', 'Soy Milk', 'dairy', 'ml', 54, 3.3, 6, 1.8, NULL, NULL, NULL),
+  ('oat_milk', 'حليب شوفان', 'Oat Milk', 'dairy', 'ml', 46, 0.8, 7, 1.5, NULL, NULL, NULL),
+  ('coconut_milk', 'حليب جوز الهند', 'Coconut Milk', 'dairy', 'ml', 230, 2.3, 3.3, 24, NULL, NULL, NULL),
+  ('barley', 'شعير', 'Barley', 'grains', 'g', 123, 2.3, 28, 0.4, NULL, NULL, NULL),
+  ('buckwheat', 'حنطة سوداء', 'Buckwheat', 'grains', 'g', 343, 13, 72, 3.4, NULL, NULL, NULL),
+  ('millet', 'دخن', 'Millet', 'grains', 'g', 119, 3.5, 23.7, 1, NULL, NULL, NULL),
+  ('bulgur', 'برغل', 'Bulgur', 'grains', 'g', 83, 3.1, 18.6, 0.2, NULL, NULL, NULL),
+  ('couscous', 'كسكس', 'Couscous', 'grains', 'g', 112, 3.8, 23.2, 0.2, NULL, NULL, NULL),
+  ('rye_bread', 'خبز الجاودار', 'Rye Bread', 'grains', 'g', 259, 8.5, 48, 3.3, NULL, NULL, NULL),
+  ('pear', 'كمثرى', 'Pear', 'fruits', 'g', 56.74, 0.34, 15.17, 0.11, 178, 'كمثرى متوسطة', 'Medium pear'),
+  ('plum', 'برقوق', 'Plum', 'fruits', 'g', 45.45, 0.76, 11.36, 0.3, 66, 'برقوقة', 'Plum'),
+  ('apricot', 'مشمش', 'Apricot', 'fruits', 'g', 48.57, 1.43, 11.14, 0.29, 35, 'مشمشة', 'Apricot'),
+  ('cherries', 'كرز', 'Cherries', 'fruits', 'g', 50, 1, 12, 0.3, NULL, NULL, NULL),
+  ('figs', 'تين', 'Figs', 'fruits', 'g', 74, 0.8, 19.2, 0.2, 50, 'تينة', 'Fig'),
+  ('pomegranate', 'رمان', 'Pomegranate', 'fruits', 'g', 83, 1.7, 19, 1.2, NULL, NULL, NULL),
+  ('kiwi', 'كيوي', 'Kiwi', 'fruits', 'g', 60.87, 1.16, 14.49, 0.58, 69, 'كيوي', 'Kiwi'),
+  ('papaya', 'بابايا', 'Papaya', 'fruits', 'g', 43, 0.5, 11, 0.3, NULL, NULL, NULL),
+  ('cantaloupe', 'كانتالوب', 'Cantaloupe', 'fruits', 'g', 34, 0.8, 8, 0.2, NULL, NULL, NULL),
+  ('cauliflower', 'قرنبيط', 'Cauliflower', 'vegetables', 'g', 25, 2, 5, 0.3, NULL, NULL, NULL),
+  ('cabbage', 'ملفوف', 'Cabbage', 'vegetables', 'g', 25, 1.3, 5.8, 0.1, NULL, NULL, NULL),
+  ('brussels_sprouts', 'كرنب بروكسل', 'Brussels Sprouts', 'vegetables', 'g', 43, 3.4, 9, 0.3, NULL, NULL, NULL),
+  ('asparagus', 'هليون', 'Asparagus', 'vegetables', 'g', 20, 2.2, 3.9, 0.1, NULL, NULL, NULL),
+  ('artichoke', 'خرشوف', 'Artichoke', 'vegetables', 'g', 47, 3.3, 10.5, 0.2, NULL, NULL, NULL),
+  ('eggplant', 'باذنجان', 'Eggplant', 'vegetables', 'g', 25, 1, 6, 0.2, NULL, NULL, NULL),
+  ('zucchini', 'كوسة', 'Zucchini', 'vegetables', 'g', 17, 1.2, 3.1, 0.3, NULL, NULL, NULL),
+  ('pumpkin', 'قرع', 'Pumpkin', 'vegetables', 'g', 26, 1, 6.5, 0.1, NULL, NULL, NULL),
+  ('radish', 'فجل', 'Radish', 'vegetables', 'g', 16, 0.7, 3.4, 0.1, NULL, NULL, NULL),
+  ('celery', 'كرفس', 'Celery', 'vegetables', 'g', 14, 0.7, 3, 0.2, NULL, NULL, NULL),
+  ('beans_pinto', 'فاصوليا بينتو', 'Pinto Beans', 'legumes', 'g', 143, 9, 26, 0.6, NULL, NULL, NULL),
+  ('beans_navy', 'فاصوليا نافي', 'Navy Beans', 'legumes', 'g', 140, 8, 26, 0.6, NULL, NULL, NULL),
+  ('beans_garbanzo', 'حمص', 'Garbanzo Beans', 'legumes', 'g', 139, 7, 22, 2.1, NULL, NULL, NULL),
+  ('split_peas', 'بازلاء مجزأة', 'Split Peas', 'legumes', 'g', 118, 8, 21, 0.4, NULL, NULL, NULL),
+  ('pecans', 'بيكان', 'Pecans', 'nuts', 'g', 691, 9, 14, 72, NULL, NULL, NULL),
+  ('pistachios', 'فستق', 'Pistachios', 'nuts', 'g', 562, 20, 28, 45, NULL, NULL, NULL),
+  ('macadamia', 'مكاديميا', 'Macadamia Nuts', 'nuts', 'g', 718, 8, 14, 76, NULL, NULL, NULL),
+  ('hazelnuts', 'بندق', 'Hazelnuts', 'nuts', 'g', 628, 15, 17, 61, NULL, NULL, NULL),
+  ('pine_nuts', 'صنوبر', 'Pine Nuts', 'nuts', 'g', 673, 14, 13, 68, NULL, NULL, NULL),
+  ('pumpkin_seeds', 'بذور قرع', 'Pumpkin Seeds', 'nuts', 'g', 559, 30, 11, 49, NULL, NULL, NULL),
+  ('flax_seeds', 'بذور الكتان', 'Flax Seeds', 'nuts', 'g', 534, 18, 29, 42, NULL, NULL, NULL),
+  ('sesame_seeds', 'سمسم', 'Sesame Seeds', 'nuts', 'g', 573, 18, 23, 50, NULL, NULL, NULL),
+  ('canola_oil', 'زيت كانولا', 'Canola Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('sunflower_oil', 'زيت دوار الشمس', 'Sunflower Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('corn_oil', 'زيت ذرة', 'Corn Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('soybean_oil', 'زيت صويا', 'Soybean Oil', 'fats', 'g', 884, 0, 0, 100, NULL, NULL, NULL),
+  ('ghee', 'سمن بلدي', 'Ghee', 'fats', 'g', 900, 0, 0, 100, NULL, NULL, NULL),
+  ('cola', 'كولا', 'Cola', 'beverages', 'ml', 41, 0, 10.6, 0, NULL, NULL, NULL),
+  ('lemonade', 'ليمونادة', 'Lemonade', 'beverages', 'ml', 40, 0, 10, 0, NULL, NULL, NULL),
+  ('sports_drink', 'مشروب رياضي', 'Sports Drink', 'beverages', 'ml', 24, 0, 6, 0, NULL, NULL, NULL),
+  ('energy_drink', 'مشروب طاقة', 'Energy Drink', 'beverages', 'ml', 45, 0, 11, 0, NULL, NULL, NULL),
+  ('basil', 'ريحان', 'Basil', 'condiments', 'g', 44, 3.2, 8, 0.6, NULL, NULL, NULL),
+  ('parsley', 'بقدونس', 'Parsley', 'condiments', 'g', 36, 3, 6.3, 0.8, NULL, NULL, NULL),
+  ('cinnamon', 'قرفة', 'Cinnamon', 'condiments', 'g', 247, 4, 81, 1.2, NULL, NULL, NULL),
+  ('turmeric', 'كركم', 'Turmeric', 'condiments', 'g', 354, 7.8, 65, 9.9, NULL, NULL, NULL),
+  ('ginger', 'زنجبيل', 'Ginger', 'condiments', 'g', 80, 1.8, 18, 0.8, NULL, NULL, NULL),
+  ('cumin', 'كمون', 'Cumin', 'condiments', 'g', 375, 18, 44, 22, NULL, NULL, NULL),
+  ('ketchup', 'كاتشب', 'Ketchup', 'condiments', 'g', 101, 1, 25, 0.3, NULL, NULL, NULL),
+  ('mayonnaise', 'مايونيز', 'Mayonnaise', 'condiments', 'g', 700, 1, 1.5, 77, NULL, NULL, NULL),
+  ('mustard', 'خردل', 'Mustard', 'condiments', 'g', 66, 4.4, 5.8, 3.3, NULL, NULL, NULL),
+  ('soy_sauce', 'صلصة الصويا', 'Soy Sauce', 'condiments', 'g', 53, 8, 4.9, 0.1, NULL, NULL, NULL),
+  ('hot_sauce', 'صلصة حارة', 'Hot Sauce', 'condiments', 'g', 36, 1.3, 7.2, 0.6, NULL, NULL, NULL),
+  ('potato_chips', 'شيبس', 'Potato Chips', 'sweets', 'g', 536, 7, 53, 35, NULL, NULL, NULL),
+  ('popcorn', 'فشار', 'Popcorn', 'sweets', 'g', 387, 13, 78, 5, NULL, NULL, NULL),
+  ('pretzels', 'بريتزل', 'Pretzels', 'sweets', 'g', 380, 9, 80, 4, NULL, NULL, NULL),
+  ('cookies_chocolate_chip', 'بسكويت شوكولاتة', 'Chocolate Chip Cookies', 'sweets', 'g', 488, 5, 68, 22, NULL, NULL, NULL),
+  ('cake_chocolate', 'كيك شوكولاتة', 'Chocolate Cake', 'sweets', 'g', 371, 5, 53, 16, NULL, NULL, NULL),
+  ('ice_cream_vanilla', 'آيس كريم فانيليا', 'Vanilla Ice Cream', 'sweets', 'g', 207, 3.5, 24, 11, NULL, NULL, NULL),
+  ('gelatin', 'جيلاتين', 'Gelatin', 'sweets', 'g', 62, 14, 0, 0.1, NULL, NULL, NULL),
+  ('baby_rice_cereal', 'حبوب أرز للأطفال', 'Baby Rice Cereal', 'other', 'g', 400, 6, 87, 1, NULL, NULL, NULL),
+  ('baby_apple_sauce', 'صلصة تفاح للأطفال', 'Baby Apple Sauce', 'other', 'g', 41, 0.2, 11, 0.1, NULL, NULL, NULL),
+  ('whey_protein', 'بروتين مصل اللبن', 'Whey Protein', 'supplements', 'g', 405, 78, 7, 6, NULL, NULL, NULL),
+  ('casein_protein', 'بروتين كازين', 'Casein Protein', 'supplements', 'g', 380, 80, 4, 3, NULL, NULL, NULL),
+  ('bcaa', 'أحماض أمينية متفرعة السلسلة', 'BCAA', 'supplements', 'g', 400, 100, 0, 0, NULL, NULL, NULL),
+  ('creatine', 'كرياتين', 'Creatine', 'supplements', 'g', 0, 0, 0, 0, NULL, NULL, NULL),
+  ('sushi_salmon', 'سوشي سلمون', 'Salmon Sushi', 'international', 'g', 150, 10, 23.33, 3.33, 30, 'قطعة سوشي', 'Sushi piece'),
+  ('sashimi', 'ساشيمي', 'Sashimi', 'international', 'g', 130, 20, 0, 5, NULL, NULL, NULL),
+  ('pad_thai', 'باد تاي', 'Pad Thai', 'international', 'g', 180, 8, 25, 6, NULL, NULL, NULL),
+  ('curry_chicken', 'كاري دجاج', 'Chicken Curry', 'international', 'g', 150, 12, 8, 8, NULL, NULL, NULL),
+  ('tacos_beef', 'تاكوس لحم', 'Beef Tacos', 'international', 'g', 170, 8, 13, 9, 100, 'تاكو', 'Taco'),
+  ('burrito', 'بوريتو', 'Burrito', 'international', 'g', 150, 7.5, 17.5, 5, 200, 'بوريتو', 'Burrito'),
+  ('shawarma_chicken', 'شاورما دجاج', 'Chicken Shawarma', 'arabic', 'g', 165, 16, 8, 8, NULL, NULL, NULL),
+  ('kofta', 'كفتة', 'Kofta', 'arabic', 'g', 220, 18, 3, 15, NULL, NULL, NULL),
+  ('baba_ghanoush', 'بابا غنوج', 'Baba Ghanoush', 'arabic', 'g', 130, 2, 8, 10, NULL, NULL, NULL),
+  ('tabbouleh', 'تبولة', 'Tabbouleh', 'arabic', 'g', 45, 2, 8, 1, NULL, NULL, NULL),
+  ('fattoush', 'فتوش', 'Fattoush', 'arabic', 'g', 60, 2, 7, 3, NULL, NULL, NULL),
+  ('kunafa', 'كنافة', 'Kunafa', 'arabic', 'g', 320, 6, 45, 14, NULL, NULL, NULL),
+  ('baklava', 'بقلاوة', 'Baklava', 'arabic', 'g', 430, 7, 52, 22, NULL, NULL, NULL),
+  ('maamoul', 'معمول', 'Maamoul', 'arabic', 'g', 400, 6.67, 50, 20, 30, 'قطعة معمول', 'Maamoul piece'),
+  ('frozen_pizza', 'بيتزا مجمدة', 'Frozen Pizza', 'fast_food', 'g', 260, 11, 32, 10, NULL, NULL, NULL),
+  ('frozen_vegetables_mix', 'خضروات مجمدة', 'Frozen Mixed Vegetables', 'fast_food', 'g', 64, 3, 13, 0.4, NULL, NULL, NULL),
+  ('frozen_fish_fillet', 'فيليه سمك مجمد', 'Frozen Fish Fillet', 'fast_food', 'g', 120, 16, 6, 4, NULL, NULL, NULL),
+  ('canned_tuna_oil', 'تونة بالزيت', 'Tuna in Oil', 'canned', 'g', 198, 29, 0, 8, NULL, NULL, NULL),
+  ('canned_sardines', 'سردين معلب', 'Canned Sardines', 'canned', 'g', 208, 25, 0, 11, NULL, NULL, NULL),
+  ('canned_corn', 'ذرة معلبة', 'Canned Corn', 'canned', 'g', 86, 2.5, 19, 1.2, NULL, NULL, NULL),
+  ('canned_beans', 'فاصوليا معلبة', 'Canned Beans', 'canned', 'g', 94, 6, 17, 0.5, NULL, NULL, NULL),
+  ('pancakes', 'بان كيك', 'Pancakes', 'breakfast', 'g', 236.84, 7.89, 39.47, 5.26, 38, 'قطعة بان كيك', 'Pancake'),
+  ('waffles', 'وافل', 'Waffles', 'breakfast', 'g', 342.86, 11.43, 51.43, 11.43, 35, 'قطعة وافل', 'Waffle'),
+  ('french_toast', 'خبز فرنسي محمص', 'French Toast', 'breakfast', 'g', 230.77, 9.23, 24.62, 10.77, 65, 'شريحة', 'Slice'),
+  ('cereal_corn_flakes', 'رقائق الذرة', 'Corn Flakes', 'breakfast', 'g', 379, 7, 87, 0.6, NULL, NULL, NULL),
+  ('cereal_oat', 'رقائق الشوفان', 'Oat Cereal', 'breakfast', 'g', 379, 10, 73, 6, NULL, NULL, NULL),
+  ('cheesecake', 'تشيز كيك', 'Cheesecake', 'sweets', 'g', 321, 5.5, 25, 23, NULL, NULL, NULL),
+  ('tiramisu', 'تيراميسو', 'Tiramisu', 'sweets', 'g', 240, 5, 25, 13, NULL, NULL, NULL),
+  ('croissant', 'كرواسون', 'Croissant', 'sweets', 'g', 405.26, 8.77, 45.61, 21.05, 57, 'كرواسون', 'Croissant'),
+  ('doughnut', 'دونات', 'Doughnut', 'sweets', 'g', 390, 6, 44, 22, 50, 'دونات', 'Doughnut'),
+  ('muffin_blueberry', 'مافن توت', 'Blueberry Muffin', 'sweets', 'g', 378.57, 5.71, 57.14, 14.29, 70, 'مافن', 'Muffin'),
+  ('chicken_soup', 'شوربة دجاج', 'Chicken Soup', 'soups', 'g', 45, 4, 4, 2, NULL, NULL, NULL),
+  ('tomato_soup', 'شوربة طماطم', 'Tomato Soup', 'soups', 'g', 40, 1, 7, 1, NULL, NULL, NULL),
+  ('lentil_soup', 'شوربة عدس', 'Lentil Soup', 'soups', 'g', 75, 5, 12, 1.5, NULL, NULL, NULL),
+  ('vegetable_soup', 'شوربة خضار', 'Vegetable Soup', 'soups', 'g', 35, 2, 6, 0.5, NULL, NULL, NULL)
+ON CONFLICT (seed_key) DO NOTHING;
+
+UPDATE foods SET source = 'seed' WHERE seed_key IS NOT NULL AND source = 'manual';
+
+-- Egyptian everyday words so coaches find seed foods the way they type them.
+DO $$
+DECLARE a record;
+BEGIN
+  FOR a IN SELECT * FROM (VALUES
+    ('%دجاج%', 'فراخ'),
+    ('%فراخ%', 'دجاج'),
+    ('%أرز%', 'رز'),
+    ('%خبز%', 'عيش'),
+    ('%لحم%', 'لحمة'),
+    ('%زبدة فول سوداني%', 'بينات بتر')
+  ) AS v(pattern, word)
+  LOOP
+    UPDATE foods SET aliases = trim(concat_ws(' ', aliases, a.word))
+    WHERE seed_key IS NOT NULL
+      AND name_ar LIKE a.pattern
+      AND coalesce(aliases, '') NOT LIKE '%' || a.word || '%';
+  END LOOP;
+END $$;
+
+COMMIT;

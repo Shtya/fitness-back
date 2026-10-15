@@ -35,6 +35,22 @@ import { UpdateMealPlanDto } from './dto/update-meal-plan.dto';
 import { MealPlanListResponse, ProgressData } from './interfaces/nutrition.interface';
 import { GymSettings } from '../../entities/settings.entity';
 import { parsePagination } from 'common/pagination';
+import { Food } from '../../entities/foods.entity';
+import { FoodsService } from '../foods/foods.service';
+import { normalizeItemUnit, nutritionFor } from '../foods/food-nutrition';
+
+type FoodsById = Map<string, Food>;
+
+/** Calories + macro snapshot for a plan item linked to a catalog food. */
+function linkedNutrition(foods: FoodsById, type: unknown, sourceId: string | null, quantity: number | null, unit: string) {
+  if (type === 'recipe' || !sourceId) return null;
+  const food = foods.get(sourceId);
+  if (!food) return null;
+  const n = nutritionFor(food, quantity, unit);
+  if (!n) return null;
+  const { kcal, ...nutrition } = n;
+  return { kcal, nutrition };
+}
 
 /** ---------- i18n helpers ---------- */
 type Lang = 'ar' | 'en';
@@ -83,7 +99,27 @@ export class NutritionService {
     @InjectRepository(NotificationEntity) private notificationRepo: Repository<NotificationEntity>,
     @InjectRepository(Recipe) private recipeRepo: Repository<Recipe>,
     private readonly dataSource: DataSource,
+    private readonly foodsService: FoodsService,
   ) {}
+
+  /** Catalog foods referenced anywhere in a create/update payload. */
+  private async loadPlanFoods(dto: CreateMealPlanDto | UpdateMealPlanDto, user: any): Promise<FoodsById> {
+    const ids: string[] = [];
+    const collect = (meals: any[] = []) => {
+      for (const m of meals || []) {
+        for (const it of m?.items || []) {
+          if (it?.type !== 'recipe' && (it?.sourceId || it?.id)) ids.push(String(it.sourceId || it.id));
+          for (const a of it?.alternatives || []) {
+            if (a?.type !== 'recipe' && (a?.sourceId || a?.id)) ids.push(String(a.sourceId || a.id));
+          }
+        }
+      }
+    };
+    collect((dto as any)?.baseMeals);
+    for (const override of Object.values((dto as any)?.dayOverrides || {})) collect((override as any)?.meals);
+    if (!ids.length || !user) return new Map();
+    return this.foodsService.findForNutrition(ids, user);
+  }
 
   /** ===================== helpers ===================== */
   private capitalizeDay(day: string): string {
@@ -103,7 +139,7 @@ export class NutritionService {
     return order.indexOf(d);
   }
 
-  private normalizeMealsPayload(meals: any[] = []) {
+  private normalizeMealsPayload(meals: any[] = [], foods: FoodsById = new Map()) {
     // sanitize + ensure stable order by array index
     return (meals || []).map((m, mi) => ({
       title: String(m?.title || `Meal ${mi + 1}`).trim(),
@@ -113,45 +149,44 @@ export class NutritionService {
         const alternativesArray = Array.isArray(it?.alternatives) ? it.alternatives : [];
         const normalizedAlternatives = alternativesArray
           .filter((a: any) => String(a?.name || '').trim())
-          .map((a: any) => ({
-            name: String(a.name || '').trim(),
-            quantity: a?.quantity === '' || a?.quantity == null ? null : Number(a.quantity),
-            unit:
-              a?.unit === 'mg'
-                ? 'mg'
-                : a?.unit === 'count' || a?.unit === 'pcs' || a?.unit === 'piece'
-                  ? 'count'
-                  : 'g',
-            calories: a?.calories === '' || a?.calories == null ? null : Number(a.calories),
-            type: a?.type === 'recipe' ? 'recipe' : 'food',
-            id: a?.sourceId ? String(a.sourceId) : a?.id ? String(a.id) : null,
-          }));
+          .map((a: any) => {
+            const quantity = a?.quantity === '' || a?.quantity == null ? null : Number(a.quantity);
+            const unit = normalizeItemUnit(a?.unit);
+            const type = a?.type === 'recipe' ? 'recipe' : 'food';
+            const id = a?.sourceId ? String(a.sourceId) : a?.id ? String(a.id) : null;
+            const linked = linkedNutrition(foods, type, id, quantity, unit);
+            return {
+              name: String(a.name || '').trim(),
+              quantity,
+              unit,
+              calories: linked ? linked.kcal : a?.calories === '' || a?.calories == null ? null : Number(a.calories),
+              type,
+              id,
+              nutrition: linked?.nutrition ?? null,
+            };
+          });
         const hasAlt = alt && String(alt?.name || '').trim();
         const legacyAlt = hasAlt
           ? {
               name: String(alt.name).trim(),
               quantity: alt.quantity !== '' && alt.quantity != null ? Number(alt.quantity) : null,
-              unit:
-                alt.unit === 'mg'
-                  ? 'mg'
-                  : alt.unit === 'count' || alt.unit === 'pcs' || alt.unit === 'piece'
-                    ? 'count'
-                    : 'g',
+              unit: normalizeItemUnit(alt.unit),
               calories: Number(alt.calories ?? 0),
             }
           : normalizedAlternatives[0] || null;
+        const itemType = it?.type === 'recipe' ? 'recipe' : 'food';
+        const sourceId = it?.sourceId ? String(it.sourceId) : it?.id ? String(it.id) : null;
+        const quantity = it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity);
+        const unit = normalizeItemUnit(it?.unit);
+        const linked = linkedNutrition(foods, itemType, sourceId, quantity, unit);
         return {
           name: String(it?.name || '').trim(),
-          itemType: it?.type === 'recipe' ? 'recipe' : 'food',
-          sourceId: it?.sourceId ? String(it.sourceId) : it?.id ? String(it.id) : null,
-          quantity: it?.quantity === '' || it?.quantity == null ? null : Number(it.quantity),
-          unit:
-            it?.unit === 'mg'
-              ? 'mg'
-              : it?.unit === 'count' || it?.unit === 'pcs' || it?.unit === 'piece'
-                ? 'count'
-                : 'g',
-          calories: Number(it?.calories ?? 0),
+          itemType,
+          sourceId,
+          quantity,
+          unit,
+          calories: linked ? linked.kcal : Number(it?.calories ?? 0),
+          nutrition: linked?.nutrition ?? null,
           orderIndex: ii,
           alternativeName: legacyAlt?.name ?? null,
           alternativeQuantity: legacyAlt?.quantity ?? null,
@@ -275,6 +310,7 @@ export class NutritionService {
       adminId,
       coachId: user.role === UserRole.COACH ? user.id : null,
     });
+    const foods = await this.loadPlanFoods(createDto, user);
 
     return this.dataSource.transaction(async (manager) => {
       const planRepo = manager.getRepository(MealPlan);
@@ -294,7 +330,7 @@ export class NutritionService {
       // build meals/supps
       for (const d of savedDays) {
         const { mealsToUse, daySupps } = this.getDayMealsFromDto(createDto, d.day);
-        const normalizedMeals = this.normalizeMealsPayload(mealsToUse || []);
+        const normalizedMeals = this.normalizeMealsPayload(mealsToUse || [], foods);
 
         for (const m of normalizedMeals) {
           const meal = await mealRepo.save(
@@ -314,8 +350,9 @@ export class NutritionService {
                 itemType: it.itemType === 'recipe' ? 'recipe' : 'food',
                 sourceId: it.sourceId ?? null,
                 quantity: it.quantity ?? null,
-                unit: it.unit === 'mg' ? 'mg' : it.unit === 'count' ? 'count' : 'g',
+                unit: normalizeItemUnit(it.unit),
                 calories: it.calories,
+                nutrition: it.nutrition ?? null,
                 orderIndex: it.orderIndex,
                 alternativeName: it.alternativeName ?? null,
                 alternativeQuantity: it.alternativeQuantity ?? null,
@@ -438,6 +475,7 @@ export class NutritionService {
     if (existing.adminId && existing.adminId !== adminId && user.role !== UserRole.SUPER_ADMIN) {
       throw new ForbiddenException(t(lang, 'forbidden_edit_others'));
     }
+    const foods = await this.loadPlanFoods(updateDto, user);
 
     return this.dataSource.transaction(async (manager) => {
       const planRepo = manager.getRepository(MealPlan);
@@ -486,7 +524,7 @@ export class NutritionService {
         await suppRepo.delete({ day: { id: d.id } as any });
 
         const { mealsToUse, daySupps } = this.getDayMealsFromDto(updateDto, d.day);
-        const normalizedMeals = this.normalizeMealsPayload(mealsToUse || []);
+        const normalizedMeals = this.normalizeMealsPayload(mealsToUse || [], foods);
 
         for (const m of normalizedMeals) {
           const meal = await mealRepo.save(
@@ -506,8 +544,9 @@ export class NutritionService {
                 itemType: it.itemType === 'recipe' ? 'recipe' : 'food',
                 sourceId: it.sourceId ?? null,
                 quantity: it.quantity ?? null,
-                unit: it.unit === 'mg' ? 'mg' : it.unit === 'count' ? 'count' : 'g',
+                unit: normalizeItemUnit(it.unit),
                 calories: it.calories,
+                nutrition: it.nutrition ?? null,
                 orderIndex: it.orderIndex,
                 alternativeName: it.alternativeName ?? null,
                 alternativeQuantity: it.alternativeQuantity ?? null,

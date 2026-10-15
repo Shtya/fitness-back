@@ -17,6 +17,7 @@ import { CalorieCalculationModule } from './calorie-calculations/calorie-calcula
 import { FormModule } from './form/form.module';
 import { NotificationModule } from './notification/notification.module';
 import { NutritionModule } from './nutrition/nutrition.module';
+import { FoodsModule } from './foods/foods.module';
 import { ExercisesModule } from './exercises/exercises.module';
 import { ProfileModule } from './profile/profile.module';
 import { WeeklyReportModule } from './weekly-report/weekly-report.module';
@@ -88,6 +89,7 @@ import { SiteInspectorModule } from './site-inspector/site-inspector.module';
 		ExercisesModule,
 		NotificationModule,
 		NutritionModule,
+		FoodsModule,
 		ProfileModule,
 		WeeklyReportModule,
 		StatsModule,

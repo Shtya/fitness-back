@@ -23,7 +23,7 @@ export class AlternativeItemDto {
 	quantity?: number;
 
 	@IsOptional()
-	@IsIn(['g', 'count', 'mg', 'pcs', 'piece'])
+	@IsIn(['g', 'count', 'mg', 'ml', 'pcs', 'piece'])
 	unit?: string;
 
 	@IsNumber()
@@ -51,7 +51,7 @@ export class MealItemDto {
 	quantity?: number;
 
 	@IsOptional()
-	@IsIn(['g', 'mg', 'count', 'pcs', 'piece'])
+	@IsIn(['g', 'mg', 'ml', 'count', 'pcs', 'piece'])
 	unit?: string;
 
 	@IsNumber()

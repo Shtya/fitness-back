@@ -26,6 +26,15 @@ export enum DayOfWeek {
 	FRIDAY = 'friday',
 }
 
+export type MealItemNutrition = {
+	grams: number;
+	protein: number;
+	carbs: number;
+	fat: number;
+	fiber: number | null;
+	sugar: number | null;
+};
+
 export enum MealType {
 	BREAKFAST = 'breakfast',
 	LUNCH = 'lunch',
@@ -185,7 +194,12 @@ export class MealItem extends CoreEntity {
 		calories: number | null;
 		type?: 'food' | 'recipe';
 		id?: string | null;
+		nutrition?: MealItemNutrition | null;
 	}> | null;
+
+	/** Computed from the linked food (sourceId) when the plan is saved; null for free-text items. */
+	@Column({ type: 'jsonb', nullable: true })
+	nutrition!: MealItemNutrition | null;
 
 	@ManyToOne(() => Meal, (meal) => meal.items, { onDelete: 'CASCADE' })
 	@JoinColumn({ name: 'meal_id' })
