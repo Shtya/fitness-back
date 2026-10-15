@@ -415,3 +415,31 @@ export class ExpectedEntry extends CoreEntity {
 	@Column({ type: 'text', nullable: true })
 	notes?: string | null;
 }
+
+/* =========================================================
+ * Gold holdings (valued daily at the market price)
+ * Table: migrations/20261015_gold_holdings.sql
+ * ======================================================= */
+
+@Entity('gold_holdings')
+export class GoldHolding extends CoreEntity {
+	@ManyToOne(() => User, { onDelete: 'CASCADE' })
+	@JoinColumn({ name: 'user_id' })
+	user!: User;
+
+	@Index()
+	@Column({ type: 'uuid', name: 'user_id' })
+	userId!: string;
+
+	@Column({ type: 'varchar', length: 120, name: 'name' })
+	name!: string;
+
+	@Column({ type: 'decimal', precision: 10, scale: 3, name: 'grams' })
+	grams!: string;
+
+	@Column({ type: 'smallint', default: 21, name: 'karat' })
+	karat!: number;
+
+	@Column({ type: 'text', nullable: true, name: 'notes' })
+	notes?: string | null;
+}
