@@ -242,7 +242,38 @@ export class AuthService {
 	async getClientsByAdmin(adminId: string, opts?: { page?: string | number; limit?: string | number; search?: string; coachId?: string }) {
 		const { page, limit, skip } = parsePagination(opts?.page, opts?.limit, { maxLimit: 500 });
 
-		const qb = this.userRepo.createQueryBuilder('u').leftJoin('u.coach', 'coach').select(['u.id', 'u.name', 'u.email', 'u.phone', 'u.status', 'u.created_at', 'u.lastLogin', 'u.coachId', 'coach.id', 'coach.name']).where('u.role = :role', { role: UserRole.CLIENT }).andWhere('u.adminId = :adminId', { adminId }).orderBy('u.created_at', 'DESC').skip(skip).take(limit);
+		const qb = this.userRepo
+			.createQueryBuilder('u')
+			.leftJoin('u.coach', 'coach')
+			.leftJoin('u.activeExercisePlan', 'workoutPlan')
+			.leftJoin('u.activeMealPlan', 'mealPlan')
+			.select([
+				'u.id',
+				'u.name',
+				'u.email',
+				'u.phone',
+				'u.status',
+				'u.created_at',
+				'u.lastLogin',
+				'u.coachId',
+				'u.gender',
+				'u.birthDate',
+				'u.membership',
+				'u.subscriptionEnd',
+				'u.caloriesTarget',
+				'u.proteinPerDay',
+				'coach.id',
+				'coach.name',
+				'workoutPlan.id',
+				'workoutPlan.name',
+				'mealPlan.id',
+				'mealPlan.name',
+			])
+			.where('u.role = :role', { role: UserRole.CLIENT })
+			.andWhere('u.adminId = :adminId', { adminId })
+			.orderBy('u.created_at', 'DESC')
+			.skip(skip)
+			.take(limit);
 
 		// فلترة بالبحث لو موجود
 		const s = this.likeable(opts?.search);
@@ -267,6 +298,16 @@ export class AuthService {
 				coach: u.coach ? { id: u.coach.id, name: (u.coach as any).name } : null,
 				created_at: u.created_at,
 				lastLogin: u.lastLogin,
+				gender: u.gender ?? null,
+				birthDate: u.birthDate ?? null,
+				membership: u.membership ?? null,
+				subscriptionEnd: u.subscriptionEnd ?? null,
+				caloriesTarget: u.caloriesTarget ?? null,
+				proteinPerDay: u.proteinPerDay ?? null,
+				workoutPlan: u.activeExercisePlan
+					? { id: u.activeExercisePlan.id, name: u.activeExercisePlan.name }
+					: null,
+				mealPlan: u.activeMealPlan ? { id: u.activeMealPlan.id, name: u.activeMealPlan.name } : null,
 			})),
 			total,
 			page,
