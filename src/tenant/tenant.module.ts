@@ -11,6 +11,8 @@ import {
 } from 'entities/tenant.entity';
 import { TenantService } from './tenant.service';
 import { TenantController } from './tenant.controller';
+import { PlatformAppearanceController } from './platform-appearance.controller';
+import { PlatformAppearanceService } from './platform-appearance.service';
 
 @Module({
   imports: [
@@ -29,8 +31,8 @@ import { TenantController } from './tenant.controller';
       }),
     }),
   ],
-  controllers: [TenantController],
-  providers: [TenantService],
+  controllers: [TenantController, PlatformAppearanceController],
+  providers: [TenantService, PlatformAppearanceService],
   exports: [TenantService],
 })
 export class TenantModule {}

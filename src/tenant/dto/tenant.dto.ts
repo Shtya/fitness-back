@@ -11,6 +11,16 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+export class UpdateDashboardBackgroundDto {
+  @IsIn(['default', 'preset', 'gradient', 'image'])
+  kind!: 'default' | 'preset' | 'gradient' | 'image';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  value?: string;
+}
+
 export class DiscoverTenantByEmailDto {
   @IsEmail()
   email!: string;
