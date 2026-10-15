@@ -79,8 +79,8 @@ export enum CommunicationType {
   OTHER = 'other',
 }
 
+/** Name is unique per gym (adminId) via migration 20261016_billing_plan_name_per_gym.sql. */
 @Entity('billing_plans')
-@Unique(['name'])
 export class BillingPlan extends CoreEntity {
   @Index()
   @Column({ type: 'varchar', length: 120 })

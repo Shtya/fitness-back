@@ -1,17 +1,30 @@
-// src/modules/billing/billing.controller.ts
 import {
 	Body,
 	Controller,
+	Delete,
 	Get,
 	Param,
+	ParseUUIDPipe,
 	Patch,
 	Post,
-	Delete,
 	Query,
+	Req,
+	UseGuards,
 } from '@nestjs/common';
+
+import { UserRole } from '../../entities/global.entity';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
+import { RolesGuard } from '../auth/guard/roles.guard';
 import { BillingService } from './billing.service';
+import { CreatePlanDto, RecordPaymentDto, UpdatePlanDto } from './dto/billing.dto';
+
+/** Money and packages are gym-owner actions; coaches keep read access to their own clients. */
+const MONEY_ROLES = [UserRole.SUPER_ADMIN, UserRole.ADMIN];
 
 @Controller('billing')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.COACH)
 export class BillingController {
 	constructor(private readonly billingService: BillingService) { }
 
@@ -20,28 +33,31 @@ export class BillingController {
 	 * ======================================================= */
 
 	@Post('plans')
-	createPlan(@Body() dto: any) {
-		return this.billingService.createPlan(dto);
+	@Roles(...MONEY_ROLES)
+	createPlan(@Body() dto: CreatePlanDto, @Req() req: any) {
+		return this.billingService.createPlan(dto, req.user);
 	}
 
 	@Get('plans')
-	getPlans(@Query() query: any) {
-		return this.billingService.getPlans(query);
+	getPlans(@Query() query: any, @Req() req: any) {
+		return this.billingService.getPlans(query, req.user);
 	}
 
 	@Get('plans/:id')
-	getPlan(@Param('id') id: string) {
-		return this.billingService.findPlanById(id);
+	getPlan(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.findPlanById(id, req.user);
 	}
 
 	@Patch('plans/:id')
-	updatePlan(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.updatePlan(id, dto);
+	@Roles(...MONEY_ROLES)
+	updatePlan(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlanDto, @Req() req: any) {
+		return this.billingService.updatePlan(id, dto, req.user);
 	}
 
 	@Delete('plans/:id')
-	removePlan(@Param('id') id: string) {
-		return this.billingService.removePlan(id);
+	@Roles(...MONEY_ROLES)
+	removePlan(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.removePlan(id, req.user);
 	}
 
 	/* =========================================================
@@ -49,36 +65,36 @@ export class BillingController {
 	 * ======================================================= */
 
 	@Post('subscriptions')
-	createSubscription(@Body() dto: any) {
-		return this.billingService.createSubscription(dto);
+	@Roles(...MONEY_ROLES)
+	createSubscription(@Body() dto: any, @Req() req: any) {
+		return this.billingService.createSubscription(dto, req.user);
 	}
 
 	@Get('subscriptions')
-	getSubscriptions(@Query() query: any) {
-		return this.billingService.getSubscriptions(query);
+	getSubscriptions(@Query() query: any, @Req() req: any) {
+		return this.billingService.getSubscriptions(query, req.user);
 	}
 
 	@Get('subscriptions/:id')
-	getSubscription(@Param('id') id: string) {
-		return this.billingService.findSubscriptionById(id);
+	getSubscription(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.findSubscriptionById(id, req.user);
 	}
 
 	@Patch('subscriptions/:id')
-	updateSubscription(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.updateSubscription(id, dto);
+	@Roles(...MONEY_ROLES)
+	updateSubscription(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.updateSubscription(id, dto, req.user);
 	}
 
 	@Patch('subscriptions/:id/cancel')
-	cancelSubscription(
-		@Param('id') id: string,
-		@Body() dto: any,
-	) {
-		return this.billingService.cancelSubscription(id, dto.reason);
+	@Roles(...MONEY_ROLES)
+	cancelSubscription(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.cancelSubscription(id, dto?.reason, req.user);
 	}
 
 	@Get('users/:userId/current-subscription')
-	getCurrentSubscription(@Param('userId') userId: string) {
-		return this.billingService.getCurrentSubscription(userId);
+	getCurrentSubscription(@Param('userId', ParseUUIDPipe) userId: string, @Req() req: any) {
+		return this.billingService.getCurrentSubscription(userId, req.user);
 	}
 
 	/* =========================================================
@@ -86,52 +102,71 @@ export class BillingController {
 	 * ======================================================= */
 
 	@Post('invoices')
-	createInvoice(@Body() dto: any) {
-		return this.billingService.createInvoice(dto);
+	@Roles(...MONEY_ROLES)
+	createInvoice(@Body() dto: any, @Req() req: any) {
+		return this.billingService.createInvoice(dto, req.user);
 	}
 
 	@Get('invoices')
-	getInvoices(@Query() query: any) {
-		return this.billingService.getInvoices(query);
+	getInvoices(@Query() query: any, @Req() req: any) {
+		return this.billingService.getInvoices(query, req.user);
 	}
 
 	@Get('invoices/:id')
-	getInvoice(@Param('id') id: string) {
-		return this.billingService.findInvoiceById(id);
+	getInvoice(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.findInvoiceById(id, req.user);
 	}
 
 	@Patch('invoices/:id')
-	updateInvoice(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.updateInvoice(id, dto);
+	@Roles(...MONEY_ROLES)
+	updateInvoice(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.updateInvoice(id, dto, req.user);
 	}
 
 	@Patch('invoices/:id/mark-paid')
-	markInvoicePaid(@Param('id') id: string) {
-		return this.billingService.markInvoicePaid(id);
+	@Roles(...MONEY_ROLES)
+	markInvoicePaid(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.markInvoicePaid(id, req.user);
 	}
 
 	/* =========================================================
 	 * Payments
 	 * ======================================================= */
 
+	/** Records a received payment and, when it covers a period, extends the client's subscription. */
+	@Post('payments/record')
+	@Roles(...MONEY_ROLES)
+	recordPayment(@Body() dto: RecordPaymentDto, @Req() req: any) {
+		return this.billingService.recordPayment(dto, req.user);
+	}
+
 	@Post('payments')
-	createPayment(@Body() dto: any) {
-		return this.billingService.createPayment(dto);
+	@Roles(...MONEY_ROLES)
+	createPayment(@Body() dto: any, @Req() req: any) {
+		return this.billingService.createPayment(dto, req.user);
 	}
 
 	@Get('payments')
-	getPayments(@Query() query: any) {
-		return this.billingService.getPayments(query);
+	getPayments(@Query() query: any, @Req() req: any) {
+		return this.billingService.getPayments(query, req.user);
 	}
 
 	@Get('payments/:id')
-	getPayment(@Param('id') id: string) {
-		return this.billingService.findPaymentById(id);
+	getPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.findPaymentById(id, req.user);
 	}
 
 	@Patch('payments/:id')
-	updatePayment(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.updatePayment(id, dto);
+	@Roles(...MONEY_ROLES)
+	updatePayment(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.updatePayment(id, dto, req.user);
+	}
+
+	/** Deletes a payment and rolls back the subscription period it added (if still current). */
+	@Delete('payments/:id')
+	@Roles(...MONEY_ROLES)
+	deletePayment(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.deletePayment(id, req.user);
 	}
 
 	/* =========================================================
@@ -139,8 +174,8 @@ export class BillingController {
 	 * ======================================================= */
 
 	@Get('stats/overview')
-	getStats(@Query() query: any) {
-		return this.billingService.getStats(query);
+	getStats(@Req() req: any) {
+		return this.billingService.getStats(req.user);
 	}
 
 	/* =========================================================
@@ -148,62 +183,67 @@ export class BillingController {
 	 * ======================================================= */
 
 	@Get('clients')
-	getClients(@Query() query: any) {
-		return this.billingService.getClients(query);
+	getClients(@Query() query: any, @Req() req: any) {
+		return this.billingService.getClients(query, req.user);
 	}
 
 	@Get('clients/:id')
-	getClientById(@Param('id') id: string) {
-		return this.billingService.getClientById(id);
+	getClientById(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientById(id, req.user);
 	}
 
 	@Get('clients/:id/timeline')
-	getClientTimeline(@Param('id') id: string, @Query() query: any) {
-		return this.billingService.getClientTimeline(id, query);
+	getClientTimeline(@Param('id', ParseUUIDPipe) id: string, @Query() query: any, @Req() req: any) {
+		return this.billingService.getClientTimeline(id, query, req.user);
 	}
 
 	@Get('clients/:id/progress')
-	getClientProgress(@Param('id') id: string) {
-		return this.billingService.getClientProgress(id);
+	getClientProgress(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientProgress(id, req.user);
 	}
 
 	@Get('clients/:id/checkins')
-	getClientCheckins(@Param('id') id: string) {
-		return this.billingService.getClientCheckins(id);
+	getClientCheckins(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientCheckins(id, req.user);
 	}
 
 	@Get('clients/:id/notes')
-	getClientNotes(@Param('id') id: string) {
-		return this.billingService.getClientNotes(id);
+	getClientNotes(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientNotes(id, req.user);
 	}
 
 	@Post('clients/:id/notes')
-	createClientNote(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.createClientNote(id, dto);
+	createClientNote(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.createClientNote(id, dto, req.user);
 	}
 
 	@Patch('clients/:id/notes/:noteId')
-	updateClientNote(@Param('id') id: string, @Param('noteId') noteId: string, @Body() dto: any) {
-		return this.billingService.updateClientNote(id, noteId, dto);
+	updateClientNote(
+		@Param('id', ParseUUIDPipe) id: string,
+		@Param('noteId', ParseUUIDPipe) noteId: string,
+		@Body() dto: any,
+		@Req() req: any,
+	) {
+		return this.billingService.updateClientNote(id, noteId, dto, req.user);
 	}
 
 	@Delete('clients/:id/notes/:noteId')
-	deleteClientNote(@Param('id') id: string, @Param('noteId') noteId: string) {
-		return this.billingService.deleteClientNote(id, noteId);
+	deleteClientNote(@Param('id', ParseUUIDPipe) id: string, @Param('noteId', ParseUUIDPipe) noteId: string, @Req() req: any) {
+		return this.billingService.deleteClientNote(id, noteId, req.user);
 	}
 
 	@Get('clients/:id/plans-history')
-	getClientPlansHistory(@Param('id') id: string) {
-		return this.billingService.getClientPlansHistory(id);
+	getClientPlansHistory(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientPlansHistory(id, req.user);
 	}
 
 	@Get('clients/:id/communications')
-	getClientCommunications(@Param('id') id: string) {
-		return this.billingService.getClientCommunications(id);
+	getClientCommunications(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+		return this.billingService.getClientCommunications(id, req.user);
 	}
 
 	@Post('clients/:id/communications/send')
-	sendClientCommunications(@Param('id') id: string, @Body() dto: any) {
-		return this.billingService.sendClientCommunication(id, dto);
+	sendClientCommunications(@Param('id', ParseUUIDPipe) id: string, @Body() dto: any, @Req() req: any) {
+		return this.billingService.sendClientCommunication(id, dto, req.user);
 	}
 }
