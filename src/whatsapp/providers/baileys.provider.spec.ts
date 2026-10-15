@@ -141,6 +141,97 @@ describe('Baileys retry receipts and group metadata (audit P3)', () => {
 	});
 });
 
+describe('BaileysProvider message reactions', () => {
+	const connected = (accountId: string) => {
+		const provider = new BaileysProvider(accountId) as any;
+		provider.state = 'connected';
+		provider.socket = { sendMessage: jest.fn().mockResolvedValue({}) };
+		return provider;
+	};
+	const sentKey = (provider: any) => provider.socket.sendMessage.mock.calls[0][1].react.key;
+
+	it('does not put a participant on a one-to-one message key', async () => {
+		const provider = connected('account-react-dm');
+		provider.messagesByChat.set(
+			'201000000000@c.us',
+			new Map([
+				[
+					'voice-1',
+					{
+						providerMessageId: 'voice-1',
+						chatId: '201000000000@c.us',
+						senderWaId: '201000000000@c.us',
+						fromMe: false,
+						type: 'ptt',
+					},
+				],
+			]),
+		);
+
+		await provider.sendReaction('voice-1', '❤️');
+
+		expect(provider.socket.sendMessage).toHaveBeenCalledWith('201000000000@s.whatsapp.net', {
+			react: {
+				text: '❤️',
+				key: { remoteJid: '201000000000@s.whatsapp.net', fromMe: false, id: 'voice-1' },
+			},
+		});
+	});
+
+	it('reuses the original key, including a LID chat and group participant', async () => {
+		const provider = connected('account-react-raw');
+		provider.rawByMessageId.set('msg-2', {
+			key: {
+				remoteJid: '1203630@g.us',
+				id: 'msg-2',
+				fromMe: false,
+				participant: '98765@lid',
+			},
+			message: { conversation: 'hi' },
+		});
+
+		await provider.sendReaction('msg-2', '👍');
+
+		expect(sentKey(provider)).toEqual({
+			remoteJid: '1203630@g.us',
+			fromMe: false,
+			id: 'msg-2',
+			participant: '98765@lid',
+		});
+	});
+
+	it('falls back to the stored message when it is no longer in memory', async () => {
+		const provider = connected('account-react-db');
+
+		await provider.sendReaction('msg-3', '😂', {
+			chatId: '201000000000@c.us',
+			fromMe: true,
+			senderWaId: null,
+			rawHint: { key: { remoteJid: '55555@lid', id: 'msg-3', fromMe: true } },
+		});
+
+		expect(sentKey(provider)).toEqual({ remoteJid: '55555@lid', fromMe: true, id: 'msg-3' });
+		expect(provider.socket.sendMessage.mock.calls[0][0]).toBe('55555@lid');
+	});
+
+	it('keeps the group sender when rebuilding a key without the raw message', async () => {
+		const provider = connected('account-react-group');
+
+		await provider.sendReaction('msg-4', '🔥', {
+			chatId: '1203630@g.us',
+			fromMe: false,
+			senderWaId: '201111111111@c.us',
+		});
+
+		expect(sentKey(provider)).toEqual({
+			remoteJid: '1203630@g.us',
+			fromMe: false,
+			id: 'msg-4',
+			participant: '201111111111@s.whatsapp.net',
+		});
+	});
+});
+
 describe('BaileysProvider inbox lookup', () => {
 	it('returns messages stored under LID when querying the phone JID', async () => {
 		const provider = new BaileysProvider('account-test');

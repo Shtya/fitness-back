@@ -67,6 +67,14 @@ export interface NormalizedWhatsAppReaction {
 	timestamp?: Date | null;
 }
 
+/** Stored facts about the reacted-to message, for when it is no longer in provider memory. */
+export interface WhatsAppReactionTarget {
+	chatId?: string | null;
+	fromMe?: boolean;
+	senderWaId?: string | null;
+	rawHint?: any;
+}
+
 export interface WhatsAppFetchMessageOptions {
 	/** Stop at the first copy this accepts. Default: one that carries a location. */
 	accept?: (message: NormalizedWhatsAppMessage | null) => boolean;
@@ -272,7 +280,11 @@ export interface WhatsAppProvider {
 			embeddedQuote?: WhatsAppEmbeddedQuote;
 		},
 	): Promise<any>;
-	sendReaction(providerMessageId: string, emoji: string | false): Promise<any>;
+	sendReaction(
+		providerMessageId: string,
+		emoji: string | false,
+		target?: WhatsAppReactionTarget,
+	): Promise<any>;
 	getReactions(providerMessageId: string): Promise<NormalizedWhatsAppReaction[]>;
 	forwardMessage(chatId: string, providerMessageId: string, options?: { rawHint?: any }): Promise<any>;
 	deleteMessage(

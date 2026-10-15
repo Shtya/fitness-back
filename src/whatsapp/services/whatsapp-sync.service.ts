@@ -5895,7 +5895,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (normalizedEmoji.length > 16) {
 			throw new BadRequestException('Invalid reaction');
 		}
-		await provider.sendReaction(message.providerMessageId, normalizedEmoji || false);
+		await provider.sendReaction(message.providerMessageId, normalizedEmoji || false, {
+			chatId: conversation.providerChatId,
+			fromMe: message.direction === WhatsAppMessageDirection.OUTBOUND,
+			senderWaId: message.senderWaId,
+			rawHint: message.raw,
+		});
 		let reactions = await provider.getReactions(message.providerMessageId).catch(() => []);
 		if (normalizedEmoji && !reactions.some((reaction) => reaction.actorKey === 'me')) {
 			reactions = [

@@ -15,6 +15,7 @@ import {
 	WhatsAppNumberCheck,
 	WhatsAppNumberProfile,
 	WhatsAppProviderUnavailableError,
+	WhatsAppReactionTarget,
 	WhatsAppSendQuoteOptions,
 	WhatsAppSendTextOptions,
 } from './whatsapp-provider';
@@ -3290,34 +3291,56 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
-	async sendReaction(providerMessageId: string, emoji: string | false) {
+	async sendReaction(
+		providerMessageId: string,
+		emoji: string | false,
+		target: WhatsAppReactionTarget = {},
+	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const id = String(providerMessageId || '').trim();
 		if (!id) throw new Error('Message is unavailable for reactions');
-		const raw = this.rawByMessageId.get(id);
-		const remembered = this.findRememberedMessage(id);
-		const remoteJid = toBaileysJid(
-			jidOf(raw?.key?.remoteJid) || remembered?.chatId || '',
-		);
-		if (!remoteJid) {
+		const key = this.reactionTargetKey(id, target);
+		if (!key.remoteJid) {
 			throw new Error('Cannot react: message chat is unknown');
 		}
 		const text = emoji ? String(emoji) : '';
-		await this.socket.sendMessage(remoteJid, {
-			react: {
-				text,
-				key: {
-					remoteJid: remoteJid,
-					fromMe: Boolean(raw?.key?.fromMe ?? remembered?.fromMe),
-					id: raw?.key?.id || id,
-					participant: raw?.key?.participant || remembered?.senderWaId || undefined,
-				},
-			},
-		});
+		await this.socket.sendMessage(key.remoteJid, { react: { text, key } });
 		this.setOwnReaction(id, text);
 		return { ok: true };
+	}
+
+	/**
+	 * The phone matches a reaction to its message by the exact original key
+	 * (remoteJid, id, fromMe, and participant only inside groups). A key that
+	 * differs is accepted by the server but silently dropped on the phone.
+	 */
+	private reactionTargetKey(id: string, target: WhatsAppReactionTarget) {
+		const hint = target.rawHint?.key?.id === id ? target.rawHint : null;
+		const originalKey = this.rawByMessageId.get(id)?.key || hint?.key;
+		if (originalKey?.remoteJid) {
+			return {
+				remoteJid: String(originalKey.remoteJid),
+				fromMe: Boolean(originalKey.fromMe),
+				id: String(originalKey.id || id),
+				...(originalKey.participant ? { participant: String(originalKey.participant) } : {}),
+			};
+		}
+		const remembered = this.findRememberedMessage(id);
+		const remoteJid = toBaileysJid(remembered?.chatId || target.chatId || '');
+		const fromMe = Boolean(remembered?.fromMe ?? target.fromMe);
+		const senderWaId = remembered?.senderWaId || target.senderWaId || '';
+		const participant =
+			remoteJid.endsWith('@g.us') && !fromMe && senderWaId
+				? toBaileysJid(senderWaId)
+				: undefined;
+		return {
+			remoteJid,
+			fromMe,
+			id,
+			...(participant ? { participant } : {}),
+		};
 	}
 
 	async getReactions(providerMessageId: string): Promise<NormalizedWhatsAppReaction[]> {
