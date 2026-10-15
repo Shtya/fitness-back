@@ -344,6 +344,11 @@ export function buildAgentPrompt(input: AgentPromptInput) {
 				: "This is your first reply in this chat: briefly mention that you are the business's AI assistant.",
 		);
 	}
+	if (!settings.discloseAi) {
+		lines.push(
+			'STYLE: Write naturally and warmly, like a team member typing on WhatsApp. Do not introduce yourself as an AI or bot unprompted, and avoid robotic phrases such as "As an AI", "as a language model" or "I am happy to assist you". The HONESTY rule still applies if the customer asks directly.',
+		);
+	}
 	if (input.mediaNote) lines.push(input.mediaNote);
 	lines.push(
 		'Return strict JSON only, no markdown, in exactly this shape:',

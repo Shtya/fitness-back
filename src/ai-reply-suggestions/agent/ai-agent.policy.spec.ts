@@ -201,4 +201,33 @@ describe('buildAgentPrompt', () => {
 		expect(prompt).toContain('first reply');
 		expect(prompt.length).toBeLessThan(14_000);
 	});
+
+	it('sounds natural without a disclosure but keeps the honesty rule', () => {
+		const { prompt } = buildAgentPrompt({
+			settings: {
+				agentName: 'فريق So7baFit',
+				businessName: 'So7baFit',
+				persona: null,
+				dialect: 'egyptian',
+				tone: 'friendly',
+				replyLength: 'short',
+				rules: null,
+				allowedTopics: [],
+				forbiddenTopics: [],
+				permissions: resolvePermissions({}),
+				useKnowledgeBase: false,
+				knowledgeOnly: false,
+				discloseAi: false,
+				disclosureText: null,
+			},
+			recent: [{ role: 'customer', content: 'اهلا' }],
+			relevantHistory: [],
+			knowledge: [],
+			memory: null,
+			isFirstAgentReply: true,
+		});
+		expect(prompt).toContain('Do not introduce yourself as an AI');
+		expect(prompt).toContain('Never claim or imply you are a human');
+		expect(prompt).not.toContain('first reply in this chat');
+	});
 });

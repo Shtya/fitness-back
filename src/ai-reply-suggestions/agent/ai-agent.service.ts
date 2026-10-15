@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
-import { WhatsAppConversation } from '../../whatsapp/entities/whatsapp.entity';
+import { WhatsAppAccount, WhatsAppConversation } from '../../whatsapp/entities/whatsapp.entity';
 import { WhatsAppAccessService } from '../../whatsapp/services/whatsapp-access.service';
 import { WhatsAppAuditService } from '../../whatsapp/services/whatsapp-audit.service';
 import { WhatsAppSyncService } from '../../whatsapp/services/whatsapp-sync.service';
@@ -42,6 +42,12 @@ import {
 	normalizeExternalBaseUrl,
 } from './ai-agent-models';
 import { resolvePermissions } from './ai-agent.policy';
+import {
+	FILLABLE_AGENT_FIELDS,
+	RecommendedAgentSettings,
+	recommendedAgentSettings,
+	starterKnowledge,
+} from './ai-agent-defaults';
 import {
 	AiAgentRuntimeService,
 	EffectiveAgentSettings,
@@ -112,6 +118,8 @@ export class AiAgentService {
 		private readonly config: ConfigService,
 		@Optional() private readonly audit?: WhatsAppAuditService,
 		@Optional() private readonly schema?: AiAgentSchemaService,
+		@Optional() @InjectRepository(WhatsAppAccount)
+		private readonly accountRepo?: Repository<WhatsAppAccount>,
 	) {}
 
 	/* ------------------------------------------------------------ settings */
@@ -156,9 +164,39 @@ export class AiAgentService {
 		return this.presentSettings(accountId, await this.runtime.getSettings(accountId, { fresh: true }));
 	}
 
-	private presentSettings(accountId: string, settings: EffectiveAgentSettings) {
+	private async recommendedFor(accountId: string): Promise<RecommendedAgentSettings> {
+		const account = await this.accountRepo
+			?.findOne({ where: { id: accountId }, select: ['id', 'label'] })
+			.catch(() => null);
+		return recommendedAgentSettings({ accountLabel: account?.label });
+	}
+
+	/**
+	 * Unsaved accounts start from the full recommended setup; saved ones only get
+	 * their empty text fields pre-filled. Nothing is persisted until the owner saves.
+	 */
+	private async presentSettings(accountId: string, settings: EffectiveAgentSettings) {
+		const recommended = await this.recommendedFor(accountId);
+		const serialized: Record<string, any> = serializeAgentSettings(settings);
+		const prefilled: string[] = [];
+		if (!settings.updated_at) {
+			for (const [key, value] of Object.entries(recommended)) {
+				if (JSON.stringify(serialized[key]) !== JSON.stringify(value)) prefilled.push(key);
+				serialized[key] = value;
+			}
+		} else {
+			for (const key of FILLABLE_AGENT_FIELDS) {
+				const current = serialized[key];
+				const empty = Array.isArray(current) ? current.length === 0 : !String(current ?? '').trim();
+				if (!empty) continue;
+				serialized[key] = recommended[key];
+				prefilled.push(key);
+			}
+		}
 		return {
-			...serializeAgentSettings(settings),
+			...serialized,
+			recommended,
+			prefilled,
 			providerAlerts: this.runtime.getProviderAlerts(accountId),
 		};
 	}
@@ -372,6 +410,37 @@ export class AiAgentService {
 		);
 		await this.auditKnowledge(user, accountId, 'created', saved.id);
 		return serializeKnowledge(saved);
+	}
+
+	/** Adds the starter entries whose titles are not in the knowledge base yet. */
+	async addStarterKnowledge(user: User, accountId: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canManage');
+		await this.schema?.ensure();
+		const existing = await this.knowledgeRepo.find({ where: { accountId }, select: ['id', 'title'] });
+		if (existing.length >= MAX_KNOWLEDGE_PER_ACCOUNT) {
+			throw new BadRequestException(`Knowledge base is limited to ${MAX_KNOWLEDGE_PER_ACCOUNT} entries`);
+		}
+		const account = await this.accountRepo
+			?.findOne({ where: { id: accountId }, select: ['id', 'label'] })
+			.catch(() => null);
+		const titles = new Set(existing.map(row => row.title.trim()));
+		const missing = starterKnowledge({ accountLabel: account?.label })
+			.filter(entry => !titles.has(entry.title))
+			.slice(0, MAX_KNOWLEDGE_PER_ACCOUNT - existing.length);
+		if (!missing.length) return [];
+		const saved = await this.knowledgeRepo.save(
+			missing.map(entry =>
+				this.knowledgeRepo.create({
+					accountId,
+					...entry,
+					isActive: true,
+					createdBy: user.id,
+					updatedBy: user.id,
+				}),
+			),
+		);
+		await Promise.all(saved.map(row => this.auditKnowledge(user, accountId, 'created', row.id)));
+		return saved.map(serializeKnowledge);
 	}
 
 	async updateKnowledge(user: User, accountId: string, id: string, dto: UpsertKnowledgeEntryDto) {

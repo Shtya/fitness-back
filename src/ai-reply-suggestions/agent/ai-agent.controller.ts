@@ -94,6 +94,11 @@ export class AiAgentController {
 		return this.agent.listKnowledge(req.user, accountId);
 	}
 
+	@Post('accounts/:accountId/ai-agent/knowledge/starter')
+	addStarterKnowledge(@Req() req: any, @Param('accountId', ParseUUIDPipe) accountId: string) {
+		return this.agent.addStarterKnowledge(req.user, accountId);
+	}
+
 	@Post('accounts/:accountId/ai-agent/knowledge')
 	createKnowledge(
 		@Req() req: any,

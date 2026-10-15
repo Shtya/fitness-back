@@ -4,6 +4,7 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 import { AiFreeModule } from "../ai-free/ai-free.module";
 import { AiModule } from "../ai/ai.module";
 import {
+  WhatsAppAccount,
   WhatsAppConversation,
   WhatsAppMessage,
 } from "../whatsapp/entities/whatsapp.entity";
@@ -36,6 +37,7 @@ import { AiAgentService } from "./agent/ai-agent.service";
     WhatsAppModule,
     TypeOrmModule.forFeature([
       WhatsAppAiSettings,
+      WhatsAppAccount,
       WhatsAppConversation,
       WhatsAppMessage,
       User,
