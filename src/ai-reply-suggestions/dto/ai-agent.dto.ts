@@ -8,6 +8,7 @@ import {
 	IsNumber,
 	IsOptional,
 	IsString,
+	IsUUID,
 	Max,
 	MaxLength,
 	Min,
@@ -22,6 +23,8 @@ import {
 	AGENT_REPLY_LENGTHS,
 	AGENT_SCOPES,
 	AGENT_TONES,
+	EXTERNAL_MODEL_KINDS,
+	EXTERNAL_PROVIDER,
 	KNOWLEDGE_CATEGORIES,
 } from '../agent/ai-agent.entities';
 import type {
@@ -29,12 +32,16 @@ import type {
 	AgentDefaultMode,
 	AgentDialect,
 	AgentMediaPolicy,
+	AgentProvider,
 	AgentReplyLength,
 	AgentScope,
 	AgentTone,
+	ExternalModelKind,
 	KnowledgeCategory,
 } from '../agent/ai-agent.entities';
-import { AI_REPLY_PROVIDERS, AiReplyProviderName } from '../entities/whatsapp-ai-settings.entity';
+import { AI_REPLY_PROVIDERS } from '../entities/whatsapp-ai-settings.entity';
+
+const AGENT_PROVIDERS = [...AI_REPLY_PROVIDERS, EXTERNAL_PROVIDER] as const;
 
 export class AgentPermissionsDto {
 	@IsOptional()
@@ -68,13 +75,17 @@ export class UpdateAiAgentSettingsDto {
 	defaultMode?: AgentDefaultMode;
 
 	@IsOptional()
-	@IsIn(AI_REPLY_PROVIDERS)
-	provider?: AiReplyProviderName;
+	@IsIn(AGENT_PROVIDERS)
+	provider?: AgentProvider;
 
 	@IsOptional()
 	@IsString()
 	@MaxLength(80)
 	model?: string;
+
+	@IsOptional()
+	@IsUUID()
+	externalModelId?: string | null;
 
 	@IsOptional()
 	@IsString()
@@ -265,4 +276,39 @@ export class AgentTestDto {
 	@ValidateNested()
 	@Type(() => UpdateAiAgentSettingsDto)
 	draft?: UpdateAiAgentSettingsDto;
+}
+
+export class UpsertExternalModelDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(30)
+	preset?: string;
+
+	@IsOptional()
+	@IsIn(EXTERNAL_MODEL_KINDS)
+	kind?: ExternalModelKind;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(80)
+	label: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(300)
+	baseUrl?: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(160)
+	model: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(400)
+	apiKey?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	isActive?: boolean;
 }

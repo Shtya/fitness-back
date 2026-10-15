@@ -18,6 +18,7 @@ import {
 	SendAgentSuggestionDto,
 	SetConversationAgentModeDto,
 	UpdateAiAgentSettingsDto,
+	UpsertExternalModelDto,
 	UpsertKnowledgeEntryDto,
 } from '../dto/ai-agent.dto';
 import { AiAgentService } from './ai-agent.service';
@@ -39,6 +40,53 @@ export class AiAgentController {
 		@Body() body: UpdateAiAgentSettingsDto,
 	) {
 		return this.agent.updateSettings(req.user, accountId, body);
+	}
+
+	@Get('accounts/:accountId/ai-agent/catalog')
+	catalog() {
+		return this.agent.catalog();
+	}
+
+	@Get('accounts/:accountId/ai-agent/models')
+	listExternalModels(@Req() req: any, @Param('accountId', ParseUUIDPipe) accountId: string) {
+		return this.agent.listExternalModels(req.user, accountId);
+	}
+
+	@Post('accounts/:accountId/ai-agent/models')
+	createExternalModel(
+		@Req() req: any,
+		@Param('accountId', ParseUUIDPipe) accountId: string,
+		@Body() body: UpsertExternalModelDto,
+	) {
+		return this.agent.createExternalModel(req.user, accountId, body);
+	}
+
+	@Put('accounts/:accountId/ai-agent/models/:id')
+	updateExternalModel(
+		@Req() req: any,
+		@Param('accountId', ParseUUIDPipe) accountId: string,
+		@Param('id', ParseUUIDPipe) id: string,
+		@Body() body: UpsertExternalModelDto,
+	) {
+		return this.agent.updateExternalModel(req.user, accountId, id, body);
+	}
+
+	@Delete('accounts/:accountId/ai-agent/models/:id')
+	deleteExternalModel(
+		@Req() req: any,
+		@Param('accountId', ParseUUIDPipe) accountId: string,
+		@Param('id', ParseUUIDPipe) id: string,
+	) {
+		return this.agent.deleteExternalModel(req.user, accountId, id);
+	}
+
+	@Post('accounts/:accountId/ai-agent/models/:id/test')
+	testExternalModel(
+		@Req() req: any,
+		@Param('accountId', ParseUUIDPipe) accountId: string,
+		@Param('id', ParseUUIDPipe) id: string,
+	) {
+		return this.agent.testExternalModel(req.user, accountId, id);
 	}
 
 	@Get('accounts/:accountId/ai-agent/knowledge')

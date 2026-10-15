@@ -39,6 +39,10 @@ export type AgentReplyLength = (typeof AGENT_REPLY_LENGTHS)[number];
 export type AgentMediaPolicy = (typeof AGENT_MEDIA_POLICIES)[number];
 export type KnowledgeCategory = (typeof KNOWLEDGE_CATEGORIES)[number];
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
+export const EXTERNAL_PROVIDER = 'external' as const;
+export type AgentProvider = AiReplyProviderName | typeof EXTERNAL_PROVIDER;
+export const EXTERNAL_MODEL_KINDS = ['openai_compatible', 'gemini', 'anthropic'] as const;
+export type ExternalModelKind = (typeof EXTERNAL_MODEL_KINDS)[number];
 
 export interface AgentPermissions {
 	/** May state prices that appear in the knowledge base. */
@@ -100,11 +104,15 @@ export class WhatsAppAiAgentSettings {
 	@Column({ name: 'default_mode', type: 'varchar', length: 20, default: 'suggest' })
 	defaultMode: AgentDefaultMode;
 
+	/** A free system provider, or `external` to use `externalModelId`. */
 	@Column({ type: 'varchar', length: 40, default: 'ai-free' })
-	provider: AiReplyProviderName;
+	provider: AgentProvider;
 
 	@Column({ type: 'varchar', length: 80, default: 'auto' })
 	model: string;
+
+	@Column({ name: 'external_model_id', type: 'uuid', nullable: true })
+	externalModelId: string | null;
 
 	@Column({ name: 'agent_name', type: 'varchar', length: 80, nullable: true })
 	agentName: string | null;
@@ -335,7 +343,63 @@ export class WhatsAppAiAgentRun {
 	error: string | null;
 }
 
+@Entity('whatsapp_ai_external_models')
+export class WhatsAppAiExternalModel {
+	@PrimaryGeneratedColumn('uuid')
+	id: string;
+
+	@Index('idx_whatsapp_ai_external_models_account')
+	@Column({ name: 'account_id', type: 'uuid' })
+	accountId: string;
+
+	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+	created_at: Date;
+
+	@UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
+	updated_at: Date;
+
+	@Column({ type: 'varchar', length: 80 })
+	label: string;
+
+	@Column({ type: 'varchar', length: 30, default: 'openai_compatible' })
+	kind: ExternalModelKind;
+
+	@Column({ type: 'varchar', length: 30, default: 'custom' })
+	preset: string;
+
+	@Column({ name: 'base_url', type: 'varchar', length: 300 })
+	baseUrl: string;
+
+	@Column({ type: 'varchar', length: 160 })
+	model: string;
+
+	@Column({ name: 'encrypted_api_key', type: 'text', nullable: true, select: false })
+	encryptedApiKey: string | null;
+
+	@Column({ name: 'key_last4', type: 'varchar', length: 4, nullable: true })
+	keyLast4: string | null;
+
+	@Column({ name: 'is_active', type: 'boolean', default: true })
+	isActive: boolean;
+
+	@Column({ name: 'last_test_at', type: 'timestamptz', nullable: true })
+	lastTestAt: Date | null;
+
+	@Column({ name: 'last_test_ok', type: 'boolean', nullable: true })
+	lastTestOk: boolean | null;
+
+	@Column({ name: 'last_test_message', type: 'varchar', length: 300, nullable: true })
+	lastTestMessage: string | null;
+
+	@Column({ name: 'created_by', type: 'uuid', nullable: true })
+	createdBy: string | null;
+
+	@Column({ name: 'updated_by', type: 'uuid', nullable: true })
+	updatedBy: string | null;
+}
+
 export const AI_AGENT_ENTITIES = [
+	WhatsAppAiExternalModel,
 	WhatsAppAiAgentSettings,
 	WhatsAppAiAgentConversation,
 	WhatsAppAiKnowledgeEntry,

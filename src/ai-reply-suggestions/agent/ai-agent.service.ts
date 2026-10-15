@@ -7,6 +7,7 @@ import {
 	NotFoundException,
 	Optional,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
@@ -19,15 +20,27 @@ import {
 	SendAgentSuggestionDto,
 	SetConversationAgentModeDto,
 	UpdateAiAgentSettingsDto,
+	UpsertExternalModelDto,
 	UpsertKnowledgeEntryDto,
 } from '../dto/ai-agent.dto';
 import {
+	EXTERNAL_PROVIDER,
 	WhatsAppAiAgentConversation,
 	WhatsAppAiAgentRun,
 	WhatsAppAiAgentSettings,
 	WhatsAppAiContactMemory,
+	WhatsAppAiExternalModel,
 	WhatsAppAiKnowledgeEntry,
 } from './ai-agent.entities';
+import {
+	BUILT_IN_AGENT_PROVIDERS,
+	EXTERNAL_MODEL_PRESETS,
+	decryptAgentSecret,
+	encryptAgentSecret,
+	generateOpenAiCompatible,
+	last4,
+	normalizeExternalBaseUrl,
+} from './ai-agent-models';
 import { resolvePermissions } from './ai-agent.policy';
 import {
 	AiAgentRuntimeService,
@@ -94,6 +107,9 @@ export class AiAgentService {
 		private readonly access: WhatsAppAccessService,
 		private readonly sync: WhatsAppSyncService,
 		private readonly runtime: AiAgentRuntimeService,
+		@InjectRepository(WhatsAppAiExternalModel)
+		private readonly externalRepo: Repository<WhatsAppAiExternalModel>,
+		private readonly config: ConfigService,
 		@Optional() private readonly audit?: WhatsAppAuditService,
 		@Optional() private readonly schema?: AiAgentSchemaService,
 	) {}
@@ -111,6 +127,9 @@ export class AiAgentService {
 		const current = await this.settingsRepo.findOne({ where: { accountId } });
 		const patch = this.settingsPatch(dto);
 		const merged = mergeAgentSettings(accountId, { ...(current || {}), ...patch });
+		if (merged.provider === EXTERNAL_PROVIDER && !merged.externalModelId) {
+			throw new BadRequestException('Select an external model before switching the agent to it');
+		}
 		const row = this.settingsRepo.create({
 			...merged,
 			created_at: current?.created_at,
@@ -147,6 +166,12 @@ export class AiAgentService {
 		assign('defaultMode', dto.defaultMode);
 		assign('provider', dto.provider);
 		assign('model', dto.model === undefined ? undefined : String(dto.model || '').trim() || 'auto');
+		assign(
+			'externalModelId',
+			dto.externalModelId === undefined
+				? undefined
+				: dto.externalModelId || null,
+		);
 		assign('agentName', cleanText(dto.agentName));
 		assign('businessName', cleanText(dto.businessName));
 		assign('persona', cleanText(dto.persona));
@@ -172,6 +197,138 @@ export class AiAgentService {
 		assign('maxRepliesPerHour', dto.maxRepliesPerHour);
 		assign('minConfidence', dto.minConfidence);
 		return patch as Partial<WhatsAppAiAgentSettings>;
+	}
+
+	catalog() {
+		return {
+			providers: BUILT_IN_AGENT_PROVIDERS,
+			externalPresets: Object.entries(EXTERNAL_MODEL_PRESETS).map(([id, preset]) => ({
+				id,
+				...preset,
+			})),
+		};
+	}
+
+	async listExternalModels(user: User, accountId: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.schema?.ensure();
+		const rows = await this.externalRepo.find({
+			where: { accountId },
+			order: { updated_at: 'DESC' },
+			take: 40,
+		});
+		return rows.map(row => this.serializeExternal(row));
+	}
+
+	async createExternalModel(user: User, accountId: string, dto: UpsertExternalModelDto) {
+		await this.access.assertAccountPermission(user, accountId, 'canManage');
+		await this.schema?.ensure();
+		const count = await this.externalRepo.count({ where: { accountId } });
+		if (count >= 20) throw new BadRequestException('You can add at most 20 external models');
+		const row = this.externalRepo.create(this.externalPatch(accountId, user.id, dto, null));
+		const saved = await this.externalRepo.save(row);
+		return this.serializeExternal(saved);
+	}
+
+	async updateExternalModel(user: User, accountId: string, id: string, dto: UpsertExternalModelDto) {
+		await this.access.assertAccountPermission(user, accountId, 'canManage');
+		const row = await this.externalRepo.findOne({ where: { id, accountId } });
+		if (!row) throw new NotFoundException('External model not found');
+		Object.assign(row, this.externalPatch(accountId, user.id, dto, row));
+		return this.serializeExternal(await this.externalRepo.save(row));
+	}
+
+	async deleteExternalModel(user: User, accountId: string, id: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canManage');
+		const result = await this.externalRepo.delete({ id, accountId });
+		if (!result.affected) throw new NotFoundException('External model not found');
+		await this.settingsRepo
+			.update({ accountId, externalModelId: id } as any, {
+				externalModelId: null,
+				provider: 'ai-free',
+			})
+			.catch(() => undefined);
+		this.runtime.invalidateSettings(accountId);
+		return { ok: true };
+	}
+
+	async testExternalModel(user: User, accountId: string, id: string) {
+		await this.access.assertAccountPermission(user, accountId, 'canManage');
+		const row = await this.externalRepo
+			.createQueryBuilder('model')
+			.addSelect('model.encryptedApiKey')
+			.where('model.id = :id AND model.accountId = :accountId', { id, accountId })
+			.getOne();
+		if (!row) throw new NotFoundException('External model not found');
+		const secret = this.config.get<string>('JWT_SECRET') || 'so7bafit-dev-secret';
+		const apiKey = row.encryptedApiKey ? decryptAgentSecret(row.encryptedApiKey, secret) : null;
+		try {
+			const result = await generateOpenAiCompatible({
+				baseUrl: row.baseUrl,
+				model: row.model,
+				apiKey,
+				prompt: 'Reply with the single word OK.',
+				timeoutMs: 20_000,
+			});
+			row.lastTestAt = new Date();
+			row.lastTestOk = true;
+			row.lastTestMessage = (result.actualModel || 'ok').slice(0, 300);
+			await this.externalRepo.save(row);
+			return { ok: true, model: result.actualModel };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			row.lastTestAt = new Date();
+			row.lastTestOk = false;
+			row.lastTestMessage = message.slice(0, 300);
+			await this.externalRepo.save(row);
+			throw new HttpException(message.slice(0, 300), HttpStatus.BAD_GATEWAY);
+		}
+	}
+
+	private externalPatch(
+		accountId: string,
+		userId: string,
+		dto: UpsertExternalModelDto,
+		current: WhatsAppAiExternalModel | null,
+	) {
+		const preset = String(dto.preset || current?.preset || 'custom');
+		const known = EXTERNAL_MODEL_PRESETS[preset] || EXTERNAL_MODEL_PRESETS.custom;
+		const secret = this.config.get<string>('JWT_SECRET') || 'so7bafit-dev-secret';
+		const apiKey = String(dto.apiKey || '').trim();
+		const patch: Partial<WhatsAppAiExternalModel> = {
+			accountId,
+			label: dto.label.trim(),
+			kind: dto.kind || known.kind,
+			preset,
+			baseUrl: normalizeExternalBaseUrl(dto.baseUrl || known.baseUrl || current?.baseUrl || ''),
+			model: dto.model.trim(),
+			isActive: dto.isActive ?? current?.isActive ?? true,
+			createdBy: current?.createdBy || userId,
+			updatedBy: userId,
+		};
+		if (apiKey) {
+			patch.encryptedApiKey = encryptAgentSecret(apiKey, secret);
+			patch.keyLast4 = last4(apiKey);
+		}
+		return patch;
+	}
+
+	private serializeExternal(row: WhatsAppAiExternalModel) {
+		return {
+			id: row.id,
+			label: row.label,
+			kind: row.kind,
+			preset: row.preset,
+			baseUrl: row.baseUrl,
+			model: row.model,
+			hasKey: Boolean(row.keyLast4),
+			keyLast4: row.keyLast4,
+			isActive: row.isActive,
+			lastTestAt: row.lastTestAt,
+			lastTestOk: row.lastTestOk,
+			lastTestMessage: row.lastTestMessage,
+			updatedAt: row.updated_at,
+		};
 	}
 
 	/* ----------------------------------------------------------- knowledge */

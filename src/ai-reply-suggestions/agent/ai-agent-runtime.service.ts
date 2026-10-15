@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, LessThan, MoreThan, Not, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
@@ -22,8 +23,13 @@ import {
 	WhatsAppAiAgentRun,
 	WhatsAppAiAgentSettings,
 	WhatsAppAiContactMemory,
+	WhatsAppAiExternalModel,
 	WhatsAppAiKnowledgeEntry,
 } from './ai-agent.entities';
+import {
+	decryptAgentSecret,
+	generateOpenAiCompatible,
+} from './ai-agent-models';
 import {
 	AgentContextMessage,
 	AgentModelResult,
@@ -71,6 +77,7 @@ export function defaultAgentSettings(accountId: string): EffectiveAgentSettings 
 		defaultMode: 'suggest',
 		provider: 'ai-free',
 		model: 'auto',
+		externalModelId: null,
 		agentName: null,
 		businessName: null,
 		persona: null,
@@ -258,6 +265,9 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 		private readonly providers: AiReplyProviderRegistry,
 		@Optional() private readonly audit?: WhatsAppAuditService,
 		@Optional() private readonly schema?: AiAgentSchemaService,
+		@Optional() @InjectRepository(WhatsAppAiExternalModel)
+		private readonly externalRepo?: Repository<WhatsAppAiExternalModel>,
+		@Optional() private readonly config?: ConfigService,
 	) {}
 
 	onModuleInit() {
@@ -621,19 +631,24 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 			isFirstAgentReply: input.isFirstAgentReply,
 			mediaNote: input.mediaNote,
 		});
-		const provider =
-			this.providers.tryGet(input.settings.provider) || this.providers.tryGet('ai-free');
-		if (!provider) throw new Error('No AI provider is available');
 		const model = String(input.settings.model || 'auto').trim() || 'auto';
 		const startedAt = Date.now();
+		const providerName = String(input.settings.provider || 'ai-free');
 		let raw: { text: string; actualModel: string | null };
-		try {
-			raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
-		} catch (firstError) {
-			this.logger.warn(
-				`AI agent provider ${provider.name} failed once, retrying: ${firstError instanceof Error ? firstError.message : firstError}`,
-			);
-			raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+		if (providerName === 'external') {
+			raw = await this.generateExternal(input.settings, prompt);
+		} else {
+			const provider =
+				this.providers.tryGet(providerName) || this.providers.tryGet('ai-free');
+			if (!provider) throw new Error('No AI provider is available');
+			try {
+				raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+			} catch (firstError) {
+				this.logger.warn(
+					`AI agent provider ${provider.name} failed once, retrying: ${firstError instanceof Error ? firstError.message : firstError}`,
+				);
+				raw = await withTimeout(provider.generate({ prompt, model }), PROVIDER_TIMEOUT_MS);
+			}
 		}
 		const result = parseAgentResult(raw.text);
 		const knowledgeIds = new Set(knowledge.map(doc => doc.id));
@@ -655,11 +670,35 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 				memory: Boolean(input.memory?.facts?.length || input.memory?.commitments?.length),
 				history: input.relevantHistory.length,
 			}),
-			provider: provider.name,
+			provider: providerName,
 			model,
 			actualModel: raw.actualModel ?? null,
 			latencyMs: Date.now() - startedAt,
 		};
+	}
+
+	private async generateExternal(settings: EffectiveAgentSettings, prompt: string) {
+		if (!settings.externalModelId || !this.externalRepo) {
+			throw new Error('No external model is selected');
+		}
+		const row = await this.externalRepo
+			.createQueryBuilder('model')
+			.addSelect('model.encryptedApiKey')
+			.where('model.id = :id AND model.accountId = :accountId', {
+				id: settings.externalModelId,
+				accountId: settings.accountId,
+			})
+			.getOne();
+		if (!row?.isActive) throw new Error('The selected external model is missing or inactive');
+		const secret = this.config?.get<string>('JWT_SECRET') || 'so7bafit-dev-secret';
+		const apiKey = row.encryptedApiKey ? decryptAgentSecret(row.encryptedApiKey, secret) : null;
+		return generateOpenAiCompatible({
+			baseUrl: row.baseUrl,
+			model: row.model,
+			apiKey,
+			prompt,
+			timeoutMs: PROVIDER_TIMEOUT_MS,
+		});
 	}
 
 	/* -------------------------------------------------------------- actions */
