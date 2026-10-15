@@ -94,11 +94,21 @@ export interface StatusReactionRow {
 /** Upper bound on viewers returned for one story; WhatsApp audiences are capped well below. */
 const STATUS_VIEWERS_LIMIT = 2000;
 
+/** TypeORM/pg returns `[rows, rowCount]` for UPDATE … RETURNING and plain rows otherwise. */
+function affectedRowCount(result: unknown): number {
+	if (Array.isArray(result) && result.length === 2 && typeof result[1] === 'number') {
+		return result[1];
+	}
+	return Array.isArray(result) ? result.length : 0;
+}
+
 @Injectable()
 
 export class WhatsAppStatusService {
 	private readonly logger = new Logger(WhatsAppStatusService.name);
 	private readonly lastPruneAt = new Map<string, number>();
+	/** LID→phone folds already applied in this process (skip repeat UPDATEs per receipt). */
+	private readonly foldedStatusActors = new Set<string>();
 
 	constructor(
 		@InjectRepository(WhatsAppStatus)
@@ -846,9 +856,19 @@ export class WhatsAppStatusService {
 	 * One person, one key: LID receipts are folded onto the phone JID when the live
 	 * session (or a saved contact) knows it, so a viewer who also reacts is counted once.
 	 */
-	private async canonicalStatusActor(accountId: string, jid: string): Promise<string> {
+	private async canonicalStatusActor(
+		accountId: string,
+		jid: string,
+		folds?: Map<string, string>,
+	): Promise<string> {
 		const key = statusActorKey(jid);
 		if (!/@(hosted\.)?lid$/.test(key)) return key;
+		const canonical = await this.lidStatusActorToPhone(accountId, jid, key);
+		if (canonical !== key) folds?.set(key, canonical);
+		return canonical;
+	}
+
+	private async lidStatusActorToPhone(accountId: string, jid: string, key: string) {
 		const phones = new Map<string, string>();
 		const contact = await this.contactRepo
 			.findOne({ where: { accountId, waId: jid }, select: ['waId', 'phoneNumber'] })
@@ -866,6 +886,63 @@ export class WhatsAppStatusService {
 		return phone ? `${phone}@s.whatsapp.net` : key;
 	}
 
+	/**
+	 * Rows stored under a LID before its phone was known would otherwise be counted as
+	 * a second person by the totals query while the viewers list shows one. Moves them
+	 * onto the phone key (earliest view, newest reaction win). Idempotent.
+	 */
+	private async foldStatusActorKeys(accountId: string, folds: Map<string, string>) {
+		let changed = false;
+		for (const [fromKey, toKey] of folds) {
+			if (!fromKey || !toKey || fromKey === toKey) continue;
+			const memo = `${accountId}|${fromKey}|${toKey}`;
+			if (this.foldedStatusActors.has(memo)) continue;
+			await this.repo.manager.query(
+				`INSERT INTO whatsapp_status_viewers (account_id, status_message_id, viewer_key, viewed_at)
+				SELECT account_id, status_message_id, $3, viewed_at FROM whatsapp_status_viewers
+				WHERE account_id = $1 AND viewer_key = $2 AND deleted_at IS NULL
+				ON CONFLICT (account_id, status_message_id, viewer_key) DO UPDATE SET
+					viewed_at = LEAST(whatsapp_status_viewers.viewed_at, EXCLUDED.viewed_at),
+					deleted_at = NULL,
+					updated_at = now()`,
+				[accountId, fromKey, toKey],
+			);
+			await this.repo.manager.query(
+				`INSERT INTO whatsapp_status_reactions (account_id, status_message_id, actor_key, emoji, message_id, reacted_at)
+				SELECT account_id, status_message_id, $3, emoji, message_id, reacted_at FROM whatsapp_status_reactions
+				WHERE account_id = $1 AND actor_key = $2 AND deleted_at IS NULL
+				ON CONFLICT (account_id, status_message_id, actor_key) DO UPDATE SET
+					emoji = EXCLUDED.emoji,
+					message_id = COALESCE(EXCLUDED.message_id, whatsapp_status_reactions.message_id),
+					reacted_at = EXCLUDED.reacted_at,
+					deleted_at = NULL,
+					updated_at = now()
+				WHERE whatsapp_status_reactions.deleted_at IS NOT NULL
+					OR whatsapp_status_reactions.reacted_at IS NULL
+					OR EXCLUDED.reacted_at >= whatsapp_status_reactions.reacted_at`,
+				[accountId, fromKey, toKey],
+			);
+			const removed = await Promise.all([
+				this.repo.manager.query(
+					`UPDATE whatsapp_status_viewers SET deleted_at = now(), updated_at = now()
+					WHERE account_id = $1 AND viewer_key = $2 AND deleted_at IS NULL
+					RETURNING status_message_id`,
+					[accountId, fromKey],
+				),
+				this.repo.manager.query(
+					`UPDATE whatsapp_status_reactions SET deleted_at = now(), updated_at = now()
+					WHERE account_id = $1 AND actor_key = $2 AND deleted_at IS NULL
+					RETURNING status_message_id`,
+					[accountId, fromKey],
+				),
+			]);
+			if (this.foldedStatusActors.size > 5_000) this.foldedStatusActors.clear();
+			this.foldedStatusActors.add(memo);
+			if (removed.some(rows => affectedRowCount(rows) > 0)) changed = true;
+		}
+		return changed;
+	}
+
 	/** Persist contacts who opened one of our own stories (WhatsApp status read receipts). */
 	async recordStatusViewers(
 		accountId: string,
@@ -875,12 +952,13 @@ export class WhatsAppStatusService {
 		const statusMessageId = statusMessageKey(statusMessageIdValue);
 		if (!statusMessageId || !isUuid(accountId)) return;
 		const byViewer = new Map<string, Date>();
+		const folds = new Map<string, string>();
 		for (const receipt of receipts || []) {
 			const viewedAt = receipt?.readAt || receipt?.playedAt || null;
 			if (!(viewedAt instanceof Date) || Number.isNaN(viewedAt.getTime())) continue;
 			const jid = String(receipt?.participantJid || '').trim();
 			if (!statusActorKey(jid)) continue;
-			const key = await this.canonicalStatusActor(accountId, jid);
+			const key = await this.canonicalStatusActor(accountId, jid, folds);
 			const previous = byViewer.get(key);
 			if (!previous || viewedAt < previous) byViewer.set(key, viewedAt);
 		}
@@ -900,6 +978,11 @@ export class WhatsAppStatusService {
 				updated_at = now()`,
 			params,
 		);
+		await this.foldStatusActorKeys(accountId, folds).catch(error =>
+			this.logger.warn(
+				`Story viewer LID fold failed for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+			),
+		);
 		await this.emitStatusInteractionsUpdated(accountId, statusMessageId);
 	}
 
@@ -916,8 +999,11 @@ export class WhatsAppStatusService {
 		reactedAt: Date | null,
 	): Promise<StatusReactionRow | null> {
 		const statusMessageId = statusMessageKey(statusMessageIdValue);
+		const folds = new Map<string, string>();
 		const actorKey =
-			actorKeyValue === 'me' ? 'me' : await this.canonicalStatusActor(accountId, actorKeyValue);
+			actorKeyValue === 'me'
+				? 'me'
+				: await this.canonicalStatusActor(accountId, actorKeyValue, folds);
 		const value = String(emoji || '').trim().slice(0, 32);
 		if (!statusMessageId || !actorKey || !value || !isUuid(accountId)) return null;
 		const at = reactedAt instanceof Date && !Number.isNaN(reactedAt.getTime()) ? reactedAt : new Date();
@@ -935,6 +1021,7 @@ export class WhatsAppStatusService {
 				OR EXCLUDED.reacted_at >= whatsapp_status_reactions.reacted_at`,
 			[accountId, statusMessageId, actorKey, value, messageId, at],
 		);
+		await this.foldStatusActorKeys(accountId, folds).catch(() => undefined);
 		const row = await this.findStatusReaction(accountId, statusMessageId, actorKey);
 		await this.emitStatusInteractionsUpdated(
 			accountId,
@@ -1155,8 +1242,10 @@ export class WhatsAppStatusService {
 			}
 		>();
 		const earliest = (a: Date | null, b: Date | null) => (!a ? b : !b ? a : a <= b ? a : b);
+		const folds = new Map<string, string>();
 		for (const [key, entry] of people) {
 			const phone = statusSenderPhone(key, phones);
+			if (phone && /@(hosted\.)?lid$/.test(key)) folds.set(key, `${phone}@s.whatsapp.net`);
 			const contact = contactByKey.get(key);
 			const rawName = names.get(key) || null;
 			const name =
@@ -1189,6 +1278,11 @@ export class WhatsAppStatusService {
 		const activity = (item: { viewedAt: Date | null; reactedAt: Date | null }) =>
 			Math.max(item.viewedAt?.getTime() || 0, item.reactedAt?.getTime() || 0);
 		const viewers = [...merged.values()].sort((a, b) => activity(b) - activity(a));
+		// Self-heal legacy LID rows so the story ring total matches this list.
+		if (folds.size) {
+			const changed = await this.foldStatusActorKeys(accountId, folds).catch(() => false);
+			if (changed) await this.emitStatusInteractionsUpdated(accountId, statusMessageId);
+		}
 		return {
 			statusId: found.row.id,
 			providerStatusId: found.row.providerStatusId,

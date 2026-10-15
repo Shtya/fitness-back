@@ -31,6 +31,8 @@ export class WebPushService {
 			body: string;
 			url?: string;
 			tag?: string;
+			/** Installed-PWA icon badge (Badging API); omitted when unknown. */
+			badgeCount?: number;
 			data?: Record<string, unknown>;
 		},
 	) {
@@ -58,6 +60,9 @@ export class WebPushService {
 							renotify: true,
 							requireInteraction: false,
 							vibrate: [200, 100, 200],
+							...(Number.isFinite(payload.badgeCount)
+								? { badgeCount: Math.max(0, Math.floor(payload.badgeCount as number)) }
+								: {}),
 							data: {
 								...(payload.data || {}),
 								url: payload.url || '/dashboard/whatsapp',

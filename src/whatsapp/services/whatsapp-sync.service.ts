@@ -801,6 +801,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private inboundMessageListeners = new Set<
 		(accountId: string, message: WhatsAppMessage) => void | Promise<void>
 	>();
+	private outboundMessageListeners = new Set<
+		(accountId: string, message: WhatsAppMessage) => void | Promise<void>
+	>();
 
 	constructor(
 		@InjectRepository(WhatsAppAccount)
@@ -849,6 +852,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	) {
 		this.inboundMessageListeners.add(listener);
 		return () => this.inboundMessageListeners.delete(listener);
+	}
+
+	/** Live, newly persisted fromMe messages (phone, web app, or API sends). No history. */
+	onOutboundMessagePersisted(
+		listener: (accountId: string, message: WhatsAppMessage) => void | Promise<void>,
+	) {
+		this.outboundMessageListeners.add(listener);
+		return () => this.outboundMessageListeners.delete(listener);
+	}
+
+	private notifyOutboundMessagePersisted(accountId: string, message: WhatsAppMessage) {
+		for (const listener of this.outboundMessageListeners) {
+			void Promise.resolve()
+				.then(() => listener(accountId, message))
+				.catch(error =>
+					this.logger.warn(
+						`Outbound message listener failed for ${message.id}: ${error?.message || error}`,
+					),
+				);
+		}
 	}
 
 	private notifyInboundMessagePersisted(accountId: string, message: WhatsAppMessage) {
@@ -3189,6 +3212,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			!this.bootstrapping.has(accountId)
 		) {
 			await this.clearUnreadFromPhone(accountId, conversation.id);
+			this.notifyOutboundMessagePersisted(accountId, saved);
 		}
 		if (shouldBumpLastMessage) {
 			await this.conversationRepo.update(conversation.id, {
@@ -3287,6 +3311,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 							  normalized.type === 'voice'
 							? 'Voice message'
 							: `New ${normalized.type || 'message'}`);
+				const badgeCounts = await this.unreadBadgeCounts(enabledRecipientIds);
 				await Promise.all(
 					enabledRecipientIds.map((userId) =>
 						this.notifications.create({
@@ -3298,6 +3323,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 								conversationId: conversation.id,
 								messageId: hydrated.id,
 								type: 'whatsapp_message',
+								...(badgeCounts.has(userId) ? { badgeCount: badgeCounts.get(userId) } : {}),
 							},
 							audience: NotificationAudience.USER,
 							userId,
@@ -3310,6 +3336,33 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.queuePendingAttachmentDownloads([hydrated], accountId);
 		}
 		return hydrated;
+	}
+
+	/**
+	 * Same visible-unread total as GET /whatsapp/unread, so the installed PWA icon badge
+	 * set from a push matches the in-app badge. Best effort — push still goes out on failure.
+	 */
+	private async unreadBadgeCounts(userIds: string[]) {
+		const counts = new Map<string, number>();
+		if (!userIds.length) return counts;
+		try {
+			const users = await this.conversationRepo.manager
+				.getRepository(User)
+				.find({ where: { id: In(userIds) } });
+			await Promise.all(
+				(users || []).map(async user => {
+					try {
+						const total = await this.access.getUnreadTotal(user);
+						counts.set(user.id, Number(total?.totalUnread) || 0);
+					} catch {
+						/* leave this user's badge unchanged */
+					}
+				}),
+			);
+		} catch {
+			/* badge is optional */
+		}
+		return counts;
 	}
 
 	/** Skip push for users who muted this conversation (all channels). */
@@ -6487,7 +6540,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// Soft catch-up: only ask the provider for messages newer than our newest
 		// local row. Full latest page remains available via force=1 (gap repair).
 		const afterCursor =
-			mode === 'latest' && !force && localCount > 0
+			mode === 'latest' && !force && localCount > 0 && freshSkip.reason !== 'sparse_unhydrated'
 				? String(newestLocal?.providerMessageId || '').trim() || undefined
 				: undefined;
 		let messages: Awaited<ReturnType<WhatsAppProvider['getMessages']>>;

@@ -21,6 +21,12 @@ import {
 import { AiReplyProviderRegistry } from "./providers/ai-reply-provider.registry";
 import { AiReplyContextService } from "./services/ai-reply-context.service";
 import { AiReplySuggestionsService } from "./services/ai-reply-suggestions.service";
+import { User } from "../../entities/global.entity";
+import { AiAgentController } from "./agent/ai-agent.controller";
+import { AI_AGENT_ENTITIES } from "./agent/ai-agent.entities";
+import { AiAgentRuntimeService } from "./agent/ai-agent-runtime.service";
+import { AiAgentSchemaService } from "./agent/ai-agent-schema.service";
+import { AiAgentService } from "./agent/ai-agent.service";
 
 @Module({
   imports: [
@@ -32,9 +38,11 @@ import { AiReplySuggestionsService } from "./services/ai-reply-suggestions.servi
       WhatsAppAiSettings,
       WhatsAppConversation,
       WhatsAppMessage,
+      User,
+      ...AI_AGENT_ENTITIES,
     ]),
   ],
-  controllers: [AiReplySuggestionsController],
+  controllers: [AiReplySuggestionsController, AiAgentController],
   providers: [
     AiFreeChainAiReplyProvider,
     DragifyFreeCompatAiReplyProvider,
@@ -61,6 +69,9 @@ import { AiReplySuggestionsService } from "./services/ai-reply-suggestions.servi
     AiReplyProviderRegistry,
     AiReplyContextService,
     AiReplySuggestionsService,
+    AiAgentSchemaService,
+    AiAgentRuntimeService,
+    AiAgentService,
   ],
   exports: [AiReplySuggestionsService],
 })

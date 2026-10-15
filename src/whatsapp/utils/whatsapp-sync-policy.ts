@@ -36,5 +36,16 @@ export function shouldSkipFreshProviderSync(options: {
 		}
 		return { skip: false, reason: 'empty_thread' };
 	}
+	// A live message landing in a chat whose history was never imported leaves a
+	// thread of one or two rows. Pull one full page once; the watermark then
+	// stops any repeat.
+	if (
+		localCount < SPARSE_THREAD_ROWS &&
+		providerSyncAgeMs(options.lastProviderSyncAt, options.now) == null
+	) {
+		return { skip: false, reason: 'sparse_unhydrated' };
+	}
 	return { skip: true, reason: 'local_replica' };
 }
+
+export const SPARSE_THREAD_ROWS = 5;

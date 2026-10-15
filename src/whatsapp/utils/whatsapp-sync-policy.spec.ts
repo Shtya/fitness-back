@@ -22,6 +22,20 @@ describe('shouldSkipFreshProviderSync', () => {
 		expect(result).toEqual({ skip: true, reason: 'local_replica' });
 	});
 
+	it('pulls a full page once for a sparse thread that was never hydrated', () => {
+		expect(
+			shouldSkipFreshProviderSync({ mode: 'latest', localCount: 1, now }),
+		).toEqual({ skip: false, reason: 'sparse_unhydrated' });
+		expect(
+			shouldSkipFreshProviderSync({
+				mode: 'latest',
+				localCount: 1,
+				lastProviderSyncAt: new Date(now - 60 * 60_000),
+				now,
+			}),
+		).toEqual({ skip: true, reason: 'local_replica' });
+	});
+
 	it('skips empty threads that already have a hydration watermark', () => {
 		const result = shouldSkipFreshProviderSync({
 			mode: 'latest',

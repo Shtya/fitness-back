@@ -446,7 +446,9 @@ export function routeBaileysReceiptUpdates(
 		const participantJid = String(item?.receipt?.userJid || '').trim();
 		if (!providerMessageId || !chatId || !participantJid) continue;
 		if (isStatusBroadcastJid(chatId)) {
-			const readAt = toDate(item?.receipt?.readTimestamp);
+			// Video stories can report only a played receipt; the phone still lists that viewer.
+			const readAt =
+				toDate(item?.receipt?.readTimestamp) || toDate(item?.receipt?.playedTimestamp);
 			if (item?.key?.fromMe === false || !readAt) continue;
 			if (own.has(bareJid(participantJid))) continue;
 			const views = storyViews.get(providerMessageId) || [];

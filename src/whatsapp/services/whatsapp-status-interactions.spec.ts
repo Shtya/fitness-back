@@ -200,6 +200,26 @@ describe('WhatsAppStatusService recording interactions', () => {
 		expect(payload).not.toMatch(/201111111111|201333333333/);
 	});
 
+	it('folds rows stored under a LID onto the phone key once the number is known', async () => {
+		const { service, queries } = createService({ lidPhones: { '555@lid': '201333333333' } });
+		await service.recordStatusViewers(ACCOUNT, 'STORYOWN', [
+			{ participantJid: '555@lid', readAt: new Date('2026-10-13T10:01:00Z') },
+		]);
+		const moves = queries.filter(item => /SELECT account_id, status_message_id, \$3/.test(item.sql));
+		expect(moves).toHaveLength(2);
+		for (const move of moves) {
+			expect(move.params).toEqual([ACCOUNT, '555@lid', '201333333333@s.whatsapp.net']);
+		}
+		const removals = queries.filter(item => /^UPDATE whatsapp_status_(viewers|reactions) SET deleted_at/.test(item.sql.trim()));
+		expect(removals).toHaveLength(2);
+
+		queries.length = 0;
+		await service.recordStatusViewers(ACCOUNT, 'STORYOWN', [
+			{ participantJid: '555@lid', readAt: new Date('2026-10-13T10:02:00Z') },
+		]);
+		expect(queries.some(item => /SELECT account_id, status_message_id, \$3/.test(item.sql))).toBe(false);
+	});
+
 	it('does nothing when no receipt is a view', async () => {
 		const { service, query, gateway } = createService();
 		await service.recordStatusViewers(ACCOUNT, 'STORYOWN', [

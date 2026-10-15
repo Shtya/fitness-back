@@ -122,6 +122,9 @@ export class NotificationService {
 							String(data.accountId || ''),
 						)}&conversationId=${encodeURIComponent(String(data.conversationId || ''))}`,
 						tag: `whatsapp-${data.conversationId || opts.userId}`,
+						badgeCount: Number.isFinite(Number(data.badgeCount))
+							? Number(data.badgeCount)
+							: undefined,
 						data,
 					})
 					.catch(e => this.logger.error('[WebPush] WhatsApp push failed', e));
