@@ -484,6 +484,10 @@ export class LentLoan extends CoreEntity {
 	@Column({ type: 'date', name: 'lent_date' })
 	lentDate!: string;
 
+	/** When true, creating/updating this loan adjusts the available cash balance. */
+	@Column({ type: 'boolean', name: 'affects_balance', default: false })
+	affectsBalance!: boolean;
+
 	@Column({ type: 'text', nullable: true, name: 'notes' })
 	notes?: string | null;
 }
@@ -513,6 +517,10 @@ export class WalletExpense extends CoreEntity {
 	@Index()
 	@Column({ type: 'date', name: 'spent_date' })
 	spentDate!: string;
+
+	/** When true (default), the spend is taken out of the available cash balance. */
+	@Column({ type: 'boolean', name: 'affects_balance', default: true })
+	affectsBalance!: boolean;
 
 	@Column({ type: 'text', nullable: true, name: 'notes' })
 	notes?: string | null;

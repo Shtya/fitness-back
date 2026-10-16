@@ -96,6 +96,11 @@ export class CreateLentLoanDto {
 	@Matches(YMD)
 	date?: string;
 
+	/** Deduct from available balance (UI default: true). */
+	@IsOptional()
+	@IsBoolean()
+	affectsBalance?: boolean;
+
 	@IsOptional()
 	@IsString()
 	@MaxLength(500)
@@ -121,6 +126,10 @@ export class UpdateLentLoanDto {
 	date?: string;
 
 	@IsOptional()
+	@IsBoolean()
+	affectsBalance?: boolean;
+
+	@IsOptional()
 	@IsString()
 	@MaxLength(500)
 	notes?: string;
@@ -141,6 +150,11 @@ export class CreateWalletExpenseDto {
 	@IsOptional()
 	@Matches(YMD)
 	date?: string;
+
+	/** Deduct from available balance (default true when omitted). */
+	@IsOptional()
+	@IsBoolean()
+	affectsBalance?: boolean;
 
 	@IsOptional()
 	@IsString()
@@ -165,6 +179,10 @@ export class UpdateWalletExpenseDto {
 	@IsOptional()
 	@Matches(YMD)
 	date?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	affectsBalance?: boolean;
 
 	@IsOptional()
 	@IsString()

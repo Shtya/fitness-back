@@ -13,9 +13,32 @@ const UPLOAD_STORAGE_NAME = /^\d{12,14}-[a-z0-9]{4,12}(?:-voice-\d+s)?(\.[a-z0-9
 const SHARE_STORAGE_PREFIX = /^share_\d{12,14}_[0-9a-f]{8}_/i;
 const SAVED_MEDIA_SUFFIX = /-\d{12,14}-[a-z0-9]{6}(\.[a-z0-9]{1,12})?$/i;
 
+/** Scripts that survive multipart mangling and prove a latin1→utf8 repair worked. */
+const NON_LATIN_SCRIPT =
+	/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u4E00-\u9FFF\u0400-\u04FF\u0900-\u097F]/;
+
+/**
+ * Multer / Busboy decode Content-Disposition filenames as Latin-1.
+ * UTF-8 Arabic (and similar) then shows as mojibake: "أسئلة" → "ø§ø³ø¦…".
+ * Only rewriting when the result clearly recovers real script text.
+ */
+export function decodeMultipartFileName(value: unknown): string {
+	const raw = String(value ?? '');
+	if (!raw) return '';
+	if (NON_LATIN_SCRIPT.test(raw)) return raw;
+	try {
+		const decoded = Buffer.from(raw, 'latin1').toString('utf8');
+		if (!decoded || decoded === raw || decoded.includes('\uFFFD')) return raw;
+		if (NON_LATIN_SCRIPT.test(decoded)) return decoded;
+	} catch {
+		/* keep raw */
+	}
+	return raw;
+}
+
 /** Basename with control / bidi-override characters removed; null when nothing usable is left. */
 export function sanitizeDisplayFileName(value: unknown): string | null {
-	const base = String(value ?? '')
+	const base = decodeMultipartFileName(value)
 		.split(/[\\/]/)
 		.pop()!
 		// eslint-disable-next-line no-control-regex

@@ -56,6 +56,7 @@ import {
 	looksLikeOutgoingVoiceUpload,
 } from '../utils/whatsapp-voice-ogg';
 import { signMediaToken, signedMediaPath } from '../utils/whatsapp-media-signed-url';
+import { sanitizeDisplayFileName } from '../utils/whatsapp-display-file-name';
 
 const mediaRoot = () =>
 	path.resolve(
@@ -653,14 +654,20 @@ export class WhatsAppConversationsController {
 		assertSendRateLimit(String(req.user?.id || ''));
 		await this.access.assertAccountPermission(req.user, accountId, 'canUse');
 		if (!file) throw new BadRequestException('File is required');
+		// Prefer an explicit UTF-8 name from the client; Multer's originalname is often latin1 mojibake.
+		const displayName =
+			sanitizeDisplayFileName(req?.body?.fileName) ||
+			sanitizeDisplayFileName(file.originalname) ||
+			file.originalname ||
+			'document';
 		let storedPath = file.path;
-		let storedName = file.originalname;
+		let storedName = displayName;
 		let mimeType = file.mimetype;
-		if (looksLikeOutgoingVoiceUpload(file.originalname, file.mimetype)) {
+		if (looksLikeOutgoingVoiceUpload(displayName, file.mimetype)) {
 			try {
 				const converted = await ensureWhatsAppVoiceOgg(file.path, {
 					mimeType: file.mimetype,
-					fileName: file.originalname,
+					fileName: displayName,
 				});
 				const committed = await commitConvertedVoiceOgg(converted.filePath, file.path);
 				await converted.cleanup?.();

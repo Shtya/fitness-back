@@ -1,5 +1,5 @@
 import { redactMessagesRawForClient } from './whatsapp-raw-redact';
-import { isInternalStorageFileName, resolveOutgoingDisplayFileName } from './whatsapp-display-file-name';
+import { resolveOutgoingDisplayFileName } from './whatsapp-display-file-name';
 import {
 	isWhatsAppViewOnceRaw,
 	stripViewOnceQuotedPreviews,
@@ -37,7 +37,7 @@ function withOriginalFileName(attachment: any) {
 	if (!attachment || typeof attachment !== 'object' || !attachment.fileName) return attachment;
 	const type = String(attachment.type || '').toLowerCase();
 	if (type === 'ptt' || type === 'voice' || /voice-\d/i.test(attachment.fileName)) return attachment;
-	if (!isInternalStorageFileName(attachment.fileName)) return attachment;
+	// Always resolve: strips internal storage names and repairs Multer latin1 mojibake.
 	const fileName = resolveOutgoingDisplayFileName({
 		requested: attachment.fileName,
 		storagePath: attachment.fileName,

@@ -166,37 +166,63 @@ export class WalletTrackerService {
 		const date = this.cleanDate(dto.date) ?? todayYmd();
 		const amount = centsToDecimal(toCents(dto.amount));
 		const notes = dto.notes?.trim() || null;
+		const affectsBalance = dto.affectsBalance !== false;
 		await this.withLentTable(() =>
-			this.dataSource.manager.save(
-				this.dataSource.manager.create(LentLoan, {
-					userId,
-					person,
-					amount,
-					lentDate: date,
-					notes,
-				}),
-			),
+			this.dataSource.transaction(async (m) => {
+				await m.save(
+					m.create(LentLoan, {
+						userId,
+						person,
+						amount,
+						lentDate: date,
+						affectsBalance,
+						notes,
+					}),
+				);
+				if (affectsBalance) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, -toCents(amount));
+				}
+			}),
 		);
 		return this.getTracker(userId);
 	}
 
 	async updateLent(userId: string, id: string, dto: UpdateLentLoanDto) {
 		const date = this.cleanDate(dto.date);
-		await this.withLentTable(async () => {
-			const row = await this.findLent(userId, id);
-			if (dto.person !== undefined) row.person = this.cleanName(dto.person);
-			if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
-			if (date) row.lentDate = date;
-			if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
-			await this.dataSource.manager.save(row);
-		});
+		await this.withLentTable(() =>
+			this.dataSource.transaction(async (m) => {
+				const row = await this.lockLent(m, userId, id);
+				// Legacy lent rows never touched the balance (column defaults to false).
+				const beforeApplied = row.affectsBalance === true ? toCents(row.amount) : 0;
+				if (dto.person !== undefined) row.person = this.cleanName(dto.person);
+				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
+				if (date) row.lentDate = date;
+				if (dto.affectsBalance !== undefined) row.affectsBalance = Boolean(dto.affectsBalance);
+				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
+				await m.save(row);
+				const afterApplied = row.affectsBalance === true ? toCents(row.amount) : 0;
+				const correction = beforeApplied - afterApplied;
+				if (correction) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, correction);
+				}
+			}),
+		);
 		return this.getTracker(userId);
 	}
 
 	async deleteLent(userId: string, id: string) {
-		await this.withLentTable(async () => {
-			await this.dataSource.manager.softRemove(await this.findLent(userId, id));
-		});
+		await this.withLentTable(() =>
+			this.dataSource.transaction(async (m) => {
+				const row = await this.lockLent(m, userId, id);
+				await m.softRemove(row);
+				if (row.affectsBalance === true) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, toCents(row.amount));
+				}
+			}),
+		);
 		return this.getTracker(userId);
 	}
 
@@ -205,19 +231,23 @@ export class WalletTrackerService {
 		const date = this.cleanDate(dto.date) ?? todayYmd();
 		const amount = centsToDecimal(toCents(dto.amount));
 		const notes = dto.notes?.trim() || null;
+		const affectsBalance = dto.affectsBalance !== false;
 		await this.withExpenseTable(() =>
 			this.dataSource.transaction(async (m) => {
-				const wallet = await this.ensureWallet(m, userId);
 				await m.save(
 					m.create(WalletExpense, {
 						userId,
 						name,
 						amount,
 						spentDate: date,
+						affectsBalance,
 						notes,
 					}),
 				);
-				await this.moveBalance(m, wallet, -toCents(amount));
+				if (affectsBalance) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, -toCents(amount));
+				}
 			}),
 		);
 		return this.getTracker(userId);
@@ -228,16 +258,18 @@ export class WalletTrackerService {
 		await this.withExpenseTable(() =>
 			this.dataSource.transaction(async (m) => {
 				const row = await this.lockExpense(m, userId, id);
-				const before = toCents(row.amount);
+				const beforeApplied = row.affectsBalance !== false ? toCents(row.amount) : 0;
 				if (dto.name !== undefined) row.name = this.cleanName(dto.name);
 				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
 				if (date) row.spentDate = date;
+				if (dto.affectsBalance !== undefined) row.affectsBalance = Boolean(dto.affectsBalance);
 				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
 				await m.save(row);
-				const delta = before - toCents(row.amount);
-				if (delta) {
+				const afterApplied = row.affectsBalance !== false ? toCents(row.amount) : 0;
+				const correction = beforeApplied - afterApplied;
+				if (correction) {
 					const wallet = await this.ensureWallet(m, userId);
-					await this.moveBalance(m, wallet, delta);
+					await this.moveBalance(m, wallet, correction);
 				}
 			}),
 		);
@@ -248,9 +280,11 @@ export class WalletTrackerService {
 		await this.withExpenseTable(() =>
 			this.dataSource.transaction(async (m) => {
 				const row = await this.lockExpense(m, userId, id);
-				const wallet = await this.ensureWallet(m, userId);
 				await m.softRemove(row);
-				await this.moveBalance(m, wallet, toCents(row.amount));
+				if (row.affectsBalance !== false) {
+					const wallet = await this.ensureWallet(m, userId);
+					await this.moveBalance(m, wallet, toCents(row.amount));
+				}
 			}),
 		);
 		return this.getTracker(userId);
@@ -274,6 +308,7 @@ export class WalletTrackerService {
 			person: row.person,
 			amount: fromCents(toCents(row.amount)),
 			date: String(row.lentDate).slice(0, 10),
+			affectsBalance: row.affectsBalance === true,
 			notes: row.notes ?? null,
 		}));
 		const total = fromCents(loans.reduce((sum, loan) => sum + toCents(loan.amount), 0));
@@ -282,6 +317,12 @@ export class WalletTrackerService {
 
 	private async findLent(userId: string, id: string) {
 		const row = await this.dataSource.manager.findOne(LentLoan, { where: { id, userId } });
+		if (!row) throw new NotFoundException('Lent item not found');
+		return row;
+	}
+
+	private async lockLent(m: EntityManager, userId: string, id: string) {
+		const row = await m.findOne(LentLoan, { where: { id, userId }, lock: { mode: 'pessimistic_write' } });
 		if (!row) throw new NotFoundException('Lent item not found');
 		return row;
 	}
@@ -302,7 +343,13 @@ export class WalletTrackerService {
 	private async getExpenses(userId: string) {
 		const today = todayYmd();
 		const { start, end } = monthRange(today);
-		const empty = { available: false as const, items: [] as Array<{ id: string; name: string; amount: number; date: string; notes: string | null }>, total: 0, spentThisMonth: 0, month: start.slice(0, 7) };
+		const empty = {
+			available: false as const,
+			items: [] as Array<{ id: string; name: string; amount: number; date: string; affectsBalance: boolean; notes: string | null }>,
+			total: 0,
+			spentThisMonth: 0,
+			month: start.slice(0, 7),
+		};
 		try {
 			// Raw probe so a stale TypeORM metadata miss is not confused with "table missing".
 			await this.dataSource.query(`SELECT 1 FROM wallet_expenses WHERE false`);
@@ -324,6 +371,7 @@ export class WalletTrackerService {
 			name: row.name,
 			amount: fromCents(toCents(row.amount)),
 			date: String(row.spentDate).slice(0, 10),
+			affectsBalance: row.affectsBalance !== false,
 			notes: row.notes ?? null,
 		}));
 		const total = fromCents(items.reduce((sum, row) => sum + toCents(row.amount), 0));

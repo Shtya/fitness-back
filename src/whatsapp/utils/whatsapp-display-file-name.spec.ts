@@ -1,5 +1,6 @@
 import {
 	contentDispositionHeader,
+	decodeMultipartFileName,
 	isInternalStorageFileName,
 	originalNameFromStorageName,
 	resolveOutgoingDisplayFileName,
@@ -7,6 +8,26 @@ import {
 } from './whatsapp-display-file-name';
 
 describe('whatsapp display file names', () => {
+	it('repairs Multer latin1 mojibake for Arabic filenames', () => {
+		const arabic = 'أسئلة_نهائية.docx';
+		const mojibake = Buffer.from(arabic, 'utf8').toString('latin1');
+		expect(mojibake).not.toBe(arabic);
+		expect(decodeMultipartFileName(mojibake)).toBe(arabic);
+		expect(sanitizeDisplayFileName(mojibake)).toBe(arabic);
+		expect(
+			resolveOutgoingDisplayFileName({
+				requested: mojibake,
+				storagePath: 'outgoing/acc/user/1791833788952-x7k2p9qa.docx',
+				type: 'document',
+			}),
+		).toBe(arabic);
+	});
+
+	it('does not re-decode an already-correct Arabic name', () => {
+		expect(decodeMultipartFileName('تقرير.pdf')).toBe('تقرير.pdf');
+		expect(sanitizeDisplayFileName('تقرير.pdf')).toBe('تقرير.pdf');
+	});
+
 	it('keeps the name the user picked, including Arabic and spaces', () => {
 		expect(
 			resolveOutgoingDisplayFileName({
