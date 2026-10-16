@@ -54,6 +54,7 @@ import { WebTranslatorModule } from './web-translator/web-translator.module';
 import { BodyMeasurementModule } from './body-measurement/body-measurement.module';
 import { FacebookEngagementModule } from './facebook-engagement/facebook-engagement.module';
 import { SiteInspectorModule } from './site-inspector/site-inspector.module';
+import { SmartDocumentModule } from './smart-document/smart-document.module';
 
 @Module({
 	imports: [
@@ -122,6 +123,7 @@ import { SiteInspectorModule } from './site-inspector/site-inspector.module';
 		BodyMeasurementModule,
 		FacebookEngagementModule,
 		SiteInspectorModule,
+		SmartDocumentModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],
