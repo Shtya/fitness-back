@@ -12,6 +12,12 @@ export class SmartDocumentController {
 		return this.service.upsertShare(String(req.user.id), body || {});
 	}
 
+	@UseGuards(JwtAuthGuard)
+	@Get('shares/:token/visits')
+	listVisits(@Param('token') token: string, @Req() req: any) {
+		return this.service.listVisitsForOwner(String(req.user.id), token);
+	}
+
 	@Get('public/:token')
 	getPublic(@Param('token') token: string) {
 		return this.service.getPublic(token);
@@ -20,5 +26,10 @@ export class SmartDocumentController {
 	@Put('public/:token')
 	updatePublic(@Param('token') token: string, @Body() body: any) {
 		return this.service.updatePublic(token, body || {});
+	}
+
+	@Post('public/:token/visit')
+	recordVisit(@Param('token') token: string, @Body() body: any, @Req() req: any) {
+		return this.service.recordVisit(token, req, body || {});
 	}
 }
