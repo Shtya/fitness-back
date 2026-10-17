@@ -16,6 +16,17 @@ export type TrackerItem = {
 	fxRate: number | null;
 	date: string;
 	notes: string | null;
+	/** When true, this amount is expected again next month (salary, etc.). */
+	recurring: boolean;
+};
+
+export type TrackerExpenseLike = {
+	amount: number;
+	/** YYYY-MM-DD spent / scheduled date. */
+	date?: string;
+	recurring?: boolean;
+	affectsBalance?: boolean;
+	balanceApplied?: boolean;
 };
 
 export type TrackerSummary = {
@@ -25,6 +36,14 @@ export type TrackerSummary = {
 	pendingNextMonth: number;
 	pendingTotal: number;
 	month: string;
+	nextMonth: string;
+};
+
+/** Cash you expect to add / deduct next month from rows marked monthly. */
+export type TrackerForecast = {
+	nextMonthIn: number;
+	nextMonthOut: number;
+	projectedBalance: number;
 	nextMonth: string;
 };
 
@@ -76,6 +95,57 @@ export function summarizeTracker(balanceCents: number, items: TrackerItem[], tod
 		pendingTotal: fromCents(pendingAll),
 		month: thisMonth.start.slice(0, 7),
 		nextMonth: nextMonth.start.slice(0, 7),
+	};
+}
+
+/** Spend hits the wallet only on/after its date (future = scheduled, not deducted yet). */
+export function expenseIsDue(date: string | undefined, today: string): boolean {
+	const ymd = String(date || '').slice(0, 10);
+	return /^\d{4}-\d{2}-\d{2}$/.test(ymd) && ymd <= today;
+}
+
+/**
+ * Next-month "going out":
+ * - recurring spends that have started by the end of next month
+ * - one-shot spends scheduled inside next month
+ */
+export function expenseCountsInNextMonthOut(expense: TrackerExpenseLike, today: string): boolean {
+	if (expense.affectsBalance === false) return false;
+	const date = String(expense.date || '').slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+	const next = monthRange(addMonths(monthRange(today).start, 1));
+	if (date > next.end) return false;
+	if (expense.recurring) return true;
+	return date >= next.start && date <= next.end;
+}
+
+/**
+ * Next-month projection from monthly money + scheduled/recurring spends.
+ * Money in = recurring tracker items (EGP).
+ * Money out = recurring spends already started, or one-shots dated next month.
+ */
+export function forecastRecurring(
+	balanceCents: number,
+	items: TrackerItem[],
+	expenses: TrackerExpenseLike[],
+	today: string,
+): TrackerForecast {
+	const nextMonth = monthRange(addMonths(monthRange(today).start, 1)).start.slice(0, 7);
+	let inCents = 0;
+	for (const item of items) {
+		if (!item.recurring) continue;
+		inCents += toCents(item.egpAmount ?? item.amount);
+	}
+	let outCents = 0;
+	for (const expense of expenses) {
+		if (!expenseCountsInNextMonthOut(expense, today)) continue;
+		outCents += toCents(expense.amount);
+	}
+	return {
+		nextMonthIn: fromCents(inCents),
+		nextMonthOut: fromCents(outCents),
+		projectedBalance: fromCents(balanceCents + inCents - outCents),
+		nextMonth,
 	};
 }
 

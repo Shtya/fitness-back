@@ -426,6 +426,10 @@ export class ExpectedEntry extends CoreEntity {
 	@Column({ type: 'date' })
 	expectedDate!: string;
 
+	/** Repeats every month for next-month cash forecast (salary, etc.). */
+	@Column({ type: 'boolean', default: false })
+	recurring!: boolean;
+
 	@Column({ type: 'text', nullable: true })
 	notes?: string | null;
 }
@@ -521,6 +525,17 @@ export class WalletExpense extends CoreEntity {
 	/** When true (default), the spend is taken out of the available cash balance. */
 	@Column({ type: 'boolean', name: 'affects_balance', default: true })
 	affectsBalance!: boolean;
+
+	/**
+	 * True once this spend has been deducted from the wallet.
+	 * Future-dated spends stay false until `spent_date` is due.
+	 */
+	@Column({ type: 'boolean', name: 'balance_applied', default: false })
+	balanceApplied!: boolean;
+
+	/** Repeats every month for next-month cash forecast (rent, salary paid out, etc.). */
+	@Column({ type: 'boolean', default: false })
+	recurring!: boolean;
 
 	@Column({ type: 'text', nullable: true, name: 'notes' })
 	notes?: string | null;

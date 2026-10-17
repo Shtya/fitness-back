@@ -38,6 +38,11 @@ export class CreateTrackerItemDto {
 	@IsBoolean()
 	received?: boolean;
 
+	/** Expect this amount again next month (salary, etc.). */
+	@IsOptional()
+	@IsBoolean()
+	recurring?: boolean;
+
 	@IsOptional()
 	@IsString()
 	@MaxLength(500)
@@ -156,6 +161,11 @@ export class CreateWalletExpenseDto {
 	@IsBoolean()
 	affectsBalance?: boolean;
 
+	/** Expect this spend again next month (rent, salary paid out, etc.). */
+	@IsOptional()
+	@IsBoolean()
+	recurring?: boolean;
+
 	@IsOptional()
 	@IsString()
 	@MaxLength(500)
@@ -185,6 +195,10 @@ export class UpdateWalletExpenseDto {
 	affectsBalance?: boolean;
 
 	@IsOptional()
+	@IsBoolean()
+	recurring?: boolean;
+
+	@IsOptional()
 	@IsString()
 	@MaxLength(500)
 	notes?: string;
@@ -211,6 +225,10 @@ export class UpdateTrackerItemDto {
 	@IsOptional()
 	@Matches(YMD)
 	date?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	recurring?: boolean;
 
 	@IsOptional()
 	@IsString()

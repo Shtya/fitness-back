@@ -1,7 +1,15 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
-import { ExpectedEntry, GoldHolding, IncomeEntry, LentLoan, WalletAccount, WalletExpense } from 'entities/money.entity';
+import {
+	ExpectedEntry,
+	GoldHolding,
+	IncomeEntry,
+	LentLoan,
+	RecurrenceType,
+	WalletAccount,
+	WalletExpense,
+} from 'entities/money.entity';
 import { isYmd, todayYmd } from '../billing/billing-rules';
 import { goldValue } from './gold-price';
 import { GoldPriceService } from './gold-price.service';
@@ -19,6 +27,8 @@ import {
 } from './wallet-tracker.dto';
 import {
 	centsToDecimal,
+	expenseIsDue,
+	forecastRecurring,
 	fromCents,
 	monthRange,
 	nextBalanceCents,
@@ -53,6 +63,7 @@ export class WalletTrackerService {
 	) {}
 
 	async getTracker(userId: string) {
+		await this.applyDueExpenses(userId);
 		const m = this.dataSource.manager;
 		const [wallet, pending, received, gold, lent, expenses, fx] = await Promise.all([
 			this.findWallet(m, userId, false),
@@ -77,9 +88,11 @@ export class WalletTrackerService {
 			...received.map((row) => this.toReceivedItem(row)),
 		];
 		const balanceCents = toCents(wallet?.openingBalance);
+		const today = todayYmd();
 		return {
 			wallet: wallet ? { id: wallet.id, name: wallet.name, currency: wallet.currency } : null,
-			summary: summarizeTracker(balanceCents, items, todayYmd()),
+			summary: summarizeTracker(balanceCents, items, today),
+			forecast: forecastRecurring(balanceCents, items, expenses.items, today),
 			fx: fx
 				? { usdToEgp: fx.usdToEgp, updatedAt: fx.updatedAt, stale: fx.stale, source: fx.source }
 				: null,
@@ -232,6 +245,9 @@ export class WalletTrackerService {
 		const amount = centsToDecimal(toCents(dto.amount));
 		const notes = dto.notes?.trim() || null;
 		const affectsBalance = dto.affectsBalance !== false;
+		const recurring = dto.recurring === true;
+		const today = todayYmd();
+		const applyNow = affectsBalance && expenseIsDue(date, today);
 		await this.withExpenseTable(() =>
 			this.dataSource.transaction(async (m) => {
 				await m.save(
@@ -241,10 +257,12 @@ export class WalletTrackerService {
 						amount,
 						spentDate: date,
 						affectsBalance,
+						balanceApplied: applyNow,
+						recurring,
 						notes,
 					}),
 				);
-				if (affectsBalance) {
+				if (applyNow) {
 					const wallet = await this.ensureWallet(m, userId);
 					await this.moveBalance(m, wallet, -toCents(amount));
 				}
@@ -255,17 +273,22 @@ export class WalletTrackerService {
 
 	async updateExpense(userId: string, id: string, dto: UpdateWalletExpenseDto) {
 		const date = this.cleanDate(dto.date);
+		const today = todayYmd();
 		await this.withExpenseTable(() =>
 			this.dataSource.transaction(async (m) => {
 				const row = await this.lockExpense(m, userId, id);
-				const beforeApplied = row.affectsBalance !== false ? toCents(row.amount) : 0;
+				const beforeApplied = row.balanceApplied === true ? toCents(row.amount) : 0;
 				if (dto.name !== undefined) row.name = this.cleanName(dto.name);
 				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
 				if (date) row.spentDate = date;
 				if (dto.affectsBalance !== undefined) row.affectsBalance = Boolean(dto.affectsBalance);
+				if (dto.recurring !== undefined) row.recurring = Boolean(dto.recurring);
 				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
+				const shouldApply =
+					row.affectsBalance !== false && expenseIsDue(String(row.spentDate).slice(0, 10), today);
+				row.balanceApplied = shouldApply;
 				await m.save(row);
-				const afterApplied = row.affectsBalance !== false ? toCents(row.amount) : 0;
+				const afterApplied = shouldApply ? toCents(row.amount) : 0;
 				const correction = beforeApplied - afterApplied;
 				if (correction) {
 					const wallet = await this.ensureWallet(m, userId);
@@ -281,13 +304,43 @@ export class WalletTrackerService {
 			this.dataSource.transaction(async (m) => {
 				const row = await this.lockExpense(m, userId, id);
 				await m.softRemove(row);
-				if (row.affectsBalance !== false) {
+				if (row.balanceApplied === true) {
 					const wallet = await this.ensureWallet(m, userId);
 					await this.moveBalance(m, wallet, toCents(row.amount));
 				}
 			}),
 		);
 		return this.getTracker(userId);
+	}
+
+	/** When a scheduled spend's date arrives, deduct it once and mark it applied. */
+	private async applyDueExpenses(userId: string) {
+		try {
+			await this.dataSource.query(`SELECT 1 FROM wallet_expenses WHERE false`);
+		} catch (error) {
+			if (isMissingTable(error)) return;
+			throw error;
+		}
+		const today = todayYmd();
+		await this.dataSource.transaction(async (m) => {
+			const due = await m
+				.createQueryBuilder(WalletExpense, 'e')
+				.setLock('pessimistic_write')
+				.where('e.userId = :userId', { userId })
+				.andWhere('e.affectsBalance = true')
+				.andWhere('e.balanceApplied = false')
+				.andWhere('e.spentDate <= :today', { today })
+				.getMany();
+			if (!due.length) return;
+			const wallet = await this.ensureWallet(m, userId);
+			let delta = 0;
+			for (const row of due) {
+				delta -= toCents(row.amount);
+				row.balanceApplied = true;
+			}
+			await m.save(due);
+			if (delta) await this.moveBalance(m, wallet, delta);
+		});
 	}
 
 	/** Money still with other people; `available: false` until the lent_loans migration is applied. */
@@ -345,7 +398,16 @@ export class WalletTrackerService {
 		const { start, end } = monthRange(today);
 		const empty = {
 			available: false as const,
-			items: [] as Array<{ id: string; name: string; amount: number; date: string; affectsBalance: boolean; notes: string | null }>,
+			items: [] as Array<{
+				id: string;
+				name: string;
+				amount: number;
+				date: string;
+				affectsBalance: boolean;
+				balanceApplied: boolean;
+				recurring: boolean;
+				notes: string | null;
+			}>,
 			total: 0,
 			spentThisMonth: 0,
 			month: start.slice(0, 7),
@@ -372,11 +434,17 @@ export class WalletTrackerService {
 			amount: fromCents(toCents(row.amount)),
 			date: String(row.spentDate).slice(0, 10),
 			affectsBalance: row.affectsBalance !== false,
+			balanceApplied: row.balanceApplied === true,
+			recurring: row.recurring === true,
 			notes: row.notes ?? null,
 		}));
 		const total = fromCents(items.reduce((sum, row) => sum + toCents(row.amount), 0));
 		const spentThisMonth = fromCents(
-			items.reduce((sum, row) => (row.date >= start && row.date <= end ? sum + toCents(row.amount) : sum), 0),
+			items.reduce(
+				(sum, row) =>
+					row.balanceApplied && row.date >= start && row.date <= end ? sum + toCents(row.amount) : sum,
+				0,
+			),
 		);
 		return { available: true, items, total, spentThisMonth, month: start.slice(0, 7) };
 	}
@@ -416,6 +484,7 @@ export class WalletTrackerService {
 		const currency = normalizeTrackerCurrency(dto.currency);
 		const amount = centsToDecimal(toCents(dto.amount));
 		const notes = dto.notes?.trim() || null;
+		const recurring = dto.recurring === true;
 		await this.dataSource.transaction(async (m) => {
 			if (!dto.received) {
 				await m.save(
@@ -425,6 +494,7 @@ export class WalletTrackerService {
 						amount,
 						currency,
 						expectedDate: date,
+						recurring,
 						notes,
 					}),
 				);
@@ -443,6 +513,8 @@ export class WalletTrackerService {
 					fxRate: settled.fxRate,
 					date,
 					notes,
+					recurring,
+					recurrenceType: recurring ? RecurrenceType.MONTHLY : null,
 					isActive: true,
 				}),
 			);
@@ -461,6 +533,7 @@ export class WalletTrackerService {
 				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
 				if (currency) row.currency = currency;
 				if (date) row.expectedDate = date;
+				if (dto.recurring !== undefined) row.recurring = Boolean(dto.recurring);
 				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
 				await m.save(row);
 				return;
@@ -470,6 +543,10 @@ export class WalletTrackerService {
 			const before = toCents(row.amount);
 			if (dto.name !== undefined) row.source = this.cleanName(dto.name);
 			if (date) row.date = date;
+			if (dto.recurring !== undefined) {
+				row.recurring = Boolean(dto.recurring);
+				if (row.recurring) row.recurrenceType = RecurrenceType.MONTHLY;
+			}
 			if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
 			if (dto.amount !== undefined || currency) {
 				const nextCurrency = currency ?? normalizeTrackerCurrency(row.currency);
@@ -501,6 +578,7 @@ export class WalletTrackerService {
 				const row = await this.lockPending(m, userId, id);
 				const currency = normalizeTrackerCurrency(row.currency);
 				const settled = await this.settleToEgp(currency, row.amount);
+				const recurring = row.recurring === true;
 				await m.save(
 					m.create(IncomeEntry, {
 						userId,
@@ -512,6 +590,8 @@ export class WalletTrackerService {
 						fxRate: settled.fxRate,
 						date: todayYmd(),
 						notes: row.notes ?? null,
+						recurring,
+						recurrenceType: recurring ? RecurrenceType.MONTHLY : null,
 						isActive: true,
 					}),
 				);
@@ -529,6 +609,7 @@ export class WalletTrackerService {
 					amount: pendingAmount,
 					currency,
 					expectedDate: row.date,
+					recurring: row.recurring === true,
 					notes: row.notes ?? null,
 				}),
 			);
@@ -568,6 +649,7 @@ export class WalletTrackerService {
 			fxRate,
 			date: String(row.expectedDate).slice(0, 10),
 			notes: row.notes ?? null,
+			recurring: row.recurring === true,
 		};
 	}
 
@@ -587,6 +669,7 @@ export class WalletTrackerService {
 			fxRate: Number.isFinite(fxRate as number) ? fxRate : null,
 			date: String(row.date).slice(0, 10),
 			notes: row.notes ?? null,
+			recurring: row.recurring === true,
 		};
 	}
 

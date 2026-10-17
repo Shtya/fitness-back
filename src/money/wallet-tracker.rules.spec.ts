@@ -1,5 +1,8 @@
 import {
 	centsToDecimal,
+	expenseCountsInNextMonthOut,
+	expenseIsDue,
+	forecastRecurring,
 	monthRange,
 	nextBalanceCents,
 	normalizeTrackerCurrency,
@@ -9,7 +12,13 @@ import {
 	usdToEgpCents,
 } from './wallet-tracker.rules';
 
-const item = (kind: TrackerItem['kind'], amount: number, date: string, egpAmount = amount): TrackerItem => ({
+const item = (
+	kind: TrackerItem['kind'],
+	amount: number,
+	date: string,
+	egpAmount = amount,
+	recurring = false,
+): TrackerItem => ({
 	id: `${kind}-${date}-${amount}`,
 	kind,
 	name: 'x',
@@ -19,6 +28,7 @@ const item = (kind: TrackerItem['kind'], amount: number, date: string, egpAmount
 	fxRate: amount === egpAmount ? null : egpAmount / amount,
 	date,
 	notes: null,
+	recurring,
 });
 
 describe('wallet tracker rules', () => {
@@ -75,5 +85,47 @@ describe('wallet tracker rules', () => {
 		expect(centsToDecimal(usdToEgpCents(10.5, 53.1))).toBe('557.55');
 		expect(normalizeTrackerCurrency('usd')).toBe('USD');
 		expect(normalizeTrackerCurrency('EGP')).toBe('EGP');
+	});
+
+	it('forecasts next month from recurring money and scheduled/recurring spends', () => {
+		const forecast = forecastRecurring(
+			toCents(10_000),
+			[
+				item('received', 5000, '2026-10-01', 5000, true),
+				item('pending', 200, '2026-10-20', 200, false),
+				item('pending', 10, '2026-10-18', 530, true),
+			],
+			[
+				{ amount: 1500, date: '2026-10-01', recurring: true, affectsBalance: true },
+				{ amount: 800, date: '2026-10-01', recurring: true, affectsBalance: false },
+				{ amount: 90, date: '2026-10-05', recurring: false, affectsBalance: true },
+				{ amount: 2000, date: '2026-11-05', recurring: false, affectsBalance: true },
+				{ amount: 400, date: '2026-12-01', recurring: true, affectsBalance: true },
+			],
+			'2026-10-15',
+		);
+		expect(forecast).toEqual({
+			nextMonthIn: 5530,
+			nextMonthOut: 3500,
+			projectedBalance: 12_030,
+			nextMonth: '2026-11',
+		});
+	});
+
+	it('treats future spend dates as not due yet', () => {
+		expect(expenseIsDue('2026-10-15', '2026-10-15')).toBe(true);
+		expect(expenseIsDue('2026-11-01', '2026-10-15')).toBe(false);
+		expect(
+			expenseCountsInNextMonthOut(
+				{ amount: 100, date: '2026-11-10', recurring: true, affectsBalance: true },
+				'2026-10-15',
+			),
+		).toBe(true);
+		expect(
+			expenseCountsInNextMonthOut(
+				{ amount: 100, date: '2026-12-10', recurring: true, affectsBalance: true },
+				'2026-10-15',
+			),
+		).toBe(false);
 	});
 });
