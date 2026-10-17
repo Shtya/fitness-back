@@ -340,8 +340,23 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 	});
 
 	it('does not spam connection notifications on a reconnect flap', async () => {
-		const { service, accessRepo, notifications } = createService();
+		const { service, accountRepo, accessRepo, notifications } = createService();
 		accessRepo.find.mockResolvedValue([{ userId: 'manager-1', canManage: true }]);
+		// First event: never linked yet → still notify on CONNECTED.
+		accountRepo.findOne
+			.mockResolvedValueOnce({
+				id: 'account-1',
+				status: WhatsAppAccountStatus.QR_PENDING,
+				lastConnectedAt: null,
+				phoneNumber: null,
+			})
+			// After connect, treat as linked for disconnect / error notifies.
+			.mockResolvedValue({
+				id: 'account-1',
+				status: WhatsAppAccountStatus.CONNECTED,
+				lastConnectedAt: new Date(),
+				phoneNumber: '201000000000',
+			});
 
 		await (service as any).handleEvent('account-1', {
 			type: 'connection',
@@ -364,6 +379,33 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			error: 'boom',
 		});
 		expect(notifications.create).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not notify disconnected/error for accounts that were never linked', async () => {
+		const { service, accountRepo, accessRepo, notifications } = createService();
+		accessRepo.find.mockResolvedValue([{ userId: 'manager-1', canManage: true }]);
+		accountRepo.findOne.mockResolvedValue({
+			id: 'account-1',
+			status: WhatsAppAccountStatus.QR_PENDING,
+			lastConnectedAt: null,
+			phoneNumber: null,
+		});
+
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.DISCONNECTED,
+		});
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.DISCONNECTED,
+		});
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.ERROR,
+			error: 'scan timeout',
+		});
+
+		expect(notifications.create).not.toHaveBeenCalled();
 	});
 
 	describe('WHATSAPP_SESSIONS_ENABLED=false', () => {

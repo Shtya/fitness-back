@@ -651,6 +651,17 @@ export class WhatsAppProviderManagerService
 			) {
 				return;
 			}
+			// Snapshot before write: QR / reconnect flaps must not spam inboxes for
+			// accounts that were never successfully linked.
+			const before = await this.accountRepo.findOne({
+				where: { id: accountId },
+				select: ['id', 'status', 'lastConnectedAt', 'phoneNumber'] as any,
+			});
+			const wasEverLinked = Boolean(
+				before?.lastConnectedAt ||
+					before?.phoneNumber ||
+					before?.status === WhatsAppAccountStatus.CONNECTED,
+			);
 			await this.accountRepo.update(accountId, {
 				status,
 				phoneNumber: event.phoneNumber || undefined,
@@ -679,13 +690,12 @@ export class WhatsAppProviderManagerService
 			await this.log(accountId, 'connection_state_changed', event.error || null, {
 				status,
 			});
-			if (
-				[
-					WhatsAppAccountStatus.CONNECTED,
-					WhatsAppAccountStatus.DISCONNECTED,
-					WhatsAppAccountStatus.ERROR,
-				].includes(status)
-			) {
+			const noteworthy =
+				status === WhatsAppAccountStatus.CONNECTED ||
+				(wasEverLinked &&
+					(status === WhatsAppAccountStatus.DISCONNECTED ||
+						status === WhatsAppAccountStatus.ERROR));
+			if (noteworthy) {
 				const now = Date.now();
 				const lastAt = this.lastConnectionNotifyAt.get(accountId) || 0;
 				const isError = status === WhatsAppAccountStatus.ERROR;
@@ -714,6 +724,13 @@ export class WhatsAppProviderManagerService
 						),
 					);
 				}
+			} else if (
+				status === WhatsAppAccountStatus.DISCONNECTED ||
+				status === WhatsAppAccountStatus.ERROR
+			) {
+				this.logger.debug(
+					`Skipped WhatsApp ${status} notification for ${accountId} — account was never linked`,
+				);
 			}
 		}
 		if (event.type === 'qr') {
