@@ -339,6 +339,33 @@ export class WhatsAppAiAgentRun {
 	@Column({ name: 'latency_ms', type: 'integer', nullable: true })
 	latencyMs: number | null;
 
+	@Column({ name: 'prompt_tokens', type: 'integer', nullable: true })
+	promptTokens: number | null;
+
+	@Column({ name: 'completion_tokens', type: 'integer', nullable: true })
+	completionTokens: number | null;
+
+	@Column({ name: 'total_tokens', type: 'integer', nullable: true })
+	totalTokens: number | null;
+
+	/** Estimated or provider-reported USD cost for this run. */
+	@Column({
+		name: 'estimated_cost_usd',
+		type: 'numeric',
+		precision: 12,
+		scale: 6,
+		nullable: true,
+		transformer: {
+			to: (value?: number | null) => value,
+			from: (value?: string | number | null) =>
+				value == null || value === '' ? null : Number(value),
+		},
+	})
+	estimatedCostUsd: number | null;
+
+	@Column({ name: 'cost_source', type: 'varchar', length: 20, nullable: true })
+	costSource: string | null;
+
 	@Column({ type: 'text', nullable: true })
 	error: string | null;
 }

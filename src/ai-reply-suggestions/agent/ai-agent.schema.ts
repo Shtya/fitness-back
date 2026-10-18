@@ -127,4 +127,15 @@ export const AI_AGENT_SCHEMA_STATEMENTS = [
 		ON whatsapp_ai_external_models(account_id)`,
 	`ALTER TABLE whatsapp_ai_agent_settings
 		ADD COLUMN IF NOT EXISTS external_model_id uuid REFERENCES whatsapp_ai_external_models(id) ON DELETE SET NULL`,
+	// 20261018_whatsapp_ai_agent_run_cost.sql
+	`ALTER TABLE whatsapp_ai_agent_runs
+		ADD COLUMN IF NOT EXISTS prompt_tokens integer`,
+	`ALTER TABLE whatsapp_ai_agent_runs
+		ADD COLUMN IF NOT EXISTS completion_tokens integer`,
+	`ALTER TABLE whatsapp_ai_agent_runs
+		ADD COLUMN IF NOT EXISTS total_tokens integer`,
+	`ALTER TABLE whatsapp_ai_agent_runs
+		ADD COLUMN IF NOT EXISTS estimated_cost_usd numeric(12,6)`,
+	`ALTER TABLE whatsapp_ai_agent_runs
+		ADD COLUMN IF NOT EXISTS cost_source varchar(20)`,
 ];

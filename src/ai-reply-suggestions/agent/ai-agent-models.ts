@@ -124,13 +124,94 @@ export function normalizeExternalBaseUrl(raw: string) {
 	return parsed.toString().replace(/\/+$/, '');
 }
 
+export type AiTokenUsage = {
+	promptTokens: number;
+	completionTokens: number;
+	totalTokens: number;
+	/** USD estimate (provider cost when available, otherwise local rate card). */
+	estimatedCostUsd: number;
+	costSource: 'provider' | 'estimate' | 'free';
+};
+
+/** USD per 1M tokens — used when the provider does not return a billed cost. */
+const RATE_CARD: Array<{ match: RegExp; input: number; output: number }> = [
+	{ match: /gpt-4o-mini/i, input: 0.15, output: 0.6 },
+	{ match: /gpt-4o/i, input: 2.5, output: 10 },
+	{ match: /gpt-4\.1-mini/i, input: 0.4, output: 1.6 },
+	{ match: /gpt-4\.1/i, input: 2, output: 8 },
+	{ match: /o3-mini/i, input: 1.1, output: 4.4 },
+	{ match: /o1-mini/i, input: 1.1, output: 4.4 },
+	{ match: /claude-3-5-haiku|claude-haiku/i, input: 0.8, output: 4 },
+	{ match: /claude-3-5-sonnet|claude-sonnet/i, input: 3, output: 15 },
+	{ match: /llama-3\.3|llama3\.3/i, input: 0.59, output: 0.79 },
+	{ match: /llama/i, input: 0.2, output: 0.2 },
+	{ match: /mixtral|mistral/i, input: 0.24, output: 0.24 },
+	{ match: /qwen/i, input: 0.2, output: 0.2 },
+	{ match: /gemini.*flash/i, input: 0.1, output: 0.4 },
+	{ match: /gemini/i, input: 0.5, output: 1.5 },
+];
+
+const DEFAULT_RATE = { input: 0.15, output: 0.6 };
+
+export function estimateTokenCostUsd(
+	model: string | null | undefined,
+	promptTokens: number,
+	completionTokens: number,
+): number {
+	const rates = RATE_CARD.find(row => row.match.test(String(model || ''))) || DEFAULT_RATE;
+	const usd =
+		(Math.max(0, promptTokens) / 1_000_000) * rates.input +
+		(Math.max(0, completionTokens) / 1_000_000) * rates.output;
+	return Math.round(usd * 1_000_000) / 1_000_000;
+}
+
+export function usageFromOpenAiResponse(
+	parsed: any,
+	model: string | null,
+): AiTokenUsage {
+	const usage = parsed?.usage || {};
+	const promptTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0;
+	const completionTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0;
+	const totalTokens =
+		Number(usage.total_tokens ?? 0) || promptTokens + completionTokens;
+	const providerCost = Number(
+		usage.total_cost ?? usage.cost ?? parsed?.usage?.cost ?? NaN,
+	);
+	if (Number.isFinite(providerCost) && providerCost >= 0) {
+		return {
+			promptTokens,
+			completionTokens,
+			totalTokens,
+			estimatedCostUsd: Math.round(providerCost * 1_000_000) / 1_000_000,
+			costSource: 'provider',
+		};
+	}
+	return {
+		promptTokens,
+		completionTokens,
+		totalTokens,
+		estimatedCostUsd: estimateTokenCostUsd(model, promptTokens, completionTokens),
+		costSource: promptTokens || completionTokens ? 'estimate' : 'free',
+	};
+}
+
+export function freeUsage(): AiTokenUsage {
+	return {
+		promptTokens: 0,
+		completionTokens: 0,
+		totalTokens: 0,
+		estimatedCostUsd: 0,
+		costSource: 'free',
+	};
+}
+
 export async function generateOpenAiCompatible(options: {
 	baseUrl: string;
 	model: string;
 	apiKey: string | null;
 	prompt: string;
 	timeoutMs: number;
-}): Promise<{ text: string; actualModel: string | null }> {
+}): Promise<{ text: string; actualModel: string | null; usage: AiTokenUsage }> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 	try {
@@ -155,7 +236,12 @@ export async function generateOpenAiCompatible(options: {
 		const parsed = JSON.parse(raw);
 		const text = String(parsed?.choices?.[0]?.message?.content || '').trim();
 		if (!text) throw new Error('External model returned an empty reply');
-		return { text, actualModel: String(parsed?.model || options.model) };
+		const actualModel = String(parsed?.model || options.model);
+		return {
+			text,
+			actualModel,
+			usage: usageFromOpenAiResponse(parsed, actualModel),
+		};
 	} finally {
 		clearTimeout(timer);
 	}

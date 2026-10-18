@@ -682,6 +682,12 @@ export class AiAgentService {
 			provider: row.provider,
 			model: row.model,
 			latencyMs: row.latencyMs,
+			promptTokens: row.promptTokens,
+			completionTokens: row.completionTokens,
+			totalTokens: row.totalTokens,
+			estimatedCostUsd:
+				row.estimatedCostUsd == null ? null : Number(row.estimatedCostUsd),
+			costSource: row.costSource,
 			error: row.error,
 			createdAt: row.created_at,
 		}));
@@ -756,6 +762,12 @@ export class AiAgentService {
 			model: generated.actualModel || generated.model,
 			latencyMs: generated.latencyMs,
 			fallbacks: generated.fallbacks,
+			usage: generated.usage,
+			promptTokens: generated.usage.promptTokens,
+			completionTokens: generated.usage.completionTokens,
+			totalTokens: generated.usage.totalTokens,
+			estimatedCostUsd: generated.usage.estimatedCostUsd,
+			costSource: generated.usage.costSource,
 			providerAlerts: this.runtime.getProviderAlerts(accountId),
 		};
 	}

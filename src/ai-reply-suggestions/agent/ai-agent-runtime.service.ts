@@ -28,7 +28,9 @@ import {
 } from './ai-agent.entities';
 import {
 	decryptAgentSecret,
+	freeUsage,
 	generateOpenAiCompatible,
+	type AiTokenUsage,
 	providerFallbackChain,
 } from './ai-agent-models';
 import {
@@ -242,6 +244,7 @@ export interface AgentGenerationOutput {
 	actualModel: string | null;
 	latencyMs: number;
 	fallbacks: ProviderFailure[];
+	usage: AiTokenUsage;
 }
 
 interface PendingBurst {
@@ -568,6 +571,11 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 					reply: generated.result.reply || null,
 					provider: generated.provider,
 					model: generated.actualModel || generated.model,
+					promptTokens: generated.usage.promptTokens,
+					completionTokens: generated.usage.completionTokens,
+					totalTokens: generated.usage.totalTokens,
+					estimatedCostUsd: generated.usage.estimatedCostUsd,
+					costSource: generated.usage.costSource,
 				});
 				// A newer customer message already scheduled its own debounced run.
 				if (humanReplied) {
@@ -586,6 +594,11 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 				sources: generated.sources,
 				provider: generated.provider,
 				model: generated.actualModel || generated.model,
+				promptTokens: generated.usage.promptTokens,
+				completionTokens: generated.usage.completionTokens,
+				totalTokens: generated.usage.totalTokens,
+				estimatedCostUsd: generated.usage.estimatedCostUsd,
+				costSource: generated.usage.costSource,
 			};
 			if (generated.decision === 'skip') {
 				await finish({ outcome: 'skipped', ...base });
@@ -671,7 +684,7 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 		const startedAt = Date.now();
 		const selected = String(input.settings.provider || 'ai-free');
 		const fallbacks: ProviderFailure[] = [];
-		let raw: { text: string; actualModel: string | null } | null = null;
+		let raw: { text: string; actualModel: string | null; usage?: AiTokenUsage } | null = null;
 		let usedProvider = selected;
 
 		for (const name of providerFallbackChain(selected)) {
@@ -706,6 +719,10 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 			conversationTexts: [...input.recent, ...input.relevantHistory].map(item => item.content),
 			previousAgentReplies: input.previousAgentReplies,
 		});
+		const usage =
+			usedProvider === 'external' && raw.usage
+				? raw.usage
+				: freeUsage();
 		return {
 			result,
 			decision: guard.decision,
@@ -719,6 +736,7 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 			actualModel: raw.actualModel ?? null,
 			latencyMs: Date.now() - startedAt,
 			fallbacks,
+			usage,
 		};
 	}
 
@@ -838,6 +856,11 @@ export class AiAgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 			sources: generated.sources,
 			provider: generated.provider,
 			model: generated.actualModel || generated.model,
+			promptTokens: generated.usage.promptTokens,
+			completionTokens: generated.usage.completionTokens,
+			totalTokens: generated.usage.totalTokens,
+			estimatedCostUsd: generated.usage.estimatedCostUsd,
+			costSource: generated.usage.costSource,
 		});
 		await this.updateState(conversation, {
 			status: 'suggested',
