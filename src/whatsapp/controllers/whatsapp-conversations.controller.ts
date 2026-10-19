@@ -277,6 +277,7 @@ export class WhatsAppConversationsController {
 		@Query('live') live?: string,
 		@Query('starredOnly') starredOnly?: string,
 		@Query('importantOnly') importantOnly?: string,
+		@Query('pinnedOnly') pinnedOnly?: string,
 		@Query('q') q?: string,
 	) {
 		// Opt-in only. Omitting `live` used to default ON and hit the phone on GET.
@@ -284,9 +285,11 @@ export class WhatsAppConversationsController {
 		const onlyImportant = ['1', 'true', 'yes'].includes(
 			String(starredOnly || importantOnly || '').toLowerCase(),
 		);
+		const onlyPinned = ['1', 'true', 'yes'].includes(String(pinnedOnly || '').toLowerCase());
 		return this.sync.listMessages(req.user, conversationId, before, Math.min(Math.max(Number(limit) || 100, 1), 500), {
-			allowLivePull: allowLivePull && !onlyImportant && !String(q || '').trim(),
+			allowLivePull: allowLivePull && !onlyImportant && !onlyPinned && !String(q || '').trim(),
 			starredOnly: onlyImportant,
+			pinnedOnly: onlyPinned,
 			search: String(q || '').trim() || undefined,
 		});
 	}

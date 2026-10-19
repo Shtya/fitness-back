@@ -4855,11 +4855,18 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		conversationId: string,
 		before?: string,
 		limit = 30,
-		options: { allowLivePull?: boolean; starredOnly?: boolean; search?: string } = {},
+		options: {
+			allowLivePull?: boolean;
+			starredOnly?: boolean;
+			pinnedOnly?: boolean;
+			search?: string;
+		} = {},
 	) {
 		const starredOnly = Boolean(options.starredOnly);
+		const pinnedOnly = Boolean(options.pinnedOnly);
 		const search = String(options.search || '').trim();
-		const allowLivePull = options.allowLivePull === true && !starredOnly && !search;
+		const allowLivePull =
+			options.allowLivePull === true && !starredOnly && !pinnedOnly && !search;
 		const { conversation, accountAccess } = await this.assertConversationVisible(
 			user,
 			conversationId,
@@ -4880,6 +4887,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.where('message.conversationId = :conversationId', { conversationId });
 			if (starredOnly) {
 				query.andWhere('message.isStarred = true');
+			}
+			if (pinnedOnly) {
+				query.andWhere('message.isPinned = true');
 			}
 			if (search) {
 				query.andWhere('message.text ILIKE :search', { search: `%${search}%` });
