@@ -2491,9 +2491,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async findInboxConversation(accountId: string, chatId: string) {
 		const existing = await this.conversationRepo.findOne({
 			where: { accountId, providerChatId: chatId },
+			withDeleted: true,
 		});
-		if (existing) return existing;
-		return this.findDirectConversationAlias(accountId, chatId, null);
+		if (existing) {
+			await this.restoreConversationIfDeleted(existing);
+			return existing;
+		}
+		const aliased = await this.findDirectConversationAlias(accountId, chatId, null);
+		if (aliased) await this.restoreConversationIfDeleted(aliased);
+		return aliased;
 	}
 
 	/**
@@ -2521,6 +2527,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				type: WhatsAppConversationType.DIRECT,
 			},
 			relations: [...this.conversationRelations()],
+			withDeleted: true,
 		});
 		if (byProviderId && byProviderId.providerChatId !== chatId) {
 			return byProviderId;
@@ -2546,6 +2553,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					type: WhatsAppConversationType.DIRECT,
 				},
 				relations: [...this.conversationRelations()],
+				withDeleted: true,
 			});
 			if (conversation) return conversation;
 		}
@@ -2573,6 +2581,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						type: WhatsAppConversationType.DIRECT,
 					},
 					relations: [...this.conversationRelations()],
+					withDeleted: true,
 				});
 				if (conversation) return conversation;
 			}
@@ -2762,8 +2771,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const existing = await this.conversationRepo.findOne({
 			where: { accountId, providerChatId: chatId },
 			relations: [...this.conversationRelations()],
+			withDeleted: true,
 		});
 		if (existing) {
+			await this.restoreConversationIfDeleted(existing);
 			const patched = await this.applyConversationIdentityPatch(existing, chatId, options);
 			await this.rebindConversationPreferences(patched);
 			return this.rememberConversation(accountId, chatId, patched);
@@ -2776,6 +2787,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			options.phone,
 		);
 		if (aliased) {
+			await this.restoreConversationIfDeleted(aliased);
 			const phone =
 				options.phone ||
 				(await this.resolveChatPhoneDigits(accountId, chatId, options.phone));
@@ -4067,6 +4079,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		this.joinConversationPreferences(query, user.id);
 		query
 			.where('conversation.accountId = :accountId', { accountId })
+			.andWhere('conversation.deleted_at IS NULL')
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
 			})
@@ -4309,6 +4322,56 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			...(isArchived ? { isPinned: false } : {}),
 		});
 		return { ok: true, conversationId, isArchived: Boolean(isArchived) };
+	}
+
+	/**
+	 * Soft-delete a chat from the CRM inbox. The row stays so a later inbound
+	 * message (or open-by-chatId) can restore it without breaking the unique
+	 * (account_id, provider_chat_id) constraint.
+	 */
+	async deleteConversation(user: User, conversationId: string) {
+		const { conversation, accountAccess } = await this.assertConversationVisible(
+			user,
+			conversationId,
+		);
+		if (!accountAccess.canUse && !accountAccess.canManage) {
+			throw new ForbiddenException('WhatsApp delete access denied');
+		}
+		const chatId = String(conversation.providerChatId || '').toLowerCase();
+		if (chatId === 'email-memo-ai@so7ba.internal') {
+			throw new BadRequestException('This system chat cannot be deleted');
+		}
+		this.forgetConversation(conversation.accountId, conversation.providerChatId);
+		await this.conversationRepo.softDelete(conversation.id);
+		try {
+			const provider = this.providers.getProvider(conversation.accountId);
+			if (typeof (provider as any)?.deleteChat === 'function') {
+				await (provider as any).deleteChat(conversation.providerChatId);
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Provider deleteChat failed for ${conversationId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+		const payload = { conversationId, deleted: true };
+		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_deleted', payload);
+		this.gateway.emitConversationEvent(
+			conversationId,
+			'conversation_deleted',
+			payload,
+			conversation.accountId,
+			this.conversationEventScope(conversation),
+		);
+		return { ok: true, conversationId };
+	}
+
+	private async restoreConversationIfDeleted(conversation: WhatsAppConversation) {
+		if (!conversation?.id || !conversation.deleted_at) return conversation;
+		await this.conversationRepo.restore(conversation.id);
+		conversation.deleted_at = null;
+		return conversation;
 	}
 
 	/**

@@ -209,6 +209,14 @@ export class WhatsAppConversationsController {
 		);
 	}
 
+	@Delete('conversations/:conversationId')
+	deleteConversation(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+	) {
+		return this.sync.deleteConversation(req.user, conversationId);
+	}
+
 	@Put('conversations/:conversationId/mute')
 	setMuted(
 		@Req() req: any,
