@@ -419,6 +419,67 @@ export async function downloadLinkedDeviceMedia(
 	throw new Error(lastError || 'Baileys returned empty media');
 }
 
+/** Unix seconds, unix ms, Date, or protobuf Long — story receipts use any of these. */
+export function protoUnixDate(value: unknown): Date | null {
+	if (value == null || value === '') return null;
+	if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+	let n: number;
+	if (typeof value === 'object' && value !== null && typeof (value as any).toNumber === 'function') {
+		n = Number((value as any).toNumber());
+	} else {
+		n = Number(value);
+	}
+	if (!Number.isFinite(n) || n <= 0) return null;
+	const ms = n > 1e12 ? n : n * 1000;
+	const date = new Date(ms);
+	return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function bareReceiptJid(value: string) {
+	return jidOf(String(value || '').replace(/:\d+@/, '@'));
+}
+
+function isOwnReceiptJid(participantJid: string, ownJids: string[]) {
+	const own = new Set(ownJids.map(bareReceiptJid));
+	return own.has(bareReceiptJid(participantJid));
+}
+
+/**
+ * Viewers already attached to a status message (history / reconnect / loadMessage).
+ * Delivery-only receipts are not views — WhatsApp only lists read or played.
+ */
+export function statusReceiptsFromUserReceipts(
+	raw: any,
+	ownJids: string[] = [],
+): NormalizedWhatsAppParticipantReceipt[] {
+	const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
+	if (!isStatusBroadcastJid(remoteJid) || raw?.key?.fromMe === false) return [];
+	const list = Array.isArray(raw?.userReceipt) ? raw.userReceipt : [];
+	const receipts: NormalizedWhatsAppParticipantReceipt[] = [];
+	for (const item of list) {
+		const participantJid = String(item?.userJid || '').trim();
+		if (!participantJid || isOwnReceiptJid(participantJid, ownJids)) continue;
+		const readAt =
+			protoUnixDate(item?.readTimestamp) || protoUnixDate(item?.playedTimestamp);
+		if (!readAt) continue;
+		receipts.push({ participantJid, readAt });
+	}
+	return receipts;
+}
+
+function mergeStatusUserReceipt(raw: any, receipt: any) {
+	if (!raw || !receipt?.userJid) return;
+	if (!Array.isArray(raw.userReceipt)) raw.userReceipt = [];
+	const existing = raw.userReceipt.find(
+		(item: any) => String(item?.userJid || '') === String(receipt.userJid),
+	);
+	if (existing) {
+		Object.assign(existing, receipt);
+		return;
+	}
+	raw.userReceipt.push(receipt);
+}
+
 /**
  * Splits Baileys per-member receipts into chat receipts (group ticks) and story views.
  *
@@ -430,12 +491,6 @@ export function routeBaileysReceiptUpdates(
 	ownJids: string[] = [],
 ): WhatsAppProviderEvent[] {
 	if (!Array.isArray(updates)) return [];
-	const toDate = (value: unknown) => {
-		const seconds = Number(value);
-		return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
-	};
-	const bareJid = (value: string) => jidOf(String(value || '').replace(/:\d+@/, '@'));
-	const own = new Set(ownJids.map(bareJid));
 	const grouped = new Map<
 		string,
 		{ chatId: string; receipts: NormalizedWhatsAppParticipantReceipt[] }
@@ -449,9 +504,10 @@ export function routeBaileysReceiptUpdates(
 		if (isStatusBroadcastJid(chatId)) {
 			// Video stories can report only a played receipt; the phone still lists that viewer.
 			const readAt =
-				toDate(item?.receipt?.readTimestamp) || toDate(item?.receipt?.playedTimestamp);
+				protoUnixDate(item?.receipt?.readTimestamp) ||
+				protoUnixDate(item?.receipt?.playedTimestamp);
 			if (item?.key?.fromMe === false || !readAt) continue;
-			if (own.has(bareJid(participantJid))) continue;
+			if (isOwnReceiptJid(participantJid, ownJids)) continue;
 			const views = storyViews.get(providerMessageId) || [];
 			views.push({ participantJid, readAt });
 			storyViews.set(providerMessageId, views);
@@ -459,9 +515,9 @@ export function routeBaileysReceiptUpdates(
 		}
 		const receipt = {
 			participantJid,
-			deliveredAt: toDate(item?.receipt?.receiptTimestamp),
-			readAt: toDate(item?.receipt?.readTimestamp),
-			playedAt: toDate(item?.receipt?.playedTimestamp),
+			deliveredAt: protoUnixDate(item?.receipt?.receiptTimestamp),
+			readAt: protoUnixDate(item?.receipt?.readTimestamp),
+			playedAt: protoUnixDate(item?.receipt?.playedTimestamp),
 		};
 		if (!receipt.deliveredAt && !receipt.readAt && !receipt.playedAt) continue;
 		const entry = grouped.get(providerMessageId) || { chatId, receipts: [] };
@@ -1501,9 +1557,35 @@ export class BaileysProvider implements WhatsAppProvider {
 				notify: String(raw.pushName).trim(),
 			});
 		}
+		this.emitOwnStatusReceipts(raw);
 		this.pruneExpiredStatuses();
 		this.emitStatusChanged();
 		return true;
+	}
+
+	private emitOwnStatusReceipts(raw: any) {
+		const statusMessageId = String(raw?.key?.id || '').trim();
+		if (!statusMessageId || raw?.key?.fromMe === false) return;
+		const receipts = statusReceiptsFromUserReceipts(raw, this.getOwnJids());
+		if (!receipts.length) return;
+		this.emit({ type: 'status_receipts', statusMessageId, receipts });
+	}
+
+	private applyStatusReceiptUpdate(item: any, emitSnapshot = false) {
+		const chatId = jidOf(item?.key?.remoteJid) || String(item?.key?.remoteJid || '');
+		if (!isStatusBroadcastJid(chatId)) return;
+		const id = String(item?.key?.id || '').trim();
+		if (!id) return;
+		const raw = this.resolveStatusRaw(id, null) || this.statusRawById.get(id);
+		if (!raw) return;
+		if (item?.receipt) mergeStatusUserReceipt(raw, item.receipt);
+		for (const receipt of Array.isArray(item?.update?.userReceipt) ? item.update.userReceipt : []) {
+			mergeStatusUserReceipt(raw, receipt);
+		}
+		if (Array.isArray(item?.userReceipt)) {
+			for (const receipt of item.userReceipt) mergeStatusUserReceipt(raw, receipt);
+		}
+		if (emitSnapshot) this.emitOwnStatusReceipts(raw);
 	}
 
 	private resolveStatusRaw(statusId: string, senderWaId?: string | null) {
@@ -2180,6 +2262,9 @@ export class BaileysProvider implements WhatsAppProvider {
 					this.emit({ type: 'message_deleted', providerMessageId, mode: 'everyone' });
 					continue;
 				}
+				if (Array.isArray(item?.update?.userReceipt) && item.update.userReceipt.length) {
+					this.applyStatusReceiptUpdate(item, true);
+				}
 				const status = mapBaileysMessageStatus(item?.update?.status);
 				if (providerMessageId && status) {
 					const remembered = this.findRememberedMessage(providerMessageId);
@@ -2210,6 +2295,9 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		// Group (and status) receipts arrive per member here, never on messages.update.
 		socket.ev.on('message-receipt.update', (updates: any[]) => {
+			if (Array.isArray(updates)) {
+				for (const item of updates) this.applyStatusReceiptUpdate(item);
+			}
 			for (const event of routeBaileysReceiptUpdates(updates, this.getOwnJids())) {
 				this.emit(event);
 			}
@@ -3711,6 +3799,19 @@ export class BaileysProvider implements WhatsAppProvider {
 			`Baileys status cache for ${this.accountId}: ${items.length} active item(s)`,
 		);
 		return items;
+	}
+
+	/**
+	 * Viewers WhatsApp already attached to our own status (history + live receipts
+	 * merged into the session cache). Used when the CRM list is missing people who
+	 * opened the story before this linked session started recording receipts.
+	 */
+	async getOwnStatusReceipts(providerStatusId: string, senderWaId?: string | null) {
+		const raw =
+			this.resolveStatusRaw(providerStatusId, senderWaId) ||
+			(await this.hydrateStatusRaw(providerStatusId, senderWaId, false));
+		if (!raw || raw.key?.fromMe === false) return [];
+		return statusReceiptsFromUserReceipts(raw, this.getOwnJids());
 	}
 
 	/**

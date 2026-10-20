@@ -238,6 +238,14 @@ export class PublishWhatsAppStatusDto {
 	caption?: string;
 }
 
+export class RepostWhatsAppStatusDto {
+	/** Caption for image/video, or the full copy for a text story. */
+	@IsOptional()
+	@IsString()
+	@MaxLength(700)
+	text?: string;
+}
+
 export class SaveWhatsAppVoiceChangerSettingsDto {
 	@IsOptional()
 	@IsBoolean()

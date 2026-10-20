@@ -16,6 +16,7 @@ import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
 	PublishWhatsAppStatusDto,
 	ReactWhatsAppStatusDto,
+	RepostWhatsAppStatusDto,
 	ReplyWhatsAppStatusDto,
 	ViewWhatsAppStatusDto,
 } from '../dto/whatsapp.dto';
@@ -98,6 +99,16 @@ export class WhatsAppStatusController {
 		@Param('statusId') statusId: string,
 	) {
 		return this.statuses.listStatusViewers(req.user, accountId, statusId);
+	}
+
+	@Post(':statusId/repost')
+	repost(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+		@Body() body: RepostWhatsAppStatusDto,
+	) {
+		return this.statuses.repost(req.user, accountId, statusId, body);
 	}
 
 	@Post(':statusId/reply')

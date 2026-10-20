@@ -1,4 +1,8 @@
-import { BaileysProvider, routeBaileysReceiptUpdates } from './baileys.provider';
+import {
+	BaileysProvider,
+	routeBaileysReceiptUpdates,
+	statusReceiptsFromUserReceipts,
+} from './baileys.provider';
 
 const OWN = '201000000000:7@s.whatsapp.net';
 
@@ -68,6 +72,36 @@ describe('routeBaileysReceiptUpdates', () => {
 	it('tolerates malformed input', () => {
 		expect(routeBaileysReceiptUpdates(null as any)).toEqual([]);
 		expect(routeBaileysReceiptUpdates([{}, { key: {} }, null])).toEqual([]);
+	});
+});
+
+describe('statusReceiptsFromUserReceipts', () => {
+	it('reads every viewer already attached to our own story, including played-only video views', () => {
+		const receipts = statusReceiptsFromUserReceipts(
+			{
+				key: { remoteJid: 'status@broadcast', id: 'STORY1', fromMe: true },
+				userReceipt: [
+					{ userJid: '201111111111@s.whatsapp.net', readTimestamp: 1_700_000_000 },
+					{ userJid: '201222222222@s.whatsapp.net', playedTimestamp: 1_700_000_100 },
+					{ userJid: '201333333333@s.whatsapp.net', receiptTimestamp: 1_700_000_200 },
+					{ userJid: '201000000000:3@s.whatsapp.net', readTimestamp: 1_700_000_300 },
+				],
+			},
+			[OWN],
+		);
+		expect(receipts).toEqual([
+			{ participantJid: '201111111111@s.whatsapp.net', readAt: new Date(1_700_000_000_000) },
+			{ participantJid: '201222222222@s.whatsapp.net', readAt: new Date(1_700_000_100_000) },
+		]);
+	});
+
+	it('ignores someone else’s story', () => {
+		expect(
+			statusReceiptsFromUserReceipts({
+				key: { remoteJid: 'status@broadcast', id: 'THEIRS', fromMe: false },
+				userReceipt: [{ userJid: '201111111111@s.whatsapp.net', readTimestamp: 1_700_000_000 }],
+			}),
+		).toEqual([]);
 	});
 });
 

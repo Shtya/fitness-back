@@ -837,6 +837,41 @@ export class WhatsAppStatusService {
 		const listed = await this.list(user, accountId, false);
 		return { ok: true, providerStatusId: publishedId || null, providerResult: result, ...listed };
 	}
+
+	/**
+	 * Publish someone else's (or your own) story onto this account's status, with
+	 * optional new copy. Image/video keep the original media; only the caption
+	 * changes. Text baked into a photo cannot be rewritten.
+	 */
+	async repost(
+		user: User,
+		accountId: string,
+		statusIdValue: string,
+		input: { text?: string } = {},
+	) {
+		const found = await this.findStatusRow(accountId, statusIdValue);
+		if (!found) throw new NotFoundException('WhatsApp status not found');
+		const row = found.row;
+		const type = normalizeStatusType(row.type);
+		const edited = String(input?.text ?? '').trim();
+		if (type === 'text') {
+			const content = edited || String(row.caption || '').trim();
+			if (!content) {
+				throw new BadRequestException('Write some text before posting this story');
+			}
+			return this.publish(user, accountId, { type: 'text', content });
+		}
+		const publishType = String(row.type || '').toLowerCase().includes('video')
+			? 'video'
+			: 'image';
+		const media = await this.resolveStatusMedia(row, found.source, accountId);
+		return this.publish(user, accountId, {
+			type: publishType,
+			content: media.absolutePath,
+			caption: edited || undefined,
+		});
+	}
+
 	async view(user: User, accountId: string, statusProviderId: string, senderWaId?: string) {
 		const permission = await this.access.getAccountAccess(user, accountId);
 		if (!permission.canView) throw new ForbiddenException('WhatsApp account access denied');
@@ -1154,6 +1189,30 @@ export class WhatsAppStatusService {
 		}
 	}
 
+	/**
+	 * Linked-device receipts only arrive while this session is online. WhatsApp still
+	 * attaches the full viewer list on the status message (`userReceipt`) — copy those
+	 * into our table before listing so the CRM matches the phone.
+	 */
+	private async backfillStatusViewersFromSession(accountId: string, row: StatusRow) {
+		const provider = this.providers.getProvider(accountId) as WhatsAppProvider | null;
+		if (typeof provider?.getOwnStatusReceipts !== 'function') return;
+		try {
+			const receipts = await provider.getOwnStatusReceipts(
+				row.providerStatusId,
+				row.senderWaId,
+			);
+			if (!receipts?.length) return;
+			await this.recordStatusViewers(accountId, row.providerStatusId, receipts);
+		} catch (error) {
+			this.logger.warn(
+				`Story viewer backfill failed for ${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
 	/** Who opened one of our own stories, with any reaction they sent. Owner-only. */
 	async listStatusViewers(user: User, accountId: string, statusIdValue: string) {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
@@ -1163,6 +1222,7 @@ export class WhatsAppStatusService {
 			throw new ForbiddenException('Only the story owner can see who viewed it');
 		}
 		const statusMessageId = statusMessageKey(found.row.providerStatusId);
+		await this.backfillStatusViewersFromSession(accountId, found.row);
 		const [viewerRows, reactionRows] = await Promise.all([
 			this.repo.manager.query(
 				`SELECT viewer_key, viewed_at FROM whatsapp_status_viewers

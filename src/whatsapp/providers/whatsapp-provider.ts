@@ -323,6 +323,11 @@ export interface WhatsAppProvider {
 		options?: { allowPhoneRequest?: boolean },
 	): Promise<any>;
 	getStatuses(): Promise<any[]>;
+	/** Viewers already on our own status in the live session (optional). */
+	getOwnStatusReceipts?(
+		providerStatusId: string,
+		senderWaId?: string | null,
+	): Promise<NormalizedWhatsAppParticipantReceipt[]>;
 	publishStatus(
 		content: string,
 		/**

@@ -94,7 +94,7 @@ function createService(options: {
 		{} as any,
 		gateway as any,
 	);
-	return { service, query, queries, access, gateway, contactRepo };
+	return { service, query, queries, access, gateway, contactRepo, provider };
 }
 
 const user = { id: 'user-1' } as any;
@@ -167,6 +167,52 @@ describe('WhatsAppStatusService story viewers', () => {
 		});
 		const result = await service.listStatusViewers(user, ACCOUNT, OWN_ID);
 		expect(result.viewerCount).toBe(1);
+	});
+
+	it('reposts a text story with edited copy', async () => {
+		const { service } = createService({
+			active: [statusRow({ type: 'text', caption: 'Original line' })],
+		});
+		service.publish = jest.fn(async () => ({ ok: true, items: [] }));
+		await service.repost(user, ACCOUNT, OWN_ID, { text: 'My version' });
+		expect(service.publish).toHaveBeenCalledWith(user, ACCOUNT, {
+			type: 'text',
+			content: 'My version',
+		});
+	});
+
+	it('keeps the original text when a text repost has no new copy', async () => {
+		const { service } = createService({
+			active: [statusRow({ type: 'text', caption: 'Keep me' })],
+		});
+		service.publish = jest.fn(async () => ({ ok: true, items: [] }));
+		await service.repost(user, ACCOUNT, OWN_ID, {});
+		expect(service.publish).toHaveBeenCalledWith(user, ACCOUNT, {
+			type: 'text',
+			content: 'Keep me',
+		});
+	});
+
+	it('persists viewers already on the live status message before listing', async () => {
+		const { service, queries, provider } = createService({
+			viewers: [{ viewer_key: '201111111111@s.whatsapp.net', viewed_at: '2026-10-13T10:00:00Z' }],
+		});
+		(provider as any).getOwnStatusReceipts = jest.fn(async () => [
+			{ participantJid: '201555555555@s.whatsapp.net', readAt: new Date('2026-04-20T20:07:00Z') },
+			{ participantJid: '201666666666@s.whatsapp.net', readAt: new Date('2026-04-20T20:08:00Z') },
+		]);
+		await service.listStatusViewers(user, ACCOUNT, OWN_ID);
+		const insert = queries.find(item => /INSERT INTO whatsapp_status_viewers/.test(item.sql));
+		expect(insert?.params).toEqual([
+			ACCOUNT,
+			'STORYOWN',
+			'201555555555@s.whatsapp.net',
+			new Date('2026-04-20T20:07:00Z'),
+			ACCOUNT,
+			'STORYOWN',
+			'201666666666@s.whatsapp.net',
+			new Date('2026-04-20T20:08:00Z'),
+		]);
 	});
 });
 

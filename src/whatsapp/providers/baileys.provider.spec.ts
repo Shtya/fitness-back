@@ -379,6 +379,40 @@ describe('BaileysProvider stories', () => {
 		expect(statuses[0].contactName).toBe('Ahmed');
 	});
 
+	it('emits every viewer already on our own story instead of waiting for live receipts', async () => {
+		const provider = new BaileysProvider('account-own-story-views');
+		const events: any[] = [];
+		provider.onEvent(event => {
+			events.push(event);
+		});
+		(provider as any).rememberStatus({
+			key: {
+				remoteJid: 'status@broadcast',
+				id: '3EB0OWNSTORY',
+				fromMe: true,
+			},
+			messageTimestamp: Math.floor(Date.now() / 1000),
+			message: { imageMessage: { mimetype: 'image/jpeg' } },
+			userReceipt: [
+				{ userJid: '201111111111@s.whatsapp.net', readTimestamp: 1_700_000_000 },
+				{ userJid: '201222222222@s.whatsapp.net', playedTimestamp: 1_700_000_050 },
+			],
+		});
+		expect(events.filter(event => event.type === 'status_receipts')).toEqual([
+			{
+				type: 'status_receipts',
+				statusMessageId: '3EB0OWNSTORY',
+				receipts: [
+					{ participantJid: '201111111111@s.whatsapp.net', readAt: new Date(1_700_000_000_000) },
+					{ participantJid: '201222222222@s.whatsapp.net', readAt: new Date(1_700_000_050_000) },
+				],
+			},
+		]);
+		await expect(
+			provider.getOwnStatusReceipts('true_status@broadcast_3EB0OWNSTORY'),
+		).resolves.toHaveLength(2);
+	});
+
 	it('keeps address-book name above message pushName', () => {
 		const provider = new BaileysProvider('account-contact-priority');
 		const chatId = '201551495772@c.us';
