@@ -36,6 +36,7 @@ import {
 	describeStoredPhone,
 	normalizeContactPhone,
 } from '../utils/whatsapp-contact-phone';
+import { resolveWhatsAppContactLabel } from '../utils/whatsapp-contact-name';
 import { assertNumberLookupRateLimit } from '../utils/whatsapp-send-rate-limit';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -175,15 +176,29 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 
 	// ── Serialization ───────────────────────────────────────────────────────
 
-	private serialize(contact: WhatsAppContact, extras: { conversationId?: string | null } = {}) {
+	private serialize(
+		contact: WhatsAppContact,
+		extras: { conversationId?: string | null; pushName?: string | null } = {},
+	) {
 		const phone = describeStoredPhone(contact.phoneNumber) ||
 			(isPhoneChatId(contact.waId) ? describeStoredPhone(contact.waId.split('@')[0]) : null);
+		const displayName = resolveWhatsAppContactLabel({
+			savedName: contact.localName || contact.name,
+			pushName: extras.pushName,
+			chatId: contact.waId,
+			phone: contact.phoneNumber,
+		});
 		return {
 			id: contact.id,
 			phone,
-			displayName: contact.localName || contact.name || null,
+			displayName,
 			localName: contact.localName || null,
-			whatsappName: contact.name || null,
+			whatsappName: resolveWhatsAppContactLabel({
+				savedName: contact.name,
+				pushName: extras.pushName,
+				chatId: contact.waId,
+				phone: contact.phoneNumber,
+			}),
 			notes: contact.notes || null,
 			avatarUrl: contact.avatarUrl || null,
 			isBusiness: Boolean(contact.isBusiness),
@@ -224,7 +239,11 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 
 	private async serializeOne(contact: WhatsAppContact) {
 		const ids = await this.conversationIdsFor(contact.accountId, [contact.id]);
-		return this.serialize(contact, { conversationId: ids.get(contact.id) || null });
+		const liveNames = await this.liveContactNames(contact.accountId);
+		return this.serialize(contact, {
+			conversationId: ids.get(contact.id) || null,
+			pushName: this.liveNameFor(contact, liveNames),
+		});
 	}
 
 	/** Every row for these digits: phone-JID rows, LID rows that carry the number, saved first. */
@@ -298,14 +317,69 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 			accountId,
 			rows.map((row) => row.id),
 		);
+		const liveNames = await this.liveContactNames(accountId);
 		return {
 			scope,
 			canListAll: canSeeAll,
 			page,
 			limit,
 			total,
-			items: rows.map((row) => this.serialize(row, { conversationId: conversations.get(row.id) || null })),
+			items: rows.map((row) =>
+				this.serialize(row, {
+					conversationId: conversations.get(row.id) || null,
+					pushName: this.liveNameFor(row, liveNames),
+				}),
+			),
 		};
+	}
+
+	/** In-memory WhatsApp names (address book + profile pushName) keyed by JID and digits. */
+	private async liveContactNames(accountId: string) {
+		const names = new Map<string, string>();
+		const provider = this.liveProvider(accountId);
+		if (!provider?.getContacts) return names;
+		let contacts: any[] = [];
+		try {
+			contacts = (await provider.getContacts()) || [];
+		} catch {
+			return names;
+		}
+		const remember = (key: string | null | undefined, label: string) => {
+			const id = String(key || '').trim();
+			if (!id || names.has(id)) return;
+			names.set(id, label);
+		};
+		for (const item of contacts) {
+			const waId = String(item?.id?._serialized || item?.id || '').trim();
+			const phone = String(item?.number || '').replace(/\D/g, '') ||
+				(isPhoneChatId(waId) ? waId.split('@')[0].replace(/\D/g, '') : '');
+			const label = resolveWhatsAppContactLabel({
+				savedName: String(item?.name || item?.formattedName || '').trim() || null,
+				pushName:
+					String(item?.pushname || item?.notify || item?.pushName || '').trim() || null,
+				chatId: waId,
+				phone,
+			});
+			if (!label) continue;
+			remember(waId, label);
+			if (phone) {
+				remember(phone, label);
+				remember(`${phone}@c.us`, label);
+				remember(`${phone}@s.whatsapp.net`, label);
+			}
+		}
+		return names;
+	}
+
+	private liveNameFor(contact: WhatsAppContact, names: Map<string, string>) {
+		const digits = String(contact.phoneNumber || '').replace(/\D/g, '');
+		return (
+			names.get(contact.waId) ||
+			(digits ? names.get(digits) : null) ||
+			(digits ? names.get(`${digits}@c.us`) : null) ||
+			(digits ? names.get(`${digits}@s.whatsapp.net`) : null) ||
+			null
+		);
 	}
 
 	// ── Lookup ──────────────────────────────────────────────────────────────

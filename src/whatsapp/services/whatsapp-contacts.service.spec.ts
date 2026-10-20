@@ -29,7 +29,7 @@ function matches(row: any, where: Record<string, any>) {
 	});
 }
 
-function chain(result: { execute?: any; getOne?: any; getMany?: any }) {
+function chain(result: { execute?: any; getOne?: any; getMany?: any; count?: number }) {
 	const qb: any = new Proxy(
 		{},
 		{
@@ -37,7 +37,8 @@ function chain(result: { execute?: any; getOne?: any; getMany?: any }) {
 				if (prop === 'execute') return async () => result.execute ?? { affected: 1 };
 				if (prop === 'getOne') return async () => result.getOne ?? null;
 				if (prop === 'getMany') return async () => result.getMany ?? [];
-				if (prop === 'getManyAndCount') return async () => [result.getMany ?? [], 0];
+				if (prop === 'getManyAndCount')
+					return async () => [result.getMany ?? [], result.count ?? (result.getMany || []).length];
 				if (prop === 'then') return undefined;
 				return () => qb;
 			},
@@ -556,5 +557,41 @@ describe('contacts: tenant isolation and authorization', () => {
 		const { service } = setup();
 		await expect(service.list(viewer, ACCOUNT, { scope: 'all' })).resolves.toMatchObject({ scope: 'saved', canListAll: false });
 		await expect(service.list(owner, ACCOUNT, { scope: 'all' })).resolves.toMatchObject({ scope: 'all', canListAll: true });
+	});
+
+	it('uses WhatsApp profile names for unsaved numbers, and keeps the number when no name exists', async () => {
+		const provider = liveProvider({
+			getContacts: jest.fn(async () => [
+				{
+					id: { _serialized: '201017346615@c.us' },
+					name: null,
+					notify: 'Ahmed Ali',
+					number: '201017346615',
+				},
+			]),
+		});
+		const { service, rows, contactRepo } = setup({ provider });
+		const named = contactRepo.create({
+			id: 'named',
+			accountId: ACCOUNT,
+			waId: '201017346615@c.us',
+			phoneNumber: '201017346615',
+			name: '201017346615',
+			isSaved: false,
+		});
+		const unnamed = contactRepo.create({
+			id: 'unnamed',
+			accountId: ACCOUNT,
+			waId: '201018022178@c.us',
+			phoneNumber: '201018022178',
+			name: null,
+			isSaved: false,
+		});
+		rows.set('named', named);
+		rows.set('unnamed', unnamed);
+		contactRepo.createQueryBuilder = () => chain({ getMany: [named, unnamed] });
+		const result = await service.list(owner, ACCOUNT, { scope: 'all' });
+		expect(result.items[0].displayName).toBe('Ahmed Ali');
+		expect(result.items[1].displayName).toBeNull();
 	});
 });

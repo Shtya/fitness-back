@@ -2640,13 +2640,22 @@ export class BaileysProvider implements WhatsAppProvider {
 				resolveWhatsAppPictureUrl(contact.imgUrl) ||
 				fromChat ||
 				resolveWhatsAppPictureUrl(this.chats.get(id)?.profilePicThumbObj?.eurl);
+			const chatName = String(this.chats.get(id)?.name || '').trim();
+			const display = this.contactDisplayName(id);
+			const push =
+				(contact.notify && !isWeakDisplayName(contact.notify, id, contact.phoneNumber)
+					? contact.notify
+					: null) ||
+				display ||
+				(chatName && !isWeakDisplayName(chatName, id, contact.phoneNumber) ? chatName : null) ||
+				null;
 			return {
 				id: { _serialized: contact.id },
 				// Keep fields separate so sync can prefer address-book over pushName.
 				name: contact.name || null,
-				pushname: contact.notify || null,
-				notify: contact.notify || null,
-				number: contact.phoneNumber || null,
+				pushname: push,
+				notify: push,
+				number: contact.phoneNumber || this.lidToPn.get(id) || null,
 				...(pic ? { profilePicThumbObj: { eurl: pic } } : {}),
 			};
 		});
