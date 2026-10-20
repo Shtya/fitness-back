@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { DAILY_TICKET_MAX_STEPS, DAILY_TICKET_MAX_TITLE, DailyTicket } from 'entities/daily-ticket.entity';
+import { DAILY_TICKET_MAX_HISTORY, DAILY_TICKET_MAX_STEPS, DAILY_TICKET_MAX_TITLE, DailyTicket } from 'entities/daily-ticket.entity';
 import { CreateDailyTicketDto, UpdateDailyTicketDto } from './daily-tickets.dto';
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(n)));
@@ -27,6 +27,8 @@ export function toClient(row: DailyTicket) {
 		doneAt: row.doneAt ? new Date(row.doneAt).getTime() : null,
 		notes: row.notes ?? '',
 		items: Array.isArray(row.items) ? row.items : [],
+		repeat: row.repeat === 'daily' ? 'daily' : 'none',
+		history: Array.isArray(row.history) ? row.history : [],
 	};
 }
 
@@ -39,6 +41,7 @@ export class DailyTicketsService {
 
 	/** Today's board: everything from today plus anything unfinished from earlier days. */
 	async list(userId: string, today?: string) {
+		if (today) await this.rollDailyTickets(userId, today);
 		const qb = this.repo.createQueryBuilder('t').where('t.userId = :userId', { userId });
 		if (today) qb.andWhere("(t.day = :today OR t.status <> 'done')", { today });
 		const rows = await qb.orderBy('t.orderIndex', 'ASC').addOrderBy('t.created_at', 'ASC').getMany();
@@ -93,6 +96,8 @@ export class DailyTicketsService {
 				orderIndex,
 				notes: '',
 				items: [],
+				repeat: 'none',
+				history: [],
 			});
 			this.apply(row, dto);
 			if (dto.createdAt) row.created_at = new Date(dto.createdAt);
@@ -142,6 +147,37 @@ export class DailyTicketsService {
 		return { tickets: saved };
 	}
 
+	/**
+	 * Daily tickets start every new day as pending. How each earlier day ended (done or not,
+	 * steps reached) is appended to `history` first, so completions are never lost.
+	 */
+	private async rollDailyTickets(userId: string, today: string) {
+		const stale = await this.repo
+			.createQueryBuilder('t')
+			.where('t.userId = :userId', { userId })
+			.andWhere("t.repeat = 'daily'")
+			.andWhere('t.day < :today', { today })
+			.getMany();
+		if (!stale.length) return;
+		for (const row of stale) {
+			const history = (Array.isArray(row.history) ? row.history : []).filter(entry => entry?.day !== row.day);
+			history.push({
+				day: row.day,
+				done: row.status === 'done',
+				progress: row.status === 'done' ? row.steps : row.progress,
+				steps: row.steps,
+				doneAt: row.doneAt ? new Date(row.doneAt).toISOString() : null,
+			});
+			row.history = history.slice(-DAILY_TICKET_MAX_HISTORY);
+			row.status = 'todo';
+			row.progress = 0;
+			row.doneAt = null;
+			row.day = today;
+			row.items = (Array.isArray(row.items) ? row.items : []).map(item => ({ ...item, done: false }));
+		}
+		await this.repo.save(stale);
+	}
+
 	/** Copies the given fields and keeps status, progress and doneAt consistent. */
 	private apply(row: DailyTicket, dto: UpdateDailyTicketDto) {
 		if (dto.title !== undefined) row.title = dto.title;
@@ -149,6 +185,7 @@ export class DailyTicketsService {
 		if (dto.pinned !== undefined) row.pinned = dto.pinned;
 		if (dto.day !== undefined) row.day = dto.day;
 		if (dto.notes !== undefined) row.notes = dto.notes;
+		if (dto.repeat !== undefined) row.repeat = dto.repeat === 'daily' ? 'daily' : 'none';
 		if (dto.items !== undefined) row.items = dto.items.map(i => ({ id: String(i.id), text: String(i.text).trim(), done: Boolean(i.done) })).filter(i => i.text);
 		if (dto.steps !== undefined) row.steps = clamp(dto.steps, 1, DAILY_TICKET_MAX_STEPS);
 		if (dto.progress !== undefined) row.progress = dto.progress;

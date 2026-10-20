@@ -8,9 +8,15 @@ export const DAILY_TICKET_MAX_STEPS = 20;
 export const DAILY_TICKET_MAX_NOTES = 5000;
 export const DAILY_TICKET_MAX_ITEMS = 50;
 export const DAILY_TICKET_MAX_ITEM_TEXT = 200;
+export const DAILY_TICKET_REPEATS = ['none', 'daily'] as const;
+/** Days of completion history kept for a repeating ticket. */
+export const DAILY_TICKET_MAX_HISTORY = 120;
 
 /** A checklist line inside a ticket. */
 export type DailyTicketItem = { id: string; text: string; done: boolean };
+
+/** How a repeating ticket ended one day (written when it resets for the next day). */
+export type DailyTicketHistoryEntry = { day: string; done: boolean; progress: number; steps: number; doneAt: string | null };
 
 export type DailyTicketStatus = (typeof DAILY_TICKET_STATUSES)[number];
 export type DailyTicketPriority = (typeof DAILY_TICKET_PRIORITIES)[number];
@@ -61,4 +67,12 @@ export class DailyTicket extends CoreEntity {
 
 	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
 	items!: DailyTicketItem[];
+
+	/** 'daily': the ticket comes back as pending every new day. */
+	@Column({ type: 'varchar', length: 10, default: 'none' })
+	repeat!: (typeof DAILY_TICKET_REPEATS)[number];
+
+	/** Earlier days of a repeating ticket, newest last. */
+	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+	history!: DailyTicketHistoryEntry[];
 }

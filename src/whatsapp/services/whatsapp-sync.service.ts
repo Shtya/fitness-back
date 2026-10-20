@@ -4152,7 +4152,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			);
 		}
 		const countQuery = query.clone();
-		const [rows, total, archivedCount] = await Promise.all([
+		const [rows, total, archivedStats] = await Promise.all([
 			query
 				.addSelect(PREFERENCE_COALESCE('is_pinned'), 'preference_is_pinned')
 				.addSelect(PREFERENCE_COALESCE('pinned_at'), 'preference_pinned_at')
@@ -4201,7 +4201,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			page: pageNumber,
 			limit: take,
 			scope: canSeeAll ? 'all' : 'assigned',
-			archivedCount,
+			archivedCount: archivedStats.count,
+			archivedUnreadCount: archivedStats.unreadCount,
 			...(since ? { updatedSince: since.toISOString() } : {}),
 		};
 		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
@@ -4515,6 +4516,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const query = this.conversationRepo
 			.createQueryBuilder('conversation')
 			.where('conversation.accountId = :accountId', { accountId })
+			.andWhere('conversation.deleted_at IS NULL')
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
 			})
@@ -4532,7 +4534,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				newsletter: '%@newsletter',
 			});
 		}
-		return query.getCount();
+		const raw = await query
+			.select('COUNT(DISTINCT conversation.id)', 'count')
+			.addSelect('COALESCE(SUM(GREATEST(conversation.unreadCount, 0)), 0)', 'unread')
+			.getRawOne<{ count?: string | number; unread?: string | number }>();
+		return {
+			count: Math.max(0, Number(raw?.count) || 0),
+			unreadCount: Math.max(0, Number(raw?.unread) || 0),
+		};
 	}
 
 	private async saveConversationPreference(

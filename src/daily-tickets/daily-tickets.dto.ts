@@ -7,6 +7,7 @@ import {
 	DAILY_TICKET_MAX_STEPS,
 	DAILY_TICKET_MAX_TITLE,
 	DAILY_TICKET_PRIORITIES,
+	DAILY_TICKET_REPEATS,
 	DAILY_TICKET_STATUSES,
 } from 'entities/daily-ticket.entity';
 
@@ -81,6 +82,10 @@ class DailyTicketFields {
 	@IsString()
 	@MaxLength(DAILY_TICKET_MAX_NOTES)
 	notes?: string;
+
+	@IsOptional()
+	@IsIn(DAILY_TICKET_REPEATS as unknown as string[])
+	repeat?: (typeof DAILY_TICKET_REPEATS)[number];
 
 	@IsOptional()
 	@IsArray()
