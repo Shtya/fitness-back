@@ -1617,6 +1617,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		});
 		if (!message) return [];
 
+		const previous = await this.reactionRepo
+			.find({ where: { messageId: message.id }, select: ['actorKey', 'emoji', 'reactedAt'] })
+			.catch(() => [] as WhatsAppMessageReaction[]);
+		const previousByActor = new Map(previous.map((row) => [row.actorKey, row]));
 		const byActor = new Map<
 			string,
 			{ actorKey: string; emoji: string; reactedAt: Date | null }
@@ -1629,11 +1633,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.trim()
 				.slice(0, 32);
 			if (!actorKey || !emoji) continue;
-			byActor.set(actorKey, {
-				actorKey,
-				emoji,
-				reactedAt: reaction.timestamp || null,
-			});
+			const given = reaction.timestamp ? new Date(reaction.timestamp) : null;
+			const prior = previousByActor.get(actorKey);
+			// Snapshots often omit timestamps; keep the stored time while the emoji is unchanged.
+			const reactedAt =
+				given && !Number.isNaN(given.getTime())
+					? given
+					: prior?.emoji === emoji
+						? prior.reactedAt || null
+						: null;
+			byActor.set(actorKey, { actorKey, emoji, reactedAt });
 		}
 		const uniqueReactions = [...byActor.values()];
 
