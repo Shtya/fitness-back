@@ -173,9 +173,9 @@ describe('WhatsAppStatusService story viewers', () => {
 		const { service } = createService({
 			active: [statusRow({ type: 'text', caption: 'Original line' })],
 		});
-		service.publish = jest.fn(async () => ({ ok: true, items: [] }));
+		const publish = jest.spyOn(service, 'publish').mockResolvedValue({ ok: true, items: [] } as any);
 		await service.repost(user, ACCOUNT, OWN_ID, { text: 'My version' });
-		expect(service.publish).toHaveBeenCalledWith(user, ACCOUNT, {
+		expect(publish).toHaveBeenCalledWith(user, ACCOUNT, {
 			type: 'text',
 			content: 'My version',
 		});
@@ -185,9 +185,9 @@ describe('WhatsAppStatusService story viewers', () => {
 		const { service } = createService({
 			active: [statusRow({ type: 'text', caption: 'Keep me' })],
 		});
-		service.publish = jest.fn(async () => ({ ok: true, items: [] }));
+		const publish = jest.spyOn(service, 'publish').mockResolvedValue({ ok: true, items: [] } as any);
 		await service.repost(user, ACCOUNT, OWN_ID, {});
-		expect(service.publish).toHaveBeenCalledWith(user, ACCOUNT, {
+		expect(publish).toHaveBeenCalledWith(user, ACCOUNT, {
 			type: 'text',
 			content: 'Keep me',
 		});
