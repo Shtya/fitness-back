@@ -23,6 +23,9 @@ import { WhatsAppAutoForwardController } from './controllers/whatsapp-auto-forwa
 import { WhatsAppContactsController } from './controllers/whatsapp-contacts.controller';
 import { WhatsAppPageLockController } from './controllers/whatsapp-page-lock.controller';
 import { WhatsAppPageLockService } from './services/whatsapp-page-lock.service';
+import { WhatsAppTypingAttemptsController } from './controllers/whatsapp-typing-attempts.controller';
+import { WhatsAppTypingAttemptsService } from './services/whatsapp-typing-attempts.service';
+import { WhatsAppOnlinePresenceService } from './services/whatsapp-online-presence.service';
 import { MailService } from 'common/nodemailer';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
@@ -169,6 +172,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAutoForwardController,
 		WhatsAppContactsController,
 		WhatsAppPageLockController,
+		WhatsAppTypingAttemptsController,
 		WhatsAppAiMediaController,
 	],
 	providers: [
@@ -198,6 +202,8 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAutoForwardService,
 		WhatsAppContactsService,
 		WhatsAppPageLockService,
+		WhatsAppTypingAttemptsService,
+		WhatsAppOnlinePresenceService,
 		MailService,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,

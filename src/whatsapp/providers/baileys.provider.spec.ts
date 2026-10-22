@@ -782,6 +782,84 @@ describe('BaileysProvider revoke detection', () => {
 	});
 });
 
+describe('BaileysProvider edit detection', () => {
+	it('emits message_edited for a MESSAGE_EDIT protocol message from the peer', () => {
+		const provider = new BaileysProvider('account-test');
+		const events: any[] = [];
+		provider.onEvent(event => {
+			events.push(event);
+		});
+
+		const handled = (provider as any).ingestEdit({
+			key: { remoteJid: '201000000000@s.whatsapp.net', id: 'edit-envelope', fromMe: false },
+			messageTimestamp: 1_760_000_000,
+			message: {
+				protocolMessage: {
+					type: 14,
+					key: { id: 'original-3' },
+					timestampMs: 1_760_000_123_000,
+					editedMessage: { conversation: '  new text ' },
+				},
+			},
+		});
+
+		expect(handled).toBe(true);
+		expect(events).toEqual([
+			{
+				type: 'message_edited',
+				providerMessageId: 'original-3',
+				text: 'new text',
+				editedAt: new Date(1_760_000_123_000),
+				fromMe: false,
+			},
+		]);
+	});
+
+	it('reads extended text edits and ignores revokes', () => {
+		const provider = new BaileysProvider('account-test');
+		const events: any[] = [];
+		provider.onEvent(event => {
+			events.push(event);
+		});
+
+		expect(
+			(provider as any).ingestRevoke({
+				key: { id: 'x' },
+				message: { protocolMessage: { type: 14, key: { id: 'original-4' } } },
+			}),
+		).toBe(false);
+		expect(
+			(provider as any).ingestEdit({
+				key: { id: 'revoke' },
+				message: { protocolMessage: { type: 0, key: { id: 'original-4' } } },
+			}),
+		).toBe(false);
+		expect(
+			(provider as any).ingestEdit({
+				key: { id: 'edit', fromMe: true },
+				messageTimestamp: 1_760_000_000,
+				message: {
+					protocolMessage: {
+						type: 14,
+						key: { id: 'original-4' },
+						editedMessage: { extendedTextMessage: { text: 'edited link text' } },
+					},
+				},
+			}),
+		).toBe(true);
+
+		expect(events).toEqual([
+			{
+				type: 'message_edited',
+				providerMessageId: 'original-4',
+				text: 'edited link text',
+				editedAt: new Date(1_760_000_000 * 1000),
+				fromMe: true,
+			},
+		]);
+	});
+});
+
 describe('BaileysProvider message actions', () => {
 	it('forwards from in-memory raw and remembers the new message', async () => {
 		const provider = new BaileysProvider('account-test');

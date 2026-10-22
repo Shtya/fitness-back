@@ -22,6 +22,14 @@ export type WhatsAppProviderEvent =
 			receipts: NormalizedWhatsAppParticipantReceipt[];
 	  }
 	| { type: 'message_deleted'; providerMessageId: string; mode: 'everyone' }
+	/** The sender changed the text / caption of an already delivered message. */
+	| {
+			type: 'message_edited';
+			providerMessageId: string;
+			text: string;
+			editedAt: Date;
+			fromMe: boolean;
+	  }
 	| { type: 'status_changed' }
 	/** Contacts who opened one of our own stories. */
 	| {
@@ -316,6 +324,12 @@ export interface WhatsAppProvider {
 		chatId: string,
 		state?: 'composing' | 'recording' | 'paused' | 'available',
 	): Promise<void>;
+	/**
+	 * Account-level availability of this linked device. WhatsApp only pushes
+	 * contacts' chatstate (typing / recording) to devices marked available.
+	 */
+	setOnlinePresence?(online: boolean): Promise<boolean>;
+	isOnlinePresence?(): boolean;
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
 	downloadStatus?(
 		providerStatusId: string,

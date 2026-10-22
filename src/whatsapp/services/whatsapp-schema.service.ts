@@ -96,6 +96,7 @@ const OPTIONAL_TABLES = [
 		ON whatsapp_story_drafts (user_id)`,
 	`ALTER TABLE whatsapp_account_access ADD COLUMN IF NOT EXISTS notifications_enabled boolean NOT NULL DEFAULT true`,
 	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz`,
+	`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS edit_history jsonb`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_conversation_preferences_identity
 		ON whatsapp_conversation_preferences (account_id, provider_chat_id)`,
 	`CREATE TABLE IF NOT EXISTS whatsapp_voice_changer_credentials (

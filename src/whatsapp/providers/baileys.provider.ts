@@ -921,6 +921,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private socketGeneration = 0;
 	private opening: Promise<void> | null = null;
 	private state: string = 'disconnected';
+	private onlinePresence = false;
 	private qr: string | null = null;
 	private pairingCode: string | null = null;
 	private closing = false;
@@ -1085,6 +1086,8 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private setState(status: string, extra: Partial<Extract<WhatsAppProviderEvent, { type: 'connection' }>> = {}) {
 		this.state = status;
+		// Every (re)connect starts as `unavailable` (markOnlineOnConnect=false).
+		this.onlinePresence = false;
 		this.emit({ type: 'connection', status, ...extra });
 	}
 
@@ -1928,6 +1931,34 @@ export class BaileysProvider implements WhatsAppProvider {
 		return true;
 	}
 
+	/** protocolMessage type 14 = MESSAGE_EDIT; carries the full new content of the target message. */
+	private ingestEdit(raw: any): boolean {
+		const protocol = unwrapMessageContent(raw?.message)?.protocolMessage;
+		if (!protocol) return false;
+		const type = protocol.type;
+		if (type !== 14 && type !== 'MESSAGE_EDIT') return false;
+		const targetId = String(protocol.key?.id || '').trim();
+		if (!targetId) return true;
+		const timestampMs = Number(protocol.timestampMs);
+		this.emitEdit(
+			targetId,
+			protocol.editedMessage,
+			Number.isFinite(timestampMs) && timestampMs > 0
+				? new Date(timestampMs)
+				: toDate(raw?.messageTimestamp),
+			Boolean(raw?.key?.fromMe),
+		);
+		return true;
+	}
+
+	private emitEdit(providerMessageId: string, edited: any, editedAt: Date, fromMe: boolean) {
+		const text = messageText(unwrapMessageContent(edited)).trim();
+		if (!providerMessageId || !text) return;
+		const remembered = this.findRememberedMessage(providerMessageId);
+		if (remembered) (remembered as any).text = text;
+		this.emit({ type: 'message_edited', providerMessageId, text, editedAt, fromMe });
+	}
+
 	private ingestReaction(raw: any): boolean {
 		const content = unwrapMessageContent(raw?.message);
 		const reaction = content?.reactionMessage;
@@ -2219,6 +2250,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const raw of list) {
 				if (this.rememberStatus(raw)) continue;
 				if (this.ingestRevoke(raw)) continue;
+				if (this.ingestEdit(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
@@ -2261,6 +2293,15 @@ export class BaileysProvider implements WhatsAppProvider {
 				) {
 					this.emit({ type: 'message_deleted', providerMessageId, mode: 'everyone' });
 					continue;
+				}
+				const editedContent = item?.update?.message?.editedMessage?.message;
+				if (providerMessageId && editedContent) {
+					this.emitEdit(
+						providerMessageId,
+						editedContent,
+						toDate(item?.update?.messageTimestamp),
+						Boolean(item?.key?.fromMe),
+					);
 				}
 				if (Array.isArray(item?.update?.userReceipt) && item.update.userReceipt.length) {
 					this.applyStatusReceiptUpdate(item, true);
@@ -2383,10 +2424,17 @@ export class BaileysProvider implements WhatsAppProvider {
 
 			if (!normalized) return;
 
-			const senderName =
-				this.contactDisplayName(normalized.chatId) ||
-				this.contactDisplayName(normalized.chatIdRaw) ||
-				'';
+			const isGroup = normalized.chatId.endsWith('@g.us');
+			// In groups the name must be the member who is typing, never the group subject.
+			const senderName = isGroup
+				? (normalized.participantPhoneDigits
+						? this.contactDisplayName(`${normalized.participantPhoneDigits}@c.us`)
+						: null) ||
+					(normalized.participantJid ? this.contactDisplayName(normalized.participantJid) : null) ||
+					''
+				: this.contactDisplayName(normalized.chatId) ||
+					this.contactDisplayName(normalized.chatIdRaw) ||
+					'';
 
 			this.logger.debug(
 				`[WHATSAPP PRESENCE]\n` +
@@ -2407,7 +2455,10 @@ export class BaileysProvider implements WhatsAppProvider {
 					chatIdAliases: normalized.chatIdAliases,
 					phoneDigits: normalized.phoneDigits,
 					isOnline: normalized.isOnline,
-					isGroup: normalized.chatId.endsWith('@g.us'),
+					isGroup,
+					participantJid: normalized.participantJid,
+					participantPhoneDigits: normalized.participantPhoneDigits,
+					participantAliases: normalized.participantAliases,
 					state: normalized.state,
 					typing: normalized.typing,
 					recording: normalized.recording,
@@ -2448,6 +2499,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			for (const raw of messages) {
 				if (this.rememberStatus(raw)) continue;
 				if (this.ingestRevoke(raw)) continue;
+				if (this.ingestEdit(raw)) continue;
 				if (this.ingestReaction(raw)) continue;
 				const normalized = this.normalizeWaMessage(raw);
 				if (!normalized) continue;
@@ -3665,6 +3717,40 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async unsubscribePresence(_chatId: string | string[]) {
 		return 0;
+	}
+
+	isOnlinePresence() {
+		return this.onlinePresence;
+	}
+
+	/**
+	 * Baileys sends `unavailable` on every connect (markOnlineOnConnect=false),
+	 * and WhatsApp withholds chatstate nodes from unavailable devices.
+	 */
+	async setOnlinePresence(online: boolean) {
+		if (!this.socket || this.state !== 'connected') return false;
+		if (typeof this.socket.sendPresenceUpdate !== 'function') return false;
+		if (!this.socket.authState?.creds?.me?.name) {
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] Baileys cannot mark ${online ? 'available' : 'unavailable'} — account has no push name yet session=${this.accountId}`,
+			);
+			return false;
+		}
+		try {
+			await this.socket.sendPresenceUpdate(online ? 'available' : 'unavailable');
+			this.onlinePresence = online;
+			this.logger.log(
+				`[WHATSAPP PRESENCE] Baileys device marked ${online ? 'available' : 'unavailable'} session=${this.accountId}`,
+			);
+			return true;
+		} catch (error) {
+			this.logger.warn(
+				`[WHATSAPP PRESENCE] Baileys availability update failed session=${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
 	}
 
 	/** Staff typing indicator toward a chat (Baileys). */

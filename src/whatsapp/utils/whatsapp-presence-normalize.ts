@@ -19,7 +19,31 @@ export type NormalizedContactPresence = {
 	lastSeen: number;
 	/** WhatsApp privacy denied last-seen (`attrs.last === 'deny'`). */
 	lastSeenRestricted: boolean;
+	/** Group chats only: the member whose chatstate this is (raw jid, often @lid). */
+	participantJid: string | null;
+	participantPhoneDigits: string | null;
+	/** Ids that may identify the member in contacts / group participants / message senders. */
+	participantAliases: string[];
 };
+
+/** Every id form a WhatsApp user may be stored under (@lid, @c.us, @s.whatsapp.net). */
+export function whatsAppParticipantAliases(jid: string, phoneDigits?: string | null): string[] {
+	const raw = String(jid || '').trim();
+	const aliases = new Set<string>();
+	if (raw) {
+		aliases.add(raw);
+		aliases.add(inboxJid(raw));
+		const user = raw.split('@')[0].split(':')[0];
+		const server = raw.split('@')[1] || '';
+		if (user && server && raw.includes(':')) aliases.add(`${user}@${server}`);
+	}
+	const digits = String(phoneDigits || '').replace(/\D/g, '');
+	if (digits.length >= 8) {
+		aliases.add(`${digits}@c.us`);
+		aliases.add(`${digits}@s.whatsapp.net`);
+	}
+	return [...aliases].filter(Boolean);
+}
 
 function inboxJid(jid: string): string {
 	const raw = String(jid || '').trim();
@@ -73,7 +97,16 @@ export function normalizeBaileysPresenceUpdate(
 
 	const presences =
 		update?.presences && typeof update.presences === 'object' ? update.presences : {};
-	const firstKey = Object.keys(presences)[0] || '';
+	const isGroup = chatIdRaw.endsWith('@g.us');
+	const keys = Object.keys(presences);
+	// In a group each key is a member; prefer the one actually typing / recording.
+	const activeKey = isGroup
+		? keys.find((key) => {
+				const value = String((presences as any)[key]?.lastKnownPresence || '').toLowerCase();
+				return value === 'composing' || value === 'recording';
+			})
+		: undefined;
+	const firstKey = activeKey || keys[0] || '';
 	const first = firstKey ? (presences as any)[firstKey] : null;
 	const lastKnown =
 		String(first?.lastKnownPresence || first?.lastKnown || '').toLowerCase() ||
@@ -116,7 +149,25 @@ export function normalizeBaileysPresenceUpdate(
 	const recording = state === 'recording';
 	const isOnline = state === 'available' || typing || recording;
 
+	const participantJid = isGroup && firstKey && firstKey !== rawId ? firstKey : null;
+	const participantBare = participantJid
+		? `${participantJid.split('@')[0].split(':')[0]}@${participantJid.split('@')[1] || ''}`
+		: '';
+	let participantPhoneDigits = participantJid
+		? phoneDigitsOf(inboxJid(participantJid)) ||
+			String(
+				resolvePhoneDigits?.(participantJid) || resolvePhoneDigits?.(participantBare) || '',
+			).replace(/\D/g, '') ||
+			null
+		: null;
+	if (participantPhoneDigits && participantPhoneDigits.length < 8) participantPhoneDigits = null;
+
 	return {
+		participantJid,
+		participantPhoneDigits,
+		participantAliases: participantJid
+			? whatsAppParticipantAliases(participantJid, participantPhoneDigits)
+			: [],
 		chatId: preferred,
 		chatIdRaw,
 		chatIdAliases: [...aliases],

@@ -78,6 +78,7 @@ import {
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppContactPresenceService, expandPresenceSubscribeIds } from './whatsapp-contact-presence.service';
+import { WhatsAppTypingAttemptsService } from './whatsapp-typing-attempts.service';
 import { WhatsAppPersistDeadLetterService } from './whatsapp-persist-dead-letter.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { WhatsAppStatusService } from './whatsapp-status.service';
@@ -91,6 +92,8 @@ import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsap
 import { resolveOutgoingDisplayFileName } from '../utils/whatsapp-display-file-name';
 import { isWhatsAppViewOnceQuoted, isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
+import { appendWhatsAppEditHistory, whatsAppEditSource } from '../utils/whatsapp-message-edits';
+import { whatsAppParticipantAliases } from '../utils/whatsapp-presence-normalize';
 import {
 	isWeakWhatsAppContactName,
 	preferWhatsAppContactName,
@@ -874,6 +877,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		private readonly preferenceRepo: Repository<WhatsAppConversationPreference>,
 		@Optional()
 		private readonly deadLetters?: WhatsAppPersistDeadLetterService,
+		@Optional()
+		private readonly typingAttempts?: WhatsAppTypingAttemptsService,
 	) {}
 
 	onModuleInit() {
@@ -1257,6 +1262,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const state = String(event.payload?.state || 'unavailable');
 			const typing = state === 'composing' || Boolean(event.payload?.typing);
 			const recording = state === 'recording' || Boolean(event.payload?.recording);
+			const participantJid = String(event.payload?.participantJid || '').trim() || null;
+			const isGroupPresence =
+				conversation.type === WhatsAppConversationType.GROUP || isGroupChatId(chatId);
+			let senderName = String(event.payload?.senderName || '');
+			if (isGroupPresence) {
+				senderName =
+					participantJid && (typing || recording)
+						? await this.resolveGroupTyperName(conversation, event.payload, senderName)
+						: '';
+			}
 			const presencePayload = {
 				conversationId: conversation.id,
 				chatId: conversation.providerChatId || chatId,
@@ -1265,7 +1280,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				typing,
 				recording,
 				t: event.payload?.t || Date.now(),
-				senderName: String(event.payload?.senderName || ''),
+				senderName,
+				...(isGroupPresence
+					? {
+							isGroup: true,
+							participantJid,
+							participantPhone: event.payload?.participantPhoneDigits || null,
+						}
+					: {}),
 				lastSeen: Number(event.payload?.lastSeen || 0),
 				lastSeenRestricted: Boolean(event.payload?.lastSeenRestricted),
 				confirmed: state === 'available' || state === 'unavailable',
@@ -1274,6 +1296,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				`[WHATSAPP PRESENCE] Sync APPLY session=${accountId} conv=${conversation.id} jid=${presencePayload.chatId} state=${state} isOnline=${presencePayload.isOnline}`,
 			);
 			this.contactPresence.applyPresenceEvent(accountId, conversation, presencePayload);
+			this.typingAttempts?.recordPresence(
+				conversation,
+				recording ? 'recording' : typing ? 'composing' : state,
+			);
 			// One emit reaches the open-chat room and the permitted inbox members exactly once.
 			this.gateway.emitConversationEvent(
 				conversation.id,
@@ -1410,7 +1436,64 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					accountId,
 				);
 			}, `message_deleted:${accountId}:${event.providerMessageId}`, undefined, this.persistLaneForMessage(accountId, event.providerMessageId));
+			return;
 		}
+		if (event.type === 'message_edited') {
+			this.enqueuePersist(
+				() => this.persistMessageEdit(accountId, event),
+				`message_edited:${accountId}:${event.providerMessageId}`,
+				undefined,
+				this.persistLaneForMessage(accountId, event.providerMessageId),
+			);
+		}
+	}
+
+	/** Edits can land before the original row is persisted — retry briefly, like receipts. */
+	private async persistMessageEdit(
+		accountId: string,
+		event: { providerMessageId: string; text: string; editedAt: Date; fromMe: boolean },
+		attempt = 0,
+	): Promise<void> {
+		const message = await this.messageRepo.findOne({
+			where: { accountId, providerMessageId: event.providerMessageId },
+			select: ['id', 'conversationId', 'direction', 'text', 'editHistory'],
+		});
+		if (!message) {
+			if (attempt < 3) {
+				const timer = setTimeout(() => {
+					this.enqueuePersist(
+						() => this.persistMessageEdit(accountId, event, attempt + 1),
+						`message_edited:${accountId}:${event.providerMessageId}`,
+						undefined,
+						this.persistLaneForMessage(accountId, event.providerMessageId),
+					);
+				}, 2000 * (attempt + 1));
+				timer.unref?.();
+			}
+			return;
+		}
+		const editHistory = appendWhatsAppEditHistory(message.editHistory, {
+			previousText: message.text,
+			text: event.text,
+			editedAt: event.editedAt,
+			by: whatsAppEditSource(message.direction, event.fromMe),
+		});
+		if (!editHistory) return;
+		const editedAt = new Date(editHistory[editHistory.length - 1].editedAt);
+		await this.messageRepo.update(message.id, {
+			text: event.text,
+			editedAt,
+			editHistory,
+		} as any);
+		await this.emitScopedConversationEvent(
+			message.conversationId,
+			'message_updated',
+			{
+				messageId: message.id,
+				changes: { text: event.text, editedAt, editHistory },
+			},
+			accountId,
+		);
 	}
 
 	/** Group member receipts can land before the sent row is persisted — retry briefly. */
@@ -3269,6 +3352,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (shouldCountUnread) {
 			await this.conversationRepo.increment({ id: conversation.id }, 'unreadCount', 1);
 			this.notifyInboundMessagePersisted(accountId, saved);
+			this.typingAttempts?.linkInboundMessage(conversation, saved.id);
 		} else if (
 			emitEvents &&
 			!fromHistory &&
@@ -5608,6 +5692,89 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	private readonly groupTyperNames = new Map<string, { name: string; at: number }>();
+
+	/**
+	 * Name of the group member in a typing presence. Same sources and order as
+	 * decorateGroupMessages (contact, group participant, last pushName), then the phone.
+	 */
+	private async resolveGroupTyperName(
+		conversation: WhatsAppConversation,
+		payload: any,
+		providerName: string,
+	): Promise<string> {
+		const participantJid = String(payload?.participantJid || '').trim();
+		const phoneDigits = String(payload?.participantPhoneDigits || '').replace(/\D/g, '') || null;
+		const aliases = [
+			...new Set(
+				[
+					...(Array.isArray(payload?.participantAliases) ? payload.participantAliases : []),
+					...whatsAppParticipantAliases(participantJid, phoneDigits),
+				]
+					.map((id: unknown) => String(id || '').trim())
+					.filter(Boolean),
+			),
+		];
+		const strong = (name: unknown, waId: string, phone?: string | null) => {
+			const value = String(name || '').trim();
+			return value && !isWeakContactDisplayName(value, waId, phone) ? value : '';
+		};
+		const fromProvider = strong(providerName, participantJid, phoneDigits);
+		if (fromProvider || !aliases.length) return fromProvider || (phoneDigits ? `+${phoneDigits}` : '');
+
+		const cacheKey = `${conversation.id}:${participantJid}`;
+		const cached = this.groupTyperNames.get(cacheKey);
+		if (cached && Date.now() - cached.at < 10 * 60_000) return cached.name;
+
+		let name = '';
+		try {
+			const contacts = await this.contactRepo.find({
+				where: { accountId: conversation.accountId, waId: In(aliases) },
+				select: ['waId', 'name', 'phoneNumber'],
+			});
+			for (const contact of contacts) {
+				name = strong(contact.name, contact.waId, contact.phoneNumber);
+				if (name) break;
+			}
+			if (!name && conversation.groupId) {
+				const participants = await this.participantRepo.find({
+					where: { groupId: conversation.groupId, waId: In(aliases) },
+					select: ['waId', 'displayName'],
+				});
+				for (const participant of participants) {
+					name = strong(participant.displayName, participant.waId);
+					if (name) break;
+				}
+			}
+			if (!name) {
+				const row = await this.messageRepo
+					.createQueryBuilder('m')
+					.select(`m.raw->>'pushName'`, 'pushName')
+					.addSelect('m.sender_wa_id', 'senderWaId')
+					.where('m.conversation_id = :conversationId', { conversationId: conversation.id })
+					.andWhere('m.sender_wa_id IN (:...aliases)', { aliases })
+					.andWhere(`coalesce(m.raw->>'pushName', '') <> ''`)
+					.orderBy('m.provider_timestamp', 'DESC', 'NULLS LAST')
+					.limit(1)
+					.getRawOne<{ pushName: string | null; senderWaId: string }>();
+				name = strong(row?.pushName, row?.senderWaId || participantJid);
+			}
+		} catch (error) {
+			this.logger.debug(
+				`[WHATSAPP PRESENCE] group typer name lookup failed conv=${conversation.id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+		const resolved = name || (phoneDigits ? `+${phoneDigits}` : '');
+		if (this.groupTyperNames.size >= 2000) {
+			const oldest = this.groupTyperNames.keys().next().value;
+			if (oldest) this.groupTyperNames.delete(oldest);
+		}
+		this.groupTyperNames.set(cacheKey, { name: resolved, at: Date.now() });
+		return resolved;
+	}
+
 	private async decorateGroupMessages(
 		conversation: WhatsAppConversation,
 		messages: WhatsAppMessage[],
@@ -7336,9 +7503,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		await provider.editText(message.providerMessageId, trimmed);
 		const editedAt = new Date();
+		// Re-read: the provider echo of this edit may already have been persisted.
+		const current = await this.messageRepo.findOne({
+			where: { id: message.id },
+			select: ['id', 'editHistory'],
+		});
+		const editHistory = appendWhatsAppEditHistory(current?.editHistory ?? message.editHistory, {
+			previousText: message.text,
+			text: trimmed,
+			editedAt,
+			by: 'staff',
+		});
 		await this.messageRepo.update(message.id, {
 			text: trimmed,
 			editedAt,
+			...(editHistory ? { editHistory } : {}),
 		} as any);
 		const saved = await this.messageRepo.findOneOrFail({
 			where: { id: message.id },

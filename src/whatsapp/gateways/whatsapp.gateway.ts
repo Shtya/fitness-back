@@ -69,9 +69,35 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 	>();
 
 	private readonly tokenExpiryTimers = new Map<string, NodeJS.Timeout>();
+	private readonly watcherListeners = new Set<(accountId: string) => void>();
 
 	@WebSocketServer()
 	server: Server;
+
+	/** Live sockets currently watching an account inbox. */
+	accountWatcherCount(accountId: string) {
+		const server = this.server as any;
+		const rooms: Map<string, Set<string>> | undefined =
+			server?.adapter?.rooms ?? server?.sockets?.adapter?.rooms;
+		return rooms?.get(accountRoom(accountId))?.size ?? 0;
+	}
+
+	onAccountWatchersChanged(listener: (accountId: string) => void) {
+		this.watcherListeners.add(listener);
+		return () => this.watcherListeners.delete(listener);
+	}
+
+	private notifyWatchersChanged(accountIds: Iterable<string>) {
+		for (const accountId of accountIds) {
+			for (const listener of this.watcherListeners) {
+				try {
+					listener(accountId);
+				} catch {
+					/* listeners must not break socket handling */
+				}
+			}
+		}
+	}
 
 	constructor(
 		private readonly jwtService: JwtService,
@@ -250,6 +276,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 	handleDisconnect(client: Socket) {
 		this.clearTokenExpiry(client);
 		this.unregisterPresence(client);
+		this.notifyWatchersChanged(Object.keys(client.data?.accountScopes || {}));
 		this.logger.debug(`WhatsApp socket disconnected: ${client.id}`);
 	}
 
@@ -298,6 +325,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		client.data.accountScopes[accountId] = { canSeeAll, room: scopeRoom };
 		if (previousRoom && previousRoom !== scopeRoom) await client.leave(previousRoom);
 		await client.join([accountRoom(accountId), scopeRoom]);
+		this.notifyWatchersChanged([accountId]);
 		return { ok: true };
 	}
 
@@ -310,6 +338,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		if (client.data?.accountScopes) delete client.data.accountScopes[accountId];
 		await client.leave(accountRoom(accountId));
 		if (scopeRoom) await client.leave(scopeRoom);
+		this.notifyWatchersChanged([accountId]);
 		return { ok: true };
 	}
 

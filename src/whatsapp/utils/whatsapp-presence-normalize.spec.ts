@@ -84,4 +84,52 @@ describe('whatsapp presence normalize', () => {
 			}),
 		).toBeNull();
 	});
+
+	it('reports which group member is typing (phone jid)', () => {
+		const result = normalizeBaileysPresenceUpdate({
+			id: '120363000000000001@g.us',
+			presences: { '201000000001@s.whatsapp.net': { lastKnownPresence: 'composing' } },
+		});
+		expect(result).toMatchObject({
+			chatId: '120363000000000001@g.us',
+			state: 'composing',
+			typing: true,
+			participantJid: '201000000001@s.whatsapp.net',
+			participantPhoneDigits: '201000000001',
+		});
+		expect(result?.participantAliases).toEqual(
+			expect.arrayContaining(['201000000001@s.whatsapp.net', '201000000001@c.us']),
+		);
+	});
+
+	it('resolves a LID group member to a phone and prefers the active member', () => {
+		const result = normalizeBaileysPresenceUpdate(
+			{
+				id: '120363000000000001@g.us',
+				presences: {
+					'111111111111111@lid': { lastKnownPresence: 'paused' },
+					'222222222222222:3@lid': { lastKnownPresence: 'recording' },
+				},
+			},
+			(jid) => (jid === '222222222222222@lid' ? '201000000002' : null),
+		);
+		expect(result).toMatchObject({
+			state: 'recording',
+			recording: true,
+			participantJid: '222222222222222:3@lid',
+			participantPhoneDigits: '201000000002',
+		});
+		expect(result?.participantAliases).toEqual(
+			expect.arrayContaining(['222222222222222@lid', '201000000002@c.us']),
+		);
+	});
+
+	it('leaves participant empty for direct chats', () => {
+		const result = normalizeBaileysPresenceUpdate({
+			id: '201000000000@c.us',
+			presences: { '201000000000@c.us': { lastKnownPresence: 'composing' } },
+		});
+		expect(result?.participantJid).toBeNull();
+		expect(result?.participantAliases).toEqual([]);
+	});
 });

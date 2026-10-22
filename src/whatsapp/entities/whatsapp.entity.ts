@@ -24,6 +24,14 @@ export enum WhatsAppConversationType {
 	GROUP = 'group',
 }
 
+export interface WhatsAppMessageEditEntry {
+	previousText: string;
+	text: string;
+	editedAt: string;
+	/** contact = the customer edited it; phone = edited from the linked phone; staff = edited from the CRM. */
+	by: 'contact' | 'phone' | 'staff';
+}
+
 export enum WhatsAppMessageDirection {
 	INBOUND = 'inbound',
 	OUTBOUND = 'outbound',
@@ -520,6 +528,10 @@ export class WhatsAppMessage extends CoreEntity {
 
 	@Column({ name: 'edited_at', type: 'timestamptz', nullable: true })
 	editedAt: Date | null;
+
+	/** Every text version the message had before each edit, oldest first. */
+	@Column({ name: 'edit_history', type: 'jsonb', nullable: true })
+	editHistory: WhatsAppMessageEditEntry[] | null;
 
 	@Column({ name: 'pinned_until', type: 'timestamptz', nullable: true })
 	pinnedUntil: Date | null;
