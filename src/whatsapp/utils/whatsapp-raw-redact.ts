@@ -25,6 +25,7 @@ const REDACTED_KEYS = new Set([
 	'scansSidecar',
 	'midQualityFileSha256',
 	'firstFrameSidecar',
+	'messageSecret',
 ]);
 
 const THUMBNAIL_KEYS = new Set(['jpegThumbnail']);

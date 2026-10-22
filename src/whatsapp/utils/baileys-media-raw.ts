@@ -1,5 +1,6 @@
 import { toCoord } from './whatsapp-location';
 import { isWhatsAppViewOnceQuoted } from './whatsapp-view-once';
+import { findWaMessageSecret } from './whatsapp-message-secret';
 
 function bytesToBase64(value: any): string | undefined {
 	if (value == null) return undefined;
@@ -173,6 +174,12 @@ function reviveBaileysMediaNode(node: any) {
 }
 
 function baileysEnvelope(source: any, message?: Record<string, unknown>) {
+	// Needed to decrypt later edits of this message (WhatsApp sends them as secretEncryptedMessage).
+	const messageSecret =
+		findWaMessageSecret(source.message) ||
+		(typeof source.messageSecret === 'string' && source.messageSecret
+			? Buffer.from(source.messageSecret, 'base64')
+			: null);
 	return {
 		protocol: 'baileys',
 		key: {
@@ -180,9 +187,12 @@ function baileysEnvelope(source: any, message?: Record<string, unknown>) {
 			id: source.key.id,
 			fromMe: source.key.fromMe,
 			participant: source.key.participant,
+			...(source.key.remoteJidAlt ? { remoteJidAlt: source.key.remoteJidAlt } : {}),
+			...(source.key.participantAlt ? { participantAlt: source.key.participantAlt } : {}),
 		},
 		messageTimestamp: source.messageTimestamp,
 		...(source.pushName ? { pushName: source.pushName } : {}),
+		...(messageSecret ? { messageSecret: messageSecret.toString('base64') } : {}),
 		...(message && Object.keys(message).length ? { message } : {}),
 	};
 }

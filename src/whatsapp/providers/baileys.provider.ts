@@ -20,6 +20,13 @@ import {
 	WhatsAppSendTextOptions,
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
+import {
+	WA_SECRET_ENC_TYPE_MESSAGE_EDIT,
+	decryptWaSecretEncryptedPayload,
+	findWaMessageSecret,
+	waNonAdJid,
+	waSecretBytes,
+} from '../utils/whatsapp-message-secret';
 import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
@@ -694,6 +701,17 @@ function unwrapMessageContent(message: any): any {
 	);
 }
 
+/** unwrapMessageContent until stable (e.g. ephemeralMessage → editedMessage → protocolMessage). */
+function deepUnwrapMessageContent(message: any): any {
+	let current = message;
+	for (let i = 0; i < 5; i += 1) {
+		const next = unwrapMessageContent(current);
+		if (next === current) return current;
+		current = next;
+	}
+	return current;
+}
+
 function contextInfoOf(content: any) {
 	if (!content || typeof content !== 'object') return null;
 	return (
@@ -961,6 +979,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	private readonly recentHistoryMessageIds = new Set<string>();
 	/** Owned by the provider (not the socket) so they survive reconnects. */
 	private readonly msgRetryCounterCache = new TtlCacheStore(60 * 60_000, 5_000);
+	private rawLookup: ((providerMessageId: string) => Promise<{ raw?: any } | null>) | null = null;
 	private readonly groupMetadataCache = new TtlCacheStore(5 * 60_000, 500);
 	private messageLookup:
 		| ((providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>)
@@ -984,6 +1003,11 @@ export class BaileysProvider implements WhatsAppProvider {
 		lookup: (providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>,
 	) {
 		this.messageLookup = lookup;
+	}
+
+	/** Stored raw of any message (inbound or outbound), used to decrypt later edits of it. */
+	setRawLookup(lookup: (providerMessageId: string) => Promise<{ raw?: any } | null>) {
+		this.rawLookup = lookup;
 	}
 
 	/** Baileys `getMessage`: re-encrypt a message a recipient could not decrypt. */
@@ -1933,7 +1957,8 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	/** protocolMessage type 14 = MESSAGE_EDIT; carries the full new content of the target message. */
 	private ingestEdit(raw: any): boolean {
-		const protocol = unwrapMessageContent(raw?.message)?.protocolMessage;
+		if (this.ingestSecretEdit(raw)) return true;
+		const protocol = deepUnwrapMessageContent(raw?.message)?.protocolMessage;
 		if (!protocol) return false;
 		const type = protocol.type;
 		if (type !== 14 && type !== 'MESSAGE_EDIT') return false;
@@ -1949,6 +1974,116 @@ export class BaileysProvider implements WhatsAppProvider {
 			Boolean(raw?.key?.fromMe),
 		);
 		return true;
+	}
+
+	/**
+	 * Current WhatsApp clients send edits as `secretEncryptedMessage` (MESSAGE_EDIT), encrypted
+	 * with the original message's messageSecret. Baileys does not decrypt these, so we do.
+	 */
+	private ingestSecretEdit(raw: any): boolean {
+		const secretMsg = deepUnwrapMessageContent(raw?.message)?.secretEncryptedMessage;
+		if (!secretMsg) return false;
+		const encType = secretMsg.secretEncType;
+		if (encType !== WA_SECRET_ENC_TYPE_MESSAGE_EDIT && encType !== 'MESSAGE_EDIT') return true;
+		void this.decryptSecretEdit(raw, secretMsg).catch((error) => {
+			this.logger.warn(
+				`[WA EDIT] secret edit failed for ${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		});
+		return true;
+	}
+
+	private async findMessageSecret(providerMessageId: string): Promise<{ secret: Buffer | null; key: any }> {
+		const cached = this.rawByMessageId.get(providerMessageId);
+		const fromMemory = findWaMessageSecret(cached?.message);
+		if (fromMemory) return { secret: fromMemory, key: cached?.key || null };
+		const lookup = this.rawLookup || this.messageLookup;
+		if (!lookup) return { secret: null, key: cached?.key || null };
+		const stored = await lookup(providerMessageId).catch(() => null);
+		const raw = stored?.raw;
+		return {
+			secret: waSecretBytes(raw?.messageSecret) || findWaMessageSecret(raw?.message),
+			key: raw?.key || cached?.key || null,
+		};
+	}
+
+	/** Every jid form this user may be addressed by (LID / phone), for key derivation. */
+	private authorJidCandidates(...values: unknown[]): string[] {
+		const out = new Set<string>();
+		for (const value of values) {
+			const jid = waNonAdJid(value);
+			if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) continue;
+			out.add(jid);
+			const phone = this.lidToPn.get(jid) || this.contacts.get(jid)?.phoneNumber;
+			if (phone) out.add(`${String(phone).replace(/\D/g, '')}@s.whatsapp.net`);
+			if (jid.endsWith('@s.whatsapp.net')) {
+				const digits = jid.split('@')[0];
+				for (const [lid, pn] of this.lidToPn) {
+					if (pn === digits) out.add(waNonAdJid(lid));
+				}
+			}
+		}
+		return [...out].filter(Boolean);
+	}
+
+	private async decryptSecretEdit(raw: any, secretMsg: any) {
+		const target = secretMsg.targetMessageKey || {};
+		const targetId = String(target.id || '').trim();
+		if (!targetId) return;
+		const { secret, key: originalKey } = await this.findMessageSecret(targetId);
+		if (!secret) {
+			this.logger.warn(
+				`[WA EDIT] no messageSecret for edited message ${targetId} (${this.accountId}); original not in memory or stored before secrets were kept`,
+			);
+			return;
+		}
+		const encPayload = waSecretBytes(secretMsg.encPayload);
+		const encIv = waSecretBytes(secretMsg.encIv);
+		if (!encPayload || !encIv) return;
+		const fromMe = Boolean(raw?.key?.fromMe);
+		const own = fromMe || target.fromMe ? this.getOwnJids() : [];
+		const author = this.authorJidCandidates(
+			target.participant,
+			target.remoteJid,
+			originalKey?.participant,
+			originalKey?.participantAlt,
+			originalKey?.remoteJid,
+			originalKey?.remoteJidAlt,
+			raw?.key?.participant,
+			raw?.key?.participantAlt,
+			raw?.key?.remoteJid,
+			raw?.key?.remoteJidAlt,
+			...own,
+		);
+		const plain = decryptWaSecretEncryptedPayload({
+			secret,
+			origMsgId: targetId,
+			origSenders: author,
+			modificationSenders: author,
+			encPayload,
+			encIv,
+		});
+		if (!plain) {
+			this.logger.warn(
+				`[WA EDIT] could not decrypt edit of ${targetId} (${this.accountId}); tried ${author.length} jid form(s)`,
+			);
+			return;
+		}
+		const { proto } = await loadBaileysModule();
+		const decoded: any = proto.Message.decode(plain);
+		const inner = deepUnwrapMessageContent(decoded);
+		const protocol = inner?.protocolMessage;
+		const content = protocol?.editedMessage || inner;
+		const timestampMs = Number(protocol?.timestampMs);
+		this.logger.log(`[WA EDIT] decrypted edit of ${targetId} (${this.accountId})`);
+		this.emitEdit(
+			targetId,
+			content,
+			Number.isFinite(timestampMs) && timestampMs > 0 ? new Date(timestampMs) : toDate(raw?.messageTimestamp),
+			fromMe,
+		);
 	}
 
 	private emitEdit(providerMessageId: string, edited: any, editedAt: Date, fromMe: boolean) {

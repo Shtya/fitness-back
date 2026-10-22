@@ -475,6 +475,12 @@ export class WhatsAppProviderManagerService
 					select: { id: true, text: true, raw: true },
 				}),
 			);
+			provider.setRawLookup((providerMessageId) =>
+				this.messageRepo.findOne({
+					where: { accountId: account.id, providerMessageId },
+					select: { id: true, raw: true },
+				}),
+			);
 			return provider;
 		}
 		if (providerName === 'wppconnect') {

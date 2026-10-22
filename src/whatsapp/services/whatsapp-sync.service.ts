@@ -1469,6 +1469,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					);
 				}, 2000 * (attempt + 1));
 				timer.unref?.();
+			} else {
+				this.logger.warn(
+					`[WA EDIT] edited message ${event.providerMessageId} not found for account ${accountId}`,
+				);
 			}
 			return;
 		}
