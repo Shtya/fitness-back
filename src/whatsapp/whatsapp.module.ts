@@ -21,6 +21,9 @@ import { WhatsAppMessageSchedulesController } from './controllers/whatsapp-messa
 import { WhatsAppBoardsController } from './controllers/whatsapp-boards.controller';
 import { WhatsAppAutoForwardController } from './controllers/whatsapp-auto-forward.controller';
 import { WhatsAppContactsController } from './controllers/whatsapp-contacts.controller';
+import { WhatsAppPageLockController } from './controllers/whatsapp-page-lock.controller';
+import { WhatsAppPageLockService } from './services/whatsapp-page-lock.service';
+import { MailService } from 'common/nodemailer';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
 import { WHATSAPP_AI_IMAGE_PROVIDERS } from './ai-media/whatsapp-ai-image.provider';
@@ -165,6 +168,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppBoardsController,
 		WhatsAppAutoForwardController,
 		WhatsAppContactsController,
+		WhatsAppPageLockController,
 		WhatsAppAiMediaController,
 	],
 	providers: [
@@ -193,6 +197,8 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppMessageSchedulesScheduler,
 		WhatsAppAutoForwardService,
 		WhatsAppContactsService,
+		WhatsAppPageLockService,
+		MailService,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
 		HuggingFaceWhatsAppImageProvider,
