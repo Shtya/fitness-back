@@ -109,6 +109,29 @@ describe('WhatsAppMessageSchedulesService.processDue', () => {
 		expect(failed.lastError).toBe('WhatsApp is not connected');
 	});
 
+	it('send-now puts a waiting message out right away', async () => {
+		const { service, schedule, sync } = setup();
+		schedule.nextRunAt = new Date(Date.now() + 60 * 60 * 1000);
+		(service as any).access = { getAccountAccess: jest.fn(async () => ({ canUse: true, canManage: false })) };
+		const result = await service.sendNow({ id: 'user-1' } as any, 'sch-1');
+		expect(result.status).toBe(WhatsAppMessageScheduleStatus.ACTIVE);
+		await new Promise(resolve => setImmediate(resolve));
+		await new Promise(resolve => setImmediate(resolve));
+		expect(sync.sendText).toHaveBeenCalledWith(expect.anything(), 'conv-1', 'hello', undefined, 'schedule:sch-1:conv-1');
+	});
+
+	it('send-now refuses recurring or finished messages', async () => {
+		const recurring = setup();
+		recurring.schedule.scheduleKind = WhatsAppMessageScheduleKind.RECURRING;
+		(recurring.service as any).access = { getAccountAccess: jest.fn(async () => ({ canUse: true, canManage: true })) };
+		await expect(recurring.service.sendNow({ id: 'user-1' } as any, 'sch-1')).rejects.toThrow('one-time');
+
+		const done = setup();
+		done.schedule.status = WhatsAppMessageScheduleStatus.COMPLETED;
+		(done.service as any).access = { getAccountAccess: jest.fn(async () => ({ canUse: true, canManage: true })) };
+		await expect(done.service.sendNow({ id: 'user-1' } as any, 'sch-1')).rejects.toThrow('already sent');
+	});
+
 	it('records each send as a delivery', async () => {
 		const { service } = setup();
 		await service.processDue(NOW);

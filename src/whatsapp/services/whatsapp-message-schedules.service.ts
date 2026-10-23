@@ -353,6 +353,31 @@ export class WhatsAppMessageSchedulesService {
 		return this.mapSchedule(schedule);
 	}
 
+	/** Sends a waiting one-time message right away instead of at its time. */
+	async sendNow(user: User, scheduleId: string) {
+		const schedule = await this.getScheduleEntity(scheduleId);
+		await this.assertScheduleManage(user, schedule);
+		if (schedule.scheduleKind !== WhatsAppMessageScheduleKind.ONCE) {
+			throw new BadRequestException('Only one-time messages can be sent now');
+		}
+		if (!EDITABLE_STATUSES.includes(schedule.status as WhatsAppMessageScheduleStatus)) {
+			throw new BadRequestException('This message is already sent or being sent');
+		}
+		const now = new Date();
+		schedule.status = WhatsAppMessageScheduleStatus.ACTIVE;
+		schedule.lastError = null;
+		schedule.nextRunAt = now;
+		await this.scheduleRepo.save(schedule);
+		this.emitScheduleEvent(schedule.accountId, 'schedule_updated', schedule);
+		// executeSchedule locks ACTIVE → PROCESSING, so the cron tick cannot send it a second time.
+		void this.executeSchedule(schedule, now).catch(error => {
+			this.logger.warn(
+				`Send-now failed for ${schedule.id}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		});
+		return this.mapSchedule(schedule);
+	}
+
 	async cancel(user: User, scheduleId: string) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
@@ -629,6 +654,7 @@ export class WhatsAppMessageSchedulesService {
 			id: schedule.id,
 			accountId: schedule.accountId,
 			createdByUserId: schedule.createdByUserId,
+			clientMessageId: schedule.clientMessageId ?? null,
 			title: schedule.title,
 			type: schedule.type,
 			text: schedule.text,

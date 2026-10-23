@@ -60,6 +60,11 @@ export class WhatsAppMessageSchedulesController {
 		return this.schedules.resume(req.user, scheduleId);
 	}
 
+	@Post('message-schedules/:scheduleId/send-now')
+	sendNow(@Req() req: any, @Param('scheduleId') scheduleId: string) {
+		return this.schedules.sendNow(req.user, scheduleId);
+	}
+
 	@Delete('message-schedules/:scheduleId')
 	cancel(@Req() req: any, @Param('scheduleId') scheduleId: string) {
 		return this.schedules.cancel(req.user, scheduleId);
