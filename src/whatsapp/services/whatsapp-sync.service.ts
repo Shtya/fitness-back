@@ -7097,6 +7097,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		userId: string,
 	) {
 		const privacy = getWhatsAppPrivacySettings(account);
+		// Replying shows the sender the second grey tick held back by "hold delivery tick".
+		if (typeof provider.releaseDeliveryReceipts === 'function') {
+			await provider.releaseDeliveryReceipts(conversation.providerChatId).catch((error) =>
+				this.logger.warn(
+					`Could not release delivery receipts for ${conversation.id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				),
+			);
+		}
 		if (privacy.readReceiptMode !== 'on_reply') return;
 
 		try {

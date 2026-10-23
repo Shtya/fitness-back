@@ -79,6 +79,10 @@ export class UpdateWhatsAppPrivacySettingsDto {
 
 	@IsIn(['on_open', 'on_reply', 'manual', 'never'])
 	readReceiptMode: 'on_open' | 'on_reply' | 'manual' | 'never';
+
+	@IsOptional()
+	@IsBoolean()
+	holdDeliveryReceipts?: boolean;
 }
 
 export class UpdateWhatsAppNotificationPreferencesDto {

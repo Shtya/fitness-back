@@ -34,6 +34,7 @@ import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
 import { PhoneRequestGate, type PhoneRequestOutcome } from '../utils/whatsapp-phone-request-gate';
 import { normalizeBaileysPresenceUpdate } from '../utils/whatsapp-presence-normalize';
 import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
+import { HeldDeliveryReceipts } from '../utils/whatsapp-held-receipts';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
@@ -980,6 +981,12 @@ export class BaileysProvider implements WhatsAppProvider {
 	/** Owned by the provider (not the socket) so they survive reconnects. */
 	private readonly msgRetryCounterCache = new TtlCacheStore(60 * 60_000, 5_000);
 	private rawLookup: ((providerMessageId: string) => Promise<{ raw?: any } | null>) | null = null;
+	/** Account privacy: hold the "delivered" tick until a reply is sent from the app. */
+	private deliveryHoldCheck: (() => boolean | Promise<boolean>) | null = null;
+	private readonly heldDeliveries = new HeldDeliveryReceipts((jid) => {
+		const pn = normalizeInboxJid(jid);
+		return [...new Set([jid, pn, toBaileysJid(pn)])];
+	});
 	private readonly groupMetadataCache = new TtlCacheStore(5 * 60_000, 500);
 	private messageLookup:
 		| ((providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>)
@@ -1008,6 +1015,52 @@ export class BaileysProvider implements WhatsAppProvider {
 	/** Stored raw of any message (inbound or outbound), used to decrypt later edits of it. */
 	setRawLookup(lookup: (providerMessageId: string) => Promise<{ raw?: any } | null>) {
 		this.rawLookup = lookup;
+	}
+
+	setDeliveryReceiptHold(check: () => boolean | Promise<boolean>) {
+		this.deliveryHoldCheck = check;
+	}
+
+	/**
+	 * Baileys `shouldSendDeliveryReceipt` (added by scripts/patch-baileys-delivery-receipts.mjs).
+	 * false = only ack the message to the server; the receipt waits for releaseDeliveryReceipts.
+	 */
+	private async shouldSendDeliveryReceipt(msg: any): Promise<boolean> {
+		const key = msg?.key;
+		const remoteJid = String(key?.remoteJid || '');
+		if (!remoteJid || key?.fromMe || !key?.id) return true;
+		if (remoteJid === 'status@broadcast' || remoteJid.endsWith('@broadcast') || remoteJid.endsWith('@newsletter')) {
+			return true;
+		}
+		if (!this.deliveryHoldCheck) return true;
+		let hold = false;
+		try {
+			hold = Boolean(await this.deliveryHoldCheck());
+		} catch {
+			return true;
+		}
+		if (!hold) return true;
+		this.heldDeliveries.hold(
+			{ remoteJid, id: String(key.id), participant: key.participant || undefined },
+			[key.remoteJidAlt],
+		);
+		return false;
+	}
+
+	/** Sends the held "delivered" receipts of a chat (second grey tick for the sender). */
+	async releaseDeliveryReceipts(chatId: string): Promise<number> {
+		const keys = this.heldDeliveries.take([chatId, toBaileysJid(chatId), normalizeInboxJid(chatId)]);
+		if (!keys.length) return 0;
+		if (!this.socket || this.state !== 'connected' || typeof this.socket.sendReceipts !== 'function') {
+			for (const key of keys) this.heldDeliveries.hold(key);
+			return 0;
+		}
+		await this.socket.sendReceipts(
+			keys.map((key) => ({ remoteJid: key.remoteJid, id: key.id, participant: key.participant, fromMe: false })),
+			undefined,
+		);
+		this.logger.log(`[WA RECEIPT] released ${keys.length} held delivery receipt(s) for ${chatId}`);
+		return keys.length;
 	}
 
 	/** Baileys `getMessage`: re-encrypt a message a recipient could not decrypt. */
@@ -2275,6 +2328,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			msgRetryCounterCache: this.msgRetryCounterCache,
 			getMessage: (key: any) => this.getMessageForRetry(key),
 			cachedGroupMetadata: (jid: string) => this.getCachedGroupMetadata(jid),
+			shouldSendDeliveryReceipt: (msg: any) => this.shouldSendDeliveryReceipt(msg),
 		});
 		this.socket = socket;
 
@@ -3782,6 +3836,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.messagesByChat.get(chatId) ||
 			this.messagesByChat.get(jid);
 		if (!bucket?.size) {
+			await this.releaseDeliveryReceipts(chatId).catch(() => 0);
 			this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
 			return;
 		}
@@ -3796,6 +3851,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (keys.length && typeof this.socket.readMessages === 'function') {
 			await this.socket.readMessages(keys);
 		}
+		// A read receipt also counts as delivered, so anything still held is released with it.
+		await this.releaseDeliveryReceipts(chatId).catch(() => 0);
 		this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
 	}
 

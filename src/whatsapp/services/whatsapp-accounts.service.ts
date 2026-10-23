@@ -20,7 +20,7 @@ import { forceReleaseWppBrowserProfile } from '../utils/whatsapp-browser-profile
 import {
 	getWhatsAppPrivacySettings,
 	mergeWhatsAppPrivacySettings,
-	WhatsAppPrivacySettings,
+	WhatsAppPrivacySettingsInput,
 } from '../utils/whatsapp-privacy';
 import { WhatsAppNotificationPreferences } from '../utils/whatsapp-notification-preferences';
 import { WhatsAppAccessService } from './whatsapp-access.service';
@@ -427,7 +427,7 @@ export class WhatsAppAccountsService {
 	async updatePrivacySettings(
 		user: User,
 		accountId: string,
-		settings: WhatsAppPrivacySettings,
+		settings: WhatsAppPrivacySettingsInput,
 	) {
 		const account = await this.accessService.assertAccountPermission(
 			user,

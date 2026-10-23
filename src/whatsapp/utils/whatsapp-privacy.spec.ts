@@ -10,7 +10,22 @@ describe('WhatsApp privacy settings', () => {
 		).toEqual({
 			hideStatusViewReceipts: true,
 			readReceiptMode: 'on_reply',
+			holdDeliveryReceipts: false,
 		});
+	});
+
+	it('saves the hold-delivery setting and keeps it when an older client omits it', () => {
+		const on = mergeWhatsAppPrivacySettings({ providerCapabilities: {} } as any, {
+			hideStatusViewReceipts: true,
+			readReceiptMode: 'on_reply',
+			holdDeliveryReceipts: true,
+		});
+		expect(getWhatsAppPrivacySettings({ providerCapabilities: on } as any).holdDeliveryReceipts).toBe(true);
+		const kept = mergeWhatsAppPrivacySettings({ providerCapabilities: on } as any, {
+			hideStatusViewReceipts: false,
+			readReceiptMode: 'never',
+		});
+		expect(kept['privacy.holdDeliveryReceipts']).toBe(true);
 	});
 
 	it('preserves capabilities while updating privacy settings', () => {

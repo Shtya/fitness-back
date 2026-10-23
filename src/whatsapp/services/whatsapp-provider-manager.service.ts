@@ -36,6 +36,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { WhatsAppSessionService } from './whatsapp-session.service';
 import { userAllowsWhatsAppNotifications } from '../utils/whatsapp-notification-preferences';
+import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
 
 @Injectable()
 export class WhatsAppProviderManagerService
@@ -461,6 +462,21 @@ export class WhatsAppProviderManagerService
 		}
 	}
 
+	private readonly deliveryHoldCache = new Map<string, { value: boolean; at: number }>();
+
+	/** Privacy "hold delivery tick", read per incoming message; cached briefly (a settings change applies within 10s). */
+	private async holdsDeliveryReceipts(accountId: string): Promise<boolean> {
+		const cached = this.deliveryHoldCache.get(accountId);
+		if (cached && Date.now() - cached.at < 10_000) return cached.value;
+		const account = await this.accountRepo.findOne({
+			where: { id: accountId },
+			select: { id: true, providerCapabilities: true },
+		});
+		const value = account ? getWhatsAppPrivacySettings(account).holdDeliveryReceipts : false;
+		this.deliveryHoldCache.set(accountId, { value, at: Date.now() });
+		return value;
+	}
+
 	private createProvider(account: WhatsAppAccount): WhatsAppProvider {
 		const providerName = this.resolveProviderName(account);
 		if (providerName === 'baileys') {
@@ -481,6 +497,7 @@ export class WhatsAppProviderManagerService
 					select: { id: true, raw: true },
 				}),
 			);
+			provider.setDeliveryReceiptHold(() => this.holdsDeliveryReceipts(account.id));
 			return provider;
 		}
 		if (providerName === 'wppconnect') {
