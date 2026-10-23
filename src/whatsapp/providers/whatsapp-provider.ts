@@ -273,6 +273,11 @@ export interface WhatsAppProvider {
 	): Promise<any>;
 	editText?(providerMessageId: string, text: string): Promise<any>;
 	markChatUnread?(chatId: string): Promise<any>;
+	/**
+	 * Mute / unmute the chat on WhatsApp itself, so the phone and every linked device stop (or
+	 * resume) notifying. `mutedUntil` null with `muted` true means "always".
+	 */
+	setChatMuted?(chatId: string, muted: boolean, mutedUntil: Date | null): Promise<void>;
 	sendMedia(
 		chatId: string,
 		path: string,

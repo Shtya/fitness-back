@@ -8,7 +8,8 @@ export class WhatsAppMessageSchedulesScheduler {
 
 	constructor(private readonly schedules: WhatsAppMessageSchedulesService) {}
 
-	@Cron(CronExpression.EVERY_MINUTE)
+	// Every 30s so a delayed reply goes out close to the minute it was set for.
+	@Cron(CronExpression.EVERY_30_SECONDS)
 	async handleDueSchedules() {
 		try {
 			const result = await this.schedules.processDue(new Date());

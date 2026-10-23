@@ -6,13 +6,14 @@ import {
 	NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, LessThan, LessThanOrEqual, Not, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
 import {
 	CreateWhatsAppMessageScheduleDto,
 	UpdateWhatsAppMessageScheduleDto,
 } from '../dto/whatsapp-schedule.dto';
 import {
+	WhatsAppMessage,
 	WhatsAppMessageSchedule,
 	WhatsAppMessageScheduleDelivery,
 	WhatsAppMessageScheduleDeliveryStatus,
@@ -22,7 +23,9 @@ import {
 	WhatsAppMessageScheduleRun,
 	WhatsAppMessageScheduleRunStatus,
 	WhatsAppMessageScheduleStatus,
+	WhatsAppMessageStatus,
 } from '../entities/whatsapp.entity';
+import { computeReplyGap } from '../utils/whatsapp-reply-gap';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import {
 	computeInitialNextRunAt,
@@ -38,6 +41,19 @@ import { WhatsAppSyncService } from './whatsapp-sync.service';
 const MAX_RECIPIENTS = 50;
 const DELAY_BETWEEN_RECIPIENTS_MS = 2500;
 const DUE_BATCH_SIZE = 20;
+/** A one-time message is tried this many times before it is marked failed for the user to retry. */
+const ONCE_MAX_ATTEMPTS = 3;
+const ONCE_RETRY_DELAY_MS = 2 * 60 * 1000;
+/** A run that sits in "processing" this long was cut off (restart / crash) and is picked up again. */
+const STUCK_PROCESSING_MS = 10 * 60 * 1000;
+const MIN_LEAD_MS = 30_000;
+/** Newest messages looked at to find my last message and their reply. */
+const REPLY_GAP_SCAN = 400;
+const EDITABLE_STATUSES = [
+	WhatsAppMessageScheduleStatus.ACTIVE,
+	WhatsAppMessageScheduleStatus.PAUSED,
+	WhatsAppMessageScheduleStatus.FAILED,
+];
 
 @Injectable()
 export class WhatsAppMessageSchedulesService {
@@ -55,6 +71,8 @@ export class WhatsAppMessageSchedulesService {
 		private readonly deliveryRepo: Repository<WhatsAppMessageScheduleDelivery>,
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
+		@InjectRepository(WhatsAppMessage)
+		private readonly messageRepo: Repository<WhatsAppMessage>,
 		private readonly access: WhatsAppAccessService,
 		private readonly sync: WhatsAppSyncService,
 		private readonly audit: WhatsAppAuditService,
@@ -64,6 +82,14 @@ export class WhatsAppMessageSchedulesService {
 	async create(user: User, accountId: string, dto: CreateWhatsAppMessageScheduleDto) {
 		const accountAccess = await this.access.getAccountAccess(user, accountId);
 		if (!accountAccess.canUse) throw new ForbiddenException('WhatsApp send access denied');
+
+		const clientMessageId = dto.clientMessageId?.trim() || null;
+		if (clientMessageId) {
+			const existing = await this.scheduleRepo.findOne({
+				where: { accountId, createdByUserId: user.id, clientMessageId },
+			});
+			if (existing) return this.mapSchedule(await this.getScheduleEntity(existing.id));
+		}
 
 		const conversationIds = [...new Set(dto.conversationIds.map(id => String(id)))];
 		if (!conversationIds.length || conversationIds.length > MAX_RECIPIENTS) {
@@ -113,7 +139,7 @@ export class WhatsAppMessageSchedulesService {
 			recurrenceEndDate: dto.recurrenceEndDate,
 		});
 		if (!nextRunAt) throw new BadRequestException('Could not compute the next run time');
-		if (scheduleKind === WhatsAppMessageScheduleKind.ONCE && nextRunAt.getTime() <= Date.now() + 30_000) {
+		if (scheduleKind === WhatsAppMessageScheduleKind.ONCE && nextRunAt.getTime() <= Date.now() + MIN_LEAD_MS) {
 			throw new BadRequestException('Scheduled time must be at least 1 minute in the future');
 		}
 
@@ -137,7 +163,7 @@ export class WhatsAppMessageSchedulesService {
 				recurrenceEndDate: dto.recurrenceEndDate || null,
 				nextRunAt,
 				status: WhatsAppMessageScheduleStatus.ACTIVE,
-				clientMessageId: dto.clientMessageId?.trim() || null,
+				clientMessageId,
 			}),
 		);
 
@@ -197,7 +223,7 @@ export class WhatsAppMessageSchedulesService {
 		const schedules: WhatsAppMessageSchedule[] = [];
 		for (const row of recipientRows) {
 			if (!row.schedule || seen.has(row.schedule.id)) continue;
-			// Cancelled / completed runs must not linger in the chat strip.
+			// Cancelled / completed runs must not linger in the chat strip (failed ones stay to retry).
 			if (
 				row.schedule.status === WhatsAppMessageScheduleStatus.CANCELLED ||
 				row.schedule.status === WhatsAppMessageScheduleStatus.COMPLETED
@@ -210,6 +236,29 @@ export class WhatsAppMessageSchedulesService {
 		return schedules.map(row => this.mapSchedule(row));
 	}
 
+	/**
+	 * How long the other side took to answer my last message, from the stored message times.
+	 * Used by "delayed reply" to send my next message after the same gap.
+	 */
+	async replyGap(user: User, conversationId: string) {
+		await this.access.assertConversationVisible(user, conversationId);
+		const rows = await this.messageRepo.find({
+			where: [
+				{ conversationId, direction: 'inbound' as any, deletedMode: Not('everyone') },
+				{
+					conversationId,
+					direction: 'outbound' as any,
+					deletedMode: Not('everyone'),
+					status: Not(In([WhatsAppMessageStatus.PENDING, WhatsAppMessageStatus.FAILED])),
+				},
+			],
+			select: ['id', 'direction', 'providerTimestamp'],
+			order: { providerTimestamp: 'DESC' },
+			take: REPLY_GAP_SCAN,
+		});
+		return computeReplyGap(rows);
+	}
+
 	async getOne(user: User, scheduleId: string) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleVisible(user, schedule);
@@ -219,11 +268,8 @@ export class WhatsAppMessageSchedulesService {
 	async update(user: User, scheduleId: string, dto: UpdateWhatsAppMessageScheduleDto) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
-		if (
-			schedule.status !== WhatsAppMessageScheduleStatus.ACTIVE &&
-			schedule.status !== WhatsAppMessageScheduleStatus.PAUSED
-		) {
-			throw new BadRequestException('Only active or paused schedules can be edited');
+		if (!EDITABLE_STATUSES.includes(schedule.status as WhatsAppMessageScheduleStatus)) {
+			throw new BadRequestException('Only scheduled, paused or failed messages can be edited');
 		}
 
 		if (typeof dto.title === 'string') schedule.title = dto.title.trim() || null;
@@ -234,7 +280,20 @@ export class WhatsAppMessageSchedulesService {
 			schedule.recurrenceEndDate = dto.recurrenceEndDate || null;
 		}
 		if (dto.scheduledAt && schedule.scheduleKind === WhatsAppMessageScheduleKind.ONCE) {
-			schedule.scheduledAt = new Date(dto.scheduledAt);
+			const at = new Date(dto.scheduledAt);
+			if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now() + MIN_LEAD_MS) {
+				throw new BadRequestException('Scheduled time must be at least 1 minute in the future');
+			}
+			schedule.scheduledAt = at;
+		}
+		if (
+			schedule.scheduleKind === WhatsAppMessageScheduleKind.ONCE &&
+			schedule.status === WhatsAppMessageScheduleStatus.FAILED
+		) {
+			// Editing a failed message puts it back in the queue with a fresh set of tries.
+			if (!dto.scheduledAt) throw new BadRequestException('Pick a new time to send the failed message');
+			schedule.status = WhatsAppMessageScheduleStatus.ACTIVE;
+			schedule.lastError = null;
 		}
 
 		schedule.nextRunAt = computeInitialNextRunAt({
@@ -257,6 +316,9 @@ export class WhatsAppMessageSchedulesService {
 	async pause(user: User, scheduleId: string) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
+		if (schedule.status !== WhatsAppMessageScheduleStatus.ACTIVE) {
+			throw new BadRequestException('Only scheduled messages can be paused');
+		}
 		schedule.status = WhatsAppMessageScheduleStatus.PAUSED;
 		await this.scheduleRepo.save(schedule);
 		this.emitScheduleEvent(schedule.accountId, 'schedule_updated', schedule);
@@ -266,7 +328,16 @@ export class WhatsAppMessageSchedulesService {
 	async resume(user: User, scheduleId: string) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
+		if (
+			schedule.status !== WhatsAppMessageScheduleStatus.PAUSED &&
+			schedule.status !== WhatsAppMessageScheduleStatus.FAILED
+		) {
+			throw new BadRequestException('Only paused or failed messages can be resumed');
+		}
+		const retrying = schedule.status === WhatsAppMessageScheduleStatus.FAILED;
 		schedule.status = WhatsAppMessageScheduleStatus.ACTIVE;
+		schedule.lastError = retrying ? null : schedule.lastError;
+		// A one-time message whose time passed while paused / failed goes out on the next tick.
 		schedule.nextRunAt =
 			computeInitialNextRunAt({
 				scheduleKind: schedule.scheduleKind,
@@ -285,6 +356,15 @@ export class WhatsAppMessageSchedulesService {
 	async cancel(user: User, scheduleId: string) {
 		const schedule = await this.getScheduleEntity(scheduleId);
 		await this.assertScheduleManage(user, schedule);
+		if (schedule.status === WhatsAppMessageScheduleStatus.PROCESSING) {
+			throw new BadRequestException('This message is being sent right now');
+		}
+		if (
+			schedule.status === WhatsAppMessageScheduleStatus.COMPLETED ||
+			schedule.status === WhatsAppMessageScheduleStatus.CANCELLED
+		) {
+			return this.mapSchedule(schedule);
+		}
 		schedule.status = WhatsAppMessageScheduleStatus.CANCELLED;
 		schedule.nextRunAt = null;
 		await this.scheduleRepo.save(schedule);
@@ -296,14 +376,15 @@ export class WhatsAppMessageSchedulesService {
 		if (this.processing) return { processed: 0, skipped: true };
 		this.processing = true;
 		try {
-			const due = await this.scheduleRepo.find({
+			await this.recoverStuckRuns(now);
+			const ready = await this.scheduleRepo.find({
 				where: {
 					status: WhatsAppMessageScheduleStatus.ACTIVE,
+					nextRunAt: LessThanOrEqual(now),
 				},
 				order: { nextRunAt: 'ASC' },
 				take: DUE_BATCH_SIZE,
 			});
-			const ready = due.filter(row => row.nextRunAt && row.nextRunAt.getTime() <= now.getTime());
 			for (const schedule of ready) {
 				await this.executeSchedule(schedule, now).catch(error => {
 					this.logger.warn(
@@ -343,9 +424,14 @@ export class WhatsAppMessageSchedulesService {
 				return;
 			}
 
+			const once = fresh.scheduleKind === WhatsAppMessageScheduleKind.ONCE;
+			const alreadySent = once ? await this.sentConversationIds(fresh.id) : new Set<string>();
 			const recipients = (fresh.recipients || []).filter(
-				item => item.status === WhatsAppMessageScheduleRecipientStatus.ACTIVE,
+				item =>
+					item.status === WhatsAppMessageScheduleRecipientStatus.ACTIVE &&
+					!alreadySent.has(item.conversationId),
 			);
+			const previousRuns = once ? await this.runRepo.count({ where: { scheduleId: fresh.id } }) : 0;
 			const run = await this.runRepo.save(
 				this.runRepo.create({
 					scheduleId: fresh.id,
@@ -357,9 +443,13 @@ export class WhatsAppMessageSchedulesService {
 
 			let sentCount = 0;
 			let failedCount = 0;
+			let lastFailure = '';
 
 			for (const recipient of recipients) {
-				const clientMessageId = `${fresh.id}:${run.id}:${recipient.conversationId}`;
+				// One-time: the same id on every try, so a retry after a lost response is not sent twice.
+				const clientMessageId = once
+					? `schedule:${fresh.id}:${recipient.conversationId}`
+					: `${fresh.id}:${run.id}:${recipient.conversationId}`;
 				const delivery = await this.deliveryRepo.save(
 					this.deliveryRepo.create({
 						runId: run.id,
@@ -390,12 +480,13 @@ export class WhatsAppMessageSchedulesService {
 					delivery.attemptCount = 1;
 					delivery.lastError = detail;
 					recipient.lastError = detail;
+					lastFailure = detail;
 					failedCount += 1;
 				}
 
 				await this.deliveryRepo.save(delivery);
 				await this.recipientRepo.save(recipient);
-				await this.sleep(DELAY_BETWEEN_RECIPIENTS_MS);
+				if (recipient !== recipients[recipients.length - 1]) await this.sleep(DELAY_BETWEEN_RECIPIENTS_MS);
 			}
 
 			run.sentCount = sentCount;
@@ -409,15 +500,21 @@ export class WhatsAppMessageSchedulesService {
 			await this.runRepo.save(run);
 
 			fresh.lastRunAt = now;
-			fresh.lastError = failedCount ? `${failedCount} recipient(s) failed` : null;
+			fresh.lastError = failedCount ? lastFailure || `${failedCount} recipient(s) failed` : null;
 
-			if (fresh.scheduleKind === WhatsAppMessageScheduleKind.ONCE) {
-				fresh.status =
-					sentCount > 0
-						? WhatsAppMessageScheduleStatus.COMPLETED
-						: WhatsAppMessageScheduleStatus.ACTIVE;
-				fresh.nextRunAt =
-					sentCount > 0 ? null : new Date(now.getTime() + 5 * 60 * 1000);
+			if (once) {
+				const attempts = previousRuns + 1;
+				if (failedCount === 0) {
+					fresh.status = WhatsAppMessageScheduleStatus.COMPLETED;
+					fresh.nextRunAt = null;
+				} else if (attempts >= ONCE_MAX_ATTEMPTS) {
+					fresh.status = WhatsAppMessageScheduleStatus.FAILED;
+					fresh.nextRunAt = null;
+					fresh.lastError = lastFailure || fresh.lastError;
+				} else {
+					fresh.status = WhatsAppMessageScheduleStatus.ACTIVE;
+					fresh.nextRunAt = new Date(now.getTime() + ONCE_RETRY_DELAY_MS * attempts);
+				}
 			} else {
 				const nextRunAt = computeNextRecurringRunAt({
 					after: new Date(now.getTime() + 60_000),
@@ -468,6 +565,36 @@ export class WhatsAppMessageSchedulesService {
 			quotedProviderMessageId: schedule.quotedProviderMessageId || undefined,
 			clientMessageId,
 		});
+	}
+
+	/** Chats a one-time message already reached in an earlier try. */
+	private async sentConversationIds(scheduleId: string) {
+		const rows = await this.deliveryRepo.find({
+			where: { scheduleId, status: WhatsAppMessageScheduleDeliveryStatus.SENT },
+			select: ['conversationId'],
+		});
+		return new Set(rows.map(row => row.conversationId));
+	}
+
+	/**
+	 * A run cut off by a restart leaves the schedule in "processing" forever. Put it back in the queue;
+	 * chats it already reached are skipped by the delivery check, so nothing is sent twice.
+	 */
+	private async recoverStuckRuns(now: Date) {
+		const stuck = await this.scheduleRepo.find({
+			where: {
+				status: WhatsAppMessageScheduleStatus.PROCESSING,
+				updated_at: LessThan(new Date(now.getTime() - STUCK_PROCESSING_MS)),
+			},
+			select: ['id'],
+			take: DUE_BATCH_SIZE,
+		});
+		if (!stuck.length) return;
+		await this.scheduleRepo.update(
+			{ id: In(stuck.map(row => row.id)), status: WhatsAppMessageScheduleStatus.PROCESSING },
+			{ status: WhatsAppMessageScheduleStatus.ACTIVE, nextRunAt: now },
+		);
+		this.logger.warn(`Re-queued ${stuck.length} WhatsApp scheduled message(s) left in processing`);
 	}
 
 	private async getScheduleEntity(scheduleId: string) {

@@ -4345,22 +4345,58 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		isMuted: boolean,
 		mutedUntil?: Date | string | null,
 	) {
-		await this.assertConversationVisible(user, conversationId);
-		const until =
-			isMuted && mutedUntil
-				? new Date(mutedUntil)
-				: isMuted
-					? null
-					: null;
+		const { conversation, accountAccess } = await this.assertConversationVisible(user, conversationId);
+		const parsed = isMuted && mutedUntil ? new Date(mutedUntil) : null;
+		const until = parsed && Number.isFinite(parsed.getTime()) ? parsed : null;
 		await this.saveConversationPreference(user.id, conversationId, {
 			isMuted: Boolean(isMuted),
-			mutedUntil: Boolean(isMuted) ? (Number.isFinite(until?.getTime?.()) ? until : null) : null,
+			mutedUntil: Boolean(isMuted) ? until : null,
 		});
+		// The app's mute only silences this app. Mirror it on WhatsApp so the phone stops ringing too.
+		const syncedToWhatsApp = accountAccess?.canUse
+			? await this.syncChatMuteToWhatsApp(conversation, Boolean(isMuted), until)
+			: false;
 		return {
 			ok: true,
 			conversationId,
 			isMuted: Boolean(isMuted),
-			mutedUntil: Boolean(isMuted) && until && Number.isFinite(until.getTime()) ? until : null,
+			mutedUntil: Boolean(isMuted) ? until : null,
+			syncedToWhatsApp,
+		};
+	}
+
+	/** Best effort: the in-app mute is already saved even if WhatsApp is offline. */
+	private async syncChatMuteToWhatsApp(
+		conversation: WhatsAppConversation | null | undefined,
+		muted: boolean,
+		until: Date | null,
+	): Promise<boolean> {
+		const chatId = String(conversation?.providerChatId || '').trim();
+		if (!conversation?.accountId || !chatId) return false;
+		const provider = this.providers.getProvider(conversation.accountId);
+		if (typeof provider?.setChatMuted !== 'function' || provider.getState?.() !== 'connected') return false;
+		try {
+			await provider.setChatMuted(chatId, muted, until);
+			return true;
+		} catch (error) {
+			this.logger.warn(
+				`WhatsApp mute sync failed for conversation ${conversation.id}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
+	}
+
+	/** Whether this user gets notifications for the chat: same rules as the push filter. */
+	async getConversationNotifyState(user: User, conversationId: string) {
+		const { conversation } = await this.assertConversationVisible(user, conversationId);
+		const unmuted = await this.filterUnmutedNotificationRecipients([user.id], conversation);
+		const enabled = await this.access.filterNotificationEnabledRecipients(conversation.accountId, [user.id]);
+		return {
+			conversationId,
+			isMuted: unmuted.length === 0,
+			notificationsEnabled: enabled.length > 0,
 		};
 	}
 

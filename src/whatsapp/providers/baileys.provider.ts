@@ -3799,6 +3799,17 @@ export class BaileysProvider implements WhatsAppProvider {
 		this.rememberChat(normalizeInboxJid(chatId), { unreadCount: 0 });
 	}
 
+	async setChatMuted(chatId: string, muted: boolean, mutedUntil: Date | null) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp account is not connected');
+		}
+		if (typeof this.socket.chatModify !== 'function') return;
+		// App-state muteAction: end time in ms since epoch, -1 for "always", null to unmute.
+		const until = mutedUntil ? mutedUntil.getTime() : NaN;
+		const value = !muted ? null : Number.isFinite(until) ? until : -1;
+		await this.socket.chatModify({ mute: value }, toBaileysJid(chatId));
+	}
+
 	async markChatUnread(chatId: string) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');

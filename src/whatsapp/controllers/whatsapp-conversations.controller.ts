@@ -217,6 +217,11 @@ export class WhatsAppConversationsController {
 		return this.sync.deleteConversation(req.user, conversationId);
 	}
 
+	@Get('conversations/:conversationId/notify-state')
+	notifyState(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.sync.getConversationNotifyState(req.user, conversationId);
+	}
+
 	@Put('conversations/:conversationId/mute')
 	setMuted(
 		@Req() req: any,

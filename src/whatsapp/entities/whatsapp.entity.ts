@@ -1138,6 +1138,8 @@ export enum WhatsAppMessageScheduleStatus {
 	PROCESSING = 'processing',
 	COMPLETED = 'completed',
 	CANCELLED = 'cancelled',
+	/** A one-time send that kept failing; it waits for the user to retry, edit or delete it. */
+	FAILED = 'failed',
 }
 
 export enum WhatsAppMessageScheduleRecipientStatus {

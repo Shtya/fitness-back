@@ -31,6 +31,11 @@ export class WhatsAppMessageSchedulesController {
 		return this.schedules.listForConversation(req.user, conversationId);
 	}
 
+	@Get('conversations/:conversationId/reply-gap')
+	replyGap(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.schedules.replyGap(req.user, conversationId);
+	}
+
 	@Get('message-schedules/:scheduleId')
 	getOne(@Req() req: any, @Param('scheduleId') scheduleId: string) {
 		return this.schedules.getOne(req.user, scheduleId);
