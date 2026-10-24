@@ -1,16 +1,21 @@
 import {
 	TYPING_MESSAGE_WINDOW_MS,
 	TYPING_SESSION_GAP_MS,
+	TYPING_WINDOW_SETTING_KEY,
 	TypingAttemptLike,
 	attemptAcceptsMessage,
+	clampTypingWindowMinutes,
 	decideTypingTransition,
 	desiredOnlinePresence,
 	normalizeTypingAttemptFilter,
 	onlinePresenceMode,
 	serializeTypingAttempt,
 	typingCheckpointFor,
+	typingCheckpointsFor,
 	typingPresenceSignal,
 	typingSentWithinMinutes,
+	typingWindowMinutesFrom,
+	typingWindowSql,
 } from './whatsapp-typing-attempts';
 
 const t0 = new Date('2026-10-22T10:00:00.000Z');
@@ -97,6 +102,28 @@ describe('whatsapp typing attempts', () => {
 		expect(typingSentWithinMinutes(4 * 60_000)).toBe(5);
 		expect(typingSentWithinMinutes(30 * 60_000)).toBe(30);
 		expect(typingSentWithinMinutes(31 * 60_000)).toBeNull();
+	});
+
+	it('cuts checkpoints at a custom no-message window', () => {
+		expect(typingCheckpointsFor(15)).toEqual([1, 2, 3, 5, 10, 15]);
+		expect(typingCheckpointsFor(90)).toEqual([1, 2, 3, 5, 10, 20, 30, 60, 90]);
+		expect(typingCheckpointFor(50 * 60_000, 15)).toBe(15);
+		expect(typingCheckpointFor(50 * 60_000, 90)).toBe(30);
+		expect(typingSentWithinMinutes(12 * 60_000, 15)).toBe(15);
+		expect(typingSentWithinMinutes(16 * 60_000, 15)).toBeNull();
+		expect(typingSentWithinMinutes(75 * 60_000, 90)).toBe(90);
+		const stopped = attempt({ status: 'stopped' });
+		expect(attemptAcceptsMessage(stopped, at(45 * 60_000), 60 * 60_000)).toBe(true);
+		expect(attemptAcceptsMessage(stopped, at(11 * 60_000), 10 * 60_000)).toBe(false);
+	});
+
+	it('reads and clamps the per-account window setting', () => {
+		expect(typingWindowMinutesFrom(undefined)).toBe(30);
+		expect(typingWindowMinutesFrom({ [TYPING_WINDOW_SETTING_KEY]: '45' })).toBe(45);
+		expect(typingWindowMinutesFrom({ [TYPING_WINDOW_SETTING_KEY]: 0 })).toBe(1);
+		expect(typingWindowMinutesFrom({ [TYPING_WINDOW_SETTING_KEY]: 99_999 })).toBe(1440);
+		expect(clampTypingWindowMinutes('abc')).toBe(30);
+		expect(typingWindowSql('w')).toContain(TYPING_WINDOW_SETTING_KEY);
 	});
 
 	it('serializes UTC instants and derived gaps', () => {

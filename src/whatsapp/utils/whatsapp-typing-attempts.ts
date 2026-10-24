@@ -15,12 +15,39 @@ export type TypingPresenceSignal = TypingAttemptKind | 'stop';
 export const TYPING_SESSION_GAP_MS = 60_000;
 /** A `typing` row with no refresh for this long is treated as stopped (missed `paused`). */
 export const TYPING_STALE_MS = 45_000;
-/** Without a message this long after the last typing, the attempt closes as `no_message`. */
+/** Without a message this long after the last typing, the attempt closes as `no_message` (default). */
 export const TYPING_MESSAGE_WINDOW_MS = 30 * 60_000;
+export const TYPING_WINDOW_DEFAULT_MINUTES = 30;
+export const TYPING_WINDOW_MIN_MINUTES = 1;
+export const TYPING_WINDOW_MAX_MINUTES = 24 * 60;
+/** Per-account override, stored in whatsapp_accounts.provider_capabilities. */
+export const TYPING_WINDOW_SETTING_KEY = 'typing.noMessageWindowMinutes';
 /** Tolerance for a message persisted just before the composing event was processed. */
 export const TYPING_MESSAGE_SKEW_MS = 5_000;
-/** Follow-up checkpoints (minutes after the last typing). */
-export const TYPING_CHECKPOINT_MINUTES = [1, 2, 3, 5, 10, 20, 30] as const;
+/** Follow-up checkpoints (minutes after the last typing), cut at the account's window. */
+export const TYPING_CHECKPOINT_MINUTES = [1, 2, 3, 5, 10, 20, 30, 60, 120, 240, 480, 720, 1440] as const;
+
+export function clampTypingWindowMinutes(value: unknown): number {
+	const n = Math.round(Number(value));
+	if (!Number.isFinite(n)) return TYPING_WINDOW_DEFAULT_MINUTES;
+	return Math.min(TYPING_WINDOW_MAX_MINUTES, Math.max(TYPING_WINDOW_MIN_MINUTES, n));
+}
+
+export function typingWindowMinutesFrom(capabilities: Record<string, unknown> | null | undefined): number {
+	const raw = capabilities?.[TYPING_WINDOW_SETTING_KEY];
+	return raw == null || raw === '' ? TYPING_WINDOW_DEFAULT_MINUTES : clampTypingWindowMinutes(raw);
+}
+
+/** SQL: the window in minutes for an account row alias (same rules as typingWindowMinutesFrom). */
+export function typingWindowSql(accountAlias: string) {
+	const raw = `(${accountAlias}.provider_capabilities->>'${TYPING_WINDOW_SETTING_KEY}')`;
+	return `LEAST(${TYPING_WINDOW_MAX_MINUTES}, GREATEST(${TYPING_WINDOW_MIN_MINUTES}, CASE WHEN ${raw} ~ '^[0-9]{1,6}$' THEN ${raw}::int ELSE ${TYPING_WINDOW_DEFAULT_MINUTES} END))`;
+}
+
+export function typingCheckpointsFor(windowMinutes = TYPING_WINDOW_DEFAULT_MINUTES): number[] {
+	const window = clampTypingWindowMinutes(windowMinutes);
+	return [...TYPING_CHECKPOINT_MINUTES.filter((checkpoint) => checkpoint < window), window];
+}
 
 export const TYPING_ATTEMPT_STATUSES: TypingAttemptStatus[] = [
 	'typing',
@@ -117,55 +144,59 @@ export function decideTypingTransition(
 
 /**
  * Only the newest attempt of the conversation may own an inbound message, and
- * only while it is still open and inside the 30-minute window.
+ * only while it is still open and inside the account's no-message window.
  */
 export function attemptAcceptsMessage(
 	latest: TypingAttemptLike | null,
 	messageAt: Date,
+	windowMs = TYPING_MESSAGE_WINDOW_MS,
 ): boolean {
 	if (!latest) return false;
 	if (latest.status !== 'typing' && latest.status !== 'stopped') return false;
 	const at = messageAt.getTime();
 	if (at < latest.startedAt.getTime() - TYPING_MESSAGE_SKEW_MS) return false;
-	return at - latest.lastTypingAt.getTime() <= TYPING_MESSAGE_WINDOW_MS;
+	return at - latest.lastTypingAt.getTime() <= windowMs;
 }
 
 /** Largest checkpoint already reached `elapsedMs` after the last typing. */
-export function typingCheckpointFor(elapsedMs: number): number {
+export function typingCheckpointFor(elapsedMs: number, windowMinutes = TYPING_WINDOW_DEFAULT_MINUTES): number {
 	const minutes = Math.max(0, elapsedMs) / 60_000;
 	let reached = 0;
-	for (const checkpoint of TYPING_CHECKPOINT_MINUTES) {
+	for (const checkpoint of typingCheckpointsFor(windowMinutes)) {
 		if (minutes >= checkpoint) reached = checkpoint;
 	}
 	return reached;
 }
 
 /** Smallest checkpoint that still covers a message `gapMs` after the last typing. */
-export function typingSentWithinMinutes(gapMs: number): number | null {
+export function typingSentWithinMinutes(
+	gapMs: number,
+	windowMinutes = TYPING_WINDOW_DEFAULT_MINUTES,
+): number | null {
 	const minutes = Math.max(0, gapMs) / 60_000;
-	for (const checkpoint of TYPING_CHECKPOINT_MINUTES) {
+	for (const checkpoint of typingCheckpointsFor(windowMinutes)) {
 		if (minutes <= checkpoint) return checkpoint;
 	}
 	return null;
 }
 
-/** SQL fragment: checkpoint reached by `ref` (timestamptz expression) at `now()`. */
-export function typingCheckpointSql(ref: string) {
+/** SQL fragment: checkpoint reached by `ref` (timestamptz) at `now()`, capped at `window` (minutes). */
+export function typingCheckpointSql(ref: string, window = String(TYPING_WINDOW_DEFAULT_MINUTES)) {
 	const minutes = `EXTRACT(EPOCH FROM (now() - ${ref})) / 60`;
 	const cases = [...TYPING_CHECKPOINT_MINUTES]
 		.reverse()
 		.map((checkpoint) => `WHEN ${minutes} >= ${checkpoint} THEN ${checkpoint}`)
 		.join(' ');
-	return `(CASE ${cases} ELSE 0 END)`;
+	return `(CASE WHEN ${minutes} >= (${window}) THEN (${window}) ELSE (CASE ${cases} ELSE 0 END) END)`;
 }
 
-/** SQL fragment: smallest checkpoint covering `gap` (interval expression); 30 past the window. */
-export function typingSentWithinSql(gap: string) {
+/** SQL fragment: smallest checkpoint covering `gap` (interval), capped at `window` (minutes). */
+export function typingSentWithinSql(gap: string, window = String(TYPING_WINDOW_DEFAULT_MINUTES)) {
 	const minutes = `EXTRACT(EPOCH FROM (${gap})) / 60`;
 	const cases = TYPING_CHECKPOINT_MINUTES.map(
 		(checkpoint) => `WHEN ${minutes} <= ${checkpoint} THEN ${checkpoint}`,
 	).join(' ');
-	return `(CASE ${cases} ELSE 30 END)`;
+	return `LEAST((CASE ${cases} ELSE ${TYPING_WINDOW_MAX_MINUTES} END), (${window}))`;
 }
 
 const iso = (value: unknown) => {
@@ -180,7 +211,13 @@ const ms = (value: unknown) => {
 };
 
 /** API row (snake_case SQL → camelCase), with derived gaps for the UI. */
-export function serializeTypingAttempt(row: any, now = new Date()) {
+export function serializeTypingAttempt(
+	row: any,
+	now = new Date(),
+	fallbackWindowMinutes = TYPING_WINDOW_DEFAULT_MINUTES,
+) {
+	const windowMinutes =
+		row.window_minutes != null ? clampTypingWindowMinutes(row.window_minutes) : fallbackWindowMinutes;
 	const startedAt = ms(row.started_at);
 	const lastTypingAt = ms(row.last_typing_at);
 	const messageAt = ms(row.message_at);
@@ -204,15 +241,16 @@ export function serializeTypingAttempt(row: any, now = new Date()) {
 		eventCount: Number(row.event_count || 0),
 		checkpointMinutes:
 			status === 'typing' || status === 'stopped'
-				? typingCheckpointFor(sinceTypingMs ?? 0)
+				? typingCheckpointFor(sinceTypingMs ?? 0, windowMinutes)
 				: Number(row.checkpoint_minutes || 0),
 		messageId: row.message_id ? String(row.message_id) : null,
 		messageAt: iso(row.message_at),
 		gapFromStartMs: messageAt != null && startedAt != null ? Math.max(0, messageAt - startedAt) : null,
 		gapFromLastTypingMs,
 		sentWithinMinutes:
-			gapFromLastTypingMs != null ? typingSentWithinMinutes(gapFromLastTypingMs) : null,
+			gapFromLastTypingMs != null ? typingSentWithinMinutes(gapFromLastTypingMs, windowMinutes) : null,
 		sinceTypingMs,
+		windowMinutes,
 		superseded: Boolean(row.superseded_by),
 		closedAt: iso(row.closed_at),
 	};
