@@ -2303,6 +2303,19 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		await fs.mkdir(this.sessionDir(), { recursive: true });
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
+		// WhatsApp only answers a linked device's presence subscription with real data when it
+		// carries the contact's privacy token (tctoken). Tokens arrive when someone messages us
+		// (or via history sync); announce each new one so we subscribe to that person right away.
+		const rawKeySet = state.keys.set.bind(state.keys);
+		state.keys.set = async (data: any) => {
+			await rawKeySet(data);
+			const tokens = data?.tctoken;
+			if (!tokens || typeof tokens !== 'object') return;
+			const jids = Object.entries(tokens)
+				.filter(([jid, value]: [string, any]) => jid !== '__index' && value?.token?.length)
+				.map(([jid]) => jid);
+			if (jids.length) this.emit({ type: 'presence_token', jids });
+		};
 		this.authKeys = state.keys;
 		const version = await resolveBaileysSocketVersion(baileys);
 
@@ -2439,6 +2452,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			// notify = live while online. append / other types are usually store /
 			// history dumps, except a recent fromMe echo from the phone app.
 			for (const raw of list) {
+				this.learnOwnPushName(raw);
 				if (this.rememberStatus(raw)) continue;
 				if (this.ingestRevoke(raw)) continue;
 				if (this.ingestEdit(raw)) continue;
@@ -3942,6 +3956,57 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	isOnlinePresence() {
 		return this.onlinePresence;
+	}
+
+	/**
+	 * Messages sent from the phone carry our own WhatsApp profile name (`pushName`). Baileys needs
+	 * that name to announce `available`; it normally arrives with app-state sync, which some
+	 * linked devices never receive. Learn it from our own traffic — never invent one.
+	 */
+	private learnOwnPushName(raw: any) {
+		const me = this.socket?.authState?.creds?.me;
+		if (!me || me.name || !raw?.key?.fromMe) return;
+		const name = String(raw?.pushName || '').trim();
+		if (!name) return;
+		me.name = name;
+		this.availabilityError = null;
+		this.logger.log(
+			`[WHATSAPP PRESENCE] Baileys push name learned from own message session=${this.accountId}`,
+		);
+	}
+
+	/**
+	 * Contacts we hold an unexpired privacy token for — the only ones WhatsApp gives a linked
+	 * device real presence for. Read from the session's key files (Baileys multi-file store).
+	 */
+	async presenceTokenJids(): Promise<string[]> {
+		const dir = this.sessionDir();
+		let files: string[] = [];
+		try {
+			files = (await fs.readdir(dir)).filter(
+				(name) => name.startsWith('tctoken-') && name.endsWith('.json') && !name.includes('__index'),
+			);
+		} catch {
+			return [];
+		}
+		const now = Math.floor(Date.now() / 1000);
+		// Same rolling window Baileys uses (4 buckets of 7 days).
+		const bucket = 604_800;
+		const cutoff = (Math.floor(now / bucket) - 3) * bucket;
+		const jids: string[] = [];
+		for (const name of files) {
+			try {
+				const entry = JSON.parse(await fs.readFile(path.join(dir, name), 'utf8'));
+				const token = entry?.token;
+				const size = typeof token?.data === 'string' ? token.data.length : Array.isArray(token?.data) ? token.data.length : 0;
+				const ts = Number(entry?.timestamp);
+				if (!size || !Number.isFinite(ts) || ts < cutoff) continue;
+				jids.push(name.slice('tctoken-'.length, -'.json'.length));
+			} catch {
+				/* unreadable key file — skip */
+			}
+		}
+		return jids;
 	}
 
 	/** What decides whether WhatsApp will stream contacts' presence to this device. */

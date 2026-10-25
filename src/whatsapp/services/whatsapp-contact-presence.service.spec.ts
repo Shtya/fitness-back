@@ -308,11 +308,13 @@ describe('WhatsAppContactPresenceService', () => {
 			redis.sMembers.mockResolvedValue(['conv-a', 'conv-b']);
 			redis.mGet.mockResolvedValue([storedEntry('conv-a'), storedEntry('conv-b')]);
 
-			const first = await service.listOnline('acc-1');
+			const first = await service.listOnline('acc-1', { includeOffline: true });
 			await service.listOnline('acc-1');
 			await service.listOnline('acc-1', { includeOffline: true });
 
 			expect(first.items.map((i) => i.conversationId).sort()).toEqual(['conv-a', 'conv-b']);
+			// Restored rows are not live until WhatsApp confirms them after the restart.
+			expect(first.items.every((i) => !i.online && i.status === 'unknown')).toBe(true);
 			expect(redis.mGet).toHaveBeenCalledWith([
 				'wa:presence:acc-1:conv-a',
 				'wa:presence:acc-1:conv-b',
@@ -335,7 +337,7 @@ describe('WhatsAppContactPresenceService', () => {
 			]);
 			redis.mGet.mockResolvedValue([storedEntry('conv-a')]);
 
-			const snap = await service.listOnline('acc-1');
+			const snap = await service.listOnline('acc-1', { includeOffline: true });
 
 			expect(redis.scanKeys).toHaveBeenCalledWith('wa:presence:acc-1:*');
 			expect(redis.mGet).toHaveBeenCalledWith(['wa:presence:acc-1:conv-a']);
@@ -371,7 +373,7 @@ describe('WhatsAppContactPresenceService', () => {
 			redis.sMembers.mockResolvedValue(['conv-a']);
 			redis.mGet.mockResolvedValue([storedEntry('conv-a')]);
 
-			const snap = await service.listOnline('acc-1');
+			const snap = await service.listOnline('acc-1', { includeOffline: true });
 
 			expect(snap.items).toHaveLength(1);
 			expect(redis.sMembers).toHaveBeenCalledTimes(1);

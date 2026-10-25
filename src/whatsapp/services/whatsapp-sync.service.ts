@@ -1214,7 +1214,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				return;
 			}
 			let conversation: WhatsAppConversation | null = null;
-			for (const candidate of [...new Set(aliasList)]) {
+			// Same person, different id form (phone vs LID): reuse the row their last presence hit,
+			// so "offline" reaches the conversation that was marked "online".
+			const knownConversationId = this.contactPresence.lookupAlias(accountId, aliasList, phoneDigits);
+			if (knownConversationId) {
+				conversation = await this.conversationRepo.findOne({
+					where: { id: knownConversationId, accountId },
+					relations: ['contact'],
+				});
+			}
+			for (const candidate of conversation ? [] : [...new Set(aliasList)]) {
 				conversation =
 					(await this.conversationRepo.findOne({
 						where: { accountId, providerChatId: candidate },
@@ -1303,6 +1312,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			this.logger.debug(
 				`[WHATSAPP PRESENCE] Sync APPLY session=${accountId} conv=${conversation.id} jid=${presencePayload.chatId} state=${state} isOnline=${presencePayload.isOnline}`,
 			);
+			if (!isGroupPresence) {
+				this.contactPresence.rememberAliases(accountId, conversation.id, [
+					...aliasList,
+					conversation.providerChatId,
+				]);
+			}
 			this.contactPresence.applyPresenceEvent(accountId, conversation, presencePayload);
 			this.typingAttempts?.recordPresence(
 				conversation,

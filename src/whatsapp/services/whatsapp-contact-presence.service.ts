@@ -106,6 +106,8 @@ export class WhatsAppContactPresenceService
 			lastLiveAt: number;
 			drops: Record<string, number>;
 			subscribe: { at: number; requested: number; ok: number; result: string } | null;
+			/** Contacts with an unexpired privacy token at the last subscribe (null = unknown). */
+			tokenHolders: number | null;
 		}
 	>();
 	/**
@@ -120,6 +122,23 @@ export class WhatsAppContactPresenceService
 	private sharedTimer: ReturnType<typeof setInterval> | null = null;
 	private readonly sharedPollMs = 4_000;
 	private readonly sharedIdleMs = 5 * 60_000;
+	/**
+	 * Every JID form WhatsApp used for a person (phone @c.us/@s.whatsapp.net, @lid, …) → the
+	 * conversation their presence was applied to. WhatsApp may report "online" under one form and
+	 * "offline" under another; without this the offline event missed the row and it stayed online.
+	 */
+	private readonly aliasToConversation = new Map<string, string>();
+	/** `${accountId}:${conversationId}` → when we re-subscribed to confirm a live status. */
+	private readonly verifyPendingSince = new Map<string, number>();
+	private verifyTimer: ReturnType<typeof setInterval> | null = null;
+	private readonly verifyEveryMs = 90_000;
+	/** WhatsApp answers a subscribe within seconds; no answer by then = we can't confirm. */
+	private readonly verifyAnswerMs = 45_000;
+	private readonly fullResubscribeMs = 10 * 60_000;
+	private readonly lastFullSubscribeAt = new Map<string, number>();
+	private readonly pendingTokenJids = new Map<string, Set<string>>();
+	private readonly tokenTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private unsubscribeProviderEvents: (() => void) | null = null;
 	/** Notified when WhatsApp reports a contact going from not-live to online/typing/recording. */
 	private readonly cameOnlineListeners = new Set<(entry: ContactPresenceItem) => void>();
 	/** Debug counters (temporary — prove WA → Redis → Socket path). */
@@ -161,6 +180,14 @@ export class WhatsAppContactPresenceService
 			void this.pollSharedAccounts();
 		}, this.sharedPollMs);
 		this.sharedTimer.unref?.();
+		this.verifyTimer = setInterval(() => {
+			void this.verifyLiveContacts();
+		}, this.verifyEveryMs);
+		this.verifyTimer.unref?.();
+		this.unsubscribeProviderEvents =
+			this.providers.onProviderEvent?.((accountId, event) => {
+				if (event?.type === 'presence_token') this.queueTokenSubscribe(accountId, event.jids || []);
+			}) ?? null;
 	}
 
 	onModuleDestroy() {
@@ -171,6 +198,139 @@ export class WhatsAppContactPresenceService
 		if (this.sharedTimer) {
 			clearInterval(this.sharedTimer);
 			this.sharedTimer = null;
+		}
+		if (this.verifyTimer) {
+			clearInterval(this.verifyTimer);
+			this.verifyTimer = null;
+		}
+		for (const timer of this.tokenTimers.values()) clearTimeout(timer);
+		this.tokenTimers.clear();
+		this.unsubscribeProviderEvents?.();
+	}
+
+	private aliasKey(accountId: string, jid: string) {
+		return `${accountId}|${String(jid || '').trim().toLowerCase()}`;
+	}
+
+	/** Remember every id form WhatsApp used for this conversation's contact. */
+	rememberAliases(accountId: string, conversationId: string, jids: Array<string | null | undefined>) {
+		for (const jid of jids) {
+			const id = String(jid || '').trim();
+			if (!id) continue;
+			this.aliasToConversation.set(this.aliasKey(accountId, id), conversationId);
+			const bare = id.replace(/:\d+@/, '@');
+			if (bare !== id) this.aliasToConversation.set(this.aliasKey(accountId, bare), conversationId);
+			if (id.endsWith('@s.whatsapp.net')) {
+				this.aliasToConversation.set(this.aliasKey(accountId, id.replace(/@s\.whatsapp\.net$/, '@c.us')), conversationId);
+			}
+		}
+	}
+
+	/**
+	 * Conversation a presence packet belongs to, from ids seen before or the phone number of a
+	 * tracked contact — so the matching "offline" always reaches the row that went "online".
+	 */
+	lookupAlias(accountId: string, jids: Array<string | null | undefined>, phoneDigits?: string | null) {
+		for (const jid of jids) {
+			const id = String(jid || '').trim();
+			if (!id) continue;
+			const hit =
+				this.aliasToConversation.get(this.aliasKey(accountId, id)) ||
+				this.aliasToConversation.get(this.aliasKey(accountId, id.replace(/:\d+@/, '@')));
+			if (hit) return hit;
+		}
+		const digits = String(phoneDigits || '').replace(/\D/g, '');
+		if (digits.length >= 8) {
+			for (const entry of this.byConversation.values()) {
+				if (entry.accountId !== accountId) continue;
+				if (String(entry.phoneNumber || '').replace(/\D/g, '') === digits) return entry.conversationId;
+			}
+		}
+		return null;
+	}
+
+	/** New privacy tokens: subscribe to those people now (batched), not on the next page load. */
+	private queueTokenSubscribe(accountId: string, jids: string[]) {
+		if (!jids.length) return;
+		if (!this.pendingTokenJids.has(accountId)) this.pendingTokenJids.set(accountId, new Set());
+		const set = this.pendingTokenJids.get(accountId)!;
+		for (const jid of jids) if (this.isPresenceEligibleJid(jid)) set.add(jid);
+		if (this.tokenTimers.has(accountId)) return;
+		const timer = setTimeout(() => {
+			this.tokenTimers.delete(accountId);
+			const batch = [...(this.pendingTokenJids.get(accountId) || [])];
+			this.pendingTokenJids.delete(accountId);
+			const provider = this.providers.getProvider(accountId);
+			if (!batch.length || provider?.getState() !== 'connected' || !provider.subscribePresence) return;
+			void Promise.resolve(provider.subscribePresence(batch))
+				.then(() =>
+					this.logger.log(
+						`[WHATSAPP PRESENCE] subscribed after new privacy token session=${accountId} jids=${batch.length}`,
+					),
+				)
+				.catch(() => undefined);
+		}, 1_500);
+		timer.unref?.();
+		this.tokenTimers.set(accountId, timer);
+	}
+
+	/**
+	 * Confirm live statuses instead of trusting them until an event happens to arrive.
+	 * Re-subscribing makes WhatsApp answer with the current presence (available / unavailable).
+	 * A live row with no answer becomes "unknown" — never "offline" and never kept "online".
+	 */
+	private async verifyLiveContacts() {
+		const now = Date.now();
+		const byAccount = new Map<string, ContactPresenceItem[]>();
+		for (const entry of this.byConversation.values()) {
+			if (!(entry.online || entry.typing || entry.recording)) continue;
+			if (!byAccount.has(entry.accountId)) byAccount.set(entry.accountId, []);
+			byAccount.get(entry.accountId)!.push(entry);
+		}
+		const accounts = new Set<string>([...byAccount.keys(), ...this.lastFullSubscribeAt.keys()]);
+		for (const accountId of accounts) {
+			if (this.sharedAccounts.has(accountId)) continue;
+			const provider = this.providers.getProvider(accountId);
+			if (!provider || provider.getState() !== 'connected' || !provider.subscribePresence) continue;
+			if (provider.isOnlinePresence?.() === false) continue; // answers would all be "unavailable"
+			let changed = false;
+			const toVerify: string[] = [];
+			for (const entry of byAccount.get(accountId) || []) {
+				const key = this.key(accountId, entry.conversationId);
+				const askedAt = this.verifyPendingSince.get(key);
+				if (askedAt && now - askedAt >= this.verifyAnswerMs) {
+					this.verifyPendingSince.delete(key);
+					this.logger.log(
+						`[WHATSAPP PRESENCE] live status not confirmed → unknown session=${accountId} conversation=${entry.conversationId}`,
+					);
+					const next: ContactPresenceItem = {
+						...entry,
+						online: false,
+						typing: false,
+						recording: false,
+						status: 'unknown',
+						state: 'unknown',
+						updatedAt: now,
+					};
+					this.byConversation.set(key, next);
+					void this.persist(next);
+					changed = true;
+					continue;
+				}
+				if (!askedAt && now - entry.updatedAt >= this.verifyEveryMs - 5_000) {
+					this.verifyPendingSince.set(key, now);
+					toVerify.push(...expandPresenceSubscribeIds(entry.chatId, entry.phoneNumber));
+				}
+			}
+			if (toVerify.length) {
+				await Promise.resolve(provider.subscribePresence([...new Set(toVerify)])).catch(() => undefined);
+			}
+			if (changed) this.broadcast(accountId);
+			const lastFull = this.lastFullSubscribeAt.get(accountId) || 0;
+			if (now - lastFull >= this.fullResubscribeMs) {
+				this.lastFullSubscribeAt.set(accountId, now);
+				void this.subscribeRecentDirectChats(accountId, 200, true).catch(() => undefined);
+			}
 		}
 	}
 
@@ -466,6 +626,35 @@ export class WhatsAppContactPresenceService
 
 		this.byConversation.set(mapKey, next);
 		void this.persist(next);
+		// WhatsApp answered — any pending "is this still live?" check is resolved.
+		this.verifyPendingSince.delete(mapKey);
+		this.rememberAliases(accountId, conversationId, [next.chatId]);
+
+		// One person can sit on two rows (phone chat + LID chat). A confirmed "offline" for them
+		// must not leave the twin row showing online.
+		if (state === 'unavailable' && !online && !typing && !recording) {
+			const digits = String(next.phoneNumber || '').replace(/\D/g, '');
+			for (const [otherKey, other] of this.byConversation) {
+				if (otherKey === mapKey || other.accountId !== accountId) continue;
+				if (!(other.online || other.typing || other.recording)) continue;
+				const samePerson =
+					(next.contactId && other.contactId === next.contactId) ||
+					(digits.length >= 8 && String(other.phoneNumber || '').replace(/\D/g, '') === digits);
+				if (!samePerson) continue;
+				const twin: ContactPresenceItem = {
+					...other,
+					online: false,
+					typing: false,
+					recording: false,
+					status: 'offline',
+					state: 'unavailable',
+					lastSeen: next.lastSeen || other.lastSeen,
+					updatedAt,
+				};
+				this.byConversation.set(otherKey, twin);
+				void this.persist(twin);
+			}
+		}
 
 		this.presenceApplyCount += 1;
 		this.presenceEventsByAccount.set(
@@ -503,7 +692,7 @@ export class WhatsAppContactPresenceService
 	private statsFor(accountId: string) {
 		let s = this.stats.get(accountId);
 		if (!s) {
-			s = { byState: {}, lastEventAt: 0, lastLiveAt: 0, drops: {}, subscribe: null };
+			s = { byState: {}, lastEventAt: 0, lastLiveAt: 0, drops: {}, subscribe: null, tokenHolders: null };
 			this.stats.set(accountId, s);
 		}
 		return s;
@@ -538,6 +727,8 @@ export class WhatsAppContactPresenceService
 			lastLiveAt: iso(s.lastLiveAt),
 			droppedEvents: { ...s.drops },
 			lastSubscribe: s.subscribe ? { ...s.subscribe, at: iso(s.subscribe.at) } : null,
+			contactsWithPrivacyToken: s.tokenHolders,
+			pendingVerifications: [...this.verifyPendingSince.keys()].filter((k) => k.startsWith(accountId + ':')).length,
 			sessionOwner: this.isSessionOwner(accountId)
 				? 'this server'
 				: this.sharedOwnerAlive.get(accountId) === true
@@ -748,13 +939,18 @@ export class WhatsAppContactPresenceService
 		const mapKey = this.key(entry.accountId, entry.conversationId);
 		const existing = this.byConversation.get(mapKey);
 		if (!existing || existing.updatedAt < Number(entry.updatedAt || 0)) {
+			// Restored after a restart: a stored "online" was true before the restart, not now.
+			// Keep it unconfirmed until WhatsApp answers the fresh subscription.
+			const wasLive = Boolean(entry.online || entry.typing || entry.recording);
 			this.byConversation.set(mapKey, {
 				...entry,
-				online: Boolean(entry.online),
-				typing: Boolean(entry.typing),
-				recording: Boolean(entry.recording),
-				status: entry.status || (entry.online ? 'online' : 'offline'),
+				online: false,
+				typing: false,
+				recording: false,
+				status: wasLive ? 'unknown' : entry.status || 'unknown',
+				state: wasLive ? 'unknown' : entry.state,
 			});
+			if (entry.chatId) this.rememberAliases(entry.accountId, entry.conversationId, [entry.chatId]);
 		}
 	}
 
@@ -942,6 +1138,11 @@ export class WhatsAppContactPresenceService
 				}
 			};
 
+			// People who gave us a privacy token first: they are the only ones WhatsApp will report
+			// real presence for, so they must never be cut by the subscribe cap.
+			const tokenJids = (await provider.presenceTokenJids?.().catch(() => [] as string[])) || [];
+			this.statsFor(accountId).tokenHolders = tokenJids.length;
+			for (const jid of tokenJids) pushIds(jid);
 			for (const row of rows) {
 				pushIds(String(row.providerChatId || '').trim(), row.contact?.phoneNumber);
 			}
@@ -972,6 +1173,7 @@ export class WhatsAppContactPresenceService
 			}
 
 			const subscribed = Number((await provider.subscribePresence(chatIds)) || 0);
+			this.lastFullSubscribeAt.set(accountId, Date.now());
 			const deviceAvailable = provider.isOnlinePresence?.() ?? null;
 			this.noteSubscribe(
 				accountId,

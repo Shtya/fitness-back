@@ -41,6 +41,8 @@ export type WhatsAppProviderEvent =
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
 	| { type: 'presence'; payload: any }
+	/** A contact's privacy token (tctoken) was stored — their presence can now be subscribed. */
+	| { type: 'presence_token'; jids: string[] }
 	| {
 			type: 'history_sync';
 			chats: number;
@@ -345,6 +347,8 @@ export interface WhatsAppProvider {
 	 */
 	setOnlinePresence?(online: boolean): Promise<boolean>;
 	isOnlinePresence?(): boolean;
+	/** Optional: contacts with an unexpired privacy token (presence is only delivered for these). */
+	presenceTokenJids?(): Promise<string[]>;
 	/** Optional: device-side facts that decide whether contact presence is delivered. */
 	presenceDiagnostics?(): {
 		providerState: string;
