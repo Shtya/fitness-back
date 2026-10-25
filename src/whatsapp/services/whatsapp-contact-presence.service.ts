@@ -97,6 +97,8 @@ export class WhatsAppContactPresenceService
 	private readonly hydrating = new Map<string, Promise<void>>();
 	private readonly pendingBroadcast = new Set<string>();
 	private pruneTimer: ReturnType<typeof setInterval> | null = null;
+	/** Notified when WhatsApp reports a contact going from not-live to online/typing/recording. */
+	private readonly cameOnlineListeners = new Set<(entry: ContactPresenceItem) => void>();
 	/** Debug counters (temporary — prove WA → Redis → Socket path). */
 	private presenceApplyCount = 0;
 	private readonly presenceEventsByAccount = new Map<string, number>();
@@ -330,6 +332,22 @@ export class WhatsAppContactPresenceService
 				`  AppliedTotal: ${this.presenceApplyCount} (account=${this.presenceEventsByAccount.get(accountId)})`,
 		);
 
+		const wasLive = Boolean(prev && (prev.online || prev.typing || prev.recording));
+		const isLive = next.online || next.typing || next.recording;
+		if (!wasLive && isLive) {
+			for (const listener of this.cameOnlineListeners) {
+				try {
+					listener({ ...next });
+				} catch (error) {
+					this.logger.warn(
+						`[WHATSAPP PRESENCE] came-online listener failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+		}
+
 		const changed =
 			!prev ||
 			prev.online !== next.online ||
@@ -340,6 +358,12 @@ export class WhatsAppContactPresenceService
 			prev.recording !== next.recording ||
 			prev.lastSeen !== next.lastSeen;
 		if (changed) this.broadcast(accountId);
+	}
+
+	/** Subscribe to "contact came online" transitions. Returns an unsubscribe function. */
+	onCameOnline(listener: (entry: ContactPresenceItem) => void) {
+		this.cameOnlineListeners.add(listener);
+		return () => this.cameOnlineListeners.delete(listener);
 	}
 
 	/**

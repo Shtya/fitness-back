@@ -26,6 +26,7 @@ import { WhatsAppPageLockService } from './services/whatsapp-page-lock.service';
 import { WhatsAppTypingAttemptsController } from './controllers/whatsapp-typing-attempts.controller';
 import { WhatsAppTypingAttemptsService } from './services/whatsapp-typing-attempts.service';
 import { WhatsAppOnlinePresenceService } from './services/whatsapp-online-presence.service';
+import { WhatsAppPresenceWatchService } from './services/whatsapp-presence-watch.service';
 import { MailService } from 'common/nodemailer';
 import { WhatsAppAiMediaController } from './ai-media/whatsapp-ai-media.controller';
 import { WhatsAppAiMediaService } from './ai-media/whatsapp-ai-media.service';
@@ -204,6 +205,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppPageLockService,
 		WhatsAppTypingAttemptsService,
 		WhatsAppOnlinePresenceService,
+		WhatsAppPresenceWatchService,
 		MailService,
 		PollinationsWhatsAppImageProvider,
 		GeminiWhatsAppImageProvider,
