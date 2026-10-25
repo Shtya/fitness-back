@@ -271,7 +271,15 @@ export interface WhatsAppProvider {
 		chatId: string,
 		contact: { displayName: string; phoneNumber: string; waId?: string },
 	): Promise<any>;
-	editText?(providerMessageId: string, text: string): Promise<any>;
+	/**
+	 * Edit one of our sent text messages. `key` is the message key exactly as WhatsApp gave it
+	 * (stored in the row's raw); the phone only applies an edit whose key matches the original.
+	 */
+	editText?(
+		providerMessageId: string,
+		text: string,
+		options?: { key?: { remoteJid?: string; id?: string; participant?: string } | null; chatId?: string | null },
+	): Promise<any>;
 	markChatUnread?(chatId: string): Promise<any>;
 	/** Sends the "delivered" receipts held back by the hold-delivery privacy setting. */
 	releaseDeliveryReceipts?(chatId: string): Promise<number>;

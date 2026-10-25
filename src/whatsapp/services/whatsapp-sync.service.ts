@@ -92,7 +92,12 @@ import { prepareMessagesForClient, toWhatsAppClientUser } from '../utils/whatsap
 import { resolveOutgoingDisplayFileName } from '../utils/whatsapp-display-file-name';
 import { isWhatsAppViewOnceQuoted, isWhatsAppViewOnceRaw } from '../utils/whatsapp-view-once';
 import { shouldSkipFreshProviderSync } from '../utils/whatsapp-sync-policy';
-import { appendWhatsAppEditHistory, whatsAppEditSource } from '../utils/whatsapp-message-edits';
+import {
+	WHATSAPP_EDIT_WINDOW_MINUTES,
+	appendWhatsAppEditHistory,
+	isWithinWhatsAppEditWindow,
+	whatsAppEditSource,
+} from '../utils/whatsapp-message-edits';
 import { whatsAppParticipantAliases } from '../utils/whatsapp-presence-normalize';
 import {
 	isWeakWhatsAppContactName,
@@ -7547,11 +7552,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (String(message.type || '').toLowerCase() !== 'text') {
 			throw new BadRequestException('Only text messages can be edited');
 		}
+		// WhatsApp drops edits of older messages without an error, so the CRM showed an edit the
+		// phone never got. Refuse instead of pretending it worked.
+		if (!isWithinWhatsAppEditWindow(message.providerTimestamp)) {
+			throw new BadRequestException(
+				`WhatsApp only lets you edit a message within ${WHATSAPP_EDIT_WINDOW_MINUTES} minutes of sending it.`,
+			);
+		}
 		const provider = this.requireProvider(conversation.accountId);
 		if (typeof provider.editText !== 'function') {
 			throw new BadRequestException('Edit is not supported by this provider');
 		}
-		await provider.editText(message.providerMessageId, trimmed);
+		await provider.editText(message.providerMessageId, trimmed, {
+			key: (message as any).raw?.key || null,
+			chatId: conversation.providerChatId,
+		});
 		const editedAt = new Date();
 		// Re-read: the provider echo of this edit may already have been persisted.
 		const current = await this.messageRepo.findOne({

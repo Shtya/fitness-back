@@ -2,6 +2,15 @@ import type { WhatsAppMessageEditEntry } from '../entities/whatsapp.entity';
 
 export const WHATSAPP_EDIT_HISTORY_LIMIT = 20;
 
+/** WhatsApp accepts an edit only this long after the message was sent; later ones are dropped silently. */
+export const WHATSAPP_EDIT_WINDOW_MINUTES = 15;
+
+export function isWithinWhatsAppEditWindow(sentAt: Date | string | null | undefined, now = Date.now()): boolean {
+	const at = new Date(sentAt ?? NaN).getTime();
+	if (!Number.isFinite(at)) return false;
+	return now - at <= WHATSAPP_EDIT_WINDOW_MINUTES * 60_000;
+}
+
 export type WhatsAppMessageEditSource = WhatsAppMessageEditEntry['by'];
 
 function normalizeEntries(value: unknown): WhatsAppMessageEditEntry[] {

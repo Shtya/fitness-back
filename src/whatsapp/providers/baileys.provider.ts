@@ -3516,36 +3516,52 @@ export class BaileysProvider implements WhatsAppProvider {
 		return result;
 	}
 
-	async editText(providerMessageId: string, text: string) {
+	async editText(
+		providerMessageId: string,
+		text: string,
+		options: { key?: { remoteJid?: string; id?: string; participant?: string } | null; chatId?: string | null } = {},
+	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const id = String(providerMessageId || '').trim();
 		const body = String(text || '').trim();
 		if (!id || !body) throw new Error('Message id and text are required');
-		let found: any = null;
-		for (const bucket of this.messagesByChat.values()) {
-			const hit = [...bucket.values()].find((msg) => msg.providerMessageId === id);
-			if (hit) {
-				found = hit;
-				break;
-			}
-		}
-		const chatId = found?.chatId;
-		if (!chatId) throw new Error('Original message not found in session cache');
-		const key = {
-			remoteJid: toBaileysJid(chatId),
-			id,
-			fromMe: true,
-		};
 		if (typeof this.socket.sendMessage !== 'function') {
 			throw new Error('Edit is not supported by this session');
 		}
-		const result = await this.socket.sendMessage(toBaileysJid(chatId), {
-			text: body,
-			edit: key,
-		});
-		return result;
+		const key = this.editKeyFor(id, options);
+		if (!key) throw new Error('Original message not found');
+		// Sent to the same address as the original: an edit keyed to the chat's phone JID while
+		// the message went out on its LID (or the reverse) is accepted but never shows on the phone.
+		return this.socket.sendMessage(key.remoteJid, { text: body, edit: key });
+	}
+
+	/** The original message key: stored raw first, then this session's cache, then the chat id. */
+	private editKeyFor(
+		id: string,
+		options: { key?: { remoteJid?: string; id?: string; participant?: string } | null; chatId?: string | null },
+	) {
+		const stored = options.key?.remoteJid ? options.key : this.rawByMessageId.get(id)?.key;
+		if (stored?.remoteJid) {
+			return {
+				remoteJid: String(stored.remoteJid),
+				id,
+				fromMe: true,
+				...(stored.participant ? { participant: String(stored.participant) } : {}),
+			};
+		}
+		let chatId = options.chatId || null;
+		if (!chatId) {
+			for (const bucket of this.messagesByChat.values()) {
+				const hit = bucket.get(id);
+				if (hit) {
+					chatId = hit.chatId;
+					break;
+				}
+			}
+		}
+		return chatId ? { remoteJid: toBaileysJid(chatId), id, fromMe: true } : null;
 	}
 
 	async sendMedia(
