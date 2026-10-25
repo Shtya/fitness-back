@@ -941,6 +941,8 @@ export class BaileysProvider implements WhatsAppProvider {
 	private opening: Promise<void> | null = null;
 	private state: string = 'disconnected';
 	private onlinePresence = false;
+	/** Why the device could not be marked available last time (surfaced in presence diagnostics). */
+	private availabilityError: string | null = null;
 	private qr: string | null = null;
 	private pairingCode: string | null = null;
 	private closing = false;
@@ -3942,6 +3944,19 @@ export class BaileysProvider implements WhatsAppProvider {
 		return this.onlinePresence;
 	}
 
+	/** What decides whether WhatsApp will stream contacts' presence to this device. */
+	presenceDiagnostics() {
+		const me = this.socket?.authState?.creds?.me;
+		return {
+			providerState: this.state,
+			deviceAvailable: this.onlinePresence,
+			hasPushName: Boolean(me?.name),
+			availabilityError: this.availabilityError,
+			knownContacts: this.contacts.size,
+			lidMappings: this.lidToPn.size,
+		};
+	}
+
 	/**
 	 * Baileys sends `unavailable` on every connect (markOnlineOnConnect=false),
 	 * and WhatsApp withholds chatstate nodes from unavailable devices.
@@ -3949,7 +3964,26 @@ export class BaileysProvider implements WhatsAppProvider {
 	async setOnlinePresence(online: boolean) {
 		if (!this.socket || this.state !== 'connected') return false;
 		if (typeof this.socket.sendPresenceUpdate !== 'function') return false;
+		const me = this.socket.authState?.creds?.me;
+		if (me && !me.name) {
+			// Baileys refuses `available` without our push name, and WhatsApp then answers every
+			// presence subscription with `unavailable`. The name normally arrives via app-state sync;
+			// when it hasn't, use our own contact record's WhatsApp name (never an invented one).
+			const digits = String(me.id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+			const own =
+				this.contacts.get(`${digits}@c.us`) ||
+				this.contacts.get(`${digits}@s.whatsapp.net`) ||
+				(me.lid ? this.contacts.get(String(me.lid).replace(/:\d+@/, '@')) : undefined);
+			const name = String(own?.notify || '').trim();
+			if (name) {
+				me.name = name;
+				this.logger.log(
+					`[WHATSAPP PRESENCE] Baileys push name restored from own contact record session=${this.accountId}`,
+				);
+			}
+		}
 		if (!this.socket.authState?.creds?.me?.name) {
+			this.availabilityError = 'no push name on this linked device yet (WhatsApp app-state sync pending)';
 			this.logger.warn(
 				`[WHATSAPP PRESENCE] Baileys cannot mark ${online ? 'available' : 'unavailable'} — account has no push name yet session=${this.accountId}`,
 			);
@@ -3958,11 +3992,15 @@ export class BaileysProvider implements WhatsAppProvider {
 		try {
 			await this.socket.sendPresenceUpdate(online ? 'available' : 'unavailable');
 			this.onlinePresence = online;
+			this.availabilityError = null;
 			this.logger.log(
 				`[WHATSAPP PRESENCE] Baileys device marked ${online ? 'available' : 'unavailable'} session=${this.accountId}`,
 			);
 			return true;
 		} catch (error) {
+			this.availabilityError = `availability update failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`;
 			this.logger.warn(
 				`[WHATSAPP PRESENCE] Baileys availability update failed session=${this.accountId}: ${
 					error instanceof Error ? error.message : String(error)

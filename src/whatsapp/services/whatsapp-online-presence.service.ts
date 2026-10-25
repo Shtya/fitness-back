@@ -79,6 +79,24 @@ export class WhatsAppOnlinePresenceService implements OnModuleInit, OnModuleDest
 		this.pending.set(accountId, timer);
 	}
 
+	/** Why this device is (not) receiving contacts' presence. */
+	diagnostics(accountId: string) {
+		const provider = this.providers.getProvider(accountId);
+		const watchers = this.gateway.accountWatcherCount(accountId);
+		return {
+			mode: this.mode,
+			crmViewers: watchers,
+			wantsAvailable: desiredOnlinePresence(this.mode, watchers),
+			lastMarkedAvailableAt: this.lastOnlineAt.get(accountId)
+				? new Date(this.lastOnlineAt.get(accountId) as number).toISOString()
+				: null,
+			device: provider?.presenceDiagnostics?.() ?? {
+				providerState: provider ? provider.getState() : 'not started',
+				deviceAvailable: provider?.isOnlinePresence?.() ?? false,
+			},
+		};
+	}
+
 	async reconcile(accountId: string) {
 		try {
 			const provider = this.providers.getProvider(accountId);

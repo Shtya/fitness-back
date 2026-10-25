@@ -301,7 +301,9 @@ describe('WhatsAppContactPresenceService', () => {
 		});
 
 		it('hydrates once via SMEMBERS + MGET (no per-key GET, no KEYS)', async () => {
-			const { service, redis } = createService();
+			const { service, redis, providers } = createService();
+			// This server holds the session: Redis is read once, then memory is authoritative.
+			providers.getProvider.mockReturnValue({ getState: () => 'connected' });
 			redis.isAvailable.mockResolvedValue(true);
 			redis.sMembers.mockResolvedValue(['conv-a', 'conv-b']);
 			redis.mGet.mockResolvedValue([storedEntry('conv-a'), storedEntry('conv-b')]);
@@ -323,7 +325,9 @@ describe('WhatsAppContactPresenceService', () => {
 		});
 
 		it('falls back to SCAN (never KEYS) when the index is empty', async () => {
-			const { service, redis } = createService();
+			const { service, redis, providers } = createService();
+			// This server holds the session: Redis is read once, then memory is authoritative.
+			providers.getProvider.mockReturnValue({ getState: () => 'connected' });
 			redis.isAvailable.mockResolvedValue(true);
 			redis.scanKeys.mockResolvedValue([
 				'wa:presence:acc-1:conv-a',
@@ -359,7 +363,9 @@ describe('WhatsAppContactPresenceService', () => {
 		});
 
 		it('retries hydration later if Redis was unavailable', async () => {
-			const { service, redis } = createService();
+			const { service, redis, providers } = createService();
+			// This server holds the session: Redis is read once, then memory is authoritative.
+			providers.getProvider.mockReturnValue({ getState: () => 'connected' });
 			await service.listOnline('acc-1');
 			redis.isAvailable.mockResolvedValue(true);
 			redis.sMembers.mockResolvedValue(['conv-a']);

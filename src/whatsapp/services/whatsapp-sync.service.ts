@@ -1207,6 +1207,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					: []),
 			].filter((id) => id && isSupportedInboxChatId(id));
 			if (!aliasList.length) {
+				this.contactPresence.noteDrop(accountId, 'unsupportedChatId');
 				this.logger.debug(
 					`[WHATSAPP PRESENCE] Sync DROP unsupported chatId=${chatId || '(empty)'} session=${accountId}`,
 				);
@@ -1232,6 +1233,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				// Only create a stub chat for live presence — avoid flooding the inbox
 				// with offline address-book JIDs we subscribed to.
 				if (!pendingOnline) {
+					this.contactPresence.noteDrop(accountId, 'noChatOffline');
 					this.logger.debug(
 						`[WHATSAPP PRESENCE] Sync SKIP unmatched offline jid=${chatId} session=${accountId}`,
 					);
@@ -1249,6 +1251,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						`[WHATSAPP PRESENCE] Sync CREATE conversation for presence session=${accountId} jid=${chatId} conv=${conversation?.id}`,
 					);
 				} catch (error) {
+					this.contactPresence.noteDrop(accountId, 'noChatCreateFailed');
 					this.logger.warn(
 						`[WHATSAPP PRESENCE] Sync DROP unmatched JID (ensure failed) session=${accountId} jid=${chatId} state=${event.payload?.state}: ${
 							error instanceof Error ? error.message : String(error)

@@ -345,6 +345,15 @@ export interface WhatsAppProvider {
 	 */
 	setOnlinePresence?(online: boolean): Promise<boolean>;
 	isOnlinePresence?(): boolean;
+	/** Optional: device-side facts that decide whether contact presence is delivered. */
+	presenceDiagnostics?(): {
+		providerState: string;
+		deviceAvailable: boolean;
+		hasPushName: boolean;
+		availabilityError?: string | null;
+		knownContacts: number;
+		lidMappings: number;
+	};
 	/** Status/story media — may use StatusV3Store; not the same as chat downloadMedia. */
 	downloadStatus?(
 		providerStatusId: string,

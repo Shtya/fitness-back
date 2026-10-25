@@ -14,6 +14,7 @@ import { RolesGuard } from '../../auth/guard/roles.guard';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppContactPresenceService } from '../services/whatsapp-contact-presence.service';
 import { WhatsAppPresenceWatchService } from '../services/whatsapp-presence-watch.service';
+import { WhatsAppOnlinePresenceService } from '../services/whatsapp-online-presence.service';
 
 @Controller('whatsapp/presence')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -22,6 +23,7 @@ export class WhatsAppPresenceController {
 		private readonly contactPresence: WhatsAppContactPresenceService,
 		private readonly access: WhatsAppAccessService,
 		private readonly watch: WhatsAppPresenceWatchService,
+		private readonly onlinePresence: WhatsAppOnlinePresenceService,
 	) {}
 
 	/**
@@ -42,7 +44,9 @@ export class WhatsAppPresenceController {
 		if (!access.canView) {
 			throw new ForbiddenException('WhatsApp account access denied');
 		}
-		// Event-driven subscribe (throttled). Do not poll every contact.
+		// Become `available` first: WhatsApp answers presence subscriptions from an unavailable
+		// device with `unavailable` for everyone. Then subscribe (throttled, event-driven).
+		await this.onlinePresence.reconcile(id).catch(() => undefined);
 		void this.contactPresence.subscribeRecentDirectChats(id).catch(() => undefined);
 		const wantOffline =
 			includeOffline === '1' ||
@@ -53,6 +57,25 @@ export class WhatsAppPresenceController {
 		});
 		if (this.access.canSeeAllConversations(req.user, access)) return snapshot;
 		return this.contactPresence.restrictToAssignee(snapshot, String(req.user?.id || ''));
+	}
+
+	/**
+	 * Why the Online list looks the way it does: device state, availability, subscription result,
+	 * event counters. Counts only — no names, numbers or message data.
+	 */
+	@Get('diagnostics')
+	async diagnostics(@Req() req: any, @Query('accountId') accountId?: string) {
+		const id = String(accountId || '').trim();
+		if (!id) throw new BadRequestException('accountId is required');
+		const access = await this.access.getAccountAccess(req.user, id);
+		if (!access.canView) throw new ForbiddenException('WhatsApp account access denied');
+		return {
+			accountId: id,
+			at: new Date().toISOString(),
+			accountStatus: access.account?.status ?? null,
+			...this.onlinePresence.diagnostics(id),
+			presence: this.contactPresence.diagnostics(id),
+		};
 	}
 
 	/** Conversation ids the current user follows on this account ("notify me when online"). */

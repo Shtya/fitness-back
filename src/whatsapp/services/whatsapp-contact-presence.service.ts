@@ -97,6 +97,29 @@ export class WhatsAppContactPresenceService
 	private readonly hydrating = new Map<string, Promise<void>>();
 	private readonly pendingBroadcast = new Set<string>();
 	private pruneTimer: ReturnType<typeof setInterval> | null = null;
+	/** Per-account counters behind GET /whatsapp/presence/diagnostics. */
+	private readonly stats = new Map<
+		string,
+		{
+			byState: Record<string, number>;
+			lastEventAt: number;
+			lastLiveAt: number;
+			drops: Record<string, number>;
+			subscribe: { at: number; requested: number; ok: number; result: string } | null;
+		}
+	>();
+	/**
+	 * Shared mode: another server holds this account's WhatsApp session (shared Redis lock), so
+	 * presence events land there and are only visible here through Redis. accountId → last request.
+	 */
+	private readonly sharedAccounts = new Map<string, number>();
+	private readonly lastSharedRefreshAt = new Map<string, number>();
+	private readonly sharedPrimed = new Set<string>();
+	/** accountId → whether a session owner held the lock at the last shared read. */
+	private readonly sharedOwnerAlive = new Map<string, boolean>();
+	private sharedTimer: ReturnType<typeof setInterval> | null = null;
+	private readonly sharedPollMs = 4_000;
+	private readonly sharedIdleMs = 5 * 60_000;
 	/** Notified when WhatsApp reports a contact going from not-live to online/typing/recording. */
 	private readonly cameOnlineListeners = new Set<(entry: ContactPresenceItem) => void>();
 	/** Debug counters (temporary — prove WA → Redis → Socket path). */
@@ -134,12 +157,137 @@ export class WhatsAppContactPresenceService
 		if (typeof this.pruneTimer.unref === 'function') {
 			this.pruneTimer.unref();
 		}
+		this.sharedTimer = setInterval(() => {
+			void this.pollSharedAccounts();
+		}, this.sharedPollMs);
+		this.sharedTimer.unref?.();
 	}
 
 	onModuleDestroy() {
 		if (this.pruneTimer) {
 			clearInterval(this.pruneTimer);
 			this.pruneTimer = null;
+		}
+		if (this.sharedTimer) {
+			clearInterval(this.sharedTimer);
+			this.sharedTimer = null;
+		}
+	}
+
+	/** True when this process holds the account's live WhatsApp socket. */
+	private isSessionOwner(accountId: string) {
+		const provider = this.providers.getProvider(accountId);
+		return Boolean(provider && provider.getState() === 'connected');
+	}
+
+	private emitCameOnline(entry: ContactPresenceItem) {
+		for (const listener of this.cameOnlineListeners) {
+			try {
+				listener({ ...entry });
+			} catch (error) {
+				this.logger.warn(
+					`[WHATSAPP PRESENCE] came-online listener failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Re-read the account's presence from Redis (written by the server that owns the session).
+	 * Never writes. If no server holds the session lock any more, "online" rows are stale — they
+	 * are shown as unknown instead of live.
+	 */
+	private async refreshShared(accountId: string, minIntervalMs = 2_500): Promise<boolean> {
+		const last = this.lastSharedRefreshAt.get(accountId) || 0;
+		if (Date.now() - last < minIntervalMs) return false;
+		this.lastSharedRefreshAt.set(accountId, Date.now());
+		let entries: ContactPresenceItem[] = [];
+		let ownerAlive = false;
+		try {
+			const ids = await this.redis.sMembers(this.redisIndexKey(accountId));
+			const rows = ids.length
+				? await this.redis.mGet<ContactPresenceItem>(ids.map((id) => this.redisKey(accountId, id)))
+				: [];
+			entries = rows.filter(
+				(entry): entry is ContactPresenceItem =>
+					Boolean(entry?.conversationId) && entry?.accountId === accountId,
+			);
+			ownerAlive = Boolean(await this.redis.exists(`whatsapp:conn-lock:${accountId}`));
+		} catch (error) {
+			this.logger.debug(
+				`[WHATSAPP PRESENCE] shared read failed session=${accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
+		const ownerWasAlive = this.sharedOwnerAlive.get(accountId);
+		this.sharedOwnerAlive.set(accountId, ownerAlive);
+		if (ownerWasAlive !== ownerAlive) {
+			this.logger.log(
+				`[WHATSAPP PRESENCE] shared mode session=${accountId} owner=${ownerAlive ? 'another server' : 'none (no live session anywhere)'}`,
+			);
+		}
+
+		const primed = this.sharedPrimed.has(accountId);
+		const fresh = new Map(entries.map((entry) => [String(entry.conversationId), entry]));
+		let changed = false;
+		for (const [mapKey, entry] of this.byConversation) {
+			if (entry.accountId === accountId && !fresh.has(String(entry.conversationId))) {
+				this.byConversation.delete(mapKey);
+				changed = true;
+			}
+		}
+		for (const raw of fresh.values()) {
+			const liveRaw = Boolean(raw.online || raw.typing || raw.recording);
+			const next: ContactPresenceItem = {
+				...raw,
+				online: ownerAlive && Boolean(raw.online),
+				typing: ownerAlive && Boolean(raw.typing),
+				recording: ownerAlive && Boolean(raw.recording),
+				status: liveRaw && !ownerAlive ? 'unknown' : raw.status || (raw.online ? 'online' : 'unknown'),
+				state: liveRaw && !ownerAlive ? 'unknown' : raw.state,
+			};
+			const mapKey = this.key(accountId, String(next.conversationId));
+			const prev = this.byConversation.get(mapKey);
+			if (
+				prev &&
+				prev.updatedAt === next.updatedAt &&
+				prev.status === next.status &&
+				prev.online === next.online &&
+				prev.typing === next.typing &&
+				prev.recording === next.recording &&
+				prev.lastSeen === next.lastSeen &&
+				prev.name === next.name
+			) {
+				continue;
+			}
+			this.byConversation.set(mapKey, next);
+			changed = true;
+			const wasLive = Boolean(prev && (prev.online || prev.typing || prev.recording));
+			const isLive = next.online || next.typing || next.recording;
+			// The first read is the baseline — alerting for everyone already online would be noise.
+			if (primed && !wasLive && isLive) this.emitCameOnline(next);
+		}
+		this.sharedPrimed.add(accountId);
+		this.hydratedAccounts.add(accountId);
+		return changed;
+	}
+
+	/** While someone is looking, keep shared accounts fresh and push changes to their sockets. */
+	private async pollSharedAccounts() {
+		const now = Date.now();
+		for (const [accountId, seenAt] of this.sharedAccounts) {
+			if (now - seenAt > this.sharedIdleMs || this.isSessionOwner(accountId)) {
+				this.sharedAccounts.delete(accountId);
+				this.sharedPrimed.delete(accountId);
+				continue;
+			}
+			const viewers = this.gateway.accountWatcherCount?.(accountId) ?? 0;
+			if (!viewers && now - seenAt > 60_000) continue;
+			if (await this.refreshShared(accountId, this.sharedPollMs - 500)) this.broadcast(accountId);
 		}
 	}
 
@@ -280,6 +428,10 @@ export class WhatsAppContactPresenceService
 				? Boolean(payload.confirmed)
 				: state === 'available' || state === 'unavailable';
 		const prev = this.byConversation.get(mapKey);
+		const stat = this.statsFor(accountId);
+		stat.byState[state] = (stat.byState[state] || 0) + 1;
+		stat.lastEventAt = Date.now();
+		if (online || typing || recording) stat.lastLiveAt = stat.lastEventAt;
 		// WhatsApp often sends unavailable without lastSeen. If we just saw them
 		// online, stamp the last observation time so the CRM header can show
 		// "last online …" instead of a bare Offline label.
@@ -334,19 +486,7 @@ export class WhatsAppContactPresenceService
 
 		const wasLive = Boolean(prev && (prev.online || prev.typing || prev.recording));
 		const isLive = next.online || next.typing || next.recording;
-		if (!wasLive && isLive) {
-			for (const listener of this.cameOnlineListeners) {
-				try {
-					listener({ ...next });
-				} catch (error) {
-					this.logger.warn(
-						`[WHATSAPP PRESENCE] came-online listener failed: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
-			}
-		}
+		if (!wasLive && isLive) this.emitCameOnline(next);
 
 		const changed =
 			!prev ||
@@ -358,6 +498,56 @@ export class WhatsAppContactPresenceService
 			prev.recording !== next.recording ||
 			prev.lastSeen !== next.lastSeen;
 		if (changed) this.broadcast(accountId);
+	}
+
+	private statsFor(accountId: string) {
+		let s = this.stats.get(accountId);
+		if (!s) {
+			s = { byState: {}, lastEventAt: 0, lastLiveAt: 0, drops: {}, subscribe: null };
+			this.stats.set(accountId, s);
+		}
+		return s;
+	}
+
+	/** Presence packets the sync layer could not use (unsupported id, no matching chat, …). */
+	noteDrop(accountId: string, reason: string) {
+		const s = this.statsFor(accountId);
+		s.drops[reason] = (s.drops[reason] || 0) + 1;
+	}
+
+	private noteSubscribe(accountId: string, requested: number, ok: number, result: string) {
+		this.statsFor(accountId).subscribe = { at: Date.now(), requested, ok, result };
+	}
+
+	/** Counters + current snapshot sizes for one account (no contact names or numbers). */
+	diagnostics(accountId: string) {
+		const s = this.statsFor(accountId);
+		let live = 0;
+		let offline = 0;
+		let unknown = 0;
+		for (const entry of this.byConversation.values()) {
+			if (entry.accountId !== accountId) continue;
+			if (entry.online || entry.typing || entry.recording) live += 1;
+			else if (entry.status === 'offline') offline += 1;
+			else unknown += 1;
+		}
+		const iso = (t: number) => (t ? new Date(t).toISOString() : null);
+		return {
+			eventsByState: { ...s.byState },
+			lastEventAt: iso(s.lastEventAt),
+			lastLiveAt: iso(s.lastLiveAt),
+			droppedEvents: { ...s.drops },
+			lastSubscribe: s.subscribe ? { ...s.subscribe, at: iso(s.subscribe.at) } : null,
+			sessionOwner: this.isSessionOwner(accountId)
+				? 'this server'
+				: this.sharedOwnerAlive.get(accountId) === true
+					? 'another server (read through shared Redis)'
+					: this.sharedOwnerAlive.get(accountId) === false
+						? 'none — no server holds this WhatsApp session'
+						: 'unknown (not read yet)',
+			sharedRefreshedAt: iso(this.lastSharedRefreshAt.get(accountId) || 0),
+			tracked: { live, offline, unknown },
+		};
 	}
 
 	/** Subscribe to "contact came online" transitions. Returns an unsubscribe function. */
@@ -408,7 +598,7 @@ export class WhatsAppContactPresenceService
 						chatId,
 					};
 					this.byConversation.set(mapKey, next);
-					void this.persist(next);
+					if (!this.sharedAccounts.has(accountId)) void this.persist(next);
 					changed = true;
 				}
 				continue;
@@ -431,7 +621,7 @@ export class WhatsAppContactPresenceService
 				updatedAt: now,
 			};
 			this.byConversation.set(mapKey, next);
-			void this.persist(next);
+			if (!this.sharedAccounts.has(accountId)) void this.persist(next);
 			changed = true;
 		}
 		if (changed && options?.broadcast) this.broadcast(accountId);
@@ -453,6 +643,8 @@ export class WhatsAppContactPresenceService
 
 	/** @returns true if any entry changed (typing clear / rare stale online / drop). */
 	private pruneMemory(accountId: string): boolean {
+		// Shared mode: the owning server prunes and Redis TTLs expire rows; never write from here.
+		if (this.sharedAccounts.has(accountId)) return false;
 		const now = Date.now();
 		let changed = false;
 		for (const [mapKey, entry] of this.byConversation) {
@@ -575,7 +767,14 @@ export class WhatsAppContactPresenceService
 		accountId: string,
 		options?: { includeOffline?: boolean },
 	) {
-		await this.ensureHydrated(accountId);
+		if (!this.isSessionOwner(accountId) && (await this.redis.isAvailable())) {
+			// Another server (or nobody) holds the session: Redis is the only source of truth here.
+			this.sharedAccounts.set(accountId, Date.now());
+			await this.refreshShared(accountId);
+		} else {
+			this.sharedAccounts.delete(accountId);
+			await this.ensureHydrated(accountId);
+		}
 		return this.snapshot(accountId, options);
 	}
 
@@ -674,6 +873,12 @@ export class WhatsAppContactPresenceService
 		}
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected' || !provider.subscribePresence) {
+			this.noteSubscribe(
+				accountId,
+				0,
+				0,
+				!provider ? 'blocked: no provider (account not started)' : `blocked: provider ${provider.getState()}`,
+			);
 			this.logger.log(
 				`[WHATSAPP PRESENCE] Subscribe blocked session=${accountId} provider=${Boolean(
 					provider,
@@ -758,6 +963,7 @@ export class WhatsAppContactPresenceService
 
 			const chatIds = [...idSet].slice(0, PRESENCE_SUBSCRIBE_JID_CAP);
 			if (!chatIds.length) {
+				this.noteSubscribe(accountId, 0, 0, 'skipped: no 1:1 chats or contacts to subscribe');
 				this.lastSubscribeAt.set(accountId, Date.now());
 				this.logger.log(
 					`[WHATSAPP PRESENCE] Subscribe skipped — no direct/contact JIDs session=${accountId}`,
@@ -766,12 +972,27 @@ export class WhatsAppContactPresenceService
 			}
 
 			const subscribed = Number((await provider.subscribePresence(chatIds)) || 0);
+			const deviceAvailable = provider.isOnlinePresence?.() ?? null;
+			this.noteSubscribe(
+				accountId,
+				chatIds.length,
+				subscribed || chatIds.length,
+				deviceAvailable === false
+					? 'ok, but device was unavailable — WhatsApp answers "unavailable" for everyone until it is available'
+					: 'ok',
+			);
 			this.lastSubscribeAt.set(accountId, Date.now());
 			this.logger.log(
 				`[WHATSAPP PRESENCE] Subscribed session=${accountId} chats=${rows.length} contactsDb=${contacts.length} jids=${chatIds.length} ok=${subscribed || chatIds.length} sample=${chatIds.slice(0, 5).join(',')}`,
 			);
 			return { ok: true, subscribed: subscribed || chatIds.length };
 		} catch (error) {
+			this.noteSubscribe(
+				accountId,
+				0,
+				0,
+				`failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
 			this.logger.warn(
 				`[WHATSAPP PRESENCE] Subscribe failed session=${accountId}: ${
 					error instanceof Error ? error.message : String(error)
