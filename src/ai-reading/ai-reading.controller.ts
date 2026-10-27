@@ -26,6 +26,11 @@ export class AiReadingController {
 		return this.service.putNotebook(req.user, body);
 	}
 
+	@Put('prompts')
+	putPrompts(@Req() req: any, @Body() body: any) {
+		return this.service.putPrompts(req.user, body);
+	}
+
 	@Post('books')
 	upsertBook(@Req() req: any, @Body() body: any) {
 		return this.service.upsertBook(req.user, body?.book || body);

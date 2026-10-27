@@ -168,6 +168,22 @@ export class AiReadingService {
 		return notebook;
 	}
 
+	/** Atomic prompts write — a full-state PUT carrying an older list can no longer undo it. */
+	async putPrompts(user: any, body: any) {
+		const userId = this.userId(user);
+		await this.getOrCreate(userId);
+		const prompts = asArray(asObject(body).prompts)
+			.filter(p => p && typeof p === 'object' && p.id)
+			.slice(0, PROMPTS_MAX);
+		await this.repo.query(
+			`UPDATE ai_reading_states
+			 SET prompts = $1::jsonb, updated_at = now()
+			 WHERE "userId" = $2 AND deleted_at IS NULL`,
+			[JSON.stringify(prompts), userId],
+		);
+		return { prompts };
+	}
+
 	async deleteBook(user: any, id: string) {
 		const userId = this.userId(user);
 		const row = await this.getOrCreate(userId);
