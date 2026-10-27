@@ -9,6 +9,7 @@ function makeProvider(me: Record<string, any>) {
 	provider.lidToPn = new Map();
 	provider.onlinePresence = false;
 	provider.availabilityError = null;
+	provider.presenceRaw = { received: 0, unparsed: 0, lastAt: 0 };
 	provider.socket = {
 		authState: { creds: { me } },
 		sendPresenceUpdate: jest.fn(async () => undefined),

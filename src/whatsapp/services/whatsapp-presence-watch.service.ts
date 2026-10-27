@@ -111,6 +111,15 @@ export class WhatsAppPresenceWatchService implements OnModuleInit, OnModuleDestr
 		return this.redis.sMembers(this.userKey(accountId, userId));
 	}
 
+	/** Does anyone follow a contact on this account? (Keeps the device available for alerts.) */
+	async hasFollowers(accountId: string): Promise<boolean> {
+		await this.ensureLoaded(accountId);
+		for (const users of this.watchers.get(accountId)?.values() || []) {
+			if (users.size) return true;
+		}
+		return false;
+	}
+
 	async setWatch(accountId: string, userId: string, conversationId: string, watch: boolean) {
 		const client = await this.requireRedis();
 		const key = this.userKey(accountId, userId);

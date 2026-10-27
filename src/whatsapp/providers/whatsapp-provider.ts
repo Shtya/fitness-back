@@ -355,6 +355,9 @@ export interface WhatsAppProvider {
 		deviceAvailable: boolean;
 		hasPushName: boolean;
 		availabilityError?: string | null;
+		rawPresencePackets?: number;
+		unparsedPresencePackets?: number;
+		lastRawPresenceAt?: string | null;
 		knownContacts: number;
 		lidMappings: number;
 	};

@@ -29,7 +29,7 @@ describe('WhatsAppOnlinePresenceService', () => {
 		const { service, provider, contactPresence } = setup(1);
 		await service.reconcile('acc');
 		expect(provider.setOnlinePresence).toHaveBeenCalledWith(true);
-		expect(contactPresence.subscribeRecentDirectChats).toHaveBeenCalledWith('acc', 200, true);
+		expect(contactPresence.subscribeRecentDirectChats).toHaveBeenCalledWith('acc', 200, true, { resend: true });
 	});
 
 	it('does not resend available on every reconcile', async () => {

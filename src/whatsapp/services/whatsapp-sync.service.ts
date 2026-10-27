@@ -1196,6 +1196,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return;
 		}
 		if (event.type === 'presence') {
+			this.contactPresence.noteReceived(accountId);
 			const chatId = String(event.payload?.chatId || '');
 			const chatIdRaw = String(event.payload?.chatIdRaw || '').trim();
 			const phoneDigits = String(event.payload?.phoneDigits || '').replace(/\D/g, '') || null;
@@ -3429,6 +3430,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				accountId,
 				this.conversationEventScope(conversation),
 			);
+			// Their message arrived, so they stopped typing; WhatsApp does not always send `paused`.
+			if (!fromHistory && hydrated.direction === WhatsAppMessageDirection.INBOUND) {
+				this.contactPresence.clearTypingAfterMessage(accountId, conversation.id);
+			}
 			this.scheduleConversationUpdated(accountId, {
 				conversationId: conversation.id,
 				assignedUserId: conversation.assignedUserId,

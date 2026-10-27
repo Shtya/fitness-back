@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import {
 	desiredOnlinePresence,
@@ -6,6 +6,7 @@ import {
 } from '../utils/whatsapp-typing-attempts';
 import { WhatsAppContactPresenceService } from './whatsapp-contact-presence.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
+import { WhatsAppPresenceWatchService } from './whatsapp-presence-watch.service';
 
 const RECONCILE_INTERVAL_MS = 60_000;
 /** Re-assert `available` periodically; the server may drop it on its own. */
@@ -30,10 +31,20 @@ export class WhatsAppOnlinePresenceService implements OnModuleInit, OnModuleDest
 	private interval: NodeJS.Timeout | null = null;
 	private unsubscribers: Array<() => void> = [];
 
+	/**
+	 * Keep the device available while anyone follows a contact on this account, so alerts work
+	 * with the CRM closed. Note: while a linked device is available WhatsApp may hold back phone
+	 * notifications. Set WHATSAPP_PRESENCE_ALERTS_KEEP_ONLINE=false to only go available while
+	 * the CRM is open.
+	 */
+	private readonly keepOnlineForAlerts =
+		String(process.env.WHATSAPP_PRESENCE_ALERTS_KEEP_ONLINE ?? 'true').toLowerCase() !== 'false';
+
 	constructor(
 		private readonly providers: WhatsAppProviderManagerService,
 		private readonly gateway: WhatsAppGateway,
 		private readonly contactPresence: WhatsAppContactPresenceService,
+		@Optional() private readonly watch?: WhatsAppPresenceWatchService,
 	) {}
 
 	onModuleInit() {
@@ -102,7 +113,12 @@ export class WhatsAppOnlinePresenceService implements OnModuleInit, OnModuleDest
 			const provider = this.providers.getProvider(accountId);
 			if (!provider?.setOnlinePresence || !provider.isOnlinePresence) return;
 			const watchers = this.gateway.accountWatcherCount(accountId);
-			const desired = desiredOnlinePresence(this.mode, watchers);
+			// Followed contacts ("notify me when online") need presence even with no CRM tab open.
+			const followers =
+				this.keepOnlineForAlerts && this.mode !== 'off' && this.watch
+					? await this.watch.hasFollowers(accountId).catch(() => false)
+					: false;
+			const desired = desiredOnlinePresence(this.mode, watchers) || followers;
 			const current = provider.isOnlinePresence();
 			if (desired) {
 				const last = this.lastOnlineAt.get(accountId) || 0;
@@ -111,9 +127,12 @@ export class WhatsAppOnlinePresenceService implements OnModuleInit, OnModuleDest
 				if (!ok) return;
 				this.lastOnlineAt.set(accountId, Date.now());
 				if (!current) {
-					// Subscriptions sent while unavailable may not deliver chatstate; renew them.
+					// Subscriptions sent (or deferred) while unavailable got no real answers: resend all.
+					this.logger.log(
+						`[WHATSAPP PRESENCE] device available → resending subscriptions session=${accountId} viewers=${watchers} followers=${followers}`,
+					);
 					await this.contactPresence
-						.subscribeRecentDirectChats(accountId, 200, true)
+						.subscribeRecentDirectChats(accountId, 200, true, { resend: true })
 						.catch(() => undefined);
 				}
 				return;
@@ -121,6 +140,8 @@ export class WhatsAppOnlinePresenceService implements OnModuleInit, OnModuleDest
 			if (current) {
 				await provider.setOnlinePresence(false);
 				this.lastOnlineAt.delete(accountId);
+				// From now on WhatsApp tells this device nothing: don't keep showing anyone as online.
+				this.contactPresence.markAccountUnconfirmed(accountId);
 			}
 		} catch (error) {
 			this.logger.warn(

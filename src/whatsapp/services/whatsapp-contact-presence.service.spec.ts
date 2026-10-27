@@ -156,6 +156,30 @@ describe('WhatsAppContactPresenceService', () => {
 		expect(withOffline.items[0].lastSeen).toBe(onlineAt);
 	});
 
+	it('ends typing when the contact’s message arrives without a paused event', async () => {
+		const { service, gateway } = createService();
+		service.applyPresenceEvent('acc-1', directConversation() as any, {
+			state: 'composing',
+			t: Date.now(),
+		});
+		gateway.emitAccountSnapshotScoped.mockClear();
+
+		service.clearTypingAfterMessage('acc-1', 'conv-1');
+
+		const snap = await service.listOnline('acc-1');
+		expect(snap.items).toHaveLength(1);
+		expect(snap.items[0].typing).toBe(false);
+		expect(snap.items[0].recording).toBe(false);
+		expect(snap.items[0].online).toBe(true);
+		expect(snap.items[0].state).toBe('available');
+		expect(gateway.emitAccountSnapshotScoped).toHaveBeenCalledTimes(1);
+
+		// Nothing to clear: no extra broadcast.
+		service.clearTypingAfterMessage('acc-1', 'conv-1');
+		service.clearTypingAfterMessage('acc-1', 'unknown-conv');
+		expect(gateway.emitAccountSnapshotScoped).toHaveBeenCalledTimes(1);
+	});
+
 	it('treats composing as typing/online', async () => {
 		const { service } = createService();
 		service.applyPresenceEvent('acc-1', directConversation() as any, {
@@ -384,7 +408,13 @@ describe('WhatsAppContactPresenceService', () => {
 			for (let i = 0; i < 20; i += 1) {
 				service.applyPresenceEvent(
 					'acc-1',
-					directConversation({ id: `conv-${i}`, providerChatId: `2011111111${i}@c.us` }) as any,
+					directConversation({
+						id: `conv-${i}`,
+						providerChatId: `2011111111${i}@c.us`,
+						// 20 different people (the snapshot lists one row per person)
+						contactId: `contact-${i}`,
+						contact: { id: `contact-${i}`, name: `P${i}`, phoneNumber: `2011111111${i}`, avatarUrl: null },
+					}) as any,
 					{ state: 'available', isOnline: true, t: Date.now() },
 				);
 			}

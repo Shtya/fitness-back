@@ -941,6 +941,8 @@ export class BaileysProvider implements WhatsAppProvider {
 	private opening: Promise<void> | null = null;
 	private state: string = 'disconnected';
 	private onlinePresence = false;
+	/** Raw `presence.update` packets from Baileys (before any matching), for diagnostics. */
+	private presenceRaw = { received: 0, unparsed: 0, lastAt: 0 };
 	/** Why the device could not be marked available last time (surfaced in presence diagnostics). */
 	private availabilityError: string | null = null;
 	private qr: string | null = null;
@@ -2613,6 +2615,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		});
 
 		socket.ev.on('presence.update', (update: any) => {
+			this.presenceRaw.received += 1;
+			this.presenceRaw.lastAt = Date.now();
 			const rawId = String(update?.id || '');
 			const normalized = normalizeBaileysPresenceUpdate(update, (jid) => {
 				const mapped = this.lidToPn.get(jid) || this.contacts.get(jid)?.phoneNumber || null;
@@ -2627,7 +2631,10 @@ export class BaileysProvider implements WhatsAppProvider {
 				}`,
 			);
 
-			if (!normalized) return;
+			if (!normalized) {
+				this.presenceRaw.unparsed += 1;
+				return;
+			}
 
 			const isGroup = normalized.chatId.endsWith('@g.us');
 			// In groups the name must be the member who is typing, never the group subject.
@@ -4017,6 +4024,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			deviceAvailable: this.onlinePresence,
 			hasPushName: Boolean(me?.name),
 			availabilityError: this.availabilityError,
+			rawPresencePackets: this.presenceRaw.received,
+			unparsedPresencePackets: this.presenceRaw.unparsed,
+			lastRawPresenceAt: this.presenceRaw.lastAt ? new Date(this.presenceRaw.lastAt).toISOString() : null,
 			knownContacts: this.contacts.size,
 			lidMappings: this.lidToPn.size,
 		};
