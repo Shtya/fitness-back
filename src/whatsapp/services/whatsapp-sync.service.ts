@@ -4858,6 +4858,12 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (!provider?.sendPresenceUpdate || !conversation.providerChatId) {
 			return { ok: false };
 		}
+		if (
+			(state === 'composing' || state === 'recording') &&
+			getWhatsAppPrivacySettings(accountAccess.account).hideTypingIndicator
+		) {
+			return { ok: true, suppressed: true };
+		}
 		await provider.sendPresenceUpdate(conversation.providerChatId, state);
 		return { ok: true };
 	}

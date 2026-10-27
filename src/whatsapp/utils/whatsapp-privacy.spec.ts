@@ -11,6 +11,7 @@ describe('WhatsApp privacy settings', () => {
 			hideStatusViewReceipts: true,
 			readReceiptMode: 'on_reply',
 			holdDeliveryReceipts: false,
+			hideTypingIndicator: false,
 		});
 	});
 
@@ -26,6 +27,22 @@ describe('WhatsApp privacy settings', () => {
 			readReceiptMode: 'never',
 		});
 		expect(kept['privacy.holdDeliveryReceipts']).toBe(true);
+	});
+
+	it('saves hide-typing and keeps it when an older client omits it', () => {
+		const on = mergeWhatsAppPrivacySettings({ providerCapabilities: {} } as any, {
+			hideStatusViewReceipts: true,
+			readReceiptMode: 'on_reply',
+			hideTypingIndicator: true,
+		});
+		expect(getWhatsAppPrivacySettings({ providerCapabilities: on } as any).hideTypingIndicator).toBe(
+			true,
+		);
+		const kept = mergeWhatsAppPrivacySettings({ providerCapabilities: on } as any, {
+			hideStatusViewReceipts: false,
+			readReceiptMode: 'never',
+		});
+		expect(kept['privacy.hideTypingIndicator']).toBe(true);
 	});
 
 	it('preserves capabilities while updating privacy settings', () => {

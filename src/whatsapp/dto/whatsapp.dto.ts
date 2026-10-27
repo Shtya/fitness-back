@@ -83,6 +83,10 @@ export class UpdateWhatsAppPrivacySettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	holdDeliveryReceipts?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	hideTypingIndicator?: boolean;
 }
 
 export class UpdateWhatsAppNotificationPreferencesDto {

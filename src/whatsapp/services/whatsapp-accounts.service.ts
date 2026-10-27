@@ -436,6 +436,7 @@ export class WhatsAppAccountsService {
 		);
 		account.providerCapabilities = mergeWhatsAppPrivacySettings(account, settings);
 		await this.accountRepo.save(account);
+		this.accessService.invalidateAccount(accountId);
 		await this.audit.write({
 			actorUserId: user.id,
 			accountId,
