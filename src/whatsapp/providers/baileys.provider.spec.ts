@@ -413,6 +413,28 @@ describe('BaileysProvider stories', () => {
 		).resolves.toHaveLength(2);
 	});
 
+	it('asks the store by the 3EB0 story id so linked-device viewer lists catch up', async () => {
+		const provider = new BaileysProvider('account-own-story-store-views') as any;
+		provider.state = 'connected';
+		provider.socket = {
+			loadMessage: jest.fn(async (_jid: string, id: string) => {
+				expect(id).toBe('3EB0OWNSTORY');
+				return {
+					key: { remoteJid: 'status@broadcast', id: '3EB0OWNSTORY', fromMe: true },
+					message: { imageMessage: { mimetype: 'image/jpeg' } },
+					userReceipt: [
+						{ userJid: '201111111111@s.whatsapp.net', readTimestamp: 1_700_000_000 },
+						{ userJid: '201999999999@s.whatsapp.net', readTimestamp: 1_700_000_400 },
+					],
+				};
+			}),
+		};
+		await expect(
+			provider.getOwnStatusReceipts('true_status@broadcast_3EB0OWNSTORY_201000000000@c.us'),
+		).resolves.toHaveLength(2);
+		expect(provider.socket.loadMessage).toHaveBeenCalledWith('status@broadcast', '3EB0OWNSTORY');
+	});
+
 	it('keeps address-book name above message pushName', () => {
 		const provider = new BaileysProvider('account-contact-priority');
 		const chatId = '201551495772@c.us';

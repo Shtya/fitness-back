@@ -3,6 +3,8 @@ import {
 	signMediaToken,
 	signedMediaPath,
 	signedSocialDownloadPath,
+	signedStatusMediaPath,
+	statusMediaResourceId,
 	verifyMediaToken,
 } from './whatsapp-media-signed-url';
 
@@ -65,5 +67,17 @@ describe('whatsapp-media-signed-url', () => {
 		const signed = signMediaToken('dl-1', 'user-9');
 		expect(verifyMediaToken(signed.token, 'dl-1')?.userId).toBe('user-9');
 		expect(verifyMediaToken(signed.token, 'dl-2')).toBeNull();
+	});
+
+	it('binds a story stream token to one account + story', () => {
+		const resource = statusMediaResourceId('live', 'acc-1', 'st-9');
+		const signed = signMediaToken(resource, 'user-9');
+		expect(verifyMediaToken(signed.token, resource)?.userId).toBe('user-9');
+		expect(
+			verifyMediaToken(signed.token, statusMediaResourceId('live', 'acc-1', 'st-8')),
+		).toBeNull();
+		expect(signedStatusMediaPath('live', 'acc-1', 'st-9', 'tok.en')).toBe(
+			'/api/v1/whatsapp/status-media/acc-1/live/st-9/content?token=tok.en',
+		);
 	});
 });

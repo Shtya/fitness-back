@@ -1710,20 +1710,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (!id) return [];
 		const ids = new Set<string>();
 		ids.add(id);
+		const hex = statusMessageKey(id);
+		if (hex) ids.add(hex);
 		const statusPart = id.match(/_(3A[0-9A-Fa-f]+)(?:_|$)/i)?.[1];
 		if (statusPart) ids.add(statusPart);
-		const afterBroadcast = id.split('status@broadcast_')[1];
-		if (afterBroadcast) {
-			const first = afterBroadcast.split('_')[0];
-			if (first && /^3A[0-9A-Fa-f]+$/i.test(first)) ids.add(first);
-		}
-		const bare = id.split('_').pop();
-		if (
-			bare &&
-			(/^3A[0-9A-Fa-f]+$/i.test(bare) || /^[0-9A-Fa-f]{16,}$/i.test(bare))
-		) {
-			ids.add(bare);
-		}
 		return [...ids];
 	}
 
@@ -4257,9 +4247,40 @@ export class BaileysProvider implements WhatsAppProvider {
 	 * opened the story before this linked session started recording receipts.
 	 */
 	async getOwnStatusReceipts(providerStatusId: string, senderWaId?: string | null) {
-		const raw =
+		let raw =
 			this.resolveStatusRaw(providerStatusId, senderWaId) ||
-			(await this.hydrateStatusRaw(providerStatusId, senderWaId, false));
+			this.statusRawById.get(String(providerStatusId || '').trim()) ||
+			null;
+		const absorb = (source: any) => {
+			if (!source) return;
+			if (!raw) raw = source;
+			for (const receipt of Array.isArray(source.userReceipt) ? source.userReceipt : []) {
+				mergeStatusUserReceipt(raw, receipt);
+			}
+		};
+		const sock = this.socket;
+		if (sock && this.state === 'connected' && typeof sock.loadMessage === 'function') {
+			for (const messageId of this.extractStatusMessageIds(providerStatusId)) {
+				if (!messageId || messageId.includes('@')) continue;
+				try {
+					const loaded = await sock.loadMessage('status@broadcast', messageId);
+					if (!loaded) continue;
+					if (!raw && loaded.message) this.rememberStatus(loaded);
+					absorb(loaded);
+				} catch {
+					/* next id shape */
+				}
+			}
+		} else {
+			absorb(await this.hydrateStatusRaw(providerStatusId, senderWaId, false));
+		}
+		const hex = statusMessageKey(providerStatusId);
+		if (hex) {
+			for (const cached of this.statusRawById.values()) {
+				if (String(cached?.key?.id || '') !== hex) continue;
+				absorb(cached);
+			}
+		}
 		if (!raw || raw.key?.fromMe === false) return [];
 		return statusReceiptsFromUserReceipts(raw, this.getOwnJids());
 	}

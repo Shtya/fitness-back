@@ -11,7 +11,10 @@ import { WhatsAppConnectionController } from './controllers/whatsapp-connection.
 import { WhatsAppConversationsController } from './controllers/whatsapp-conversations.controller';
 import { WhatsAppAttachmentStreamController } from './controllers/whatsapp-attachment-stream.controller';
 import { WhatsAppReportsController } from './controllers/whatsapp-reports.controller';
-import { WhatsAppStatusController } from './controllers/whatsapp-status.controller';
+import {
+	WhatsAppStatusController,
+	WhatsAppStatusMediaController,
+} from './controllers/whatsapp-status.controller';
 import { WhatsAppVoiceChangerController } from './controllers/whatsapp-voice-changer.controller';
 import { WhatsAppMediaLibraryController } from './controllers/whatsapp-media-library.controller';
 import { WhatsAppSocialDownloadController } from './controllers/whatsapp-social-download.controller';
@@ -163,6 +166,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAttachmentStreamController,
 		WhatsAppReportsController,
 		WhatsAppStatusController,
+		WhatsAppStatusMediaController,
 		WhatsAppVoiceChangerController,
 		WhatsAppMediaLibraryController,
 		WhatsAppSocialDownloadController,

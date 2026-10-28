@@ -867,17 +867,23 @@ export class WhatsAppStatusService {
 			}),
 			this.contactRepo.find({
 				where: { accountId },
-				select: ['waId', 'phoneNumber', 'name', 'avatarUrl'],
+				select: ['waId', 'phoneNumber', 'name', 'avatarUrl', 'isSaved', 'localName'],
 			}),
 		]);
 		const people = new Map<
 			string,
-			{ waId: string; name: string | null; avatarUrl: string | null; lastMessageAt: Date | null }
+			{
+				waId: string;
+				name: string | null;
+				avatarUrl: string | null;
+				lastMessageAt: Date | null;
+				saved: boolean;
+			}
 		>();
 		const entry = (jid: string) => {
 			let person = people.get(jid);
 			if (!person) {
-				person = { waId: jid, name: null, avatarUrl: null, lastMessageAt: null };
+				person = { waId: jid, name: null, avatarUrl: null, lastMessageAt: null, saved: false };
 				people.set(jid, person);
 			}
 			return person;
@@ -892,16 +898,21 @@ export class WhatsAppStatusService {
 			const person = entry(jid);
 			person.name = preferWhatsAppContactName(person.name, contact.name, jid) || person.name;
 			person.avatarUrl = person.avatarUrl || contact.avatarUrl || null;
+			if (contact.isSaved || contact.localName) person.saved = true;
 		}
 		return [...people.values()]
-			.map(person => ({
-				...person,
-				name:
+			.map(person => {
+				const name =
 					person.name && !isWeakWhatsAppContactName(person.name, person.waId, null)
 						? person.name
-						: null,
-				phone: person.waId.replace(/@.*$/, ''),
-			}))
+						: null;
+				return {
+					...person,
+					name,
+					saved: person.saved || Boolean(name),
+					phone: person.waId.replace(/@.*$/, ''),
+				};
+			})
 			.sort(
 				(a, b) =>
 					(b.lastMessageAt?.getTime() || 0) - (a.lastMessageAt?.getTime() || 0) ||
@@ -922,6 +933,7 @@ export class WhatsAppStatusService {
 				name: null,
 				avatarUrl: null,
 				lastMessageAt: null,
+				saved: false,
 				phone: waId.replace(/@.*$/, ''),
 			});
 		}
@@ -1688,6 +1700,19 @@ export class WhatsAppStatusService {
 		});
 		if (!found) throw new NotFoundException('WhatsApp status not found');
 		return this.resolveStatusMedia(found.row, found.source, accountId);
+	}
+
+	/**
+	 * Bytes behind a signed story URL. The token was issued by `resolveContent` for a
+	 * user who could view this story, and is bound to this exact story.
+	 */
+	async resolveSignedContent(accountId: string, statusIdValue: string, history: boolean) {
+		if (!isUuid(accountId)) throw new NotFoundException('WhatsApp status not found');
+		const found = await this.findStatusRow(accountId, statusIdValue, { historyOnly: history });
+		if (!found) throw new NotFoundException('WhatsApp status not found');
+		return this.resolveStatusMedia(found.row, found.source, accountId, {
+			allowPhoneRequest: false,
+		});
 	}
 
 	private async resolveStatusMedia(

@@ -2,6 +2,7 @@ import {
 	Body,
 	Controller,
 	Get,
+	NotFoundException,
 	Param,
 	Post,
 	Put,
@@ -10,8 +11,14 @@ import {
 	Res,
 	UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
+import { JwtOrMediaTokenGuard } from '../guards/jwt-or-media-token.guard';
 import { streamResolvedAttachment } from '../utils/whatsapp-attachment-stream';
+import {
+	signedStatusMediaPath,
+	signMediaToken,
+	statusMediaResourceId,
+} from '../utils/whatsapp-media-signed-url';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
@@ -27,6 +34,32 @@ import { WhatsAppStatusService } from '../services/whatsapp-status.service';
 import { WhatsAppSyncService } from '../services/whatsapp-sync.service';
 
 const STATUS_CONTENT_CACHE = 'private, max-age=3600';
+const STATUS_STREAM_TTL_SECONDS = 60 * 60;
+
+/** Range-capable story bytes for a signed URL (or a bearer token). */
+@Controller('whatsapp/status-media/:accountId/:scope/:statusId')
+@UseGuards(JwtOrMediaTokenGuard)
+export class WhatsAppStatusMediaController {
+	constructor(private readonly statuses: WhatsAppStatusService) {}
+
+	@Get('content')
+	async content(
+		@Req() req: Request & { user?: any; waMediaToken?: boolean },
+		@Res({ passthrough: true }) res: Response,
+		@Param('accountId') accountId: string,
+		@Param('scope') scope: string,
+		@Param('statusId') statusId: string,
+	) {
+		if (scope !== 'live' && scope !== 'history') throw new NotFoundException();
+		const history = scope === 'history';
+		const file = req.waMediaToken
+			? await this.statuses.resolveSignedContent(accountId, statusId, history)
+			: await this.statuses.resolveContent(req.user, accountId, statusId, { history });
+		return streamResolvedAttachment(req, res, file, `status-${scope}-${statusId}`, {
+			cacheControl: STATUS_CONTENT_CACHE,
+		});
+	}
+}
 
 @Controller('whatsapp/accounts/:accountId/statuses')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -77,6 +110,31 @@ export class WhatsAppStatusController {
 	@Get('history')
 	listHistory(@Req() req: any, @Param('accountId') accountId: string) {
 		return this.statuses.listHistory(req.user, accountId);
+	}
+
+	/** A signed URL a `<video>` can stream with Range requests; it cannot send our bearer header. */
+	@Get(':statusId/stream-url')
+	async streamUrl(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+		@Query('history') history?: string,
+	) {
+		const isHistory = history === 'true' || history === '1';
+		const file = await this.statuses.resolveContent(req.user, accountId, statusId, {
+			history: isHistory,
+		});
+		const scope = isHistory ? 'history' : 'live';
+		const signed = signMediaToken(
+			statusMediaResourceId(scope, accountId, statusId),
+			String(req.user?.id || ''),
+			STATUS_STREAM_TTL_SECONDS,
+		);
+		return {
+			url: signedStatusMediaPath(scope, accountId, statusId, signed.token),
+			mimeType: file.mimeType,
+			expiresAt: signed.expiresAt,
+		};
 	}
 
 	@Get('history/:statusId/content')

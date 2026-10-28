@@ -97,6 +97,27 @@ export function signedSocialDownloadPath(downloadId: string, token: string): str
 	return `/api/v1/whatsapp/social-downloads/${encodeURIComponent(downloadId)}/content?token=${encodeURIComponent(token)}`;
 }
 
+export type StatusMediaScope = 'live' | 'history';
+
+/** Bound to scope + account + story so a token cannot be replayed against another story. */
+export function statusMediaResourceId(
+	scope: string,
+	accountId: string,
+	statusId: string,
+): string {
+	return `status:${scope}:${accountId}:${statusId}`;
+}
+
+/** A story video streamed straight into `<video>` (Range requests) instead of one big blob. */
+export function signedStatusMediaPath(
+	scope: StatusMediaScope,
+	accountId: string,
+	statusId: string,
+	token: string,
+): string {
+	return `/api/v1/whatsapp/status-media/${encodeURIComponent(accountId)}/${scope}/${encodeURIComponent(statusId)}/content?token=${encodeURIComponent(token)}`;
+}
+
 /**
  * Same scheme for one clip of a story draft.
  *

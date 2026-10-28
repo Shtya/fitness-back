@@ -4,7 +4,7 @@ import {
 	UnauthorizedException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
-import { verifyMediaToken } from '../utils/whatsapp-media-signed-url';
+import { statusMediaResourceId, verifyMediaToken } from '../utils/whatsapp-media-signed-url';
 
 /**
  * The resource a signed token must be bound to, derived from the route.
@@ -16,6 +16,10 @@ import { verifyMediaToken } from '../utils/whatsapp-media-signed-url';
 function signedResourceId(params: Record<string, unknown> | undefined): string {
 	const draftId = String(params?.draftId || '');
 	if (draftId) return `${draftId}:${String(params?.index ?? '')}`;
+	const statusId = String(params?.statusId || '');
+	if (statusId) {
+		return statusMediaResourceId(String(params?.scope || ''), String(params?.accountId || ''), statusId);
+	}
 	return String(params?.attachmentId || params?.downloadId || '');
 }
 
