@@ -853,12 +853,66 @@ export class WhatsAppStatusService {
 		return audience.slice(0, STATUS_AUDIENCE_LIMIT);
 	}
 
+	/** When each account last asked the phone for its address book, so the picker does not spam it. */
+	private readonly addressBookPulledAt = new Map<string, number>();
+
+	/**
+	 * Names saved in the phone's address book, keyed by phone digits, straight from the live
+	 * session. Contact sync only stores these during a full inbox sync, so rows synced before
+	 * `phonebook_name` existed (or after a restart) would otherwise all look like profile names.
+	 */
+	private async livePhonebookNames(accountId: string): Promise<Map<string, string>> {
+		const names = new Map<string, string>();
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected') return names;
+		const read = async () => {
+			for (const contact of (await provider.getContacts().catch(() => [])) || []) {
+				const id = String(contact?.id?._serialized || contact?.id || '');
+				const digits = String(contact?.number || '').replace(/\D/g, '') || id.split('@')[0].split(':')[0];
+				if (!/^\d{8,15}$/.test(digits) || id.endsWith('@g.us')) continue;
+				const name = String(contact?.name || '').trim();
+				if (name && !isWeakWhatsAppContactName(name, id, digits)) names.set(digits, name);
+			}
+		};
+		await read();
+		const last = this.addressBookPulledAt.get(accountId) || 0;
+		if (!names.size && provider.pullAddressBook && Date.now() - last > 10 * 60_000) {
+			this.addressBookPulledAt.set(accountId, Date.now());
+			// The snapshot arrives as contact events; give it a bounded wait, then read again.
+			await Promise.race([
+				provider.pullAddressBook().catch(() => undefined),
+				new Promise(resolve => setTimeout(resolve, 15_000)),
+			]);
+			await read();
+		}
+		return names;
+	}
+
+	/** Store phonebook names learned from the live session, in the background. */
+	private persistPhonebookNames(accountId: string, updates: Array<{ waId: string; phonebookName: string }>) {
+		if (!updates.length) return;
+		void (async () => {
+			for (let index = 0; index < updates.length; index += 50) {
+				await Promise.all(
+					updates
+						.slice(index, index + 50)
+						.map(({ waId, phonebookName }) => this.contactRepo.update({ accountId, waId }, { phonebookName })),
+				);
+			}
+		})().catch(error =>
+			this.logger.warn(
+				`Could not store phonebook names for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+			),
+		);
+	}
+
 	/**
 	 * The people this account's stories can reach, named, for the audience picker.
 	 * Same sources as {@link publishAudience}, keyed by the phone JID a publish uses.
 	 */
 	private async audiencePeople(accountId: string) {
-		const [conversations, contacts] = await Promise.all([
+		const [phonebook, conversations, contacts] = await Promise.all([
+			this.livePhonebookNames(accountId),
 			this.conversationRepo.find({
 				where: { accountId },
 				select: ['providerChatId', 'lastMessageAt'],
@@ -904,8 +958,10 @@ export class WhatsAppStatusService {
 			}
 			return person;
 		};
+		// Passing the digits as the phone also rejects a "name" that is just "+2010…".
 		const strong = (name: string | null | undefined, jid: string) =>
-			name && !isWeakWhatsAppContactName(name, jid, null) ? name.trim() : null;
+			name && !isWeakWhatsAppContactName(name, jid, jid.split('@')[0]) ? name.trim() : null;
+		const learned: Array<{ waId: string; phonebookName: string }> = [];
 		for (const conversation of conversations) {
 			const [jid] = statusAudienceJids([conversation.providerChatId]);
 			if (jid) entry(jid).lastMessageAt = conversation.lastMessageAt;
@@ -914,9 +970,12 @@ export class WhatsAppStatusService {
 			const [jid] = statusAudienceJids([contact.phoneNumber, contact.waId]);
 			if (!jid) continue;
 			const person = entry(jid);
+			const live = phonebook.get(jid.split('@')[0]) || null;
+			if (live && live !== contact.phonebookName) learned.push({ waId: contact.waId, phonebookName: live });
 			// Phonebook (or a name typed in the contact manager) = saved; anything else
 			// WhatsApp gave us is the profile name the person set for themselves.
-			const savedName = strong(contact.localName, jid) || strong(contact.phonebookName, jid);
+			const savedName =
+				strong(contact.localName, jid) || strong(live, jid) || strong(contact.phonebookName, jid);
 			if (savedName || contact.isSaved) person.saved = true;
 			person.savedName = person.savedName || savedName;
 			const profileName = strong(contact.name, jid);
@@ -925,6 +984,15 @@ export class WhatsAppStatusService {
 			}
 			person.avatarUrl = person.avatarUrl || contact.avatarUrl || null;
 		}
+		// Someone in the phonebook with only a chat row (no contact row) is still saved.
+		for (const [jid, person] of people) {
+			const live = person.savedName ? null : phonebook.get(jid.split('@')[0]);
+			if (live) {
+				person.savedName = live;
+				person.saved = true;
+			}
+		}
+		this.persistPhonebookNames(accountId, learned);
 		return [...people.values()]
 			.map(({ savedName, profileName, ...person }) => {
 				const name = savedName || profileName;
@@ -984,6 +1052,39 @@ export class WhatsAppStatusService {
 			settings,
 		).waIds.length;
 		return { ...settings, recipients, people };
+	}
+
+	/**
+	 * Current profile picture for one person in the audience picker. Stored URLs are signed
+	 * WhatsApp CDN links that expire, and many rows never had one, so the picker asks for
+	 * rows on screen whose image is missing or fails to load. `null` = hidden by privacy
+	 * settings, no photo, or the account is offline.
+	 */
+	async audienceAvatar(user: User, accountId: string, waId: string, quality: 'preview' | 'full' = 'preview') {
+		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const [jid] = statusAudienceJids([waId]);
+		if (!jid) throw new BadRequestException('Not a phone number');
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected' || typeof provider.getProfilePictureUrl !== 'function') {
+			return { waId: jid, avatarUrl: null, connected: false };
+		}
+		const avatarUrl = await provider.getProfilePictureUrl(jid, { quality }).catch(() => null);
+		// Only the small thumb is stored; it is what every avatar in the app shows.
+		if (avatarUrl && quality === 'preview') {
+			const digits = jid.split('@')[0];
+			await this.contactRepo
+				.createQueryBuilder()
+				.update()
+				.set({ avatarUrl })
+				.where('account_id = :accountId', { accountId })
+				.andWhere('(wa_id IN (:...ids) OR phone_number = :digits)', {
+					ids: [jid, `${digits}@c.us`],
+					digits,
+				})
+				.execute()
+				.catch(() => undefined);
+		}
+		return { waId: jid, avatarUrl: avatarUrl || null, connected: true };
 	}
 
 	async updateAudience(

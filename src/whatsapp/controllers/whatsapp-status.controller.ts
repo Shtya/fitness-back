@@ -98,6 +98,20 @@ export class WhatsAppStatusController {
 		return this.statuses.getAudience(req.user, accountId);
 	}
 
+	@Post('audience/avatar')
+	audienceAvatar(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: { waId?: string; quality?: string },
+	) {
+		return this.statuses.audienceAvatar(
+			req.user,
+			accountId,
+			String(body?.waId || '').slice(0, 80),
+			body?.quality === 'full' ? 'full' : 'preview',
+		);
+	}
+
 	@Put('audience')
 	updateAudience(
 		@Req() req: any,
