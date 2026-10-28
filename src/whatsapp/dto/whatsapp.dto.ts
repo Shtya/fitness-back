@@ -256,6 +256,14 @@ export class UpdateWhatsAppStoryAudienceDto {
 	@IsString({ each: true })
 	@MaxLength(80, { each: true })
 	waIds?: string[];
+
+	/** Numbers added by hand that have no chat or contact row yet. Omitted = keep the saved list. */
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(800)
+	@IsString({ each: true })
+	@MaxLength(80, { each: true })
+	extraWaIds?: string[];
 }
 
 export class RepostWhatsAppStatusDto {

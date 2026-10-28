@@ -248,6 +248,7 @@ const OPTIONAL_TABLES = [
 		ADD COLUMN IF NOT EXISTS wa_sync_attempts int NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS wa_sync_next_at timestamptz,
 		ADD COLUMN IF NOT EXISTS wa_synced_at timestamptz`,
+	`ALTER TABLE whatsapp_contacts ADD COLUMN IF NOT EXISTS phonebook_name varchar(200)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_contacts_saved
 		ON whatsapp_contacts(account_id) WHERE is_saved = true`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_contacts_sync_due

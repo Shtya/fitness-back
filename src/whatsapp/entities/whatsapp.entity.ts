@@ -185,6 +185,10 @@ export class WhatsAppContact extends CoreEntity {
 	@Column({ name: 'is_business', type: 'boolean', default: false })
 	isBusiness: boolean;
 
+	/** Name saved in the phone's address book. `name` may instead hold the profile (push) name. */
+	@Column({ name: 'phonebook_name', type: 'varchar', length: 200, nullable: true })
+	phonebookName: string | null;
+
 	/** Name the user typed in the contact manager. `name` stays the WhatsApp-sourced label. */
 	@Column({ name: 'local_name', type: 'varchar', length: 200, nullable: true })
 	localName: string | null;

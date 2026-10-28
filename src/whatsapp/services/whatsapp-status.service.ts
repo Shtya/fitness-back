@@ -867,14 +867,23 @@ export class WhatsAppStatusService {
 			}),
 			this.contactRepo.find({
 				where: { accountId },
-				select: ['waId', 'phoneNumber', 'name', 'avatarUrl', 'isSaved', 'localName'],
+				select: [
+					'waId',
+					'phoneNumber',
+					'name',
+					'phonebookName',
+					'avatarUrl',
+					'isSaved',
+					'localName',
+				],
 			}),
 		]);
 		const people = new Map<
 			string,
 			{
 				waId: string;
-				name: string | null;
+				savedName: string | null;
+				profileName: string | null;
 				avatarUrl: string | null;
 				lastMessageAt: Date | null;
 				saved: boolean;
@@ -883,11 +892,20 @@ export class WhatsAppStatusService {
 		const entry = (jid: string) => {
 			let person = people.get(jid);
 			if (!person) {
-				person = { waId: jid, name: null, avatarUrl: null, lastMessageAt: null, saved: false };
+				person = {
+					waId: jid,
+					savedName: null,
+					profileName: null,
+					avatarUrl: null,
+					lastMessageAt: null,
+					saved: false,
+				};
 				people.set(jid, person);
 			}
 			return person;
 		};
+		const strong = (name: string | null | undefined, jid: string) =>
+			name && !isWeakWhatsAppContactName(name, jid, null) ? name.trim() : null;
 		for (const conversation of conversations) {
 			const [jid] = statusAudienceJids([conversation.providerChatId]);
 			if (jid) entry(jid).lastMessageAt = conversation.lastMessageAt;
@@ -896,20 +914,31 @@ export class WhatsAppStatusService {
 			const [jid] = statusAudienceJids([contact.phoneNumber, contact.waId]);
 			if (!jid) continue;
 			const person = entry(jid);
-			person.name = preferWhatsAppContactName(person.name, contact.name, jid) || person.name;
+			// Phonebook (or a name typed in the contact manager) = saved; anything else
+			// WhatsApp gave us is the profile name the person set for themselves.
+			const savedName = strong(contact.localName, jid) || strong(contact.phonebookName, jid);
+			if (savedName || contact.isSaved) person.saved = true;
+			person.savedName = person.savedName || savedName;
+			const profileName = strong(contact.name, jid);
+			if (profileName && profileName !== savedName) {
+				person.profileName = preferWhatsAppContactName(person.profileName, profileName, jid) || person.profileName;
+			}
 			person.avatarUrl = person.avatarUrl || contact.avatarUrl || null;
-			if (contact.isSaved || contact.localName) person.saved = true;
 		}
 		return [...people.values()]
-			.map(person => {
-				const name =
-					person.name && !isWeakWhatsAppContactName(person.name, person.waId, null)
-						? person.name
-						: null;
+			.map(({ savedName, profileName, ...person }) => {
+				const name = savedName || profileName;
+				const kind: 'saved' | 'profile' | 'number' = person.saved
+					? 'saved'
+					: name
+						? 'profile'
+						: 'number';
 				return {
 					...person,
 					name,
-					saved: person.saved || Boolean(name),
+					profileName: savedName ? null : profileName,
+					kind,
+					added: false,
 					phone: person.waId.replace(/@.*$/, ''),
 				};
 			})
@@ -924,19 +953,32 @@ export class WhatsAppStatusService {
 		const account = await this.access.assertAccountPermission(user, accountId, 'canUse');
 		const settings = getWhatsAppStoryAudience(account);
 		const people = await this.audiencePeople(accountId);
-		const known = new Set(people.map(person => person.waId));
-		// A saved choice can name someone who has since left the synced lists; keep them visible.
-		for (const waId of settings.waIds) {
-			if (known.has(waId)) continue;
-			people.push({
+		const byWaId = new Map(people.map(person => [person.waId, person]));
+		const extras = new Set(settings.extraWaIds);
+		// Hand-added numbers lead the list; a saved choice can also name someone who has
+		// since left the synced lists. Keep both visible.
+		const missing: typeof people = [];
+		for (const waId of [...settings.extraWaIds, ...settings.waIds]) {
+			const known = byWaId.get(waId);
+			if (known) {
+				if (extras.has(waId)) known.added = true;
+				continue;
+			}
+			const person = {
 				waId,
 				name: null,
+				profileName: null,
 				avatarUrl: null,
 				lastMessageAt: null,
 				saved: false,
+				kind: 'number' as const,
+				added: extras.has(waId),
 				phone: waId.replace(/@.*$/, ''),
-			});
+			};
+			byWaId.set(waId, person);
+			missing.push(person);
 		}
+		people.unshift(...missing);
 		const recipients = resolveStoryAudience(
 			people.map(person => person.waId),
 			settings,
@@ -947,7 +989,7 @@ export class WhatsAppStatusService {
 	async updateAudience(
 		user: User,
 		accountId: string,
-		input: { mode: WhatsAppStoryAudienceMode; waIds?: string[] },
+		input: { mode: WhatsAppStoryAudienceMode; waIds?: string[]; extraWaIds?: string[] },
 	) {
 		await this.access.assertAccountPermission(user, accountId, 'canUse');
 		if (input.mode === 'only' && !statusAudienceJids(input.waIds || []).length) {

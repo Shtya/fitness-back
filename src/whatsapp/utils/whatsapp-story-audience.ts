@@ -11,12 +11,19 @@ export interface WhatsAppStoryAudienceSettings {
 	mode: WhatsAppStoryAudienceMode;
 	/** Phone JIDs (`digits@s.whatsapp.net`): the excluded people, or the only recipients. */
 	waIds: string[];
+	/** Numbers added by hand: counted as contacts even with no chat or contact row. */
+	extraWaIds: string[];
 }
 
 export const STORY_AUDIENCE_MAX_IDS = 800;
 
 const MODE_KEY = 'story.audienceMode';
 const IDS_KEY = 'story.audienceWaIds';
+const EXTRA_KEY = 'story.audienceExtraWaIds';
+
+function storedJids(value: unknown): string[] {
+	return statusAudienceJids(Array.isArray(value) ? value : []).slice(0, STORY_AUDIENCE_MAX_IDS);
+}
 
 export function isStoryAudienceMode(value: unknown): value is WhatsAppStoryAudienceMode {
 	return value === 'contacts' || value === 'except' || value === 'only';
@@ -29,21 +36,22 @@ export function getWhatsAppStoryAudience(
 	const mode = values[MODE_KEY];
 	return {
 		mode: isStoryAudienceMode(mode) ? mode : 'contacts',
-		waIds: statusAudienceJids(Array.isArray(values[IDS_KEY]) ? values[IDS_KEY] : []).slice(
-			0,
-			STORY_AUDIENCE_MAX_IDS,
-		),
+		waIds: storedJids(values[IDS_KEY]),
+		extraWaIds: storedJids(values[EXTRA_KEY]),
 	};
 }
 
 export function mergeWhatsAppStoryAudience(
 	account: Pick<WhatsAppAccount, 'providerCapabilities'>,
-	settings: { mode: WhatsAppStoryAudienceMode; waIds?: unknown[] },
+	settings: { mode: WhatsAppStoryAudienceMode; waIds?: unknown[]; extraWaIds?: unknown[] },
 ): Record<string, unknown> {
+	const current = account.providerCapabilities || {};
 	return {
-		...(account.providerCapabilities || {}),
+		...current,
 		[MODE_KEY]: settings.mode,
-		[IDS_KEY]: statusAudienceJids(settings.waIds || []).slice(0, STORY_AUDIENCE_MAX_IDS),
+		[IDS_KEY]: storedJids(settings.waIds || []),
+		// Left out of the request means "unchanged", so an older client cannot wipe the list.
+		[EXTRA_KEY]: storedJids(settings.extraWaIds ?? current[EXTRA_KEY]),
 	};
 }
 
@@ -53,7 +61,7 @@ export function mergeWhatsAppStoryAudience(
  */
 export function resolveStoryAudience(
 	candidates: Iterable<unknown>,
-	settings: WhatsAppStoryAudienceSettings,
+	settings: Omit<WhatsAppStoryAudienceSettings, 'extraWaIds'> & { extraWaIds?: string[] },
 ): { waIds: string[]; excludeWaIds: string[]; exact: boolean } {
 	if (settings.mode === 'only') {
 		return { waIds: statusAudienceJids(settings.waIds), excludeWaIds: [], exact: true };
@@ -61,7 +69,10 @@ export function resolveStoryAudience(
 	const excluded = settings.mode === 'except' ? statusAudienceJids(settings.waIds) : [];
 	const blocked = new Set(excluded);
 	return {
-		waIds: statusAudienceJids(candidates).filter(jid => !blocked.has(jid)),
+		// Hand-added numbers first: they would otherwise fall past the publish cap.
+		waIds: statusAudienceJids([...(settings.extraWaIds || []), ...candidates]).filter(
+			jid => !blocked.has(jid),
+		),
 		excludeWaIds: excluded,
 		exact: false,
 	};

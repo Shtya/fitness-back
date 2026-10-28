@@ -13,6 +13,7 @@ describe('whatsapp story audience', () => {
 		expect(getWhatsAppStoryAudience({ providerCapabilities: {} } as any)).toEqual({
 			mode: 'contacts',
 			waIds: [],
+			extraWaIds: [],
 		});
 	});
 
@@ -25,7 +26,22 @@ describe('whatsapp story audience', () => {
 		expect(getWhatsAppStoryAudience({ providerCapabilities: merged } as any)).toEqual({
 			mode: 'except',
 			waIds: [A, B],
+			extraWaIds: [],
 		});
+	});
+
+	it('keeps hand-added numbers when a request leaves them out', () => {
+		const first = mergeWhatsAppStoryAudience({ providerCapabilities: {} } as any, {
+			mode: 'contacts',
+			extraWaIds: ['+20 100 000 0003'],
+		});
+		const second = mergeWhatsAppStoryAudience({ providerCapabilities: first } as any, { mode: 'contacts' });
+		expect(getWhatsAppStoryAudience({ providerCapabilities: second } as any).extraWaIds).toEqual([C]);
+	});
+
+	it('adds hand-added numbers to the contacts audience unless they are hidden', () => {
+		expect(resolveStoryAudience([A], { mode: 'contacts', waIds: [], extraWaIds: [C] }).waIds).toEqual([C, A]);
+		expect(resolveStoryAudience([A], { mode: 'except', waIds: [C], extraWaIds: [C] }).waIds).toEqual([A]);
 	});
 
 	it('removes excluded people and lets the provider add its own contacts', () => {

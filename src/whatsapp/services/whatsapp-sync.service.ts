@@ -3751,11 +3751,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const rows = waIds.map((id) => {
 			const item = incoming.get(id)!;
 			const existing = existingByWaId.get(id);
-			// Provider address-book `name` always wins when present (recovers pushName stomps).
-			const nextName =
+			const savedName =
 				item.savedName && !isWeakWhatsAppContactName(item.savedName, id, item.phoneNumber)
 					? item.savedName
-					: preferWhatsAppContactName(
+					: null;
+			// Provider address-book `name` always wins when present (recovers pushName stomps).
+			const nextName = savedName
+				? savedName
+				: preferWhatsAppContactName(
 							existing?.name,
 							resolveWhatsAppContactLabel({
 								savedName: null,
@@ -3771,6 +3774,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				waId: id,
 				phoneNumber: item.phoneNumber || existing?.phoneNumber || null,
 				name: nextName,
+				// Kept apart from `name` so the story audience can tell phonebook from profile names.
+				phonebookName: savedName || existing?.phonebookName || null,
 				avatarUrl: item.avatarUrl || existing?.avatarUrl || null,
 				isBusiness: item.isBusiness,
 			};
@@ -3781,6 +3786,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			if (!existing) return true;
 			return (
 				(existing.name || null) !== (row.name || null) ||
+				(existing.phonebookName || null) !== (row.phonebookName || null) ||
 				(existing.phoneNumber || null) !== (row.phoneNumber || null) ||
 				(existing.avatarUrl || null) !== (row.avatarUrl || null) ||
 				Boolean(existing.isBusiness) !== Boolean(row.isBusiness)
