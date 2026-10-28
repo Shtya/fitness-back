@@ -11,6 +11,7 @@ import * as path from 'path';
 import { In, Repository } from 'typeorm';
 import { User } from '../../../entities/global.entity';
 import {
+	WhatsAppAccount,
 	WhatsAppContact,
 	WhatsAppConversation,
 	WhatsAppStatus,
@@ -22,7 +23,12 @@ import {
 	WhatsAppProvider,
 	WhatsAppStatusQuote,
 } from '../providers/whatsapp-provider';
-import { statusActorKey, statusMessageKey } from '../utils/whatsapp-status-interactions';
+import {
+	OWN_STATUS_ACTORS,
+	STATUS_LIKE_ACTOR,
+	statusActorKey,
+	statusMessageKey,
+} from '../utils/whatsapp-status-interactions';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -37,6 +43,12 @@ import {
 	preferWhatsAppContactName,
 } from '../utils/whatsapp-contact-name';
 import { statusAudienceJids } from '../utils/whatsapp-contact';
+import {
+	type WhatsAppStoryAudienceMode,
+	getWhatsAppStoryAudience,
+	mergeWhatsAppStoryAudience,
+	resolveStoryAudience,
+} from '../utils/whatsapp-story-audience';
 
 function statusId(item: any) {
 	return String(
@@ -109,6 +121,10 @@ export class WhatsAppStatusService {
 	private readonly lastPruneAt = new Map<string, number>();
 	/** LID→phone folds already applied in this process (skip repeat UPDATEs per receipt). */
 	private readonly foldedStatusActors = new Set<string>();
+	private readonly syncRuns = new Map<
+		string,
+		{ promise: Promise<any>; rerun: Promise<any> | null }
+	>();
 
 	constructor(
 		@InjectRepository(WhatsAppStatus)
@@ -163,8 +179,44 @@ export class WhatsAppStatusService {
 		return 'whatsapp_not_connected';
 	}
 
-	/** Internal: pull statuses from the linked provider and upsert into Postgres. */
-	async syncFromProvider(accountId: string) {
+	/**
+	 * Internal: pull statuses from the linked provider and upsert into Postgres.
+	 *
+	 * One sync per account at a time. Overlapping runs inserted the same new story twice,
+	 * hit the unique key, and aborted mid-list — the newest stories (often the one just
+	 * posted from the phone) were the ones skipped. A call during a run waits for it and
+	 * then runs once more, so nothing that arrived meanwhile is missed.
+	 */
+	async syncFromProvider(accountId: string): Promise<{
+		providerCount: number;
+		upserted: number;
+		hint: string | null;
+	}> {
+		const running = this.syncRuns.get(accountId);
+		if (running) {
+			if (!running.rerun) {
+				running.rerun = running.promise
+					.catch(() => undefined)
+					.then(() => {
+						if (this.syncRuns.get(accountId) === running) this.syncRuns.delete(accountId);
+						return this.syncFromProvider(accountId);
+					});
+			}
+			return running.rerun;
+		}
+		const entry: { promise: Promise<any>; rerun: Promise<any> | null } = {
+			promise: this.runProviderSync(accountId),
+			rerun: null,
+		};
+		this.syncRuns.set(accountId, entry);
+		try {
+			return await entry.promise;
+		} finally {
+			if (this.syncRuns.get(accountId) === entry) this.syncRuns.delete(accountId);
+		}
+	}
+
+	private async runProviderSync(accountId: string) {
 		const readiness = await this.ensureStatusProvider(accountId, 45_000);
 		const provider = readiness.provider;
 		if (!readiness.ready || !provider?.capabilities.statusFetch) {
@@ -386,14 +438,24 @@ export class WhatsAppStatusService {
 				await this.repo.save(existing);
 				await this.archiveStatusRow(existing);
 			} else {
-				const created = await this.repo.save(
-					this.repo.create({
-						accountId,
-						providerStatusId: id,
-						...payload,
-						mediaPath: null,
-					}),
-				);
+				// publish() also upserts outside the sync lock, so the row may appear in between.
+				let created: WhatsAppStatus;
+				try {
+					created = await this.repo.save(
+						this.repo.create({
+							accountId,
+							providerStatusId: id,
+							...payload,
+							mediaPath: null,
+						}),
+					);
+				} catch (error: any) {
+					if (error?.code !== '23505') throw error;
+					const raced = await this.repo.findOne({ where: { accountId, providerStatusId: id } });
+					if (!raced) throw error;
+					Object.assign(raced, payload);
+					created = await this.repo.save(raced);
+				}
 				byProviderId.set(id, created);
 				existingRows.push(created);
 				await this.archiveStatusRow(created);
@@ -555,6 +617,14 @@ export class WhatsAppStatusService {
 				);
 			}
 		}
+		// Receipts that reached the session while no socket listener persisted them
+		// still sit on the story itself; copy them so the ring count matches the phone.
+		await Promise.all(
+			mapped
+				.filter(item => item.isOwn && item.inSession)
+				.slice(0, 30)
+				.map(item => this.backfillStatusViewersFromSession(accountId, item)),
+		);
 		return {
 			supported: provider?.capabilities.statusFetch ?? true,
 			sessionReady,
@@ -783,16 +853,131 @@ export class WhatsAppStatusService {
 		return audience.slice(0, STATUS_AUDIENCE_LIMIT);
 	}
 
+	/**
+	 * The people this account's stories can reach, named, for the audience picker.
+	 * Same sources as {@link publishAudience}, keyed by the phone JID a publish uses.
+	 */
+	private async audiencePeople(accountId: string) {
+		const [conversations, contacts] = await Promise.all([
+			this.conversationRepo.find({
+				where: { accountId },
+				select: ['providerChatId', 'lastMessageAt'],
+				order: { lastMessageAt: 'DESC' },
+				take: STATUS_AUDIENCE_LIMIT,
+			}),
+			this.contactRepo.find({
+				where: { accountId },
+				select: ['waId', 'phoneNumber', 'name', 'avatarUrl'],
+			}),
+		]);
+		const people = new Map<
+			string,
+			{ waId: string; name: string | null; avatarUrl: string | null; lastMessageAt: Date | null }
+		>();
+		const entry = (jid: string) => {
+			let person = people.get(jid);
+			if (!person) {
+				person = { waId: jid, name: null, avatarUrl: null, lastMessageAt: null };
+				people.set(jid, person);
+			}
+			return person;
+		};
+		for (const conversation of conversations) {
+			const [jid] = statusAudienceJids([conversation.providerChatId]);
+			if (jid) entry(jid).lastMessageAt = conversation.lastMessageAt;
+		}
+		for (const contact of contacts) {
+			const [jid] = statusAudienceJids([contact.phoneNumber, contact.waId]);
+			if (!jid) continue;
+			const person = entry(jid);
+			person.name = preferWhatsAppContactName(person.name, contact.name, jid) || person.name;
+			person.avatarUrl = person.avatarUrl || contact.avatarUrl || null;
+		}
+		return [...people.values()]
+			.map(person => ({
+				...person,
+				name:
+					person.name && !isWeakWhatsAppContactName(person.name, person.waId, null)
+						? person.name
+						: null,
+				phone: person.waId.replace(/@.*$/, ''),
+			}))
+			.sort(
+				(a, b) =>
+					(b.lastMessageAt?.getTime() || 0) - (a.lastMessageAt?.getTime() || 0) ||
+					String(a.name || '\uffff').localeCompare(String(b.name || '\uffff')),
+			);
+	}
+
+	async getAudience(user: User, accountId: string) {
+		const account = await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const settings = getWhatsAppStoryAudience(account);
+		const people = await this.audiencePeople(accountId);
+		const known = new Set(people.map(person => person.waId));
+		// A saved choice can name someone who has since left the synced lists; keep them visible.
+		for (const waId of settings.waIds) {
+			if (known.has(waId)) continue;
+			people.push({
+				waId,
+				name: null,
+				avatarUrl: null,
+				lastMessageAt: null,
+				phone: waId.replace(/@.*$/, ''),
+			});
+		}
+		const recipients = resolveStoryAudience(
+			people.map(person => person.waId),
+			settings,
+		).waIds.length;
+		return { ...settings, recipients, people };
+	}
+
+	async updateAudience(
+		user: User,
+		accountId: string,
+		input: { mode: WhatsAppStoryAudienceMode; waIds?: string[] },
+	) {
+		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		if (input.mode === 'only' && !statusAudienceJids(input.waIds || []).length) {
+			throw new BadRequestException('Pick at least one person who can see your stories');
+		}
+		const accounts = this.repo.manager.getRepository(WhatsAppAccount);
+		const account = await accounts.findOneByOrFail({ id: accountId });
+		account.providerCapabilities = mergeWhatsAppStoryAudience(account, input) as any;
+		await accounts.update(accountId, { providerCapabilities: account.providerCapabilities });
+		this.access.invalidateAccount(accountId);
+		const settings = getWhatsAppStoryAudience(account);
+		await this.audit.write({
+			actorUserId: user.id,
+			accountId,
+			action: 'whatsapp.status.audience_updated',
+			targetType: 'WhatsAppAccount',
+			targetId: accountId,
+			metadata: { mode: settings.mode, count: settings.waIds.length },
+		});
+		return this.getAudience(user, accountId);
+	}
+
 	async publish(
 		user: User,
 		accountId: string,
 		input: { type: string; content: string; caption?: string },
 	) {
 		const provider = await this.assertCanPublish(user, accountId);
+		const account = await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const audience = resolveStoryAudience(
+			await this.publishAudience(accountId),
+			getWhatsAppStoryAudience(account),
+		);
+		if (audience.exact && !audience.waIds.length) {
+			throw new BadRequestException('Pick at least one person who can see your stories');
+		}
 		const result = await provider.publishStatus(input.content, {
 			type: input.type,
 			caption: input.caption,
-			audienceWaIds: await this.publishAudience(accountId),
+			audienceWaIds: audience.waIds,
+			exactAudience: audience.exact,
+			excludeAudienceWaIds: audience.excludeWaIds,
 		});
 		const publishedId = statusId(result);
 		if (publishedId) {
@@ -1035,10 +1220,9 @@ export class WhatsAppStatusService {
 	): Promise<StatusReactionRow | null> {
 		const statusMessageId = statusMessageKey(statusMessageIdValue);
 		const folds = new Map<string, string>();
-		const actorKey =
-			actorKeyValue === 'me'
-				? 'me'
-				: await this.canonicalStatusActor(accountId, actorKeyValue, folds);
+		const actorKey = OWN_STATUS_ACTORS.includes(actorKeyValue)
+			? actorKeyValue
+			: await this.canonicalStatusActor(accountId, actorKeyValue, folds);
 		const value = String(emoji || '').trim().slice(0, 32);
 		if (!statusMessageId || !actorKey || !value || !isUuid(accountId)) return null;
 		const at = reactedAt instanceof Date && !Number.isNaN(reactedAt.getTime()) ? reactedAt : new Date();
@@ -1061,9 +1245,47 @@ export class WhatsAppStatusService {
 		await this.emitStatusInteractionsUpdated(
 			accountId,
 			statusMessageId,
-			actorKey === 'me' ? { myReaction: row?.emoji || null } : {},
+			actorKey === 'me'
+				? { myReaction: row?.emoji || null }
+				: actorKey === STATUS_LIKE_ACTOR
+					? { myLiked: Boolean(row) }
+					: {},
 		);
 		return row;
+	}
+
+	/**
+	 * A like or unlike, from a contact on our story or from us (web or phone) on theirs.
+	 * Unlike only clears like rows: an emoji reply row carries the reply's message id.
+	 */
+	async recordStatusLike(
+		accountId: string,
+		statusMessageIdValue: string,
+		actorJid: string | null,
+		emoji: string,
+		at: Date | null,
+	) {
+		const actor = actorJid ? String(actorJid).trim() : STATUS_LIKE_ACTOR;
+		if (!actor) return;
+		if (String(emoji || '').trim()) {
+			await this.saveStatusReaction(accountId, statusMessageIdValue, actor, emoji, null, at);
+			return;
+		}
+		const statusMessageId = statusMessageKey(statusMessageIdValue);
+		if (!statusMessageId || !isUuid(accountId)) return;
+		const actorKey =
+			actor === STATUS_LIKE_ACTOR ? actor : await this.canonicalStatusActor(accountId, actor, new Map());
+		await this.repo.manager.query(
+			`UPDATE whatsapp_status_reactions SET deleted_at = now(), updated_at = now()
+			WHERE account_id = $1 AND status_message_id = $2 AND actor_key = $3
+				AND message_id IS NULL AND deleted_at IS NULL`,
+			[accountId, statusMessageId, actorKey],
+		);
+		await this.emitStatusInteractionsUpdated(
+			accountId,
+			statusMessageId,
+			actorKey === STATUS_LIKE_ACTOR ? { myLiked: false } : {},
+		);
 	}
 
 	async getOwnStatusReaction(accountId: string, statusMessageIdValue: string) {
@@ -1110,7 +1332,7 @@ export class WhatsAppStatusService {
 				SELECT status_message_id, actor_key AS actor, true AS is_reaction
 				FROM whatsapp_status_reactions
 				WHERE account_id = $1 AND status_message_id = ANY($2::varchar[])
-					AND actor_key <> 'me' AND deleted_at IS NULL
+					AND actor_key NOT IN ('me', 'me:like') AND deleted_at IS NULL
 			) interactions
 			GROUP BY status_message_id`,
 			[accountId, keys],
@@ -1158,15 +1380,18 @@ export class WhatsAppStatusService {
 			const [counts, mine] = await Promise.all([
 				this.statusInteractionCounts(accountId, keys),
 				this.repo.manager.query(
-					`SELECT status_message_id, emoji FROM whatsapp_status_reactions
+					`SELECT status_message_id, actor_key, emoji FROM whatsapp_status_reactions
 					WHERE account_id = $1 AND status_message_id = ANY($2::varchar[])
-						AND actor_key = 'me' AND deleted_at IS NULL`,
-					[accountId, keys],
+						AND actor_key = ANY($3::varchar[]) AND deleted_at IS NULL`,
+					[accountId, keys, OWN_STATUS_ACTORS],
 				),
 			]);
-			const myReactions = new Map<string, string>(
-				(mine || []).map((row: any) => [row.status_message_id, row.emoji]),
-			);
+			const myReactions = new Map<string, string>();
+			const myLikes = new Set<string>();
+			for (const row of mine || []) {
+				if (row.actor_key === STATUS_LIKE_ACTOR) myLikes.add(row.status_message_id);
+				else myReactions.set(row.status_message_id, row.emoji);
+			}
 			return items.map(item => {
 				const key = statusMessageKey(item.providerStatusId);
 				if (item.isOwn) {
@@ -1177,7 +1402,7 @@ export class WhatsAppStatusService {
 						reactionCount: total?.reactionCount || 0,
 					};
 				}
-				return { ...item, myReaction: myReactions.get(key) || null };
+				return { ...item, myReaction: myReactions.get(key) || null, myLiked: myLikes.has(key) };
 			});
 		} catch (error) {
 			this.logger.warn(
@@ -1194,7 +1419,10 @@ export class WhatsAppStatusService {
 	 * attaches the full viewer list on the status message (`userReceipt`) — copy those
 	 * into our table before listing so the CRM matches the phone.
 	 */
-	private async backfillStatusViewersFromSession(accountId: string, row: StatusRow) {
+	private async backfillStatusViewersFromSession(
+		accountId: string,
+		row: Pick<StatusRow, 'providerStatusId' | 'senderWaId'>,
+	) {
 		const provider = this.providers.getProvider(accountId) as WhatsAppProvider | null;
 		if (typeof provider?.getOwnStatusReceipts !== 'function') return;
 		try {
@@ -1234,7 +1462,7 @@ export class WhatsAppStatusService {
 			this.repo.manager.query(
 				`SELECT actor_key, emoji, reacted_at FROM whatsapp_status_reactions
 				WHERE account_id = $1 AND status_message_id = $2
-					AND actor_key <> 'me' AND deleted_at IS NULL
+					AND actor_key NOT IN ('me', 'me:like') AND deleted_at IS NULL
 				LIMIT ${STATUS_VIEWERS_LIMIT}`,
 				[accountId, statusMessageId],
 			),

@@ -54,8 +54,11 @@ function createService(options: {
 		if (/COUNT\(DISTINCT actor\)/.test(sql)) {
 			return [{ status_message_id: params[1][0], viewer_count: 2, reaction_count: 1 }];
 		}
-		if (/SELECT status_message_id, emoji FROM whatsapp_status_reactions/.test(sql)) {
-			return [{ status_message_id: 'STORYTHEIRS', emoji: '🔥' }];
+		if (/SELECT status_message_id, actor_key, emoji FROM whatsapp_status_reactions/.test(sql)) {
+			return [
+				{ status_message_id: 'STORYTHEIRS', actor_key: 'me', emoji: '🔥' },
+				{ status_message_id: 'STORYTHEIRS', actor_key: 'me:like', emoji: '💚' },
+			];
 		}
 		return [];
 	});
@@ -356,7 +359,7 @@ describe('WhatsAppStatusService list totals', () => {
 		]);
 		expect(items[0]).toMatchObject({ viewerCount: 2, reactionCount: 1 });
 		expect(items[0].myReaction).toBeUndefined();
-		expect(items[1]).toMatchObject({ myReaction: '🔥' });
+		expect(items[1]).toMatchObject({ myReaction: '🔥', myLiked: true });
 		expect(items[1].viewerCount).toBeUndefined();
 	});
 

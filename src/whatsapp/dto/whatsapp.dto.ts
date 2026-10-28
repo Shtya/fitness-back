@@ -246,6 +246,18 @@ export class PublishWhatsAppStatusDto {
 	caption?: string;
 }
 
+export class UpdateWhatsAppStoryAudienceDto {
+	@IsIn(['contacts', 'except', 'only'])
+	mode: 'contacts' | 'except' | 'only';
+
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(800)
+	@IsString({ each: true })
+	@MaxLength(80, { each: true })
+	waIds?: string[];
+}
+
 export class RepostWhatsAppStatusDto {
 	/** Caption for image/video, or the full copy for a text story. */
 	@IsOptional()
@@ -570,4 +582,9 @@ export class ReactWhatsAppStatusDto {
 	@IsString()
 	@MaxLength(32)
 	emoji: string;
+}
+
+export class LikeWhatsAppStatusDto {
+	@IsBoolean()
+	liked: boolean;
 }

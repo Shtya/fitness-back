@@ -53,6 +53,7 @@ import {
 import { sanitizeWhatsAppOutboundMentions } from '../utils/whatsapp-outbound-mentions';
 import {
 	isStatusReactionText,
+	STATUS_LIKE_EMOJI,
 	statusActorKey,
 	statusQuoteFromContextInfo,
 } from '../utils/whatsapp-status-interactions';
@@ -1155,6 +1156,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						event.receipts,
 					),
 				`status_receipts:${accountId}:${event.statusMessageId}`,
+			);
+			return;
+		}
+		if (event.type === 'status_like') {
+			this.enqueuePersist(
+				() =>
+					this.statusService.recordStatusLike(
+						accountId,
+						event.statusMessageId,
+						event.fromMe ? null : event.actorJid,
+						event.emoji,
+						event.at,
+					),
+				`status_like:${accountId}:${event.statusMessageId}`,
 			);
 			return;
 		}
@@ -7477,6 +7492,47 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				conversation,
 				message: sent.message,
 			};
+		} finally {
+			this.statusReactionsInFlight.delete(lockKey);
+		}
+	}
+
+	/** The phone's heart on someone's story: private, no chat message, only the poster sees it. */
+	async likeStatus(user: User, accountId: string, statusId: string, liked: boolean) {
+		const target = await this.statusService.resolveStatusInteractionTarget(user, accountId, statusId);
+		const provider = this.providers.getProvider(accountId);
+		if (typeof provider?.likeStatus !== 'function') {
+			throw new BadRequestException('Liking stories is not supported on this WhatsApp connection');
+		}
+		const statusKey = target.statusQuote.statusMessageId;
+		const lockKey = `${accountId}:${statusKey}:like`;
+		if (this.statusReactionsInFlight.has(lockKey)) {
+			throw new HttpException('This story like is already being sent', 409);
+		}
+		this.statusReactionsInFlight.add(lockKey);
+		try {
+			const emoji = liked ? STATUS_LIKE_EMOJI : '';
+			try {
+				await provider.likeStatus(
+					target.statusQuote.providerStatusId || statusKey,
+					target.statusQuote.ownerJid,
+					emoji,
+				);
+			} catch (error) {
+				throw new BadRequestException(
+					error instanceof Error ? error.message : 'Could not like this story',
+				);
+			}
+			await this.statusService.recordStatusLike(accountId, statusKey, null, emoji, new Date());
+			await this.audit.write({
+				actorUserId: user.id,
+				accountId,
+				action: liked ? 'whatsapp.status.liked' : 'whatsapp.status.unliked',
+				targetType: 'WhatsAppStatus',
+				targetId: target.statusId,
+				metadata: {},
+			});
+			return { ok: true, liked };
 		} finally {
 			this.statusReactionsInFlight.delete(lockKey);
 		}

@@ -4,6 +4,7 @@ import {
 	Get,
 	Param,
 	Post,
+	Put,
 	Query,
 	Req,
 	Res,
@@ -15,9 +16,11 @@ import { JwtAuthGuard } from '../../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guard/roles.guard';
 import {
 	PublishWhatsAppStatusDto,
+	LikeWhatsAppStatusDto,
 	ReactWhatsAppStatusDto,
 	RepostWhatsAppStatusDto,
 	ReplyWhatsAppStatusDto,
+	UpdateWhatsAppStoryAudienceDto,
 	ViewWhatsAppStatusDto,
 } from '../dto/whatsapp.dto';
 import { WhatsAppStatusService } from '../services/whatsapp-status.service';
@@ -55,6 +58,20 @@ export class WhatsAppStatusController {
 		@Body() body: PublishWhatsAppStatusDto,
 	) {
 		return this.statuses.publish(req.user, accountId, body);
+	}
+
+	@Get('audience')
+	audience(@Req() req: any, @Param('accountId') accountId: string) {
+		return this.statuses.getAudience(req.user, accountId);
+	}
+
+	@Put('audience')
+	updateAudience(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Body() body: UpdateWhatsAppStoryAudienceDto,
+	) {
+		return this.statuses.updateAudience(req.user, accountId, body);
 	}
 
 	@Get('history')
@@ -135,6 +152,16 @@ export class WhatsAppStatusController {
 		@Body() body: ReactWhatsAppStatusDto,
 	) {
 		return this.sync.reactToStatus(req.user, accountId, statusId, body.emoji);
+	}
+
+	@Put(':statusId/like')
+	like(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('statusId') statusId: string,
+		@Body() body: LikeWhatsAppStatusDto,
+	) {
+		return this.sync.likeStatus(req.user, accountId, statusId, body.liked);
 	}
 
 	@Get(':statusId/content')

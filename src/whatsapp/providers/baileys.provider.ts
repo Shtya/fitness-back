@@ -35,6 +35,7 @@ import { PhoneRequestGate, type PhoneRequestOutcome } from '../utils/whatsapp-ph
 import { normalizeBaileysPresenceUpdate } from '../utils/whatsapp-presence-normalize';
 import { buildWhatsAppMessageAckInfo } from '../utils/whatsapp-message-info';
 import { HeldDeliveryReceipts } from '../utils/whatsapp-held-receipts';
+import { statusMessageKey } from '../utils/whatsapp-status-interactions';
 import {
 	buildVoiceWaveform,
 	ensureWhatsAppVoiceOgg,
@@ -1597,7 +1598,16 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private rememberStatus(raw: any): boolean {
 		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
-		if (!isStatusBroadcastJid(remoteJid) || !raw?.message) return false;
+		if (!isStatusBroadcastJid(remoteJid)) return false;
+		// Own stories posted from the phone are the ones users miss; say why one is dropped.
+		if (!raw?.message) {
+			if (raw?.key?.fromMe) {
+				this.logger.warn(
+					`Own status ${raw?.key?.id || '?'} arrived without content for ${this.accountId} (stub=${raw?.messageStubType ?? 'none'})`,
+				);
+			}
+			return false;
+		}
 		const content = unwrapMessageContent(raw.message);
 		if (!content || isControlOnlyContent(content)) return false;
 		const serialized = this.statusSerializedId(raw);
@@ -1632,6 +1642,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			fromMe,
 			isOwn: fromMe,
 		};
+		if (fromMe && !this.statusesById.has(serialized)) {
+			this.logger.log(`Own ${type} status ${item.messageId} seen for ${this.accountId}`);
+		}
 		this.statusesById.set(serialized, item);
 		this.statusRawById.set(serialized, raw);
 		if (item.messageId) this.statusRawById.set(item.messageId, raw);
@@ -2157,6 +2170,25 @@ export class BaileysProvider implements WhatsAppProvider {
 		const targetId = String(reaction?.key?.id || '').trim();
 		if (!targetId) return false;
 		const emoji = String(reaction.text || '').trim();
+		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
+		if (isStatusBroadcastJid(remoteJid)) {
+			const fromMe = Boolean(raw?.key?.fromMe);
+			const participant = String(raw?.key?.participant || '').trim();
+			const participantAlt = String(raw?.key?.participantAlt || '').trim();
+			this.emit({
+				type: 'status_like',
+				statusMessageId: targetId,
+				actorJid: fromMe
+					? null
+					: participantAlt.endsWith('@s.whatsapp.net')
+						? participantAlt
+						: participant || participantAlt || null,
+				fromMe,
+				emoji,
+				at: toDate(raw?.messageTimestamp),
+			});
+			return true;
+		}
 		const actorKey = raw?.key?.fromMe
 			? 'me'
 			: String(raw?.key?.participant || raw?.key?.remoteJid || 'unknown');
@@ -4262,13 +4294,24 @@ export class BaileysProvider implements WhatsAppProvider {
 	 */
 	async publishStatus(
 		content: string,
-		options: { type: string; caption?: string; audienceWaIds?: string[] },
+		options: {
+			type: string;
+			caption?: string;
+			audienceWaIds?: string[];
+			exactAudience?: boolean;
+			excludeAudienceWaIds?: string[];
+		},
 	) {
 		if (!this.socket || this.state !== 'connected') {
 			throw new Error('WhatsApp account is not connected');
 		}
 		const type = String(options.type || 'text').toLowerCase();
-		const statusJidList = this.statusAudienceJids(options.audienceWaIds || []);
+		const excluded = new Set(statusAudienceJids(options.excludeAudienceWaIds || []));
+		const statusJidList = (
+			options.exactAudience
+				? statusAudienceJids(options.audienceWaIds || [])
+				: this.statusAudienceJids(options.audienceWaIds || [])
+		).filter((jid) => !excluded.has(jid));
 		if (!statusJidList.length) {
 			throw new Error(
 				'No contacts are known for this account yet, so a status would be published to nobody. Open a chat with someone, or wait for the contact sync to finish, then try again.',
@@ -4340,6 +4383,30 @@ export class BaileysProvider implements WhatsAppProvider {
 				fromMe: Boolean(key.fromMe),
 			},
 		]);
+		return { ok: true };
+	}
+
+	async likeStatus(statusId: string, senderWaId: string | null | undefined, emoji: string) {
+		if (!this.socket || this.state !== 'connected') {
+			throw new Error('WhatsApp is not connected');
+		}
+		const raw =
+			this.resolveStatusRaw(statusId, senderWaId) ||
+			(await this.hydrateStatusRaw(statusId, senderWaId, false));
+		const id = String(raw?.key?.id || statusMessageKey(statusId)).trim();
+		const owner = toBaileysJid(String(raw?.key?.participant || senderWaId || '').trim());
+		if (!id || !owner) throw new Error('This story is no longer available in the session');
+		const me = toBaileysJid(this.ownUserJid());
+		await this.socket.sendMessage(
+			'status@broadcast',
+			{
+				react: {
+					text: emoji,
+					key: { remoteJid: 'status@broadcast', id, participant: owner, fromMe: false },
+				},
+			},
+			{ statusJidList: [...new Set([owner, me].filter(Boolean))] },
+		);
 		return { ok: true };
 	}
 }

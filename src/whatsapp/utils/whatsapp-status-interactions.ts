@@ -6,6 +6,18 @@ export const STATUS_BROADCAST_JID = 'status@broadcast';
 export const STATUS_QUICK_REACTIONS = ['😂', '😮', '😍', '😢', '👏', '🔥', '🎉', '💯'];
 
 /**
+ * A story "like" (the phone's heart button) is a reactionMessage on status@broadcast,
+ * unlike emoji reactions which WhatsApp delivers as a quoted chat reply.
+ */
+export const STATUS_LIKE_EMOJI = '💚';
+
+/** Row key for our own like, kept apart from our emoji reaction (`'me'`). */
+export const STATUS_LIKE_ACTOR = 'me:like';
+
+/** Actor keys that are this account, never a viewer. */
+export const OWN_STATUS_ACTORS = ['me', STATUS_LIKE_ACTOR];
+
+/**
  * The bare WhatsApp message id of a story.
  *
  * Stories are stored under a serialized id (`true_status@broadcast_<id>_<jid>`), but

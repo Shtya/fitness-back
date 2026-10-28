@@ -160,3 +160,66 @@ describe('BaileysProvider story replies', () => {
 		expect(sendMessage.mock.calls[0][2].quoted.message).toBe(cachedMessage);
 	});
 });
+
+describe('BaileysProvider story likes', () => {
+	function connectedProvider() {
+		const provider = new BaileysProvider('account-story-like') as any;
+		const sendMessage = jest.fn().mockResolvedValue({ key: { id: 'LIKE1' } });
+		provider.state = 'connected';
+		provider.socket = { sendMessage, user: { id: OWN } };
+		provider.hydrateStatusRaw = jest.fn().mockResolvedValue(null);
+		const events: any[] = [];
+		provider.emit = (event: any) => events.push(event);
+		return { provider, sendMessage, events };
+	}
+
+	it('sends a like as a reaction on status@broadcast to the poster and us', async () => {
+		const { provider, sendMessage } = connectedProvider();
+		await provider.likeStatus(
+			'false_status@broadcast_STORY11_201111111111@c.us',
+			'201111111111@c.us',
+			'💚',
+		);
+		const [jid, content, options] = sendMessage.mock.calls[0];
+		expect(jid).toBe('status@broadcast');
+		expect(content.react).toEqual({
+			text: '💚',
+			key: {
+				remoteJid: 'status@broadcast',
+				id: 'STORY11',
+				participant: '201111111111@s.whatsapp.net',
+				fromMe: false,
+			},
+		});
+		expect(options.statusJidList).toEqual([
+			'201111111111@s.whatsapp.net',
+			'201000000000@s.whatsapp.net',
+		]);
+	});
+
+	it('routes a reaction on a story to status_like instead of a chat reaction', () => {
+		const { provider, events } = connectedProvider();
+		const handled = provider.ingestReaction({
+			key: {
+				remoteJid: 'status@broadcast',
+				id: 'R1',
+				fromMe: false,
+				participant: '12345@lid',
+				participantAlt: '201222222222@s.whatsapp.net',
+			},
+			message: { reactionMessage: { text: '💚', key: { id: 'MYSTORY' } } },
+			messageTimestamp: 1_700_000_000,
+		});
+		expect(handled).toBe(true);
+		expect(events).toEqual([
+			{
+				type: 'status_like',
+				statusMessageId: 'MYSTORY',
+				actorJid: '201222222222@s.whatsapp.net',
+				fromMe: false,
+				emoji: '💚',
+				at: new Date(1_700_000_000_000),
+			},
+		]);
+	});
+});

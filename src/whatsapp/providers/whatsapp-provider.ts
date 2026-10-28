@@ -37,6 +37,15 @@ export type WhatsAppProviderEvent =
 			statusMessageId: string;
 			receipts: NormalizedWhatsAppParticipantReceipt[];
 	  }
+	/** A story like (heart): someone liking our story, or us liking theirs. Empty emoji = unlike. */
+	| {
+			type: 'status_like';
+			statusMessageId: string;
+			actorJid: string | null;
+			fromMe: boolean;
+			emoji: string;
+			at: Date | null;
+	  }
 	// The linked device was removed / taken over on WhatsApp's side: the stored
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }
@@ -378,9 +387,22 @@ export interface WhatsAppProvider {
 		/**
 		 * `audienceWaIds` is who the status is encrypted for. A provider that keeps its
 		 * own contact list may ignore it; Baileys needs it because its in-memory list is
-		 * empty until WhatsApp pushes a sync.
+		 * empty until WhatsApp pushes a sync. `exactAudience` forbids adding anyone else,
+		 * and `excludeAudienceWaIds` is removed from whatever the provider would add.
 		 */
-		options: { type: string; caption?: string; audienceWaIds?: string[] },
+		options: {
+			type: string;
+			caption?: string;
+			audienceWaIds?: string[];
+			exactAudience?: boolean;
+			excludeAudienceWaIds?: string[];
+		},
 	): Promise<any>;
 	viewStatus(statusId: string, senderWaId?: string): Promise<any>;
+	/** Like (or, with an empty emoji, unlike) someone else's story. */
+	likeStatus?(
+		statusId: string,
+		senderWaId: string | null | undefined,
+		emoji: string,
+	): Promise<{ ok: boolean }>;
 }
