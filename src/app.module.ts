@@ -33,6 +33,7 @@ import { CalendarModule } from './calendar/calendar.module';
 import { LoggerMiddleware } from '../common/logger.middleware';
 import { TodoModule } from './todo/todo.module';
 import { DailyTicketsModule } from './daily-tickets/daily-tickets.module';
+import { LearnLibraryModule } from './learn-library/learn-library.module';
 import { RecipesModule } from './recipes/recipes.module';
 import { MoneyModule } from './money/money.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
@@ -104,6 +105,7 @@ import { SmartDocumentModule } from './smart-document/smart-document.module';
 		CalendarModule,
 		TodoModule,
 		DailyTicketsModule,
+		LearnLibraryModule,
 		RecipesModule,
 		MoneyModule,
 		WhatsAppModule,
