@@ -1,4 +1,7 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { NotFoundException } from '@nestjs/common';
+import { LEARN_SCHEMA_STATEMENTS } from './learn-library.schema';
 import { LearnCourse, LearnLecture } from 'entities/learn.entity';
 import { LearnLibraryService, lectureSummaryToClient, plainText, snippetAround } from './learn-library.service';
 
@@ -35,6 +38,42 @@ describe('learn-library text helpers', () => {
 		expect(row.hasContent).toBe(true);
 		expect(row.qaCount).toBe(1);
 		expect(row.doneAt).toBe(1000);
+	});
+});
+
+describe('Learn boot schema', () => {
+	const migration = readFileSync(join(__dirname, '../../migrations/20261030_learn_library.sql'), 'utf8');
+	const columnsOf = (sql: string, table: string) => {
+		const body = sql.slice(sql.indexOf(`CREATE TABLE IF NOT EXISTS ${table}`)).split(/\n\s*\);?|\)`/)[0];
+		return [...body.matchAll(/^\s*("?\w+"?)\s+(uuid|timestamptz|varchar|text|boolean|integer|jsonb)/gm)].map(m => m[1]).sort();
+	};
+
+	it('only uses statements that are safe to run on every start', () => {
+		for (const statement of LEARN_SCHEMA_STATEMENTS) {
+			expect(statement).toMatch(/^(CREATE TABLE IF NOT EXISTS|CREATE INDEX IF NOT EXISTS)/);
+			expect(statement).not.toMatch(/\b(DROP|DELETE|TRUNCATE|UPDATE)\b/i);
+		}
+	});
+
+	it('creates the same tables and columns as the SQL migration', () => {
+		const boot = LEARN_SCHEMA_STATEMENTS.join('\n');
+		for (const table of ['learn_courses', 'learn_lectures']) {
+			expect(columnsOf(boot, table)).toEqual(columnsOf(migration, table));
+			expect(columnsOf(boot, table).length).toBeGreaterThan(10);
+		}
+	});
+
+	it('runs once at boot and retries on the next load after a failure', async () => {
+		const query = jest.fn().mockRejectedValueOnce(new Error('connection reset')).mockResolvedValue([]);
+		const service = new LearnLibraryService({ find: jest.fn().mockResolvedValue([]) } as any, {} as any, { query } as any);
+		(service as any).statsFor = jest.fn().mockResolvedValue(new Map());
+		jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+
+		expect(await service.onModuleInit()).toBe(false);
+		await service.listCourses('u1');
+		expect(query).toHaveBeenCalledTimes(1 + LEARN_SCHEMA_STATEMENTS.length);
+		await service.listCourses('u1');
+		expect(query).toHaveBeenCalledTimes(1 + LEARN_SCHEMA_STATEMENTS.length);
 	});
 });
 

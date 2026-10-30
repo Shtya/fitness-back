@@ -1,6 +1,8 @@
 -- "Learn" tab on the WhatsApp page: a personal library of courses and lectures (content written
 -- with the Documents editor, plus notes, key points, summary, Q&A and revision flags).
 -- Additive only: two new tables, nothing existing is touched.
+-- The backend also applies these same statements at startup (src/learn-library/learn-library.schema.ts),
+-- so running this file by hand is optional.
 -- Run: node scripts/run-sql-migration.mjs migrations/20261030_learn_library.sql
 
 BEGIN;

@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, DataSource, Repository } from 'typeorm';
 import { LEARN_MAX_TITLE, LearnCourse, LearnLecture } from 'entities/learn.entity';
 import { CreateCourseDto, CreateLectureDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
+import { LEARN_SCHEMA_STATEMENTS } from './learn-library.schema';
 
 const ms = (date: Date | null | undefined) => (date ? new Date(date).getTime() : null);
 
@@ -82,12 +83,39 @@ export function lectureToClient(row: LearnLecture) {
 
 /** Personal learning library: every query is scoped to the signed-in user's own rows. */
 @Injectable()
-export class LearnLibraryService {
+export class LearnLibraryService implements OnModuleInit {
+	private readonly logger = new Logger(LearnLibraryService.name);
+	private schemaReady: Promise<boolean> | null = null;
+
 	constructor(
 		@InjectRepository(LearnCourse) private readonly courses: Repository<LearnCourse>,
 		@InjectRepository(LearnLecture) private readonly lectures: Repository<LearnLecture>,
 		private readonly dataSource: DataSource,
 	) {}
+
+	onModuleInit() {
+		return this.ensureSchema();
+	}
+
+	/**
+	 * Creates the Learn tables if this database does not have them yet (boot, and again on the
+	 * next library load if the boot attempt failed, e.g. the database was briefly unreachable).
+	 */
+	ensureSchema() {
+		if (!this.schemaReady) {
+			this.schemaReady = (async () => {
+				try {
+					for (const statement of LEARN_SCHEMA_STATEMENTS) await this.dataSource.query(statement);
+					return true;
+				} catch (error) {
+					this.logger.error(`Could not ensure Learn tables: ${error instanceof Error ? error.message : error}`);
+					this.schemaReady = null;
+					return false;
+				}
+			})();
+		}
+		return this.schemaReady;
+	}
 
 	private async statsFor(userId: string, courseIds?: string[]) {
 		const qb = this.lectures
@@ -123,6 +151,7 @@ export class LearnLibraryService {
 	}
 
 	async listCourses(userId: string) {
+		await this.ensureSchema();
 		const rows = await this.courses.find({ where: { userId }, order: { orderIndex: 'ASC', created_at: 'ASC' } });
 		const stats = await this.statsFor(userId);
 		return { courses: rows.map(row => courseToClient(row, stats.get(row.id))) };
