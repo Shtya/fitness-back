@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, DataSource, Repository } from 'typeorm';
-import { LEARN_MAX_TITLE, LearnCourse, LearnLecture } from 'entities/learn.entity';
+import { LEARN_MAX_TITLE, LearnCourse, LearnLecture, LearnRoadmap } from 'entities/learn.entity';
 import { CreateCourseDto, CreateLectureDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
 import { LEARN_SCHEMA_STATEMENTS } from './learn-library.schema';
+import { NormalizedRoadmap, mergeTopicsIndex, parseRoadmapJson, parseTopicsIndexJson, roadmapTopicKeys } from './learn-roadmap.util';
 
 const ms = (date: Date | null | undefined) => (date ? new Date(date).getTime() : null);
 
@@ -90,6 +91,7 @@ export class LearnLibraryService implements OnModuleInit {
 	constructor(
 		@InjectRepository(LearnCourse) private readonly courses: Repository<LearnCourse>,
 		@InjectRepository(LearnLecture) private readonly lectures: Repository<LearnLecture>,
+		@InjectRepository(LearnRoadmap) private readonly roadmaps: Repository<LearnRoadmap>,
 		private readonly dataSource: DataSource,
 	) {}
 
@@ -367,6 +369,107 @@ export class LearnLibraryService implements OnModuleInit {
 					};
 				}),
 		};
+	}
+
+	/* ─── roadmaps ─── */
+
+	private roadmapStats(data: NormalizedRoadmap, progress: Record<string, string>) {
+		const keys = roadmapTopicKeys(data);
+		return {
+			levels: data.levels?.length || 0,
+			courses: (data.levels || []).reduce((n, l) => n + (l.courses?.length || 0), 0),
+			topics: keys.length,
+			done: keys.filter(k => progress?.[k]).length,
+		};
+	}
+
+	private roadmapSummary(row: LearnRoadmap) {
+		const data = row.data as NormalizedRoadmap;
+		return {
+			id: row.id,
+			title: row.title,
+			description: data.description || '',
+			language: data.language || '',
+			targetRole: data.target_role || [],
+			updatedAt: ms(row.updated_at) ?? Date.now(),
+			...this.roadmapStats(data, row.progress || {}),
+		};
+	}
+
+	private async ownRoadmap(userId: string, id: string) {
+		const row = await this.roadmaps.findOne({ where: { id, userId } });
+		if (!row) throw new NotFoundException('Roadmap not found');
+		return row;
+	}
+
+	async listRoadmaps(userId: string) {
+		await this.ensureSchema();
+		const rows = await this.roadmaps.find({ where: { userId }, order: { orderIndex: 'ASC', created_at: 'ASC' } });
+		return { roadmaps: rows.map(row => this.roadmapSummary(row)) };
+	}
+
+	async getRoadmap(userId: string, id: string) {
+		const row = await this.ownRoadmap(userId, id);
+		return { ...this.roadmapSummary(row), data: row.data, progress: row.progress || {} };
+	}
+
+	async createRoadmap(userId: string, json: string) {
+		await this.ensureSchema();
+		const data = parseRoadmapJson(json);
+		const max = await this.roadmaps
+			.createQueryBuilder('r')
+			.select('COALESCE(MAX(r.orderIndex), -1)', 'max')
+			.where('r.userId = :userId', { userId })
+			.getRawOne<{ max: string }>();
+		const row = await this.roadmaps.save(
+			this.roadmaps.create({ userId, title: data.title.slice(0, LEARN_MAX_TITLE), data, progress: {}, orderIndex: Number(max?.max ?? -1) + 1 }),
+		);
+		return this.getRoadmap(userId, row.id);
+	}
+
+	/** Replaces the roadmap's content; progress is kept for every topic that still exists. */
+	async updateRoadmap(userId: string, id: string, json: string) {
+		const row = await this.ownRoadmap(userId, id);
+		const data = parseRoadmapJson(json);
+		const keep = new Set(roadmapTopicKeys(data));
+		const progress = Object.fromEntries(Object.entries(row.progress || {}).filter(([key]) => keep.has(key)));
+		await this.roadmaps.update({ id, userId }, { title: data.title.slice(0, LEARN_MAX_TITLE), data: data as Record<string, any>, progress });
+		return this.getRoadmap(userId, id);
+	}
+
+	/** Adds a topics index to a roadmap (explanations, missing topics, added courses); progress is untouched. */
+	async importTopicsIndex(userId: string, id: string, json: string) {
+		const row = await this.ownRoadmap(userId, id);
+		const data = mergeTopicsIndex(row.data as NormalizedRoadmap, parseTopicsIndexJson(json));
+		await this.roadmaps.update({ id, userId }, { data: data as Record<string, any> });
+		return this.getRoadmap(userId, id);
+	}
+
+	async removeRoadmap(userId: string, id: string) {
+		await this.ownRoadmap(userId, id);
+		await this.roadmaps.softDelete({ id, userId });
+		return { id };
+	}
+
+	/**
+	 * Marks topics done / not done in one statement on the stored map, so two quick clicks (or two
+	 * tabs) never overwrite each other's progress. Unknown keys are ignored.
+	 */
+	async setRoadmapTopics(userId: string, id: string, keys: string[], done: boolean) {
+		const row = await this.ownRoadmap(userId, id);
+		const valid = new Set(roadmapTopicKeys(row.data as NormalizedRoadmap));
+		const wanted = [...new Set(keys)].filter(key => valid.has(key));
+		if (!wanted.length) return { progress: row.progress || {} };
+		const stamp = new Date().toISOString();
+		const sql = done
+			? `UPDATE learn_roadmaps SET progress = progress || COALESCE((SELECT jsonb_object_agg(k, $3::text) FROM unnest($4::text[]) AS k WHERE NOT (progress ? k)), '{}'::jsonb), updated_at = now()
+				 WHERE id = $1 AND "userId" = $2 AND deleted_at IS NULL RETURNING progress`
+			: `UPDATE learn_roadmaps SET progress = progress - $4::text[], updated_at = now()
+				 WHERE id = $1 AND "userId" = $2 AND deleted_at IS NULL RETURNING progress`;
+		const params = done ? [id, userId, stamp, wanted] : [id, userId, wanted];
+		const result = await this.dataSource.query(done ? sql : sql.replace('$4', '$3'), params);
+		const rows = Array.isArray(result?.[0]) ? result[0] : result;
+		return { progress: rows?.[0]?.progress ?? {} };
 	}
 
 	private async touchCourse(userId: string, courseId: string) {

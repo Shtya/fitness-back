@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
-import { CreateCourseDto, CreateLectureDto, LearnQuery, LearnSearchQuery, ReorderDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
+import { CreateCourseDto, CreateLectureDto, LearnQuery, LearnSearchQuery, ReorderDto, RoadmapJsonDto, RoadmapTopicsDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
 import { LearnLibraryService } from './learn-library.service';
 
 /** The WhatsApp page's "Learn" tab: a personal library of courses and lectures. */
@@ -78,5 +78,40 @@ export class LearnLibraryController {
 	@Get('search')
 	search(@Req() req: any, @Query() query: LearnSearchQuery) {
 		return this.service.search(this.userId(req), query.q);
+	}
+
+	@Get('roadmaps')
+	listRoadmaps(@Req() req: any, @Query() _query: LearnQuery) {
+		return this.service.listRoadmaps(this.userId(req));
+	}
+
+	@Post('roadmaps')
+	createRoadmap(@Req() req: any, @Body() body: RoadmapJsonDto) {
+		return this.service.createRoadmap(this.userId(req), body.json);
+	}
+
+	@Get('roadmaps/:id')
+	getRoadmap(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Query() _query: LearnQuery) {
+		return this.service.getRoadmap(this.userId(req), id);
+	}
+
+	@Put('roadmaps/:id')
+	updateRoadmap(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() body: RoadmapJsonDto) {
+		return this.service.updateRoadmap(this.userId(req), id, body.json);
+	}
+
+	@Post('roadmaps/:id/topics-index')
+	importTopicsIndex(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() body: RoadmapJsonDto) {
+		return this.service.importTopicsIndex(this.userId(req), id, body.json);
+	}
+
+	@Delete('roadmaps/:id')
+	removeRoadmap(@Req() req: any, @Param('id', ParseUUIDPipe) id: string) {
+		return this.service.removeRoadmap(this.userId(req), id);
+	}
+
+	@Patch('roadmaps/:id/topics')
+	setRoadmapTopics(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() body: RoadmapTopicsDto) {
+		return this.service.setRoadmapTopics(this.userId(req), id, body.keys, body.done);
 	}
 }

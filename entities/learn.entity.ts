@@ -93,3 +93,30 @@ export class LearnLecture extends CoreEntity {
 	@Column({ type: 'int', default: 0 })
 	orderIndex!: number;
 }
+
+/** Largest roadmap JSON accepted (characters). */
+export const LEARN_ROADMAP_MAX_JSON = 1_000_000;
+
+/**
+ * A learning roadmap imported from JSON (levels → courses → topics, plus schedule, timeline,
+ * certifications, labs…). `data` is the normalized roadmap; `progress` maps a topic key
+ * ("<courseId>::<topic>") to the time it was marked done, and is updated one key at a time.
+ */
+@Entity('learn_roadmaps')
+@Index(['userId', 'orderIndex'])
+export class LearnRoadmap extends CoreEntity {
+	@Column({ type: 'uuid' })
+	userId!: string;
+
+	@Column({ type: 'varchar', length: LEARN_MAX_TITLE })
+	title!: string;
+
+	@Column({ type: 'jsonb' })
+	data!: Record<string, any>;
+
+	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+	progress!: Record<string, string>;
+
+	@Column({ type: 'int', default: 0 })
+	orderIndex!: number;
+}

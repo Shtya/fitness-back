@@ -40,4 +40,16 @@ export const LEARN_SCHEMA_STATEMENTS = [
 		"orderIndex" integer NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS "IDX_learn_lectures_user_course_order" ON learn_lectures ("userId", "courseId", "orderIndex")`,
+	`CREATE TABLE IF NOT EXISTS learn_roadmaps (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		deleted_at timestamptz NULL,
+		"userId" uuid NOT NULL,
+		title varchar(160) NOT NULL,
+		data jsonb NOT NULL,
+		progress jsonb NOT NULL DEFAULT '{}'::jsonb,
+		"orderIndex" integer NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS "IDX_learn_roadmaps_user_order" ON learn_roadmaps ("userId", "orderIndex")`,
 ];

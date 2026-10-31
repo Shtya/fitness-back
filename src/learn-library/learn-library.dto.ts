@@ -9,6 +9,7 @@ import {
 	LEARN_MAX_QA_TEXT,
 	LEARN_MAX_SECTION,
 	LEARN_MAX_TITLE,
+	LEARN_ROADMAP_MAX_JSON,
 } from 'entities/learn.entity';
 
 /** The frontend's axios adds ?lang= to every request. */
@@ -136,4 +137,23 @@ export class ReorderDto {
 	@ArrayMaxSize(1000)
 	@IsUUID('all', { each: true })
 	ids!: string[];
+}
+
+export class RoadmapJsonDto {
+	/** The roadmap JSON as text (parsed and validated on the server). */
+	@IsString()
+	@MinLength(2)
+	@MaxLength(LEARN_ROADMAP_MAX_JSON)
+	json!: string;
+}
+
+export class RoadmapTopicsDto {
+	@IsArray()
+	@ArrayMaxSize(1000)
+	@IsString({ each: true })
+	@MaxLength(400, { each: true })
+	keys!: string[];
+
+	@IsBoolean()
+	done!: boolean;
 }
