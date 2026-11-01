@@ -5,6 +5,8 @@ import {
 	classifyBaileysDisconnect,
 	computeReconnectDelayMs,
 	downloadLinkedDeviceMedia,
+	mediaDownloadTimeoutForBytes,
+	DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
 	RECONNECT_ALERT_AFTER,
 	isHistoryMessageUpsert,
 	mapBaileysMessageStatus,
@@ -753,6 +755,66 @@ describe('BaileysProvider media download helpers', () => {
 			}),
 		).rejects.toThrow(/exceeds limit/);
 		expect(calls).toEqual([]);
+	});
+
+	it('streams a large document to disk when the disk ceiling allows it', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'wa-big-doc-'));
+		const tmp = join(dir, 'big.fig.part');
+		try {
+			const raw = {
+				key: { id: 'BIGDOC', remoteJid: '201000000000@s.whatsapp.net' },
+				message: {
+					documentMessage: {
+						directPath: '/v/t62/big.fig',
+						mediaKey: Buffer.from('key'),
+						fileLength: 200 * 1024 * 1024,
+					},
+				},
+			};
+			const result = await downloadLinkedDeviceMedia(
+				raw,
+				{ id: 'BIGDOC', toFile: tmp },
+				{
+					maxBytes: 2 * 1024 * 1024 * 1024,
+					downloadContentFromMessage: async () =>
+						(async function* () {
+							yield Buffer.alloc(1024, 7);
+						})(),
+				},
+			);
+			expect(result.filePath).toBe(tmp);
+			expect(await readFile(tmp)).toHaveLength(1024);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it('keeps the in-memory path capped even when the disk ceiling is higher', async () => {
+		const raw = {
+			key: { id: 'BIGRAM', remoteJid: '201000000000@s.whatsapp.net' },
+			message: {
+				documentMessage: {
+					directPath: '/v/t62/big.fig',
+					mediaKey: Buffer.from('key'),
+					fileLength: 200 * 1024 * 1024,
+				},
+			},
+		};
+		await expect(
+			downloadLinkedDeviceMedia(raw, { id: 'BIGRAM' }, {
+				maxBytes: 2 * 1024 * 1024 * 1024,
+				downloadContentFromMessage: async () =>
+					(async function* () {
+						yield Buffer.alloc(1024, 7);
+					})(),
+			}),
+		).rejects.toThrow(/exceeds limit/);
+	});
+
+	it('scales the download timeout for multi-hundred-MB documents', () => {
+		expect(mediaDownloadTimeoutForBytes(10 * 1024 * 1024)).toBe(DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS);
+		expect(mediaDownloadTimeoutForBytes(542_917_864)).toBeGreaterThan(DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS);
+		expect(mediaDownloadTimeoutForBytes(542_917_864)).toBeLessThanOrEqual(45 * 60_000);
 	});
 
 	it('fills url from directPath so Baileys does not download thumbnailDirectPath', () => {

@@ -199,8 +199,25 @@ export function attachFullMediaUrls(
 
 /** Companion CDN download. Phone re-upload is a later fallback and must not run first. */
 export const DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
-export const DEFAULT_MEDIA_MAX_BYTES = 128 * 1024 * 1024;
+/**
+ * WhatsApp documents go up to 2 GB. Downloads that stream to disk use this ceiling.
+ * Callers that keep bytes in RAM must stay under {@link DEFAULT_MEDIA_BUFFER_MAX_BYTES}.
+ */
+export const DEFAULT_MEDIA_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+/** Safety cap when media is buffered in process memory instead of written to a file. */
+export const DEFAULT_MEDIA_BUFFER_MAX_BYTES = 128 * 1024 * 1024;
 export const PHONE_REUPLOAD_TIMEOUT_MS = 12_000;
+
+/** Slow-link floor (~256 KB/s) so a ~500 MB document is not killed by the default 2-minute timer. */
+export function mediaDownloadTimeoutForBytes(
+	declaredBytes: number,
+	baseMs = DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
+): number {
+	const declared = Number(declaredBytes) || 0;
+	if (declared <= 32 * 1024 * 1024) return baseMs;
+	const scaled = Math.ceil(declared / (256 * 1024)) * 1000;
+	return Math.min(45 * 60_000, Math.max(baseMs, scaled));
+}
 
 const LINKED_DEVICE_MEDIA_NODES = [
 	['imageMessage', 'image'],
@@ -275,8 +292,12 @@ export async function downloadLinkedDeviceMedia(
 	options: { id?: string; toFile?: string | null },
 	deps: LinkedDeviceMediaDeps,
 ): Promise<{ data?: Buffer; filePath?: string; raw: any }> {
-	const maxBytes = deps.maxBytes || DEFAULT_MEDIA_MAX_BYTES;
-	const timeoutMs = deps.timeoutMs || DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS;
+	const diskMaxBytes = deps.maxBytes || DEFAULT_MEDIA_MAX_BYTES;
+	// Buffering a multi-hundred-MB document in RAM OOMs the process; disk stream uses the full ceiling.
+	const maxBytes = options.toFile
+		? diskMaxBytes
+		: Math.min(diskMaxBytes, DEFAULT_MEDIA_BUFFER_MAX_BYTES);
+	const baseTimeoutMs = deps.timeoutMs || DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS;
 	const reuploadTimeoutMs = deps.reuploadTimeoutMs || PHONE_REUPLOAD_TIMEOUT_MS;
 	const id = options.id || String(rawInput?.key?.id || '');
 	let raw = rawInput;
@@ -302,8 +323,11 @@ export async function downloadLinkedDeviceMedia(
 			const node = content?.[key];
 			if (!node?.directPath && !node?.url) continue;
 			const declared = declaredMediaBytes(node);
+			const timeoutMs = mediaDownloadTimeoutForBytes(declared, baseTimeoutMs);
 			if (declared > maxBytes) {
-				throw new Error(`Media file exceeds limit (${declared} bytes)`);
+				throw new Error(
+					`Media file exceeds limit (${declared} bytes; max ${maxBytes} bytes)`,
+				);
 			}
 			try {
 				const stream = await withTimeout(
@@ -328,7 +352,9 @@ export async function downloadLinkedDeviceMedia(
 					);
 					if (streamedBytes > maxBytes) {
 						await fs.rm(options.toFile, { force: true }).catch(() => undefined);
-						throw new Error(`Media file exceeds limit (${streamedBytes} bytes)`);
+						throw new Error(
+							`Media file exceeds limit (${streamedBytes} bytes; max ${maxBytes} bytes)`,
+						);
 					}
 					if (streamedBytes) {
 						log(`[WA] Media decryption completed type=${type} bytes=${streamedBytes} source=cdn`);
@@ -358,6 +384,15 @@ export async function downloadLinkedDeviceMedia(
 
 	const tryLibrary = async (): Promise<{ data?: Buffer; filePath?: string } | null> => {
 		if (typeof deps.downloadMediaMessage !== 'function') return null;
+		const declared = (() => {
+			const content = unwrapMessageContent(raw?.message);
+			for (const [key] of LINKED_DEVICE_MEDIA_NODES) {
+				const node = content?.[key];
+				if (node) return declaredMediaBytes(node);
+			}
+			return 0;
+		})();
+		const timeoutMs = mediaDownloadTimeoutForBytes(declared, baseTimeoutMs);
 		try {
 			const downloaded = await withTimeout(
 				Promise.resolve(deps.downloadMediaMessage(raw, options.toFile ? 'stream' : 'buffer', {}, {})),
@@ -368,7 +403,9 @@ export async function downloadLinkedDeviceMedia(
 				const streamedBytes = await writeMediaStreamToFile(downloaded, options.toFile);
 				if (streamedBytes > maxBytes) {
 					await fs.rm(options.toFile, { force: true }).catch(() => undefined);
-					throw new Error(`Media file exceeds limit (${streamedBytes} bytes)`);
+					throw new Error(
+						`Media file exceeds limit (${streamedBytes} bytes; max ${maxBytes} bytes)`,
+					);
 				}
 				if (!streamedBytes) return null;
 				log(`[WA] Media decryption completed bytes=${streamedBytes} source=library`);
@@ -382,7 +419,9 @@ export async function downloadLinkedDeviceMedia(
 					: null;
 			if (!buffer?.length) return null;
 			if (buffer.length > maxBytes) {
-				throw new Error(`Media file exceeds limit (${buffer.length} bytes)`);
+				throw new Error(
+					`Media file exceeds limit (${buffer.length} bytes; max ${maxBytes} bytes)`,
+				);
 			}
 			log(`[WA] Media decryption completed bytes=${buffer.length} source=library`);
 			log(`[WA] Media download completed bytes=${buffer.length} source=library`);
