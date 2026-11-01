@@ -160,4 +160,22 @@ describe('whatsapp-contact', () => {
 			}),
 		).toBe(false);
 	});
+
+	it('reads iPhone item1.TEL lines and cards inside ephemeralMessage', () => {
+		const vcard = [
+			'BEGIN:VCARD',
+			'FN:Mostafa',
+			'item1.TEL;waid=201115171339:+20 111 517 1339',
+			'item1.X-ABLabel:Mobile',
+			'END:VCARD',
+		].join('\r\n');
+		expect(parseVcardPhones(vcard)).toEqual([
+			expect.objectContaining({ waId: '201115171339@c.us', label: 'Mobile' }),
+		]);
+		const shared = extractSharedContactFromRaw({
+			message: { ephemeralMessage: { message: { contactMessage: { displayName: 'Mostafa', vcard } } } },
+		});
+		expect(shared?.displayName).toBe('Mostafa');
+		expect(shared?.waId).toBe('201115171339@c.us');
+	});
 });

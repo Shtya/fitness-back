@@ -77,20 +77,47 @@ function decodeVcardValue(value: string): string {
 		.trim();
 }
 
+/** vCard lines, unfolded (RFC 6350 continuation lines start with a space or tab). */
+function vcardLines(vcard: string): string[] {
+	return String(vcard || '')
+		.replace(/\r\n?/g, '\n')
+		.replace(/\n[ \t]/g, '')
+		.split('\n')
+		.map(line => line.trim());
+}
+
+// iPhone cards group each number with its label: "item1.TEL;waid=…:+20…" + "item1.X-ABLabel:Work".
+const VCARD_TEL_LINE = /^(?:([\w-]+)\.)?TEL(?=[;:])/i;
+
+function vcardGroupLabels(lines: string[]): Map<string, string> {
+	const labels = new Map<string, string>();
+	for (const line of lines) {
+		const match = line.match(/^([\w-]+)\.X-ABLabel:(.+)$/i);
+		if (!match) continue;
+		const label = decodeVcardValue(match[2]).replace(/^_\$!<(.+)>!\$_$/, '$1');
+		if (label) labels.set(match[1].toLowerCase(), label);
+	}
+	return labels;
+}
+
 export function parseVcardPhones(vcard: string): WhatsAppSharedContactPhone[] {
-	const text = String(vcard || '').replace(/\r\n/g, '\n');
-	if (!text.trim()) return [];
+	const lines = vcardLines(vcard);
+	if (!lines.some(Boolean)) return [];
+	const groupLabels = vcardGroupLabels(lines);
 	const phones: WhatsAppSharedContactPhone[] = [];
 	const seen = new Set<string>();
-	for (const line of text.split('\n')) {
-		if (!/^TEL/i.test(line.trim())) continue;
+	for (const line of lines) {
+		const telMatch = line.match(VCARD_TEL_LINE);
+		if (!telMatch) continue;
 		const waidMatch = line.match(/waid=([0-9]+)/i);
 		const waId = waidMatch?.[1] ? `${waidMatch[1]}@c.us` : null;
 		const colonIndex = line.lastIndexOf(':');
 		const afterColon = colonIndex >= 0 ? line.slice(colonIndex + 1).trim() : '';
 		const phone = decodeVcardValue(afterColon);
 		const labelMatch = line.match(/type=([^;:]+)/i);
-		const label = labelMatch?.[1] ? decodeVcardValue(labelMatch[1]) : null;
+		const label =
+			(telMatch[1] && groupLabels.get(telMatch[1].toLowerCase())) ||
+			(labelMatch?.[1] ? decodeVcardValue(labelMatch[1]) : null);
 		const digits = digitsFromWaId(waId || phone);
 		if (!digits && !phone) continue;
 		const key = `${waId || ''}:${digits || phone}`;
@@ -107,7 +134,7 @@ export function parseVcardPhones(vcard: string): WhatsAppSharedContactPhone[] {
 }
 
 function parseVcardName(vcard: string): string | null {
-	const text = String(vcard || '');
+	const text = vcardLines(vcard).join('\n');
 	const fn = text.match(/^FN[^:]*:(.+)$/im)?.[1];
 	if (fn) return decodeVcardValue(fn);
 	const n = text.match(/^N[^:]*:(.+)$/im)?.[1];
@@ -131,6 +158,23 @@ function phoneFromLooseValue(value: unknown): WhatsAppSharedContactPhone | null 
 		waId: waId || `${digits}@c.us`,
 		formatted: formatPhoneForDisplay(text, waId),
 	};
+}
+
+/** Disappearing-message chats keep the card inside ephemeralMessage (view-once inside viewOnceMessage*). */
+function unwrapContactEnvelope(raw: Record<string, any>): Record<string, any> {
+	let message = raw?.message;
+	for (let depth = 0; message && depth < 4; depth += 1) {
+		const inner =
+			message.ephemeralMessage?.message ||
+			message.viewOnceMessage?.message ||
+			message.viewOnceMessageV2?.message ||
+			message.viewOnceMessageV2Extension?.message ||
+			null;
+		if (!inner) break;
+		message = inner;
+	}
+	if (!message || message === raw?.message) return raw;
+	return { ...raw, message };
 }
 
 function hasContactPayload(node: Record<string, any>): boolean {
@@ -163,7 +207,7 @@ export function extractSharedContactFromRaw(
 	fallbackText?: string | null,
 ): WhatsAppSharedContact | null {
 	if (!raw || typeof raw !== 'object') return null;
-	const node = raw as Record<string, any>;
+	const node = unwrapContactEnvelope(raw as Record<string, any>);
 	if (!hasContactPayload(node)) return null;
 
 	if (node.sharedContact?.displayName || node.sharedContact?.phones?.length) {
