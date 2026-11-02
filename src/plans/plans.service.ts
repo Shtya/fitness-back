@@ -766,6 +766,11 @@ export class PlanService implements OnModuleInit {
 
 	/* ---------- My Workouts: the client's own copy of their plan ---------- */
 
+	/** Staff edit their own workout by default; clients need the coach's "canEditWorkout". */
+	private canEditOwnPlan(user: User) {
+		return Boolean(user.canEditWorkout) || [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COACH].includes(user.role);
+	}
+
 	private async deletePlanDeep(manager: EntityManager, planId: string) {
 		const days = await manager.find(ExercisePlanDay, { where: { plan: { id: planId } }, select: ['id'] });
 		const dayIds = days.map(d => d.id);
@@ -787,7 +792,7 @@ export class PlanService implements OnModuleInit {
 			: null;
 		const isPersonal = Boolean(plan && plan.ownerUserId === userId);
 		return {
-			canEdit: Boolean(user.canEditWorkout && plan),
+			canEdit: Boolean(this.canEditOwnPlan(user) && plan),
 			isPersonal,
 			canReset: Boolean(isPersonal && plan?.sourcePlanId),
 			plan: plan ? this.planToFrontendShape(plan) : null,
@@ -802,7 +807,7 @@ export class PlanService implements OnModuleInit {
 		const isArabic = String(lang).toLowerCase().startsWith('ar');
 		const user = await this.userRepo.findOne({ where: { id: userId } });
 		if (!user) throw new NotFoundException('User not found');
-		if (!user.canEditWorkout) {
+		if (!this.canEditOwnPlan(user)) {
 			throw new ForbiddenException(isArabic ? 'المدرب ما سمحلكش تعدّل خطتك' : 'Your coach has not allowed you to edit your plan');
 		}
 		const days = toArray(dto?.program?.days);

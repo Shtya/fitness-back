@@ -70,6 +70,14 @@ describe('client personal plan', () => {
 		expect(allowed.create).not.toHaveBeenCalled();
 	});
 
+	it('staff edit their own plan without the client permission', async () => {
+		const admin = { id: 'a1', role: 'admin', canEditWorkout: false, activeExercisePlanId: 'coach-1' };
+		const { svc, create } = setup({ user: admin, plans: { 'coach-1': coachPlan } });
+		const out = await svc.saveMyPlan('a1', { program: { days: [day('saturday', ['e1'])] } }, 'en');
+		expect(create).toHaveBeenCalled();
+		expect(out.canEdit).toBe(true);
+	});
+
 	it('reset puts the client back on the coach plan and deletes the copy', async () => {
 		const user = { id: 'u1', role: 'client', canEditWorkout: true, activeExercisePlanId: 'copy-1' };
 		const { svc, manager } = setup({
