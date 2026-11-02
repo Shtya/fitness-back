@@ -1,11 +1,12 @@
 // src/plans/plans.service.ts
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, EntityManager } from 'typeorm';
 import { Exercise, ExercisePlan, ExercisePlanDay, ExercisePlanDayExercise, User, DayOfWeek, UserRole, PlanBlock } from 'entities/global.entity';
 import { CRUD } from 'common/crud.service';
 import { parsePagination } from 'common/pagination';
 import { RedisService } from '../redis/redis.service';
+import { PERSONAL_PLAN_SCHEMA_STATEMENTS } from './personal-plan.schema';
 
 const DAY_ALIASES: Record<string, DayOfWeek> = {
 	mon: DayOfWeek.MONDAY,
@@ -52,7 +53,9 @@ function parseMaybeJson<T = any>(v: any): T {
 }
 
 @Injectable()
-export class PlanService {
+export class PlanService implements OnModuleInit {
+	private readonly logger = new Logger(PlanService.name);
+
 	constructor(
 		private readonly dataSource: DataSource,
 		@InjectRepository(ExercisePlan) private readonly planRepo: Repository<ExercisePlan>,
@@ -62,6 +65,14 @@ export class PlanService {
 		@InjectRepository(User) private readonly userRepo: Repository<User>,
 		private readonly redisService: RedisService, // Inject Redis service
 	) { }
+
+	async onModuleInit() {
+		try {
+			for (const statement of PERSONAL_PLAN_SCHEMA_STATEMENTS) await this.dataSource.query(statement);
+		} catch (error) {
+			this.logger.error(`Personal plan columns could not be added: ${(error as Error)?.message || error}`);
+		}
+	}
 
 	private assertCanAccessPlan(plan: ExercisePlan, actor: { id: string; role: UserRole }, action: 'view' | 'edit' | 'delete' | 'assign') {
 		if (actor.role === UserRole.SUPER_ADMIN) {
@@ -79,11 +90,12 @@ export class PlanService {
 		const qb = this.planRepo.createQueryBuilder('p');
 
 		if (actor.role === UserRole.SUPER_ADMIN) {
+			qb.where('p."ownerUserId" IS NULL');
 			return qb;
 		}
 
 		if (actor.role === UserRole.ADMIN || actor.role === UserRole.COACH) {
-			qb.where('(p."adminId" IS NULL OR p."adminId" = :adminId)', { adminId: actor.id });
+			qb.where('(p."adminId" IS NULL OR p."adminId" = :adminId) AND p."ownerUserId" IS NULL', { adminId: actor.id });
 			return qb;
 		}
 
@@ -261,7 +273,12 @@ export class PlanService {
 	}
 
 
-	async createPlanWithContent(input: any, lang: any, actor: { id: string; role: UserRole }) {
+	async createPlanWithContent(
+		input: any,
+		lang: any,
+		actor: { id: string; role: UserRole },
+		personal?: { ownerUserId: string; sourcePlanId: string },
+	) {
 		const toItems = (arr: any[], block: PlanBlock) =>
 			(Array.isArray(arr) ? arr : []).map((e, idx) => ({
 				e,
@@ -297,6 +314,8 @@ export class PlanService {
 					name,
 					isActive: !!isActive,
 					adminId: userId,
+					ownerUserId: personal?.ownerUserId ?? null,
+					sourcePlanId: personal?.sourcePlanId ?? null,
 					notes: Array.isArray(notes) ? notes.filter(Boolean) : [],
 					// keep these if you still have plan-level warmup/cardio fields
 					warmup: warmup ?? null,
@@ -693,6 +712,12 @@ export class PlanService {
 			}
 		});
 
+		// Their own edited copies of the previous plan are replaced by the coach's new plan.
+		const staleCopies = await this.planRepo.find({ where: { ownerUserId: In(uniqueIds) }, select: ['id'] });
+		for (const copy of staleCopies) {
+			if (copy.id !== planId) await this.dataSource.transaction(manager => this.deletePlanDeep(manager, copy.id));
+		}
+
 		// Invalidate plan caches
 		await this.invalidatePlanCaches(planId, actor.id);
 
@@ -737,6 +762,110 @@ export class PlanService {
 				subscriptionActive,
 			};
 		});
+	}
+
+	/* ---------- My Workouts: the client's own copy of their plan ---------- */
+
+	private async deletePlanDeep(manager: EntityManager, planId: string) {
+		const days = await manager.find(ExercisePlanDay, { where: { plan: { id: planId } }, select: ['id'] });
+		const dayIds = days.map(d => d.id);
+		if (dayIds.length) {
+			await manager.delete(ExercisePlanDayExercise, { day: { id: In(dayIds) } as any });
+			await manager.delete(ExercisePlanDay, { id: In(dayIds) });
+		}
+		await manager.delete(ExercisePlan, { id: planId });
+	}
+
+	async getMyPlan(userId: string) {
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+		const plan = user.activeExercisePlanId
+			? await this.planRepo.findOne({
+				where: { id: user.activeExercisePlanId },
+				relations: ['days', 'days.items', 'days.items.exercise'],
+			})
+			: null;
+		const isPersonal = Boolean(plan && plan.ownerUserId === userId);
+		return {
+			canEdit: Boolean(user.canEditWorkout && plan),
+			isPersonal,
+			canReset: Boolean(isPersonal && plan?.sourcePlanId),
+			plan: plan ? this.planToFrontendShape(plan) : null,
+		};
+	}
+
+	/**
+	 * Saves the client's edits. The coach's plan is never changed: the first save makes a copy
+	 * that only this client uses (ownerUserId), later saves update that copy.
+	 */
+	async saveMyPlan(userId: string, dto: any, lang: any) {
+		const isArabic = String(lang).toLowerCase().startsWith('ar');
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+		if (!user.canEditWorkout) {
+			throw new ForbiddenException(isArabic ? 'المدرب ما سمحلكش تعدّل خطتك' : 'Your coach has not allowed you to edit your plan');
+		}
+		const days = toArray(dto?.program?.days);
+		// The plan can never be emptied: at least one day, and every day keeps an exercise.
+		if (!days.length) {
+			throw new BadRequestException(isArabic ? 'لازم يفضل يوم واحد على الأقل في الخطة' : 'Keep at least one day in your plan');
+		}
+		for (const d of days) {
+			const count = toArray(d?.warmupExercises).length + toArray(d?.exercises).length + toArray(d?.cardioExercises).length;
+			if (!count) {
+				throw new BadRequestException(isArabic ? 'كل يوم لازم يكون فيه تمرين واحد على الأقل' : 'Every day needs at least one exercise');
+			}
+		}
+		if (!user.activeExercisePlanId) {
+			throw new BadRequestException(isArabic ? 'مفيش خطة متعيّنة ليك' : 'You have no plan assigned');
+		}
+		const current = await this.planRepo.findOne({ where: { id: user.activeExercisePlanId } });
+		if (!current) throw new NotFoundException(isArabic ? 'الخطة غير موجودة' : 'Plan not found');
+
+		const actor = { id: userId, role: user.role };
+		const program = { days };
+		if (current.ownerUserId === userId) {
+			await this.updatePlanAndContent(current.id, { program }, lang, actor);
+		} else {
+			const copy = await this.createPlanWithContent(
+				{
+					name: current.name,
+					isActive: true,
+					notes: current.notes,
+					warmup: current.warmup,
+					cardio: current.cardio,
+					userId: current.adminId ?? null,
+					program,
+				},
+				lang,
+				actor,
+				{ ownerUserId: userId, sourcePlanId: current.id },
+			);
+			await this.userRepo.update({ id: userId }, { activeExercisePlanId: copy.id });
+		}
+		await this.redisService.del(`active_plan:${userId}`);
+		return this.getMyPlan(userId);
+	}
+
+	/** Drops the client's copy and puts them back on the coach's original plan. */
+	async resetMyPlan(userId: string, lang: any) {
+		const isArabic = String(lang).toLowerCase().startsWith('ar');
+		const user = await this.userRepo.findOne({ where: { id: userId } });
+		if (!user) throw new NotFoundException('User not found');
+		const current = user.activeExercisePlanId ? await this.planRepo.findOne({ where: { id: user.activeExercisePlanId } }) : null;
+		if (!current || current.ownerUserId !== userId || !current.sourcePlanId) {
+			throw new BadRequestException(isArabic ? 'خطتك زي ما المدرب عملها، مفيش تعديلات ترجع عنها' : 'Your plan has no changes to undo');
+		}
+		const source = await this.planRepo.findOne({ where: { id: current.sourcePlanId } });
+		if (!source) {
+			throw new NotFoundException(isArabic ? 'الخطة الأصلية اتمسحت، كلّم المدرب' : 'The original plan no longer exists, ask your coach');
+		}
+		await this.dataSource.transaction(async manager => {
+			await manager.update(User, { id: userId }, { activeExercisePlanId: source.id });
+			await this.deletePlanDeep(manager, current.id);
+		});
+		await this.redisService.del(`active_plan:${userId}`);
+		return this.getMyPlan(userId);
 	}
 
 	/* ---------- Cache Invalidation Methods ---------- */
@@ -824,6 +953,8 @@ export class PlanService {
 			name: plan.name,
 			isActive: !!plan.isActive,
 			adminId: plan?.adminId,
+			isPersonal: Boolean((plan as any)?.ownerUserId),
+			sourcePlanId: (plan as any)?.sourcePlanId ?? null,
 
 			notes: Array.isArray((plan as any).notes) ? (plan as any).notes : [],
 			warmup: (plan as any).warmup ?? null,

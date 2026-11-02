@@ -149,6 +149,15 @@ export class ExercisePlan extends CoreEntity {
 	@Index()
 	@Column({ type: 'uuid', nullable: true })
 	adminId?: string | null;
+
+	/** Set on a client's own edited copy of a coach plan (see PlanService.saveMyPlan). */
+	@Index()
+	@Column({ type: 'uuid', nullable: true })
+	ownerUserId?: string | null;
+
+	/** The coach plan a personal copy was made from; "reset" goes back to it. */
+	@Column({ type: 'uuid', nullable: true })
+	sourcePlanId?: string | null;
 }
 
 @Entity('exercise_plan_days')

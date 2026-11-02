@@ -40,6 +40,25 @@ export class PlanController {
      return this.svc.getActivePlan(req.user.id);
   }
 
+  // My Workouts editor: the signed-in client's own plan (declared before ':id' routes).
+  @Get('mine')
+  @UseGuards(JwtAuthGuard)
+  mine(@Req() req: any) {
+    return this.svc.getMyPlan(req.user.id);
+  }
+
+  @Put('mine')
+  @UseGuards(JwtAuthGuard)
+  saveMine(@Req() req: any, @Body() body: any, @Query('lang') lang: any) {
+    return this.svc.saveMyPlan(req.user.id, body, lang);
+  }
+
+  @Post('mine/reset')
+  @UseGuards(JwtAuthGuard)
+  resetMine(@Req() req: any, @Query('lang') lang: any) {
+    return this.svc.resetMyPlan(req.user.id, lang);
+  }
+
   // CREATE manual plan
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -65,6 +84,7 @@ export class PlanController {
   // UPDATE plan (only owner admin or super admin)
   @Put(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COACH)
   async update(@Param('id') id: string, @Body() dto: UpdatePlanDto & any, @Req() req: any, @Query('lang') lang: any) {
     return this.svc.updatePlanAndContent(id, dto,lang, { id: req.user.id, role: req.user.role });
   }
@@ -72,6 +92,7 @@ export class PlanController {
   // DELETE a plan (only owner admin or super admin)
   @Delete(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COACH)
   async remove(@Param('id') id: string, @Req() req: any) {
     return this.svc.remove(id, { id: req.user.id, role: req.user.role });
   }
