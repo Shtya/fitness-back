@@ -1,9 +1,13 @@
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ensureWhatsAppVoiceOgg } from './whatsapp-voice-ogg';
+import { ensureWhatsAppVoiceOgg, runFfmpeg } from './whatsapp-voice-ogg';
 import {
+	NoAudioTrackError,
+	audioTrackFileName,
+	ensureAudioTrackM4a,
 	ensureVoicePlaybackM4a,
+	isVideoAttachment,
 	needsM4aForPlayback,
 	playbackFileName,
 } from './whatsapp-voice-playback';
@@ -89,4 +93,32 @@ describe('whatsapp voice playback (m4a for iOS Safari)', () => {
 		await expect(ensureVoicePlaybackM4a(oggPath)).resolves.toBe(first);
 		expect((await fs.stat(first)).mtimeMs).toBe(before);
 	}, 30_000);
+
+	it('recognises videos by MIME or extension', () => {
+		expect(isVideoAttachment('clip.bin', 'video/mp4')).toBe(true);
+		expect(isVideoAttachment('VID-2024.MOV', 'application/octet-stream')).toBe(true);
+		expect(isVideoAttachment('voice.ogg', 'audio/ogg')).toBe(false);
+		expect(audioTrackFileName('VID-2024.mp4')).toBe('VID-2024.m4a');
+	});
+
+	it('pulls the audio track out of a video as a small MP4/AAC file', async () => {
+		const wavPath = path.join(dir, 'tone.wav');
+		await fs.writeFile(wavPath, sineWav(3));
+		const videoPath = path.join(dir, 'clip.mp4');
+		await runFfmpeg(
+			['-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x240:d=3', '-i', wavPath, '-shortest', '-c:v', 'libx264', '-c:a', 'aac', videoPath],
+			30_000,
+		);
+		const audioPath = await ensureAudioTrackM4a(videoPath);
+		expect(audioPath).toBe(`${videoPath}.audio.m4a`);
+		const head = await fs.readFile(audioPath);
+		expect(head.subarray(4, 8).toString('ascii')).toBe('ftyp');
+		expect(head.length).toBeLessThan((await fs.stat(videoPath)).size);
+	}, 60_000);
+
+	it('says so when a video has no sound', async () => {
+		const videoPath = path.join(dir, 'silent.mp4');
+		await runFfmpeg(['-y', '-f', 'lavfi', '-i', 'color=c=red:s=320x240:d=2', '-c:v', 'libx264', videoPath], 30_000);
+		await expect(ensureAudioTrackM4a(videoPath)).rejects.toBeInstanceOf(NoAudioTrackError);
+	}, 60_000);
 });

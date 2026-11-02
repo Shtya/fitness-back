@@ -42,7 +42,11 @@ async function isFreshCopy(sourcePath: string, outputPath: string): Promise<bool
 	}
 }
 
-async function transcodeToM4a(sourcePath: string, outputPath: string): Promise<string> {
+async function transcodeToM4a(
+	sourcePath: string,
+	outputPath: string,
+	timeoutMs = 45_000,
+): Promise<string> {
 	if (await isFreshCopy(sourcePath, outputPath)) return outputPath;
 	const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp`;
 	try {
@@ -66,7 +70,7 @@ async function transcodeToM4a(sourcePath: string, outputPath: string): Promise<s
 				'mp4',
 				tempPath,
 			],
-			45_000,
+			timeoutMs,
 		);
 		const stats = await fs.stat(tempPath);
 		if (!stats.size) throw new Error('Converted voice file is empty');
@@ -95,5 +99,51 @@ export function ensureVoicePlaybackM4a(absolutePath: string): Promise<string> {
 
 export function playbackFileName(fileName?: string | null): string {
 	const base = path.parse(String(fileName || 'voice')).name || 'voice';
+	return `${base}.m4a`;
+}
+
+/**
+ * Query value for "the audio track only" (transcription): a 10-minute video is ~100 MB, its
+ * mono 64 kbps audio ~5 MB, and the browser no longer has to download and decode the video.
+ */
+export const AUDIO_TRACK_FORMAT = 'audio';
+const AUDIO_TRACK_SUFFIX = '.audio.m4a';
+// Audio-only re-encode runs far faster than real time; this covers hour-long videos on a slow box.
+const AUDIO_TRACK_TIMEOUT_MS = 10 * 60_000;
+
+export class NoAudioTrackError extends Error {
+	constructor() {
+		super('This video has no sound to transcribe');
+	}
+}
+
+/** Video containers whose audio can be pulled out (by MIME type, or a video file extension). */
+export function isVideoAttachment(fileName?: string | null, mimeType?: string | null): boolean {
+	if (String(mimeType || '').toLowerCase().startsWith('video/')) return true;
+	return /\.(mp4|m4v|mov|webm|mkv|3gp|avi)$/i.test(String(fileName || ''));
+}
+
+/** Returns an AAC/M4A copy of a video's audio track, built once and kept beside the video. */
+export function ensureAudioTrackM4a(absolutePath: string): Promise<string> {
+	const outputPath = `${absolutePath}${AUDIO_TRACK_SUFFIX}`;
+	const pending = inFlight.get(outputPath);
+	if (pending) return pending;
+	const job = transcodeToM4a(absolutePath, outputPath, AUDIO_TRACK_TIMEOUT_MS)
+		.catch(error => {
+			// ffmpeg: "Output file does not contain any stream" / "matches no streams".
+			if (/does not contain any stream|matches no streams/i.test(String(error?.message || ''))) {
+				throw new NoAudioTrackError();
+			}
+			throw error;
+		})
+		.finally(() => {
+			inFlight.delete(outputPath);
+		});
+	inFlight.set(outputPath, job);
+	return job;
+}
+
+export function audioTrackFileName(fileName?: string | null): string {
+	const base = path.parse(String(fileName || 'video')).name || 'video';
 	return `${base}.m4a`;
 }
