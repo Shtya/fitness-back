@@ -5139,11 +5139,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}).catch(() => undefined);
 		const take = Math.min(Math.max(Number(limit) || 100, 1), search ? 200 : 200);
 		const loadLocal = async (cursorId?: string) => {
+			// Two steps on purpose. `.take()` on a query that joins one-to-many relations
+			// makes TypeORM wrap everything in a DISTINCT subquery that joins *every*
+			// message of the chat with its attachments/reactions before the LIMIT, so long
+			// chats opened slowly. The page of ids comes straight off the
+			// (conversation_id, provider_timestamp) index; relations load for those ids only.
 			const query = this.messageRepo
 				.createQueryBuilder('message')
-				.leftJoinAndSelect('message.attachments', 'attachments')
-				.leftJoinAndSelect('message.reactions', 'reactions')
-				.leftJoinAndSelect('message.senderUser', 'senderUser')
+				.select('message.id', 'id')
 				.where('message.conversationId = :conversationId', { conversationId });
 			if (starredOnly) {
 				query.andWhere('message.isStarred = true');
@@ -5169,10 +5172,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					);
 				}
 			}
-			const rows = await query
+			const pageIds = (
+				await query
+					.orderBy('message.providerTimestamp', 'DESC')
+					.addOrderBy('message.id', 'DESC')
+					.limit(take)
+					.getRawMany<{ id: string }>()
+			).map((row) => row.id);
+			if (!pageIds.length) return [];
+			const rows = await this.messageRepo
+				.createQueryBuilder('message')
+				.leftJoinAndSelect('message.attachments', 'attachments')
+				.leftJoinAndSelect('message.reactions', 'reactions')
+				.leftJoinAndSelect('message.senderUser', 'senderUser')
+				.where('message.id IN (:...pageIds)', { pageIds })
 				.orderBy('message.providerTimestamp', 'DESC')
 				.addOrderBy('message.id', 'DESC')
-				.take(take)
 				.getMany();
 			for (const message of rows) {
 				const duration = readVoiceDurationFromRaw(message.raw);

@@ -34,6 +34,17 @@ describe('whatsapp-media-signed-url', () => {
 		});
 	});
 
+	it('gives the same URL for the same file within a window (browser cache hits)', () => {
+		const start = Math.floor(1_700_000_000_000 / (MEDIA_TOKEN_TTL_SECONDS * 1000)) * MEDIA_TOKEN_TTL_SECONDS * 1000;
+		const first = signMediaToken('att-1', 'user-9', MEDIA_TOKEN_TTL_SECONDS, start + 1_000);
+		const later = signMediaToken('att-1', 'user-9', MEDIA_TOKEN_TTL_SECONDS, start + 60 * 60 * 1000);
+		expect(later.token).toBe(first.token);
+		// Always valid for at least one full TTL from issue.
+		expect(first.expiresAtMs - (start + 1_000)).toBeGreaterThanOrEqual(MEDIA_TOKEN_TTL_SECONDS * 1000 - 1_000);
+		const nextWindow = signMediaToken('att-1', 'user-9', MEDIA_TOKEN_TTL_SECONDS, start + MEDIA_TOKEN_TTL_SECONDS * 1000);
+		expect(nextWindow.token).not.toBe(first.token);
+	});
+
 	it('rejects a token for a different attachment id', () => {
 		const signed = signMediaToken('att-1', 'user-9');
 		expect(verifyMediaToken(signed.token, 'att-2')).toBeNull();

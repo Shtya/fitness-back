@@ -1,6 +1,12 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 
-export const MEDIA_TOKEN_TTL_SECONDS = 15 * 60;
+/**
+ * Signed media URLs expire on fixed window boundaries (valid between one and two TTLs), so the
+ * same file keeps the same URL for a whole window. With a per-request expiry every page load
+ * produced a new URL, the browser's HTTP cache (Cache-Control: 7 days) never hit, and each
+ * reopened chat downloaded every photo again.
+ */
+export const MEDIA_TOKEN_TTL_SECONDS = 6 * 60 * 60;
 
 type MediaTokenPayload = {
 	a: string;
@@ -38,7 +44,8 @@ export function signMediaToken(
 	const id = String(attachmentId || '').trim();
 	const uid = String(userId || '').trim();
 	if (!id || !uid) throw new Error('attachmentId and userId are required');
-	const expiresAtMs = nowMs + Math.max(30, Number(ttlSeconds) || MEDIA_TOKEN_TTL_SECONDS) * 1000;
+	const windowMs = Math.max(30, Number(ttlSeconds) || MEDIA_TOKEN_TTL_SECONDS) * 1000;
+	const expiresAtMs = (Math.floor(nowMs / windowMs) + 2) * windowMs;
 	const payload: MediaTokenPayload = {
 		a: id,
 		u: uid,
