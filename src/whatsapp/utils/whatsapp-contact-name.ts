@@ -9,6 +9,19 @@
  * Baileys fields: `name` = saved contact, `notify` = pushName the peer set.
  */
 
+/**
+ * WhatsApp hides some numbers and sends them masked, e.g. "+20·······72". That is a placeholder,
+ * not a name: a saved contact name or profile name must replace it, but it still beats showing
+ * nothing (or an internal id) when it is all there is.
+ */
+export function isMaskedWhatsAppPhone(name: string | null | undefined): boolean {
+	const n = String(name || '').trim();
+	if (!n) return false;
+	const maskRun = /[•·∙⋅‧*]{2,}|\.{3,}|…/;
+	const onlyPhoneAndMask = /^[+\d\s•·∙⋅‧*.…()-]+$/;
+	return maskRun.test(n) && onlyPhoneAndMask.test(n);
+}
+
 export function isWeakWhatsAppContactName(
 	name: string | null | undefined,
 	chatId?: string | null,
@@ -16,6 +29,7 @@ export function isWeakWhatsAppContactName(
 ): boolean {
 	const n = String(name || '').trim();
 	if (!n) return true;
+	if (isMaskedWhatsAppPhone(n)) return true;
 	const phoneDigits = String(phone || '').replace(/\D/g, '');
 	if (phoneDigits && n.replace(/\D/g, '') === phoneDigits && /^\+?\d[\d\s-]*$/.test(n)) {
 		return true;
@@ -40,7 +54,12 @@ export function preferWhatsAppContactName(
 	const next = String(incoming || '').trim() || null;
 	const prevWeak = isWeakWhatsAppContactName(prev, chatId, phone);
 	const nextWeak = isWeakWhatsAppContactName(next, chatId, phone);
-	if (!next || nextWeak) return prevWeak ? null : prev;
+	if (!next || nextWeak) {
+		if (!prevWeak) return prev;
+		// Nothing better: keep a masked number rather than losing the label entirely.
+		if (isMaskedWhatsAppPhone(prev)) return prev;
+		return isMaskedWhatsAppPhone(next) ? next : null;
+	}
 	if (!prev || prevWeak) return next;
 	return prev;
 }
@@ -61,5 +80,7 @@ export function resolveWhatsAppContactLabel(input: {
 	const phone = input.phone;
 	if (saved && !isWeakWhatsAppContactName(saved, chatId, phone)) return saved;
 	if (push && !isWeakWhatsAppContactName(push, chatId, phone)) return push;
+	if (isMaskedWhatsAppPhone(saved)) return saved;
+	if (isMaskedWhatsAppPhone(push)) return push;
 	return null;
 }

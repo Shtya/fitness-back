@@ -2325,14 +2325,22 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return repaired;
 	}
 
+	/** Accounts whose phone address book was pulled since this process started. */
+	private readonly addressBookPulled = new Set<string>();
+
 	private async runIncrementalReconnect(accountId: string) {
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected') return;
+		// After a relink the new session has no saved-contact names until the address book is
+		// pulled; without it chats showed WhatsApp's masked numbers. Once per account per process.
+		const pullAddressBook = !this.addressBookPulled.has(accountId);
 		try {
 			await this.syncChatsInternal(accountId, provider, 500, {
 				syncGroupParticipants: false,
 				emitProgress: false,
+				pullAddressBook,
 			});
+			if (pullAddressBook) this.addressBookPulled.add(accountId);
 			await this.markAccountHydrated(accountId, { history: true });
 			await this.repairInboxOrder(accountId);
 		} catch (error) {

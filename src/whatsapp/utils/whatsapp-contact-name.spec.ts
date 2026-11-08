@@ -1,4 +1,5 @@
 import {
+	isMaskedWhatsAppPhone,
 	isWeakWhatsAppContactName,
 	preferWhatsAppContactName,
 	resolveWhatsAppContactLabel,
@@ -47,5 +48,28 @@ describe('whatsapp-contact-name', () => {
 				chatId: '201551495772@c.us',
 			}),
 		).toBe(null);
+	});
+
+	describe('masked numbers from WhatsApp', () => {
+		it('recognises masked numbers and nothing else', () => {
+			expect(isMaskedWhatsAppPhone('+20·······72')).toBe(true);
+			expect(isMaskedWhatsAppPhone('+20 •••• 36')).toBe(true);
+			expect(isMaskedWhatsAppPhone('+20 155 149 5772')).toBe(false);
+			expect(isMaskedWhatsAppPhone('Ahmed · Work')).toBe(false);
+			expect(isMaskedWhatsAppPhone('Noor Saleh')).toBe(false);
+		});
+
+		it('lets a saved or profile name replace a masked number', () => {
+			expect(isWeakWhatsAppContactName('+20·······72')).toBe(true);
+			expect(preferWhatsAppContactName('+20·······72', 'Noor Saleh')).toBe('Noor Saleh');
+		});
+
+		it('keeps the masked number when nothing better exists', () => {
+			expect(preferWhatsAppContactName('+20·······72', null)).toBe('+20·······72');
+			expect(preferWhatsAppContactName(null, '+20·······72')).toBe('+20·······72');
+			expect(preferWhatsAppContactName('Noor Saleh', '+20·······72')).toBe('Noor Saleh');
+			expect(resolveWhatsAppContactLabel({ savedName: 'Noor Saleh', pushName: '+20·······72' })).toBe('Noor Saleh');
+			expect(resolveWhatsAppContactLabel({ savedName: null, pushName: '+20·······72' })).toBe('+20·······72');
+		});
 	});
 });
