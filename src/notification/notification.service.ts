@@ -129,20 +129,6 @@ export class NotificationService {
 					})
 					.catch(e => this.logger.error('[WebPush] WhatsApp push failed', e));
 			}
-			if (opts.type === NotificationType.WHATSAPP_CONNECTION) {
-				// A dropped WhatsApp link fails silently (messages just stop), so it must reach
-				// the phone, not only the bell inside the dashboard.
-				const data = opts.data || {};
-				this.webPushService
-					.sendToUser(opts.userId, {
-						title: opts.title,
-						body: opts.message || opts.title,
-						url: `/dashboard/whatsapp?accountId=${encodeURIComponent(String(data.accountId || ''))}&tab=accounts`,
-						tag: `whatsapp-connection-${data.accountId || opts.userId}`,
-						data,
-					})
-					.catch(e => this.logger.error('[WebPush] WhatsApp connection push failed', e));
-			}
 		}
 
 		return saved;
