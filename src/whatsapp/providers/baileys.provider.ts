@@ -29,6 +29,7 @@ import {
 } from '../utils/whatsapp-message-secret';
 import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
+import { prepareBundleMessages, readGroupHistoryBundle } from '../utils/whatsapp-group-history-bundle';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
 import { PhoneRequestGate, type PhoneRequestOutcome } from '../utils/whatsapp-phone-request-gate';
@@ -1622,6 +1623,10 @@ export class BaileysProvider implements WhatsAppProvider {
 		return jidOf(`${bare}@${domain}`) || jidOf(full);
 	}
 
+	getOwnPushName(): string | null {
+		return String(this.socket?.authState?.creds?.me?.name || '').trim() || null;
+	}
+
 	getOwnJids(): string[] {
 		const ids = [this.socket?.user?.id, this.socket?.user?.lid]
 			.map((value) => String(value || '').trim())
@@ -1886,6 +1891,78 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Raw history messages (history sync, or a group's shared history) → normalized messages
+	 * marked as history, so sync persists them without unread counts or a push flood.
+	 */
+	private ingestHistoryRawMessages(messages: any[]): NormalizedWhatsAppMessage[] {
+		const historyMessages: NormalizedWhatsAppMessage[] = [];
+		for (const raw of messages) {
+			if (this.rememberStatus(raw)) continue;
+			if (this.ingestRevoke(raw)) continue;
+			if (this.ingestEdit(raw)) continue;
+			if (this.ingestReaction(raw)) continue;
+			const normalized = this.normalizeWaMessage(raw);
+			if (!normalized) continue;
+			(normalized as any).__fromHistory = true;
+			if (normalized.raw && typeof normalized.raw === 'object') {
+				normalized.raw = { ...normalized.raw, __fromHistory: true };
+			}
+			this.rememberMessage(normalized, raw);
+			this.rememberHistoryMessageId(normalized.providerMessageId);
+			historyMessages.push(normalized);
+		}
+		return historyMessages;
+	}
+
+	/** Bundles already imported (or being imported) in this process, by message id. */
+	private readonly importedHistoryBundles = new Set<string>();
+
+	/**
+	 * "X sent you message history": a group member shared the group's earlier messages with us.
+	 * Download and read the bundle, then store its messages as history of that group.
+	 */
+	private async importGroupHistoryBundle(raw: any, bundle: any) {
+		const groupJid = jidOf(raw?.key?.remoteJid);
+		const bundleId = String(raw?.key?.id || '');
+		// Only groups, and only bundles shared with us (one we shared is history we already have).
+		if (!groupJid.endsWith('@g.us') || raw?.key?.fromMe) return;
+		if (bundleId && this.importedHistoryBundles.has(bundleId)) return;
+		if (bundleId) this.importedHistoryBundles.add(bundleId);
+		const declared = Number(String(bundle?.messageHistoryMetadata?.messageCount ?? 0)) || 0;
+		this.logger.log(`[WA] Group history bundle for ${this.accountId} chat=${groupJid} declared=${declared}`);
+		try {
+			const { proto } = await loadBaileysModule();
+			const read = await readGroupHistoryBundle(bundle, proto as any);
+			const prepared = prepareBundleMessages(read.messages, {
+				groupJid,
+				sharerJid: jidOf(raw?.key?.participant) || jidOf(raw?.participant) || null,
+				ownJids: this.getOwnJids(),
+			});
+			const historyMessages = this.ingestHistoryRawMessages(prepared);
+			this.ensureChatsFromMessages();
+			this.logger.log(
+				`[WA] Group history bundle read for ${this.accountId} chat=${groupJid}: layout=${read.layout} key="${read.keyInfo}" packing=${read.packing} decoded=${read.messages.length} stored=${historyMessages.length}`,
+			);
+			if (historyMessages.length) {
+				this.emit({ type: 'history_sync', chats: 1, messages: historyMessages.length, payload: historyMessages });
+			}
+		} catch (error) {
+			// Let a later copy of the same bundle (reconnect, history) try again.
+			if (bundleId) this.importedHistoryBundles.delete(bundleId);
+			this.logger.warn(
+				`[WA] Group history bundle failed for ${this.accountId} chat=${groupJid}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	/** The shared-history pointer in a message, if that is what it is. */
+	private groupHistoryBundleOf(raw: any) {
+		return deepUnwrapMessageContent(raw?.message)?.messageHistoryBundle || null;
 	}
 
 	/** Ensure every chat that has messages is visible in getChats. */
@@ -2563,6 +2640,12 @@ export class BaileysProvider implements WhatsAppProvider {
 			// history dumps, except a recent fromMe echo from the phone app.
 			for (const raw of list) {
 				this.learnOwnPushName(raw);
+				// Shared group history: import what it points at; the pointer itself is not a message.
+				const historyBundle = this.groupHistoryBundleOf(raw);
+				if (historyBundle) {
+					void this.importGroupHistoryBundle(raw, historyBundle);
+					continue;
+				}
 				if (this.rememberStatus(raw)) continue;
 				if (this.ingestRevoke(raw)) continue;
 				if (this.ingestEdit(raw)) continue;
@@ -2815,23 +2898,14 @@ export class BaileysProvider implements WhatsAppProvider {
 					...(pic ? { imgUrl: pic, profilePicThumbObj: { eurl: pic } } : {}),
 				});
 			}
-			const historyMessages: NormalizedWhatsAppMessage[] = [];
+			// A shared-history pointer can also arrive inside a history dump.
 			for (const raw of messages) {
-				if (this.rememberStatus(raw)) continue;
-				if (this.ingestRevoke(raw)) continue;
-				if (this.ingestEdit(raw)) continue;
-				if (this.ingestReaction(raw)) continue;
-				const normalized = this.normalizeWaMessage(raw);
-				if (!normalized) continue;
-				// Mark history so sync persists without unread spam / push flood.
-				(normalized as any).__fromHistory = true;
-				if (normalized.raw && typeof normalized.raw === 'object') {
-					normalized.raw = { ...normalized.raw, __fromHistory: true };
-				}
-				this.rememberMessage(normalized, raw);
-				this.rememberHistoryMessageId(normalized.providerMessageId);
-				historyMessages.push(normalized);
+				const historyBundle = this.groupHistoryBundleOf(raw);
+				if (historyBundle) void this.importGroupHistoryBundle(raw, historyBundle);
 			}
+			const historyMessages = this.ingestHistoryRawMessages(
+				messages.filter((raw: any) => !this.groupHistoryBundleOf(raw)),
+			);
 			this.ensureChatsFromMessages();
 			this.historySyncChunks += 1;
 			this.logger.log(

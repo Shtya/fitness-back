@@ -6064,6 +6064,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				remember(participant.waId, participant.displayName, null);
 			}
 		}
+		// Mentions of us: no contact row and no real participant name exists for our own number,
+		// so they stayed as digits. Our phone and LID resolve to our own WhatsApp name, as on the phone.
+		const provider = this.providers.getProvider(conversation.accountId);
+		const ownName = provider?.getOwnPushName?.() || null;
+		const ownJids = provider?.getOwnJids?.() || [];
+		if (ownJids.length) {
+			const account = await this.accountRepo
+				.findOne({ where: { id: conversation.accountId }, select: ['id', 'phoneNumber'] as any })
+				.catch(() => null);
+			for (const jid of ownJids) remember(jid, ownName, account?.phoneNumber || null);
+		}
 		for (const message of messages) {
 			remember(
 				message.senderWaId,

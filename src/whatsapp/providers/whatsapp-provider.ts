@@ -272,6 +272,8 @@ export interface WhatsAppProvider {
 	getGroupParticipants(groupId: string): Promise<any[]>;
 	/** The linked account's own JIDs (phone and LID) when the socket knows them. */
 	getOwnJids?(): string[];
+	/** The linked account's own WhatsApp name (push name), when known. */
+	getOwnPushName?(): string | null;
 	sendText(
 		chatId: string,
 		text: string,
