@@ -1071,5 +1071,44 @@ describe('BaileysProvider message actions', () => {
 		const contentArg = sendMessage.mock.calls[0][1];
 		expect(contentArg.quoted).toBeUndefined();
 	});
+
+	it('waits for a reconnect instead of failing a send made mid-relink', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockResolvedValue({ key: { id: 'm1' } });
+		(provider as any).normalizeWaMessage = () => null;
+		(provider as any).state = 'connecting';
+		(provider as any).socket = null;
+		setTimeout(() => {
+			(provider as any).socket = { sendMessage, user: { id: 'me' } };
+			(provider as any).state = 'connected';
+		}, 300);
+		await provider.sendText('201000000001@c.us', 'hello');
+		expect(sendMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it('resends with the same message id when the socket drops mid-send', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest
+			.fn()
+			.mockRejectedValueOnce(new Error('Connection Closed'))
+			.mockResolvedValueOnce({ key: { id: 'fixed-id' } });
+		(provider as any).normalizeWaMessage = () => null;
+		(provider as any).generateMessageId = () => 'fixed-id';
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage, user: { id: 'me' } };
+		await provider.sendText('201000000001@c.us', 'hello');
+		expect(sendMessage).toHaveBeenCalledTimes(2);
+		expect(sendMessage.mock.calls[0][2].messageId).toBe('fixed-id');
+		expect(sendMessage.mock.calls[1][2].messageId).toBe('fixed-id');
+	});
+
+	it('does not resend when there is no fixed id to dedupe on', async () => {
+		const provider = new BaileysProvider('account-test');
+		const sendMessage = jest.fn().mockRejectedValue(new Error('Connection Closed'));
+		(provider as any).state = 'connected';
+		(provider as any).socket = { sendMessage, user: { id: 'me' } };
+		await expect(provider.sendText('201000000001@c.us', 'hello')).rejects.toThrow('Connection Closed');
+		expect(sendMessage).toHaveBeenCalledTimes(1);
+	});
 });
 

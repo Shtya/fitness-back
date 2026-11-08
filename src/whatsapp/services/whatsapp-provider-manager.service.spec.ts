@@ -50,6 +50,9 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			isReady: jest.fn().mockReturnValue(true),
 			isAvailable: jest.fn().mockResolvedValue(true),
 		};
+		const userRepo = {
+			find: jest.fn().mockResolvedValue([]),
+		};
 		const service = new WhatsAppProviderManagerService(
 			accountRepo as any,
 			logRepo as any,
@@ -59,6 +62,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			gateway as any,
 			notifications as any,
 			redis as any,
+			userRepo as any,
 		);
 		return {
 			service,
@@ -71,6 +75,7 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			redis,
 			redisClient,
 			notifications,
+			userRepo,
 		};
 	}
 
@@ -339,9 +344,10 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 		expect(redisClient.del).not.toHaveBeenCalled();
 	});
 
-	it('does not spam connection notifications on a reconnect flap', async () => {
-		const { service, accountRepo, accessRepo, notifications } = createService();
+	it('stays quiet on a reconnect flap and alerts managers and admins on an error', async () => {
+		const { service, accountRepo, accessRepo, notifications, userRepo } = createService();
 		accessRepo.find.mockResolvedValue([{ userId: 'manager-1', canManage: true }]);
+		userRepo.find.mockResolvedValue([{ id: 'admin-1' }, { id: 'manager-1' }]);
 		// First event: never linked yet → still notify on CONNECTED.
 		accountRepo.findOne
 			.mockResolvedValueOnce({
@@ -371,14 +377,52 @@ describe('WhatsAppProviderManagerService event isolation', () => {
 			status: WhatsAppAccountStatus.CONNECTED,
 		});
 
-		expect(notifications.create).toHaveBeenCalledTimes(1);
+		expect(notifications.create).not.toHaveBeenCalled();
 
 		await (service as any).handleEvent('account-1', {
 			type: 'connection',
 			status: WhatsAppAccountStatus.ERROR,
 			error: 'boom',
 		});
+		// One each for the manager and the admin, even though the manager is also an admin.
 		expect(notifications.create).toHaveBeenCalledTimes(2);
+		expect(notifications.create.mock.calls.map(([call]) => call.userId).sort()).toEqual([
+			'admin-1',
+			'manager-1',
+		]);
+		expect(notifications.create.mock.calls[0][0].data.kind).toBe('error');
+	});
+
+	it('reports a link that stays down past the grace period once, then its recovery', async () => {
+		const { service, accountRepo, accessRepo, notifications } = createService();
+		accessRepo.find.mockResolvedValue([{ userId: 'manager-1', canManage: true }]);
+		const linked = { id: 'account-1', lastConnectedAt: new Date(), phoneNumber: '201000000000', label: 'Main' };
+		accountRepo.findOne.mockResolvedValue({ ...linked, status: WhatsAppAccountStatus.DISCONNECTED });
+		const now = jest.spyOn(Date, 'now');
+		now.mockReturnValue(1_000_000);
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.DISCONNECTED,
+		});
+		now.mockReturnValue(1_000_000 + 9 * 60_000);
+		await (service as any).checkOutages();
+		expect(notifications.create).not.toHaveBeenCalled();
+
+		now.mockReturnValue(1_000_000 + 11 * 60_000);
+		await (service as any).checkOutages();
+		await (service as any).checkOutages();
+		expect(notifications.create).toHaveBeenCalledTimes(1);
+		expect(notifications.create.mock.calls[0][0].data.kind).toBe('still_down');
+		expect(notifications.create.mock.calls[0][0].title).toContain('11');
+
+		accountRepo.findOne.mockResolvedValue({ ...linked, status: WhatsAppAccountStatus.CONNECTED });
+		await (service as any).handleEvent('account-1', {
+			type: 'connection',
+			status: WhatsAppAccountStatus.CONNECTED,
+		});
+		expect(notifications.create).toHaveBeenCalledTimes(2);
+		expect(notifications.create.mock.calls[1][0].data.kind).toBe('restored');
+		now.mockRestore();
 	});
 
 	it('does not notify disconnected/error for accounts that were never linked', async () => {

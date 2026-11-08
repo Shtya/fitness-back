@@ -45,6 +45,7 @@ import {
 	WhatsAppProviderEvent,
 	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
+import { REPAIR_INBOX_ORDER_SQL, shouldAdvanceLastMessageAt } from '../utils/whatsapp-inbox-order';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import {
 	buildWhatsAppGroupReceiptView,
@@ -2304,6 +2305,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		await this.accountRepo.update(accountId, updates);
 	}
 
+	/**
+	 * Raises every chat to its newest stored message. Fixes chats an earlier sync moved backwards
+	 * and tells open dashboards to refresh the list quietly when anything changed.
+	 */
+	async repairInboxOrder(accountId: string) {
+		const result = await this.conversationRepo.query(REPAIR_INBOX_ORDER_SQL, [accountId]);
+		const rows = Array.isArray(result?.[0]) ? result[0] : Array.isArray(result) ? result : [];
+		const repaired = rows.length;
+		if (repaired) {
+			this.logger.warn(`[WA] inbox order repaired account=${accountId} chats=${repaired}`);
+			this.gateway.emitAccountEvent(accountId, 'sync_completed', {
+				progress: 100,
+				background: true,
+				source: 'order_repair',
+				repaired,
+			});
+		}
+		return repaired;
+	}
+
 	private async runIncrementalReconnect(accountId: string) {
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected') return;
@@ -2313,6 +2334,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				emitProgress: false,
 			});
 			await this.markAccountHydrated(accountId, { history: true });
+			await this.repairInboxOrder(accountId);
 		} catch (error) {
 			this.logger.debug(
 				`Incremental WhatsApp reconnect sync skipped for ${accountId}: ${
@@ -2388,6 +2410,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					this.clearBootstrapUnlock(accountId);
 					this.bootstrapping.delete(accountId);
 					await this.markAccountHydrated(accountId, { history: true });
+					await this.repairInboxOrder(accountId).catch(() => 0);
 					this.gateway.emitAccountEvent(accountId, 'sync_completed', {
 						...result,
 						progress: 100,
@@ -3378,9 +3401,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		const nextLastMessageAt =
-			normalized.timestampReliable === false || this.bootstrapping.has(accountId)
-				? null
-				: whatsAppTimestampToDate(normalized.timestamp);
+			normalized.timestampReliable === false ? null : whatsAppTimestampToDate(normalized.timestamp);
 		const previousLastMessageAt = conversation.lastMessageAt
 			? new Date(conversation.lastMessageAt).getTime()
 			: 0;
@@ -4009,11 +4030,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const lastMessageAt = trustedActivityMs ? new Date(trustedActivityMs) : null;
 			const unreadCount = providerUnreadCount(chat);
 			const updates: Partial<WhatsAppConversation> = {};
-			if (
-				lastMessageAt &&
-				lastMessageAt.getTime() !==
-					(conversation.lastMessageAt ? new Date(conversation.lastMessageAt).getTime() : 0)
-			) {
+			// Forward only: a freshly relinked phone reports stale chat times.
+			if (shouldAdvanceLastMessageAt(conversation.lastMessageAt, lastMessageAt)) {
 				updates.lastMessageAt = lastMessageAt;
 			}
 			if (

@@ -1205,6 +1205,52 @@ export class BaileysProvider implements WhatsAppProvider {
 		return path.join(sessionRoot(), this.accountId);
 	}
 
+	/**
+	 * A relink reconnects the socket a few times (515 restart, network blips). Sends made in that
+	 * window used to fail at once with "not connected" / "Connection Closed"; they now wait for it.
+	 */
+	private async waitUntilConnected(timeoutMs = 25_000) {
+		const ready = () => Boolean(this.socket) && this.state === 'connected';
+		if (ready()) return;
+		const recovering = ['connecting', 'disconnected', 'reconnecting'].includes(String(this.state));
+		if (recovering && !this.closing) {
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline && !this.closing) {
+				await new Promise(resolve => setTimeout(resolve, 250));
+				if (ready()) return;
+				if (!['connecting', 'disconnected', 'reconnecting'].includes(String(this.state))) break;
+			}
+		}
+		throw new Error('WhatsApp account is not connected');
+	}
+
+	/** True for errors that mean the socket dropped under the send, not that the send is invalid. */
+	/** Baileys' id generator, captured on connect so a resent message keeps its id. */
+	private generateMessageId: ((userId?: string) => string) | null = null;
+
+	private isSocketDropError(error: unknown) {
+		const text = String((error as any)?.message || error || '');
+		return /connection closed|connection lost|connection terminated|socket closed|not connected/i.test(text);
+	}
+
+	/**
+	 * Sends with a fixed message id; if the socket drops mid-send, waits for the reconnect and
+	 * sends the same id again (the same id is one message for WhatsApp, not a duplicate).
+	 */
+	private async sendWithReconnect(jid: string, content: any, options: any = {}) {
+		const messageId = options.messageId || this.generateMessageId?.(this.socket?.user?.id) || undefined;
+		const sendOptions = messageId ? { ...options, messageId } : options;
+		try {
+			return await this.socket!.sendMessage(jid, content, sendOptions);
+		} catch (error) {
+			// Without a fixed id a second attempt could deliver the message twice.
+			if (!messageId || !this.isSocketDropError(error)) throw error;
+			this.logger.warn(`[WA] send hit a closed socket account=${this.accountId}; retrying after reconnect`);
+			await this.waitUntilConnected();
+			return this.socket!.sendMessage(jid, content, sendOptions);
+		}
+	}
+
 	private setState(status: string, extra: Partial<Extract<WhatsAppProviderEvent, { type: 'connection' }>> = {}) {
 		this.state = status;
 		// Every (re)connect starts as `unavailable` (markOnlineOnConnect=false).
@@ -2357,6 +2403,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	private async openSocketOnce() {
 		const baileys = await loadBaileysModule();
+		this.generateMessageId = (baileys as any).generateMessageIDV2 || null;
 		const {
 			default: makeWASocket,
 			useMultiFileAuthState,
@@ -3420,9 +3467,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async getGroupParticipants(groupId: string) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const jid = toBaileysJid(groupId);
 		if (!String(jid).endsWith('@g.us')) return [];
 		try {
@@ -3557,18 +3602,18 @@ export class BaileysProvider implements WhatsAppProvider {
 		quote?: string | WhatsAppSendQuoteOptions,
 		options?: WhatsAppSendTextOptions,
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const jid = toBaileysJid(chatId);
 		const mentions = (options?.mentions || []).map(toBaileysJid).filter(Boolean);
 		const content = mentions.length ? { text, mentions } : { text };
 		// Baileys expects `quoted` in the 3rd options arg — putting it on the
 		// content object is ignored, so WhatsApp receives a plain text message.
 		const quotedPayload = this.resolveQuotedPayload(chatId, quote);
-		const result = quotedPayload
-			? await this.socket.sendMessage(jid, content, { quoted: quotedPayload })
-			: await this.socket.sendMessage(jid, content);
+		const result = await this.sendWithReconnect(
+			jid,
+			content,
+			quotedPayload ? { quoted: quotedPayload } : {},
+		);
 		const normalized = this.normalizeWaMessage(result);
 		if (normalized) this.rememberMessage(normalized, result);
 		return result;
@@ -3578,9 +3623,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		chatId: string,
 		contact: { displayName: string; phoneNumber: string; waId?: string },
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const jid = toBaileysJid(chatId);
 		const displayName = String(contact?.displayName || '').trim() || 'Contact';
 		const phone = String(contact?.phoneNumber || contact?.waId || '')
@@ -3605,9 +3648,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		text: string,
 		options: { key?: { remoteJid?: string; id?: string; participant?: string } | null; chatId?: string | null } = {},
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const id = String(providerMessageId || '').trim();
 		const body = String(text || '').trim();
 		if (!id || !body) throw new Error('Message id and text are required');
@@ -3662,9 +3703,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			embeddedQuote?: WhatsAppEmbeddedQuote;
 		} = {},
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const jid = toBaileysJid(chatId);
 		const lower = String(filePath || options.fileName || '').toLowerCase();
 		let mime =
@@ -3742,9 +3781,11 @@ export class BaileysProvider implements WhatsAppProvider {
 				: options.quotedProviderMessageId
 					? this.resolveQuotedPayload(chatId, options.quotedProviderMessageId)
 					: null;
-			const result = quotedPayload
-				? await this.socket.sendMessage(jid, content, { quoted: quotedPayload })
-				: await this.socket.sendMessage(jid, content);
+			const result = await this.sendWithReconnect(
+				jid,
+				content,
+				quotedPayload ? { quoted: quotedPayload } : {},
+			);
 			const normalized = this.normalizeWaMessage(result);
 			if (normalized) this.rememberMessage(normalized, result);
 			return result;
@@ -3758,9 +3799,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		emoji: string | false,
 		target: WhatsAppReactionTarget = {},
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const id = String(providerMessageId || '').trim();
 		if (!id) throw new Error('Message is unavailable for reactions');
 		const key = this.reactionTargetKey(id, target);
@@ -3810,9 +3849,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async forwardMessage(chatId: string, providerMessageId: string, options: { rawHint?: any } = {}) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const id = String(providerMessageId || '').trim();
 		if (!id) throw new Error('Message id is required');
 		const stored = this.rawByMessageId.get(id);
@@ -3838,9 +3875,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async deleteMessage(chatId: string, providerMessageId: string, mode: 'local' | 'everyone') {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const id = String(providerMessageId || '').trim();
 		const jid = toBaileysJid(chatId);
 		const raw = this.rawByMessageId.get(id);
@@ -3957,9 +3992,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async setChatMuted(chatId: string, muted: boolean, mutedUntil: Date | null) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		if (typeof this.socket.chatModify !== 'function') return;
 		// App-state muteAction: end time in ms since epoch, -1 for "always", null to unmute.
 		const until = mutedUntil ? mutedUntil.getTime() : NaN;
@@ -3968,9 +4001,7 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	async markChatUnread(chatId: string) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const jid = toBaileysJid(chatId);
 		if (typeof this.socket.chatModify === 'function') {
 			await this.socket.chatModify({ markRead: false }, jid);
@@ -4169,9 +4200,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		providerMessageId: string,
 		options: { rawHint?: any; toFile?: string; allowPhoneRequest?: boolean } = {},
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const id = String(providerMessageId || '').trim();
 		if (!id) throw new Error('Media message id is required');
 
@@ -4362,9 +4391,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			excludeAudienceWaIds?: string[];
 		},
 	) {
-		if (!this.socket || this.state !== 'connected') {
-			throw new Error('WhatsApp account is not connected');
-		}
+		await this.waitUntilConnected();
 		const type = String(options.type || 'text').toLowerCase();
 		const excluded = new Set(statusAudienceJids(options.excludeAudienceWaIds || []));
 		const statusJidList = (

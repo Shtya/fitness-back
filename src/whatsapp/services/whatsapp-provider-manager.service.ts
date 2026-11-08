@@ -12,6 +12,8 @@ import { In, Not, Repository } from 'typeorm';
 import {
 	NotificationAudience,
 	NotificationType,
+	User,
+	UserRole,
 } from '../../../entities/global.entity';
 import { NotificationService } from '../../notification/notification.service';
 import { RedisService } from '../../redis/redis.service';
@@ -35,8 +37,13 @@ import {
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { WhatsAppSessionService } from './whatsapp-session.service';
-import { userAllowsWhatsAppNotifications } from '../utils/whatsapp-notification-preferences';
 import { getWhatsAppPrivacySettings } from '../utils/whatsapp-privacy';
+import {
+	buildWhatsAppConnectionAlert,
+	shouldAlertOutage,
+	WhatsAppConnectionAlertKind,
+	whatsappAccountName,
+} from '../utils/whatsapp-connection-alerts';
 
 @Injectable()
 export class WhatsAppProviderManagerService
@@ -49,8 +56,9 @@ export class WhatsAppProviderManagerService
 	private readonly sessionInvalidationCooldownMs = 10 * 60 * 1000;
 	/** Space out relaunches after a repeat wipe without stranding the account. */
 	private readonly sessionRelaunchBackoffMs = 30 * 1000;
-	private readonly lastConnectionNotifyAt = new Map<string, number>();
-	private readonly connectionNotifyCooldownMs = 60_000;
+	/** Accounts that were linked and are not connected now: since when, and whether we said so. */
+	private readonly outages = new Map<string, { since: number; alerted: boolean }>();
+	private outageWatchdog: NodeJS.Timeout | null = null;
 	private readonly connecting = new Map<string, Promise<WhatsAppProvider>>();
 	private readonly connectStartedAt = new Map<string, number>();
 	private readonly listeners = new Set<
@@ -78,7 +86,82 @@ export class WhatsAppProviderManagerService
 		private readonly gateway: WhatsAppGateway,
 		private readonly notifications: NotificationService,
 		private readonly redis: RedisService,
+		@InjectRepository(User)
+		private readonly userRepo: Repository<User>,
 	) {}
+
+	private markOutage(accountId: string) {
+		if (!this.outages.has(accountId)) this.outages.set(accountId, { since: Date.now(), alerted: false });
+	}
+
+	/**
+	 * Tells the account's managers and every admin, whatever their message-notification setting:
+	 * this is about the account itself, not a chat they muted.
+	 */
+	private async alertConnection(
+		accountId: string,
+		kind: WhatsAppConnectionAlertKind,
+		options: { downMinutes?: number; reason?: string | null } = {},
+	) {
+		const account = await this.accountRepo.findOne({
+			where: { id: accountId },
+			select: ['id', 'label', 'phoneNumber'] as any,
+		});
+		const managers = await this.accessRepo.find({ where: { accountId, canManage: true } });
+		const admins = await this.userRepo.find({
+			where: { role: In([UserRole.ADMIN, UserRole.SUPER_ADMIN]) } as any,
+			select: ['id'] as any,
+		});
+		const userIds = [
+			...new Set([...managers.map(item => item.userId), ...admins.map(item => item.id)].filter(Boolean)),
+		];
+		const alert = buildWhatsAppConnectionAlert(kind, whatsappAccountName(account), options);
+		this.logger.warn(`[WA] connection alert account=${accountId} kind=${kind} recipients=${userIds.length}`);
+		await Promise.allSettled(
+			userIds.map(userId =>
+				this.notifications.create({
+					type: NotificationType.WHATSAPP_CONNECTION,
+					title: alert.title,
+					message: alert.message,
+					data: {
+						accountId,
+						type: 'whatsapp_connection',
+						kind,
+						requiresScan: alert.requiresScan,
+					},
+					audience: NotificationAudience.USER,
+					userId,
+				}),
+			),
+		);
+	}
+
+	/** Every minute: report links that have been down past the grace period, once per outage. */
+	private startOutageWatchdog() {
+		if (this.outageWatchdog) return;
+		this.outageWatchdog = setInterval(() => {
+			void this.checkOutages().catch(error =>
+				this.logger.warn(`WhatsApp outage check failed: ${error instanceof Error ? error.message : String(error)}`),
+			);
+		}, 60_000);
+		this.outageWatchdog.unref?.();
+	}
+
+	private async checkOutages() {
+		const now = Date.now();
+		for (const [accountId, outage] of this.outages) {
+			if (!shouldAlertOutage(outage, now)) continue;
+			const account = await this.accountRepo.findOne({ where: { id: accountId }, select: ['id', 'status'] as any });
+			if (!account || account.status === WhatsAppAccountStatus.CONNECTED) {
+				this.outages.delete(accountId);
+				continue;
+			}
+			outage.alerted = true;
+			await this.alertConnection(accountId, 'still_down', {
+				downMinutes: (now - outage.since) / 60_000,
+			});
+		}
+	}
 
 	private lockKey(accountId: string) {
 		return `whatsapp:conn-lock:${accountId}`;
@@ -593,24 +676,12 @@ export class WhatsAppProviderManagerService
 				message,
 				requiresScan: true,
 			});
-			const recipients = await this.accessRepo.find({
-				where: { accountId, canManage: true },
-			});
-			const enabledRecipients = recipients.filter((recipient) =>
-				userAllowsWhatsAppNotifications(recipient),
-			);
-			await Promise.allSettled(
-				enabledRecipients.map(recipient =>
-					this.notifications.create({
-						type: NotificationType.WHATSAPP_CONNECTION,
-						title: 'WhatsApp needs a new QR scan',
-						message: reason,
-						data: { accountId, type: 'whatsapp_connection', requiresScan: true },
-						audience: NotificationAudience.USER,
-						userId: recipient.userId,
-					}),
-				),
-			);
+			this.markOutage(accountId);
+			const outage = this.outages.get(accountId);
+			if (outage && !outage.alerted) {
+				outage.alerted = true;
+				await this.alertConnection(accountId, 'logged_out', { reason });
+			}
 		} finally {
 			this.invalidatingSessions.delete(accountId);
 		}
@@ -713,47 +784,25 @@ export class WhatsAppProviderManagerService
 			await this.log(accountId, 'connection_state_changed', event.error || null, {
 				status,
 			});
-			const noteworthy =
-				status === WhatsAppAccountStatus.CONNECTED ||
-				(wasEverLinked &&
-					(status === WhatsAppAccountStatus.DISCONNECTED ||
-						status === WhatsAppAccountStatus.ERROR));
-			if (noteworthy) {
-				const now = Date.now();
-				const lastAt = this.lastConnectionNotifyAt.get(accountId) || 0;
-				const isError = status === WhatsAppAccountStatus.ERROR;
-				if (!isError && lastAt && now - lastAt < this.connectionNotifyCooldownMs) {
-					this.logger.debug(
-						`Skipped WhatsApp connection notification for ${accountId} (${status}) — cooldown`,
-					);
-				} else {
-					this.lastConnectionNotifyAt.set(accountId, now);
-					const recipients = await this.accessRepo.find({
-						where: { accountId, canManage: true },
-					});
-					const enabledRecipients = recipients.filter((recipient) =>
-						userAllowsWhatsAppNotifications(recipient),
-					);
-					await Promise.allSettled(
-						enabledRecipients.map(recipient =>
-							this.notifications.create({
-								type: NotificationType.WHATSAPP_CONNECTION,
-								title: 'WhatsApp connection changed',
-								message: `WhatsApp account is now ${status}`,
-								data: { accountId, status, type: 'whatsapp_connection' },
-								audience: NotificationAudience.USER,
-								userId: recipient.userId,
-							}),
-						),
-					);
-				}
+			if (status === WhatsAppAccountStatus.CONNECTED) {
+				const outage = this.outages.get(accountId);
+				this.outages.delete(accountId);
+				if (outage?.alerted) await this.alertConnection(accountId, 'restored');
 			} else if (
-				status === WhatsAppAccountStatus.DISCONNECTED ||
-				status === WhatsAppAccountStatus.ERROR
+				wasEverLinked &&
+				[
+					WhatsAppAccountStatus.DISCONNECTED,
+					WhatsAppAccountStatus.ERROR,
+					WhatsAppAccountStatus.QR_PENDING,
+				].includes(status)
 			) {
-				this.logger.debug(
-					`Skipped WhatsApp ${status} notification for ${accountId} — account was never linked`,
-				);
+				// Short drops reconnect on their own; the watchdog speaks up if this one lasts.
+				this.markOutage(accountId);
+				const outage = this.outages.get(accountId);
+				if (status === WhatsAppAccountStatus.ERROR && outage && !outage.alerted) {
+					outage.alerted = true;
+					await this.alertConnection(accountId, 'error', { reason: event.error || null });
+				}
 			}
 		}
 		if (event.type === 'qr') {
@@ -1050,6 +1099,15 @@ export class WhatsAppProviderManagerService
 				]),
 			},
 		});
+		this.startOutageWatchdog();
+		for (const account of accounts) {
+			if (
+				account.status !== WhatsAppAccountStatus.CONNECTED &&
+				(account.lastConnectedAt || account.phoneNumber)
+			) {
+				this.markOutage(account.id);
+			}
+		}
 		let restoreIndex = 0;
 		for (const account of accounts) {
 			const providerName = this.resolveProviderName(account);
@@ -1072,6 +1130,8 @@ export class WhatsAppProviderManagerService
 	}
 
 	async onApplicationShutdown() {
+		if (this.outageWatchdog) clearInterval(this.outageWatchdog);
+		this.outageWatchdog = null;
 		// Chromium needs a clean close to flush the linked-device keys, but a hung
 		// browser must not block process exit either.
 		await Promise.allSettled(
