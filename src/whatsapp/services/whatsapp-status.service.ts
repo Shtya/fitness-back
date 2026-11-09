@@ -26,9 +26,11 @@ import {
 import {
 	OWN_STATUS_ACTORS,
 	STATUS_LIKE_ACTOR,
+	isStatusReactionText,
 	statusActorKey,
 	statusMessageKey,
 } from '../utils/whatsapp-status-interactions';
+import { dedupeStatusRows, isOwnStatusSender, ownStatusUsers } from '../utils/whatsapp-status-owner';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
@@ -140,6 +142,23 @@ export class WhatsAppStatusService {
 		private readonly audit: WhatsAppAuditService,
 		private readonly gateway: WhatsAppGateway,
 	) {}
+	/** Our own ids for this account (phone JID, LID, account number) as bare user parts. */
+	private async ownUsers(accountId: string): Promise<Set<string>> {
+		const provider = this.providers.getProvider(accountId);
+		const ownJids = typeof provider?.getOwnJids === 'function' ? provider.getOwnJids() : [];
+		const rows = await this.repo.manager
+			.query(`SELECT phone_number FROM whatsapp_accounts WHERE id = $1`, [accountId])
+			.catch(() => []);
+		return ownStatusUsers(ownJids || [], rows?.[0]?.phone_number || null);
+	}
+
+	/** A story is ours if stored as ours, or if its sender is one of our own ids. */
+	private async isOwnStatusRow(accountId: string, row: { isOwn: boolean; senderWaId: string | null }) {
+		if (row.isOwn) return true;
+		if (!row.senderWaId) return false;
+		return isOwnStatusSender(row.senderWaId, await this.ownUsers(accountId));
+	}
+
 	private provider(accountId: string) {
 		const provider = this.providers.getProvider(accountId);
 		if (!provider || provider.getState() !== 'connected') {
@@ -374,6 +393,7 @@ export class WhatsAppStatusService {
 		contactNames: Map<string, string>,
 	) {
 		const existingRows = await this.repo.find({ where: { accountId } });
+		const own = await this.ownUsers(accountId);
 		const existingActiveCount = existingRows.filter(
 			row => !row.expiresAt || row.expiresAt > new Date(),
 		).length;
@@ -427,7 +447,11 @@ export class WhatsAppStatusService {
 				senderWaId,
 				type: providerType,
 				caption: item?.caption || item?.body || null,
-				isOwn: Boolean(item?.fromMe || item?.isOwn),
+				// Never downgrade a story already known to be ours.
+				isOwn:
+					Boolean(item?.fromMe || item?.isOwn) ||
+					isOwnStatusSender(senderWaId, own) ||
+					Boolean(byProviderId.get(id)?.isOwn),
 				publishedAt,
 				expiresAt: new Date(publishedAt.getTime() + 24 * 60 * 60 * 1000),
 			};
@@ -535,6 +559,28 @@ export class WhatsAppStatusService {
 			seenRowIds.add(item.id);
 			dedupedItems.push(item);
 		}
+		// Stories we posted from the phone that were stored as a contact's: claim them, and
+		// write that down so the next read (or an offline session) knows too.
+		const own = await this.ownUsers(accountId);
+		const healed = dedupedItems.filter(item => !item.isOwn && isOwnStatusSender(item.senderWaId, own));
+		for (const item of healed) item.isOwn = true;
+		if (healed.length) {
+			const providerIds = healed.map(item => item.providerStatusId);
+			await Promise.all([
+				this.repo.update({ accountId, providerStatusId: In(providerIds) }, { isOwn: true }),
+				this.historyRepo.update({ accountId, providerStatusId: In(providerIds) }, { isOwn: true }),
+			]).catch(error =>
+				this.logger.warn(
+					`Own story heal failed for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
+			this.logger.log(`Status list ${accountId}: ${healed.length} own stor(ies) from the phone were stored as a contact's`);
+		}
+		// One row per story (the same story stored under two ids would show twice).
+		const unique = dedupeStatusRows(dedupedItems);
+		if (debug) for (const row of unique.dropped) excluded.push({ id: row.id, reason: 'duplicate_story' });
+		dedupedItems.length = 0;
+		dedupedItems.push(...unique.kept);
 		const senderIds = [
 			...new Set(dedupedItems.map(item => item.senderWaId).filter(Boolean) as string[]),
 		];
@@ -738,6 +784,14 @@ export class WhatsAppStatusService {
 			.orderBy('status.publishedAt', 'DESC')
 			.take(5000)
 			.getMany();
+		// Same as the live list: phone-posted stories are ours, and each story is listed once.
+		const own = await this.ownUsers(accountId);
+		for (const item of items) {
+			if (!item.isOwn && isOwnStatusSender(item.senderWaId, own)) item.isOwn = true;
+		}
+		const deduped = dedupeStatusRows(items).kept;
+		items.length = 0;
+		items.push(...deduped);
 		const contactNames = new Map<string, string>();
 		const senderIds = [
 			...new Set(items.map(item => item.senderWaId).filter(Boolean) as string[]),
@@ -1601,7 +1655,8 @@ export class WhatsAppStatusService {
 		await this.access.assertAccountPermission(user, accountId, 'canView');
 		const found = await this.findStatusRow(accountId, statusIdValue);
 		if (!found) throw new NotFoundException('WhatsApp status not found');
-		if (!found.row.isOwn) {
+		// Stories posted from the phone were stored as a contact's; they are ours all the same.
+		if (!(await this.isOwnStatusRow(accountId, found.row))) {
 			throw new ForbiddenException('Only the story owner can see who viewed it');
 		}
 		const statusMessageId = statusMessageKey(found.row.providerStatusId);
@@ -1622,22 +1677,65 @@ export class WhatsAppStatusService {
 				[accountId, statusMessageId],
 			),
 		]);
-		const people = new Map<
-			string,
-			{ viewedAt: Date | null; reaction: string | null; reactedAt: Date | null }
-		>();
+		type StoryReply = {
+			messageId: string;
+			conversationId: string;
+			type: string;
+			text: string | null;
+			at: Date | null;
+		};
+		type Person = {
+			viewedAt: Date | null;
+			reaction: string | null;
+			reactedAt: Date | null;
+			replies: StoryReply[];
+		};
+		const people = new Map<string, Person>();
+		const personFor = (key: string) => {
+			const entry = people.get(key) || { viewedAt: null, reaction: null, reactedAt: null, replies: [] };
+			people.set(key, entry);
+			return entry;
+		};
 		for (const row of viewerRows || []) {
-			people.set(row.viewer_key, {
-				viewedAt: row.viewed_at ? new Date(row.viewed_at) : null,
-				reaction: null,
-				reactedAt: null,
-			});
+			personFor(row.viewer_key).viewedAt = row.viewed_at ? new Date(row.viewed_at) : null;
 		}
 		for (const row of reactionRows || []) {
-			const entry = people.get(row.actor_key) || { viewedAt: null, reaction: null, reactedAt: null };
+			const entry = personFor(row.actor_key);
 			entry.reaction = row.emoji || null;
 			entry.reactedAt = row.reacted_at ? new Date(row.reacted_at) : null;
-			people.set(row.actor_key, entry);
+		}
+		// Comments: replies quoting this story land in each person's chat; list them here too.
+		// A reply that is a single emoji is already counted as that person's reaction.
+		const replyRows = await this.repo.manager
+			.query(
+				`SELECT m.id, m.conversation_id, m.sender_wa_id, m.type, m.text, m.provider_timestamp,
+					c.provider_chat_id
+				FROM whatsapp_messages m
+				JOIN whatsapp_conversations c ON c.id = m.conversation_id
+				WHERE m.account_id = $1 AND m.quoted_provider_message_id = $2
+					AND m.direction = 'inbound' AND m.deleted_at IS NULL
+				ORDER BY m.provider_timestamp ASC
+				LIMIT ${STATUS_VIEWERS_LIMIT}`,
+				[accountId, statusMessageId],
+			)
+			.catch(error => {
+				this.logger.warn(
+					`Story replies unavailable for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return [];
+			});
+		for (const row of replyRows || []) {
+			const text = row.text == null ? null : String(row.text);
+			if (text && isStatusReactionText(text)) continue;
+			const key = statusActorKey(row.sender_wa_id || row.provider_chat_id);
+			if (!key) continue;
+			personFor(key).replies.push({
+				messageId: row.id,
+				conversationId: row.conversation_id,
+				type: String(row.type || 'text'),
+				text,
+				at: row.provider_timestamp ? new Date(row.provider_timestamp) : null,
+			});
 		}
 
 		const keys = [...people.keys()];
@@ -1682,6 +1780,7 @@ export class WhatsAppStatusService {
 				viewedAt: Date | null;
 				reaction: string | null;
 				reactedAt: Date | null;
+				replies: StoryReply[];
 			}
 		>();
 		const earliest = (a: Date | null, b: Date | null) => (!a ? b : !b ? a : a <= b ? a : b);
@@ -1704,12 +1803,14 @@ export class WhatsAppStatusService {
 					viewedAt: entry.viewedAt,
 					reaction: entry.reaction,
 					reactedAt: entry.reactedAt,
+					replies: [...entry.replies],
 				});
 				continue;
 			}
 			current.name = current.name || name;
 			current.avatarUrl = current.avatarUrl || contact?.avatarUrl || null;
 			current.viewedAt = earliest(current.viewedAt, entry.viewedAt);
+			current.replies.push(...entry.replies);
 			if (
 				entry.reaction &&
 				(!current.reactedAt || (entry.reactedAt && entry.reactedAt > current.reactedAt))
@@ -1718,8 +1819,15 @@ export class WhatsAppStatusService {
 				current.reactedAt = entry.reactedAt;
 			}
 		}
-		const activity = (item: { viewedAt: Date | null; reactedAt: Date | null }) =>
-			Math.max(item.viewedAt?.getTime() || 0, item.reactedAt?.getTime() || 0);
+		const activity = (item: { viewedAt: Date | null; reactedAt: Date | null; replies: StoryReply[] }) =>
+			Math.max(
+				item.viewedAt?.getTime() || 0,
+				item.reactedAt?.getTime() || 0,
+				...item.replies.map(reply => reply.at?.getTime() || 0),
+			);
+		for (const item of merged.values()) {
+			item.replies.sort((a, b) => (a.at?.getTime() || 0) - (b.at?.getTime() || 0));
+		}
 		const viewers = [...merged.values()].sort((a, b) => activity(b) - activity(a));
 		// Self-heal legacy LID rows so the story ring total matches this list.
 		if (folds.size) {
@@ -1731,6 +1839,7 @@ export class WhatsAppStatusService {
 			providerStatusId: found.row.providerStatusId,
 			viewerCount: viewers.length,
 			reactionCount: viewers.filter(item => item.reaction).length,
+			replyCount: viewers.reduce((sum, item) => sum + item.replies.length, 0),
 			viewers,
 		};
 	}
@@ -1744,7 +1853,7 @@ export class WhatsAppStatusService {
 		const found = await this.findStatusRow(accountId, statusIdValue);
 		if (!found) throw new NotFoundException('WhatsApp status not found');
 		const row = found.row;
-		if (row.isOwn) {
+		if (await this.isOwnStatusRow(accountId, row)) {
 			throw new BadRequestException('You cannot reply or react to your own story');
 		}
 		const expiresAt = row.expiresAt ? new Date(row.expiresAt).getTime() : null;

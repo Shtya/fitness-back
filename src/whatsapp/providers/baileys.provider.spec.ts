@@ -415,6 +415,52 @@ describe('BaileysProvider stories', () => {
 		).resolves.toHaveLength(2);
 	});
 
+	it('treats a story we posted from the phone (under our LID) as ours, viewers included', async () => {
+		const provider = new BaileysProvider('account-phone-story') as any;
+		provider.socket = { user: { id: '201011112222:7@s.whatsapp.net', lid: '99887766554433:7@lid' } };
+		const events: any[] = [];
+		provider.onEvent((event: any) => events.push(event));
+		// What Baileys 7 decodes: sender is our LID, and fromMe is false (it only checks the phone JID).
+		const raw = {
+			key: { remoteJid: 'status@broadcast', id: '3EB0PHONESTORY', fromMe: false, participant: '99887766554433@lid' },
+			messageTimestamp: Math.floor(Date.now() / 1000),
+			message: { imageMessage: { mimetype: 'image/jpeg' } },
+			userReceipt: [{ userJid: '201333333333@s.whatsapp.net', readTimestamp: 1_700_000_000 }],
+		};
+		expect(provider.rememberStatus(raw)).toBe(true);
+		const [story] = await provider.getStatuses();
+		expect(story).toMatchObject({ fromMe: true, isOwn: true });
+		expect(story.id._serialized.startsWith('true_status@broadcast_3EB0PHONESTORY')).toBe(true);
+		expect(events.find((event: any) => event.type === 'status_receipts')?.receipts).toHaveLength(1);
+		await expect(provider.getOwnStatusReceipts(story.id._serialized)).resolves.toHaveLength(1);
+	});
+
+	it('keeps a contact story as theirs, and a like we gave from the phone as ours', () => {
+		const provider = new BaileysProvider('account-phone-like') as any;
+		provider.socket = { user: { id: '201011112222:7@s.whatsapp.net', lid: '99887766554433:7@lid' } };
+		const events: any[] = [];
+		provider.onEvent((event: any) => events.push(event));
+		provider.rememberStatus({
+			key: { remoteJid: 'status@broadcast', id: '3EB0THEIRS', fromMe: false, participant: '55555555555555@lid' },
+			messageTimestamp: Math.floor(Date.now() / 1000),
+			message: { imageMessage: { mimetype: 'image/jpeg' } },
+		});
+		expect([...provider.statusesById.values()][0]).toMatchObject({ fromMe: false, isOwn: false });
+		provider.ingestReaction({
+			key: { remoteJid: 'status@broadcast', id: 'LIKE1', fromMe: false, participant: '99887766554433@lid' },
+			messageTimestamp: 1_700_000_100,
+			message: { reactionMessage: { key: { id: '3EB0THEIRS' }, text: '💚' } },
+		});
+		provider.ingestReaction({
+			key: { remoteJid: 'status@broadcast', id: 'LIKE2', fromMe: false, participant: '201444444444@s.whatsapp.net' },
+			messageTimestamp: 1_700_000_200,
+			message: { reactionMessage: { key: { id: '3EB0MINE' }, text: '💚' } },
+		});
+		const likes = events.filter((event: any) => event.type === 'status_like');
+		expect(likes[0]).toMatchObject({ statusMessageId: '3EB0THEIRS', fromMe: true, actorJid: null });
+		expect(likes[1]).toMatchObject({ statusMessageId: '3EB0MINE', fromMe: false, actorJid: '201444444444@s.whatsapp.net' });
+	});
+
 	it('asks the store by the 3EB0 story id so linked-device viewer lists catch up', async () => {
 		const provider = new BaileysProvider('account-own-story-store-views') as any;
 		provider.state = 'connected';

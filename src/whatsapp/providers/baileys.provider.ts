@@ -1686,9 +1686,30 @@ export class BaileysProvider implements WhatsAppProvider {
 		trimMapToMax(this.statusRawById, CACHE_MAX.statusRaw);
 	}
 
+	/**
+	 * Baileys marks a status@broadcast message as ours only when its sender is our phone JID
+	 * (groups check the LID too, broadcasts do not). Stories and likes we send from the phone
+	 * arrive under our LID, so they came in as someone else's: own stories listed as a
+	 * contact's, with no viewers. Set `fromMe` when the sender is any of our own ids.
+	 */
+	private claimOwnBroadcast(raw: any) {
+		if (!raw?.key || raw.key.fromMe) return;
+		const remoteJid = jidOf(raw.key.remoteJid) || String(raw.key.remoteJid || '');
+		if (!isStatusBroadcastJid(remoteJid)) return;
+		const own = this.getOwnJids();
+		if (!own.length) return;
+		const senders = [raw.key.participant, raw.key.participantAlt, raw.participant]
+			.map((value) => String(value || '').trim())
+			.filter(Boolean);
+		if (senders.some((jid) => isOwnReceiptJid(jid, own))) {
+			raw.key = { ...raw.key, fromMe: true };
+		}
+	}
+
 	private rememberStatus(raw: any): boolean {
 		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
 		if (!isStatusBroadcastJid(remoteJid)) return false;
+		this.claimOwnBroadcast(raw);
 		// Own stories posted from the phone are the ones users miss; say why one is dropped.
 		if (!raw?.message) {
 			if (raw?.key?.fromMe) {
@@ -2324,6 +2345,8 @@ export class BaileysProvider implements WhatsAppProvider {
 		const emoji = String(reaction.text || '').trim();
 		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
 		if (isStatusBroadcastJid(remoteJid)) {
+			// A like we gave from the phone is ours, not a viewer's reaction.
+			this.claimOwnBroadcast(raw);
 			const fromMe = Boolean(raw?.key?.fromMe);
 			const participant = String(raw?.key?.participant || '').trim();
 			const participantAlt = String(raw?.key?.participantAlt || '').trim();

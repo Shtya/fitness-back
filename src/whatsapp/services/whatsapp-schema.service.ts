@@ -233,6 +233,11 @@ const OPTIONAL_TABLES = [
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_status_reactions_status
 		ON whatsapp_status_reactions(account_id, status_message_id)`,
+	// Story comments: replies are found by the story id they quote. CONCURRENTLY so a large
+	// messages table keeps taking writes while it builds (each statement runs on its own).
+	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_messages_quoted
+		ON whatsapp_messages(account_id, quoted_provider_message_id)
+		WHERE quoted_provider_message_id IS NOT NULL`,
 	`ALTER TABLE whatsapp_message_schedules ADD COLUMN IF NOT EXISTS file_name varchar(255)`,
 	`ALTER TABLE whatsapp_contacts
 		ADD COLUMN IF NOT EXISTS local_name varchar(200),
