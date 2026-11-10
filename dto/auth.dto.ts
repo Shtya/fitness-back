@@ -1,4 +1,5 @@
 import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength, IsEnum, IsInt, Min, IsPositive, Max, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { UserRole } from 'entities/global.entity';
 
 export class RegisterDto {
@@ -10,6 +11,8 @@ export class RegisterDto {
 }
 
 export class LoginDto {
+  // Autofill and paste often leave spaces around the address; they are never part of it.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsEmail()
   email!: string;
 

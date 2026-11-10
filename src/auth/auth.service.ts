@@ -131,6 +131,29 @@ export class AuthService {
 		};
 	}
 
+	/**
+	 * Super-admin sets any account's password to one they choose (a locked-out admin, a user
+	 * who forgot theirs). Any pending reset link is voided so it cannot override this one.
+	 */
+	async superAdminSetPassword(targetUserId: string, newPasswordValue: string, actor: { id: string; role: UserRole }) {
+		if (actor?.role !== UserRole.SUPER_ADMIN) {
+			throw new ForbiddenException('Only super admin can set passwords');
+		}
+		const newPassword = String(newPasswordValue ?? '');
+		if (newPassword.length < 8) throw new BadRequestException('Password must be at least 8 characters');
+		if (newPassword.length > 128) throw new BadRequestException('Password is too long');
+		if (newPassword.trim() !== newPassword) {
+			throw new BadRequestException('Password cannot start or end with a space');
+		}
+		const user = await this.userRepo.findOne({ where: { id: targetUserId } });
+		if (!user) throw new NotFoundException('User not found');
+		user.password = await bcrypt.hash(newPassword, 12);
+		user.resetPasswordToken = null;
+		user.resetPasswordExpires = null;
+		await this.userRepo.save(user);
+		return { message: 'Password updated', userId: user.id, email: user.email };
+	}
+
 	/** Super-admin enters a user session without changing their password. */
 	async impersonateUser(targetUserId: string, actor: { id: string; role: UserRole }) {
 		if (actor.role !== UserRole.SUPER_ADMIN) {
@@ -975,7 +998,24 @@ export class AuthService {
 	}
 
 	async login(dto: LoginDto) {
-		const user = await this.userRepo.createQueryBuilder('user').addSelect('user.password').where('user.email = :email', { email: dto.email }).getOne();
+		// Exact match first; then case and surrounding spaces ignored, so "Admin@gmail.com" or a
+		// trailing space from autofill still finds the account.
+		const email = String(dto.email || '').trim();
+		let user = await this.userRepo
+			.createQueryBuilder('user')
+			.addSelect('user.password')
+			.where('user.email = :email', { email })
+			.getOne();
+		if (!user && email) {
+			const matches = await this.userRepo
+				.createQueryBuilder('user')
+				.addSelect('user.password')
+				.where('LOWER(TRIM(user.email)) = LOWER(:email)', { email })
+				.take(2)
+				.getMany();
+			// Two accounts differing only by case: never guess between them.
+			if (matches.length === 1) user = matches[0];
+		}
 
 		if (!user || !(await bcrypt.compare(dto.password, user.password))) throw new UnauthorizedException('Incorrect email or password');
 

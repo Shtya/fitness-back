@@ -75,6 +75,14 @@ export class AuthController {
 		return this.authService.adminGenerateTempCredentials(id, req.user);
 	}
 
+	/** Set any account's password (super admin only). */
+	@Put('super-admin/users/:id/password')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(UserRole.SUPER_ADMIN)
+	async superAdminSetPassword(@Param('id') id: string, @Body() body: { newPassword?: string }, @Req() req: any) {
+		return this.authService.superAdminSetPassword(id, String(body?.newPassword ?? ''), req.user);
+	}
+
 	/** Enter a user session without resetting their password */
 	@Post('super-admin/impersonate/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
