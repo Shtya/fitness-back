@@ -240,6 +240,27 @@ export class WhatsAppAccessService {
 		return account;
 	}
 
+	/**
+	 * Account-wide features (stories) are for people who see the whole account: the owner, or
+	 * staff who manage or assign it. Staff limited to their assigned chats get those chats only.
+	 */
+	async assertWholeAccountAccess(
+		user: User,
+		accountId: string,
+		permission: WhatsAppAccountPermission = 'canView',
+	) {
+		const { account, ...access } = await this.getAccountAccess(user, accountId, {
+			fresh: permission === 'canManage',
+		});
+		if (!access?.[permission]) {
+			throw new ForbiddenException(`WhatsApp account permission denied: ${permission}`);
+		}
+		if (!this.canSeeAllConversations(user, { account, ...access })) {
+			throw new ForbiddenException('Only people who see the whole WhatsApp account can open this');
+		}
+		return account;
+	}
+
 	async assertConversationVisible(user: User, conversationId: string) {
 		const conversation = await this.conversationRepo.findOne({
 			where: { id: conversationId },
@@ -250,12 +271,9 @@ export class WhatsAppAccessService {
 		if (!conversation) throw new NotFoundException('WhatsApp conversation not found');
 		const accountAccess = await this.getAccountAccess(user, conversation.accountId);
 		const canSeeAll = this.canSeeAllConversations(user, accountAccess);
-		const isEmailMemoAi =
-			String(conversation.providerChatId || '') === 'email-memo-ai@so7ba.internal';
-		if (
-			!accountAccess.canView ||
-			(!canSeeAll && conversation.assignedUserId !== user.id && !isEmailMemoAi)
-		) {
+		// Assigned-only staff open their assigned chats and nothing else (the AI Memo chat, the
+		// owner's email summaries, is not an exception).
+		if (!accountAccess.canView || (!canSeeAll && conversation.assignedUserId !== user.id)) {
 			throw new ForbiddenException('WhatsApp conversation access denied');
 		}
 		return { conversation, accountAccess, canSeeAll };

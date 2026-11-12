@@ -78,7 +78,7 @@ function createService(options: {
 		find: jest.fn(async () => options.contacts ?? []),
 		update: jest.fn().mockResolvedValue(undefined),
 	};
-	const access = { assertAccountPermission: jest.fn().mockResolvedValue(undefined) };
+	const access = { assertWholeAccountAccess: jest.fn().mockResolvedValue(undefined) };
 	const provider = {
 		getState: () => 'connected',
 		resolveContactIdentity: jest.fn(async (jid: string) =>
@@ -150,7 +150,7 @@ describe('WhatsAppStatusService story viewers', () => {
 
 	it('checks account access before touching data and 404s unknown stories', async () => {
 		const denied = createService();
-		denied.access.assertAccountPermission.mockRejectedValueOnce(new ForbiddenException('nope'));
+		denied.access.assertWholeAccountAccess.mockRejectedValueOnce(new ForbiddenException('nope'));
 		await expect(denied.service.listStatusViewers(user, ACCOUNT, OWN_ID)).rejects.toBeInstanceOf(
 			ForbiddenException,
 		);
@@ -307,7 +307,7 @@ describe('WhatsAppStatusService reply/react targets', () => {
 			contacts: [{ waId: '201555555555@c.us', name: 'Sara', phoneNumber: '201555555555' }],
 		});
 		const target = await service.resolveStatusInteractionTarget(user, ACCOUNT, THEIRS_ID);
-		expect(access.assertAccountPermission).toHaveBeenCalledWith(user, ACCOUNT, 'canUse');
+		expect(access.assertWholeAccountAccess).toHaveBeenCalledWith(user, ACCOUNT, 'canUse');
 		expect(target).toEqual({
 			statusId: THEIRS_ID,
 			ownerJid: '201555555555@c.us',

@@ -27,7 +27,7 @@ function createService(expired: any[] = []) {
 	};
 	const historyRepo = { upsert: jest.fn().mockResolvedValue(undefined) };
 	const access = {
-		assertAccountPermission: jest.fn().mockResolvedValue(undefined),
+		assertWholeAccountAccess: jest.fn().mockResolvedValue(undefined),
 	};
 	const providers = {
 		getProvider: jest.fn(() => {

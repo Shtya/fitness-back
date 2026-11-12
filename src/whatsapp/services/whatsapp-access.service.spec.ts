@@ -245,4 +245,43 @@ describe('WhatsAppAccessService', () => {
 			),
 		).rejects.toBeInstanceOf(ForbiddenException);
 	});
+
+	describe('assigned-only staff see their chats and nothing else', () => {
+		const assignedOnly = { accountId: 'account-1', userId: 'coach-1', canView: true, canUse: true, canManage: false, canAssign: false };
+		const coach = { id: 'coach-1', role: UserRole.COACH } as any;
+
+		it('does not open the AI Memo chat (the owner email summaries) for them', async () => {
+			const { service, conversationRepo } = createService(assignedOnly);
+			conversationRepo.findOne.mockResolvedValue({
+				id: 'memo',
+				accountId: 'account-1',
+				providerChatId: 'email-memo-ai@so7ba.internal',
+				assignedUserId: null,
+			});
+			await expect(service.assertConversationVisible(coach, 'memo')).rejects.toBeInstanceOf(ForbiddenException);
+		});
+
+		it('still opens a chat assigned to them', async () => {
+			const { service, conversationRepo } = createService(assignedOnly);
+			conversationRepo.findOne.mockResolvedValue({ id: 'c1', accountId: 'account-1', assignedUserId: 'coach-1' });
+			await expect(service.assertConversationVisible(coach, 'c1')).resolves.toMatchObject({ canSeeAll: false });
+		});
+
+		it('keeps account-wide features (stories) to the owner and to staff who manage or assign', async () => {
+			const scoped = createService(assignedOnly).service;
+			await expect(scoped.assertWholeAccountAccess(coach, 'account-1', 'canView')).rejects.toThrow(/whole WhatsApp account/);
+
+			const owner = createService().service;
+			await expect(
+				owner.assertWholeAccountAccess({ id: 'owner-1', role: UserRole.ADMIN } as any, 'account-1', 'canUse'),
+			).resolves.toMatchObject({ id: 'account-1' });
+
+			const assigner = createService({ ...assignedOnly, canAssign: true }).service;
+			await expect(assigner.assertWholeAccountAccess(coach, 'account-1', 'canView')).resolves.toMatchObject({ id: 'account-1' });
+
+			// and the underlying permission still applies
+			const viewOnlyManager = createService({ ...assignedOnly, canUse: false, canManage: true }).service;
+			await expect(viewOnlyManager.assertWholeAccountAccess(coach, 'account-1', 'canUse')).rejects.toThrow(/canUse/);
+		});
+	});
 });

@@ -1020,6 +1020,16 @@ export class BaileysProvider implements WhatsAppProvider {
 	private readonly statusRawById = new Map<string, any>();
 	private statusChangeTimer: NodeJS.Timeout | null = null;
 	private connectedAtMs = 0;
+	/**
+	 * First connect of this process. The story cache lives in RAM: it survives reconnects but
+	 * starts empty after a restart, so it only holds every live story once it is 24h old.
+	 */
+	private statusCacheSinceMs = 0;
+
+	/** How long the in-memory story cache has been filling (0 before the first connect). */
+	statusCacheAgeMs(): number {
+		return this.statusCacheSinceMs ? Date.now() - this.statusCacheSinceMs : 0;
+	}
 	private historySyncChunks = 0;
 	/** Provider ids already included in a messaging-history.set batch. */
 	private readonly recentHistoryMessageIds = new Set<string>();
@@ -2597,6 +2607,7 @@ export class BaileysProvider implements WhatsAppProvider {
 				this.qr = null;
 				this.pairingCode = null;
 				this.connectedAtMs = Date.now();
+				if (!this.statusCacheSinceMs) this.statusCacheSinceMs = this.connectedAtMs;
 				const fullId = String(socket.user?.id || '');
 				const phone = fullId.split(':')[0] || this.phoneNumberHint || undefined;
 				this.setState('connected', { phoneNumber: phone });

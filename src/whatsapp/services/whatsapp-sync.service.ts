@@ -9,6 +9,7 @@ import {
 	OnModuleDestroy,
 	OnModuleInit,
 	Optional,
+	ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
@@ -4269,13 +4270,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		}
 		if (!canSeeAll) {
-			query.andWhere(
-				`(conversation.assignedUserId = :userId OR conversation.providerChatId = :emailMemoAiChatId)`,
-				{
-					userId: user.id,
-					emailMemoAiChatId: 'email-memo-ai@so7ba.internal',
-				},
-			);
+			// Staff limited to assigned chats see those and nothing else. The AI Memo chat used to
+			// be listed for them too; it carries the owner's own email summaries.
+			query.andWhere('conversation.assignedUserId = :userId', { userId: user.id });
 		}
 		if (filter === 'unread') {
 			query.andWhere('conversation.unreadCount > 0');
@@ -7411,12 +7408,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			conversation.type === WhatsAppConversationType.GROUP
 				? sanitizeWhatsAppOutboundMentions(text, mentions)
 				: [];
-		const result = await provider.sendText(
-			conversation.providerChatId,
-			text,
-			quoteForProvider,
-			mentionJids.length ? { mentions: mentionJids } : undefined,
-		);
+		let result: any;
+		try {
+			result = await provider.sendText(
+				conversation.providerChatId,
+				text,
+				quoteForProvider,
+				mentionJids.length ? { mentions: mentionJids } : undefined,
+			);
+		} catch (error) {
+			// The reason used to vanish into a bare 500 and the chat only showed "Retry".
+			// Log what failed, and hand the client a readable, retryable 503.
+			const reason = error instanceof Error ? error.message : String(error);
+			this.logger.warn(
+				`[WA SEND] text failed account=${conversation.accountId} conversation=${conversationId} chars=${text.length} quoted=${Boolean(quotedProviderMessageId)} provider=${provider.getState?.() || '?'}: ${reason}`,
+			);
+			if (error instanceof HttpException) throw error;
+			throw new ServiceUnavailableException(`WhatsApp did not accept the message: ${reason}`.slice(0, 300));
+		}
 		const id =
 			providerMessageId(result) ||
 			`local_out_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;

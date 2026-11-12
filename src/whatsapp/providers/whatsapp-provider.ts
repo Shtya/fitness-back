@@ -274,6 +274,8 @@ export interface WhatsAppProvider {
 	getOwnJids?(): string[];
 	/** The linked account's own WhatsApp name (push name), when known. */
 	getOwnPushName?(): string | null;
+	/** How long the in-memory story cache has been filling since this process connected. */
+	statusCacheAgeMs?(): number;
 	sendText(
 		chatId: string,
 		text: string,

@@ -105,6 +105,9 @@ export interface StatusReactionRow {
 	reactedAt: Date | null;
 }
 
+/** A story lives 24 hours. */
+const STATUS_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 /** Upper bound on viewers returned for one story; WhatsApp audiences are capped well below. */
 const STATUS_VIEWERS_LIMIT = 2000;
 
@@ -486,15 +489,26 @@ export class WhatsAppStatusService {
 			}
 		}
 
+		// A story missing from the provider is only gone if the provider could have seen it: its
+		// cache is RAM, empty after every restart (each deploy), so until it has been filling for
+		// a full story lifetime, "not in the cache" just means "arrived before the restart".
+		// Pruning on that deleted live stories; they now simply expire with `expiresAt`.
+		const provider = this.providers.getProvider(accountId);
+		const cacheAgeMs =
+			typeof provider?.statusCacheAgeMs === 'function' ? provider.statusCacheAgeMs() : 0;
+		const cacheCoversStoryLifetime = cacheAgeMs >= STATUS_LIFETIME_MS;
 		const allowStalePrune =
+			cacheCoversStoryLifetime &&
 			refreshedProviderIds.size > 0 &&
 			(existingActiveCount === 0 ||
 				refreshedProviderIds.size >= Math.max(3, Math.ceil(existingActiveCount * 0.65)));
 		if (allowStalePrune) {
+			// By the bare story id: the same story can be stored under another serialized id.
+			const refreshedKeys = new Set([...refreshedProviderIds].map(id => statusMessageKey(id) || id));
 			const stale = existingRows.filter(
 				row =>
 					(!row.expiresAt || row.expiresAt > new Date()) &&
-					!refreshedProviderIds.has(row.providerStatusId),
+					!refreshedKeys.has(statusMessageKey(row.providerStatusId) || row.providerStatusId),
 			);
 			for (const row of stale) {
 				await this.archiveStatusRow(row);
@@ -504,14 +518,14 @@ export class WhatsAppStatusService {
 			}
 		} else if (refreshedProviderIds.size > 0 && existingActiveCount > refreshedProviderIds.size) {
 			this.logger.debug(
-				`Status sync ${accountId}: skipped stale prune (provider=${refreshedProviderIds.size} dbActive=${existingActiveCount})`,
+				`Status sync ${accountId}: kept stories missing from the cache (provider=${refreshedProviderIds.size} dbActive=${existingActiveCount} cacheAgeMin=${Math.round(cacheAgeMs / 60_000)})`,
 			);
 		}
 		return refreshedProviderIds.size;
 	}
 
 	async list(user: User, accountId: string, refresh = false, debug = false) {
-		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		this.schedulePrune(accountId);
 		const contactNames = new Map<string, string>();
 		let provider = this.providers.getProvider(accountId);
@@ -772,7 +786,7 @@ export class WhatsAppStatusService {
 	}
 
 	async listHistory(user: User, accountId: string) {
-		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		const historyCount = await this.historyRepo.count({ where: { accountId } });
 		if (!historyCount) {
 			const activeRows = await this.repo.find({ where: { accountId }, take: 500 });
@@ -865,7 +879,7 @@ export class WhatsAppStatusService {
 	 * video into story clips, for one — can fail before spending the CPU.
 	 */
 	async assertCanPublish(user: User, accountId: string) {
-		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		const provider = this.provider(accountId);
 		if (!provider.capabilities.statusPublish) {
 			throw new BadRequestException('Status publishing is not supported by this provider');
@@ -1072,7 +1086,7 @@ export class WhatsAppStatusService {
 	}
 
 	async getAudience(user: User, accountId: string) {
-		const account = await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const account = await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		const settings = getWhatsAppStoryAudience(account);
 		const people = await this.audiencePeople(accountId);
 		const byWaId = new Map(people.map(person => [person.waId, person]));
@@ -1115,7 +1129,7 @@ export class WhatsAppStatusService {
 	 * settings, no photo, or the account is offline.
 	 */
 	async audienceAvatar(user: User, accountId: string, waId: string, quality: 'preview' | 'full' = 'preview') {
-		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		const [jid] = statusAudienceJids([waId]);
 		if (!jid) throw new BadRequestException('Not a phone number');
 		const provider = this.providers.getProvider(accountId);
@@ -1146,7 +1160,7 @@ export class WhatsAppStatusService {
 		accountId: string,
 		input: { mode: WhatsAppStoryAudienceMode; waIds?: string[]; extraWaIds?: string[] },
 	) {
-		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		if (input.mode === 'only' && !statusAudienceJids(input.waIds || []).length) {
 			throw new BadRequestException('Pick at least one person who can see your stories');
 		}
@@ -1173,7 +1187,7 @@ export class WhatsAppStatusService {
 		input: { type: string; content: string; caption?: string },
 	) {
 		const provider = await this.assertCanPublish(user, accountId);
-		const account = await this.access.assertAccountPermission(user, accountId, 'canUse');
+		const account = await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		const audience = resolveStoryAudience(
 			await this.publishAudience(accountId),
 			getWhatsAppStoryAudience(account),
@@ -1267,9 +1281,8 @@ export class WhatsAppStatusService {
 	}
 
 	async view(user: User, accountId: string, statusProviderId: string, senderWaId?: string) {
-		const permission = await this.access.getAccountAccess(user, accountId);
-		if (!permission.canView) throw new ForbiddenException('WhatsApp account access denied');
-		const privacy = getWhatsAppPrivacySettings(permission.account);
+		const account = await this.access.assertWholeAccountAccess(user, accountId, 'canView');
+		const privacy = getWhatsAppPrivacySettings(account);
 		if (privacy.hideStatusViewReceipts) {
 			return { ok: true, receiptSuppressed: true };
 		}
@@ -1652,7 +1665,7 @@ export class WhatsAppStatusService {
 
 	/** Who opened one of our own stories, with any reaction they sent. Owner-only. */
 	async listStatusViewers(user: User, accountId: string, statusIdValue: string) {
-		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		const found = await this.findStatusRow(accountId, statusIdValue);
 		if (!found) throw new NotFoundException('WhatsApp status not found');
 		// Stories posted from the phone were stored as a contact's; they are ours all the same.
@@ -1849,7 +1862,7 @@ export class WhatsAppStatusService {
 	 * goes. LID posters are answered in their phone chat when the number is known.
 	 */
 	async resolveStatusInteractionTarget(user: User, accountId: string, statusIdValue: string) {
-		await this.access.assertAccountPermission(user, accountId, 'canUse');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
 		const found = await this.findStatusRow(accountId, statusIdValue);
 		if (!found) throw new NotFoundException('WhatsApp status not found');
 		const row = found.row;
@@ -1946,7 +1959,7 @@ export class WhatsAppStatusService {
 		statusIdValue: string,
 		options?: { history?: boolean },
 	) {
-		await this.access.assertAccountPermission(user, accountId, 'canView');
+		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		const found = await this.findStatusRow(accountId, statusIdValue, {
 			historyOnly: options?.history,
 		});

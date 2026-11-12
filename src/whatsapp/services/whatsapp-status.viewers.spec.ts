@@ -32,7 +32,7 @@ function createService(queryRows: (sql: string) => any[]) {
 		{ findOne: jest.fn().mockResolvedValue(null) } as any,
 		contactRepo as any,
 		{} as any,
-		{ assertAccountPermission: jest.fn().mockResolvedValue(undefined) } as any,
+		{ assertWholeAccountAccess: jest.fn().mockResolvedValue(undefined) } as any,
 		{ getProvider: jest.fn(() => provider) } as any,
 		{} as any,
 		{ emitAccountEvent: jest.fn() } as any,
