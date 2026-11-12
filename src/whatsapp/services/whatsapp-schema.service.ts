@@ -254,6 +254,11 @@ const OPTIONAL_TABLES = [
 		ON CONFLICT (conversation_id, user_id) DO NOTHING`,
 	// Story comments: replies are found by the story id they quote. CONCURRENTLY so a large
 	// messages table keeps taking writes while it builds (each statement runs on its own).
+	// Reports read messages and audit rows of one account in a time window.
+	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_messages_account_ts
+		ON whatsapp_messages(account_id, provider_timestamp)`,
+	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_audit_account_actor_time
+		ON whatsapp_audit_logs(account_id, actor_user_id, created_at)`,
 	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_messages_quoted
 		ON whatsapp_messages(account_id, quoted_provider_message_id)
 		WHERE quoted_provider_message_id IS NOT NULL`,

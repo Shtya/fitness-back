@@ -257,6 +257,21 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		this.broadcastPresence();
 	}
 
+	/** Users who have this WhatsApp account open right now, with when their tab last pinged. */
+	liveWatchersOfAccount(accountId: string) {
+		const result = new Map<string, number>();
+		const sockets: Map<string, Socket> | undefined = (this.server as any)?.sockets?.sockets;
+		if (!sockets || !accountId) return result;
+		for (const socket of sockets.values()) {
+			if (!socket.data?.accountScopes?.[accountId]) continue;
+			const userId = String(socket.data?.presenceUserId || socket.data?.user?.id || '');
+			if (!userId) continue;
+			const seen = this.presence.get(userId)?.lastSeenAt || Date.now();
+			result.set(userId, Math.max(result.get(userId) || 0, seen));
+		}
+		return result;
+	}
+
 	/** Snapshot for REST polling / initial paint. */
 	getOnlinePresence() {
 		return {
