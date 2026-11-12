@@ -108,6 +108,26 @@ export interface StatusReactionRow {
 /** A story lives 24 hours. */
 const STATUS_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
+/** Opening Stories asks the phone for its stories at most this often (Sync now ignores it). */
+const PHONE_STORY_REQUEST_INTERVAL_MS = 3 * 60 * 1000;
+
+/**
+ * A stored story as a history anchor for the phone: its bare message id, poster and time.
+ * Ids look like `<fromMe>_status@broadcast_<messageId>[_<participant>]`.
+ */
+export function storyAnchorFromRow(row: { providerStatusId: string; publishedAt: Date | string | null }) {
+	const id = String(row.providerStatusId || '').trim();
+	const match = id.match(/^(true|false)_status@broadcast_([^_]+)(?:_(.+))?$/i);
+	const timestamp = Math.floor(new Date(row.publishedAt || 0).getTime() / 1000);
+	if (!match || !timestamp) return null;
+	return {
+		id: match[2],
+		fromMe: match[1].toLowerCase() === 'true',
+		participant: match[3] || null,
+		timestamp,
+	};
+}
+
 /** Upper bound on viewers returned for one story; WhatsApp audiences are capped well below. */
 const STATUS_VIEWERS_LIMIT = 2000;
 
@@ -524,7 +544,46 @@ export class WhatsAppStatusService {
 		return refreshedProviderIds.size;
 	}
 
-	async list(user: User, accountId: string, refresh = false, debug = false) {
+	/** Last time each account asked its phone for stories (automatic requests are spaced out). */
+	private readonly phoneStoryRequests = new Map<string, number>();
+
+	/**
+	 * Ask the phone for the stories it has now, in the background. Opening Stories triggers it
+	 * (at most every few minutes); "Sync now" forces it. Stories the phone sends arrive like live
+	 * ones (provider `status_changed` → sync → `statuses_updated`), so the list refreshes itself.
+	 */
+	requestStoriesFromPhone(accountId: string, options: { force?: boolean } = {}) {
+		const last = this.phoneStoryRequests.get(accountId) || 0;
+		if (!options.force && Date.now() - last < PHONE_STORY_REQUEST_INTERVAL_MS) return false;
+		const provider = this.providers.getProvider(accountId);
+		if (typeof provider?.requestStatusesFromPhone !== 'function' || provider.getState() !== 'connected') {
+			return false;
+		}
+		this.phoneStoryRequests.set(accountId, Date.now());
+		void (async () => {
+			// Anchors from the database: after a restart the provider cache is empty.
+			const rows = await this.repo.find({
+				where: { accountId },
+				order: { publishedAt: 'DESC' },
+				take: 20,
+			});
+			const anchors = rows
+				.filter(row => !row.expiresAt || row.expiresAt > new Date())
+				.map(row => storyAnchorFromRow(row))
+				.filter((anchor): anchor is NonNullable<typeof anchor> => Boolean(anchor));
+			const result = await provider.requestStatusesFromPhone!(anchors);
+			this.logger.log(
+				`[WA STORIES] phone request ${accountId}: requested=${result.requested}${result.reason ? ` reason=${result.reason}` : ''} pages=${result.pages} stories ${result.before}→${result.after}`,
+			);
+		})().catch(error =>
+			this.logger.warn(
+				`[WA STORIES] phone request failed for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+			),
+		);
+		return true;
+	}
+
+	async list(user: User, accountId: string, refresh = false, debug = false, fromPhone = false) {
 		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		this.schedulePrune(accountId);
 		const contactNames = new Map<string, string>();
@@ -536,6 +595,7 @@ export class WhatsAppStatusService {
 		const excluded: Array<{ id: string; reason: string }> = [];
 
 		if (refresh) {
+			this.requestStoriesFromPhone(accountId, { force: fromPhone });
 			const synced = await this.syncFromProvider(accountId);
 			providerCount = synced.providerCount;
 			refreshHint = synced.hint;

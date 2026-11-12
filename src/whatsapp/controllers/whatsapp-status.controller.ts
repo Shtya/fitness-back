@@ -75,12 +75,15 @@ export class WhatsAppStatusController {
 		@Param('accountId') accountId: string,
 		@Query('refresh') refresh?: string,
 		@Query('debug') debug?: string,
+		@Query('phone') phone?: string,
 	) {
 		return this.statuses.list(
 			req.user,
 			accountId,
 			refresh === 'true',
 			debug === 'true' || debug === '1',
+			// "Sync now": ask the phone even if it was asked a moment ago.
+			phone === '1' || phone === 'true',
 		);
 	}
 

@@ -276,6 +276,11 @@ export interface WhatsAppProvider {
 	getOwnPushName?(): string | null;
 	/** How long the in-memory story cache has been filling since this process connected. */
 	statusCacheAgeMs?(): number;
+	/** Ask the phone for the stories it holds now (on-demand history of status@broadcast). */
+	requestStatusesFromPhone?(
+		anchors?: Array<{ id: string; participant?: string | null; fromMe?: boolean; timestamp: number }>,
+		options?: { maxPages?: number; waitMs?: number },
+	): Promise<{ requested: boolean; reason?: string; pages: number; before: number; after: number }>;
 	sendText(
 		chatId: string,
 		text: string,

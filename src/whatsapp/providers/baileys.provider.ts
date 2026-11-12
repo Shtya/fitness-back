@@ -4408,6 +4408,96 @@ export class BaileysProvider implements WhatsAppProvider {
 		return this.downloadMedia(id, { rawHint: raw, allowPhoneRequest });
 	}
 
+	/**
+	 * Ask the phone for the stories it has now, instead of waiting for each one to arrive.
+	 *
+	 * The story cache only fills from stories delivered while this session is up (and from the
+	 * first link's history), so after a restart it misses everything posted before. Stories are
+	 * the `status@broadcast` chat on the phone; this asks for that chat's history page by page
+	 * (on-demand history sync, the same request the inbox uses for older messages), newest known
+	 * story first, until a page reaches past a story's 24h life or brings nothing new. What the
+	 * phone sends arrives as `messaging-history.set` and is remembered like any story.
+	 *
+	 * `anchors` are stories known from the database, used when the cache is empty.
+	 */
+	async requestStatusesFromPhone(
+		anchors: Array<{ id: string; participant?: string | null; fromMe?: boolean; timestamp: number }> = [],
+		options: { maxPages?: number; waitMs?: number } = {},
+	): Promise<{ requested: boolean; reason?: string; pages: number; before: number; after: number }> {
+		const sock = this.socket;
+		const before = this.statusesById.size;
+		if (!sock || this.state !== 'connected') return { requested: false, reason: 'not_connected', pages: 0, before, after: before };
+		if (typeof sock.fetchMessageHistory !== 'function') {
+			return { requested: false, reason: 'unsupported', pages: 0, before, after: before };
+		}
+		type Anchor = { key: { remoteJid: string; id: string; fromMe: boolean; participant?: string }; timestamp: number };
+		const toAnchor = (raw: any): Anchor | null => {
+			const id = String(raw?.key?.id || '').trim();
+			const timestamp = Number(String(raw?.messageTimestamp ?? 0)) || 0;
+			if (!id || !timestamp) return null;
+			const participant = String(raw?.key?.participant || '').trim();
+			return {
+				key: { remoteJid: 'status@broadcast', id, fromMe: Boolean(raw?.key?.fromMe), ...(participant ? { participant } : {}) },
+				timestamp,
+			};
+		};
+		const candidates: Anchor[] = [];
+		for (const raw of this.statusRawById.values()) {
+			const anchor = toAnchor(raw);
+			if (anchor) candidates.push(anchor);
+		}
+		for (const item of anchors) {
+			const anchor = toAnchor({
+				key: { id: item.id, participant: item.participant || undefined, fromMe: Boolean(item.fromMe) },
+				messageTimestamp: item.timestamp,
+			});
+			if (anchor) candidates.push(anchor);
+		}
+		if (!candidates.length) return { requested: false, reason: 'no_anchor', pages: 0, before, after: before };
+		// Newest first: the phone returns what came before the anchor.
+		candidates.sort((a, b) => b.timestamp - a.timestamp);
+		const oldestAllowed = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+		const maxPages = Math.max(1, Math.min(options.maxPages ?? 4, 8));
+		const wait = options.waitMs ?? 6_000;
+		let anchor: Anchor | null = candidates[0];
+		let pages = 0;
+		const seenAnchors = new Set<string>();
+		while (anchor && pages < maxPages && this.state === 'connected') {
+			if (seenAnchors.has(anchor.key.id)) break;
+			seenAnchors.add(anchor.key.id);
+			const sizeBefore = this.statusesById.size;
+			const current: Anchor = anchor;
+			const outcome = await this.phoneRequests.run('history_on_demand', `status@broadcast:${current.key.id}`, async () => {
+				await sock.fetchMessageHistory(50, current.key, current.timestamp);
+				const started = Date.now();
+				while (Date.now() - started < wait) {
+					await waitMs(500);
+					if (this.statusesById.size > sizeBefore) {
+						// Give the rest of the page a moment to land.
+						await waitMs(800);
+						return true;
+					}
+				}
+				return false;
+			});
+			pages += 1;
+			this.logger.log(
+				`[WA STORIES] phone history page ${pages} for ${this.accountId}: outcome=${outcome} stories ${sizeBefore}→${this.statusesById.size}`,
+			);
+			if (outcome !== 'ok') break;
+			// Next page: before the oldest story we hold now, while still inside a story's life.
+			let oldest: Anchor | null = null;
+			for (const raw of this.statusRawById.values()) {
+				const next = toAnchor(raw);
+				if (next && (!oldest || next.timestamp < oldest.timestamp)) oldest = next;
+			}
+			anchor = oldest && oldest.timestamp > oldestAllowed ? oldest : null;
+		}
+		const after = this.statusesById.size;
+		if (after > before) this.emitStatusChanged();
+		return { requested: true, pages, before, after };
+	}
+
 	async getStatuses() {
 		this.pruneExpiredStatuses();
 		const items = [...this.statusesById.values()];
