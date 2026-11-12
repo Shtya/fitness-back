@@ -544,6 +544,36 @@ export class WhatsAppStatusService {
 		return refreshedProviderIds.size;
 	}
 
+	/**
+	 * The poster deleted a story: it leaves the live list at once, and its history copy is
+	 * marked so the history can say it was deleted. Returns how many live rows were removed.
+	 */
+	async markStatusDeletedByPoster(accountId: string, statusMessageIdValue: string, at: Date | null = null) {
+		const key = statusMessageKey(statusMessageIdValue);
+		if (!key || !isUuid(accountId)) return 0;
+		const revokedAt = at instanceof Date && !Number.isNaN(at.getTime()) ? at : new Date();
+		const pattern = `%status@broadcast_${key}%`;
+		const candidates = await this.repo
+			.createQueryBuilder('status')
+			.where('status.accountId = :accountId', { accountId })
+			.andWhere('(status.providerStatusId = :key OR status.providerStatusId LIKE :pattern)', { key, pattern })
+			.getMany();
+		const live = candidates.filter(row => statusMessageKey(row.providerStatusId) === key);
+		if (live.length) {
+			await this.archiveStatusRows(live);
+			await this.repo.delete(live.map(row => row.id));
+		}
+		await this.historyRepo
+			.createQueryBuilder()
+			.update()
+			.set({ revokedAt })
+			.where('account_id = :accountId', { accountId })
+			.andWhere('(provider_status_id = :key OR provider_status_id LIKE :pattern)', { key, pattern })
+			.execute();
+		this.logger.log(`[WA STORIES] poster deleted ${key} for ${accountId}: live rows removed=${live.length}`);
+		return live.length;
+	}
+
 	/** Last time each account asked its phone for stories (automatic requests are spaced out). */
 	private readonly phoneStoryRequests = new Map<string, number>();
 

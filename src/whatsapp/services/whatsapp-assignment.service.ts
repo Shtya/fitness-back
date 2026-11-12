@@ -19,6 +19,7 @@ import {
 	WhatsAppConversationAssignment,
 } from '../entities/whatsapp.entity';
 import { toWhatsAppClientUser } from '../utils/whatsapp-client-payload';
+import { setAssigneeUnread } from '../utils/whatsapp-assignee-unread';
 import { WhatsAppGateway } from '../gateways/whatsapp.gateway';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
@@ -95,6 +96,15 @@ export class WhatsAppAssignmentService {
 			await manager.update(WhatsAppConversation, conversationId, {
 				assignedUserId: targetUserId || null,
 			});
+			// The new assignee starts with what is unread in the chat right now.
+			if (targetUserId) {
+				await setAssigneeUnread(
+					(sql, params) => manager.query(sql, params as any[]),
+					conversationId,
+					targetUserId,
+					Math.max(0, Number(conversation.unreadCount) || 0),
+				);
+			}
 			await manager.save(
 				WhatsAppConversationAssignment,
 				manager.create(WhatsAppConversationAssignment, {

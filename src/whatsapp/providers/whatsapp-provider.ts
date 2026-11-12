@@ -46,6 +46,8 @@ export type WhatsAppProviderEvent =
 			emoji: string;
 			at: Date | null;
 	  }
+	/** A story its poster deleted (status@broadcast revoke). */
+	| { type: 'status_deleted'; statusMessageId: string; at: Date | null }
 	// The linked device was removed / taken over on WhatsApp's side: the stored
 	// browser profile can never authenticate again and must be wiped for a rescan.
 	| { type: 'session_invalid'; reason: string }

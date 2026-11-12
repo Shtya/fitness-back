@@ -120,6 +120,13 @@ import {
 	buildInboundSenderReceiptView,
 	buildWhatsAppMessageAckInfo,
 } from '../utils/whatsapp-message-info';
+import {
+	assigneeUnreadByConversation,
+	assigneeUnreadSql,
+	bumpAssigneeUnread,
+	getAssigneeUnread,
+	setAssigneeUnread,
+} from '../utils/whatsapp-assignee-unread';
 
 function hasChatVisibleContent(normalized: Partial<NormalizedWhatsAppMessage> | null | undefined) {
 	const text = String(normalized?.text || '')
@@ -1452,6 +1459,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				`message_receipts:${accountId}:${event.providerMessageId}`,
 				undefined,
 				this.persistLaneForMessage(accountId, event.providerMessageId),
+			);
+			return;
+		}
+		if (event.type === 'status_deleted') {
+			this.enqueuePersist(
+				async () => {
+					const removed = await this.statusService.markStatusDeletedByPoster(
+						accountId,
+						event.statusMessageId,
+						event.at,
+					);
+					this.gateway.emitAccountEvent(accountId, 'statuses_updated', {
+						reason: 'status_deleted',
+						statusMessageId: event.statusMessageId,
+						removed,
+					});
+				},
+				`status_deleted:${accountId}:${event.statusMessageId}`,
 			);
 			return;
 		}
@@ -3422,8 +3447,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			!fromHistory &&
 			!normalized.fromMe &&
 			!this.bootstrapping.has(accountId);
+		// The assignee keeps an unread of their own (see whatsapp-assignee-unread.ts).
+		let assigneeUnreadCount: number | null = null;
 		if (shouldCountUnread) {
 			await this.conversationRepo.increment({ id: conversation.id }, 'unreadCount', 1);
+			if (conversation.assignedUserId) {
+				assigneeUnreadCount = await bumpAssigneeUnread(
+					this.runSql,
+					conversation.id,
+					conversation.assignedUserId,
+				).catch(() => null);
+			}
 			this.notifyInboundMessagePersisted(accountId, saved);
 			this.typingAttempts?.linkInboundMessage(conversation, saved.id);
 		} else if (
@@ -3484,6 +3518,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				assignedUserId: conversation.assignedUserId,
 				lastMessageAt: hydrated.providerTimestamp,
 				unreadCount: nextUnreadCount,
+				...(assigneeUnreadCount != null ? { assigneeUnreadCount } : {}),
 				preview: {
 					id: hydrated.id,
 					providerMessageId: hydrated.providerMessageId,
@@ -4275,7 +4310,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			query.andWhere('conversation.assignedUserId = :userId', { userId: user.id });
 		}
 		if (filter === 'unread') {
-			query.andWhere('conversation.unreadCount > 0');
+			// Assigned-only staff go by their own unread, not the owner's.
+			if (canSeeAll) query.andWhere('conversation.unreadCount > 0');
+			else query.andWhere(`${assigneeUnreadSql()} > 0`, { assigneeUnreadUserId: user.id });
 		}
 		if (filter === 'favorites') {
 			query.andWhere(`${PREFERENCE_COALESCE('is_favorite')} = true`);
@@ -4334,11 +4371,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.offset((pageNumber - 1) * take)
 				.getMany(),
 			countQuery.getCount(),
-			this.countArchivedConversations(user.id, accountId, inboxKind),
+			this.countArchivedConversations(user.id, accountId, inboxKind, canSeeAll),
 		]);
 		const lastMessageByConversationId = await this.findLastPreviewMessages(
 			rows.map((item) => item.id),
 		);
+		// Staff see their own unread for each chat; the owner's count stays the owner's.
+		const ownUnread = canSeeAll
+			? null
+			: await assigneeUnreadByConversation(this.runSql, user.id, rows.map((item) => item.id)).catch(
+					() => new Map<string, number>(),
+				);
 		const result = {
 			items: rows.map((row) => {
 				const { preferenceByConversation, preferenceByChat, ...item } =
@@ -4346,6 +4389,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				const preference = preferenceByConversation || preferenceByChat;
 				return {
 					...item,
+					...(ownUnread ? { unreadCount: ownUnread.get(item.id) || 0 } : {}),
 					assignedUser: toWhatsAppClientUser(item.assignedUser),
 					lastProviderSyncAt: item.lastProviderSyncAt
 						? new Date(item.lastProviderSyncAt).toISOString()
@@ -4717,6 +4761,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		userId: string,
 		accountId: string,
 		inboxKind: string,
+		canSeeAll = true,
 	) {
 		const query = this.conversationRepo
 			.createQueryBuilder('conversation')
@@ -4739,9 +4784,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				newsletter: '%@newsletter',
 			});
 		}
+		if (!canSeeAll) {
+			query.andWhere('conversation.assignedUserId = :archivedAssignee', { archivedAssignee: userId });
+		}
+		const unreadExpr = canSeeAll ? 'GREATEST(conversation.unreadCount, 0)' : assigneeUnreadSql();
 		const raw = await query
 			.select('COUNT(DISTINCT conversation.id)', 'count')
-			.addSelect('COALESCE(SUM(GREATEST(conversation.unreadCount, 0)), 0)', 'unread')
+			.addSelect(`COALESCE(SUM(${unreadExpr}), 0)`, 'unread')
+			.setParameter('assigneeUnreadUserId', userId)
 			.getRawOne<{ count?: string | number; unread?: string | number }>();
 		return {
 			count: Math.max(0, Number(raw?.count) || 0),
@@ -7194,11 +7244,33 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
+	/** Raw SQL runner for the assignee-unread helpers. */
+	private readonly runSql = (sql: string, params?: unknown[]) =>
+		this.conversationRepo.manager.query(sql, params as any[]);
+
+	/**
+	 * Clear the unread this reader owns: the account's when they see the whole account, their
+	 * own assignee unread when the chat is theirs. Staff reading never clears the owner's badge.
+	 */
+	private async clearUnreadForReader(
+		conversation: WhatsAppConversation,
+		userId: string,
+		canSeeAll: boolean,
+	): Promise<'account' | 'assignee' | 'both' | null> {
+		const isAssignee = Boolean(conversation.assignedUserId) && conversation.assignedUserId === userId;
+		if (canSeeAll) await this.conversationRepo.update(conversation.id, { unreadCount: 0 });
+		if (isAssignee) await setAssigneeUnread(this.runSql, conversation.id, userId, 0).catch(() => undefined);
+		if (canSeeAll && isAssignee) return 'both';
+		if (canSeeAll) return 'account';
+		return isAssignee ? 'assignee' : null;
+	}
+
 	private async markReadAfterReply(
 		conversation: WhatsAppConversation,
 		account: WhatsAppAccount,
 		provider: WhatsAppProvider,
 		userId: string,
+		canSeeAll = true,
 	) {
 		const privacy = getWhatsAppPrivacySettings(account);
 		// Replying shows the sender the second grey tick held back by "hold delivery tick".
@@ -7215,11 +7287,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 
 		try {
 			await provider.markChatRead(conversation.providerChatId);
-			await this.conversationRepo.update(conversation.id, { unreadCount: 0 });
+			const scope = await this.clearUnreadForReader(conversation, userId, canSeeAll);
 			this.gateway.emitAccountEvent(
 				conversation.accountId,
 				'conversation_read',
-				{ conversationId: conversation.id, userId },
+				{ conversationId: conversation.id, userId, scope },
 				this.conversationEventScope(conversation),
 			);
 		} catch (error) {
@@ -7259,11 +7331,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				}
 			}
 		}
-		await this.conversationRepo.update(conversationId, { unreadCount: 0 });
+		const scope = await this.clearUnreadForReader(
+			conversation,
+			user.id,
+			this.access.canSeeAllConversations(user, accountAccess),
+		);
 		this.gateway.emitAccountEvent(
 			conversation.accountId,
 			'conversation_read',
-			{ conversationId, userId: user.id },
+			{ conversationId, userId: user.id, scope },
 			this.conversationEventScope(conversation),
 		);
 		await this.audit.write({
@@ -7290,9 +7366,19 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			user,
 			conversationId,
 		);
-		const nextUnread = Math.max(1, Number(conversation.unreadCount) || 0);
-		await this.conversationRepo.update(conversationId, { unreadCount: nextUnread });
-		if (accountAccess.canUse) {
+		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
+		const isAssignee = conversation.assignedUserId === user.id;
+		let nextUnread = Math.max(1, Number(conversation.unreadCount) || 0);
+		if (canSeeAll) {
+			await this.conversationRepo.update(conversationId, { unreadCount: nextUnread });
+		}
+		let assigneeUnreadCount: number | undefined;
+		if (isAssignee) {
+			const current = await getAssigneeUnread(this.runSql, conversationId, user.id).catch(() => 0);
+			assigneeUnreadCount = await setAssigneeUnread(this.runSql, conversationId, user.id, Math.max(1, current));
+			if (!canSeeAll) nextUnread = assigneeUnreadCount;
+		}
+		if (accountAccess.canUse && canSeeAll) {
 			try {
 				const provider = this.requireProvider(conversation.accountId);
 				if (typeof provider.markChatUnread === 'function') {
@@ -7308,7 +7394,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		this.gateway.emitAccountEvent(conversation.accountId, 'conversation_updated', {
 			conversationId,
-			unreadCount: nextUnread,
+			...(canSeeAll ? { unreadCount: Math.max(1, Number(conversation.unreadCount) || 0) } : {}),
+			...(assigneeUnreadCount != null ? { assigneeUnreadCount } : {}),
 			userId: user.id,
 		});
 		return { ok: true, conversationId, unreadCount: nextUnread };
@@ -7434,7 +7521,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				`sendText returned without a stable provider id for conversation ${conversationId}; persisting with local fallback id`,
 			);
 		}
-		await this.markReadAfterReply(conversation, accountAccess.account, provider, user.id);
+		await this.markReadAfterReply(
+			conversation,
+			accountAccess.account,
+			provider,
+			user.id,
+			this.access.canSeeAllConversations(user, accountAccess),
+		);
 		const persisted = await this.persistMessage(
 			conversation.accountId,
 			{
@@ -7883,7 +7976,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				`sendMedia returned without a stable provider id for conversation ${conversationId}; persisting with local fallback id`,
 			);
 		}
-		await this.markReadAfterReply(conversation, accountAccess.account, provider, user.id);
+		await this.markReadAfterReply(
+			conversation,
+			accountAccess.account,
+			provider,
+			user.id,
+			this.access.canSeeAllConversations(user, accountAccess),
+		);
 		const stat = await fs.stat(durablePath);
 		const attachmentType =
 			input.type === 'voice' ? 'ptt' : input.type === 'audio' ? 'audio' : input.type;
@@ -8049,7 +8148,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const conversationByGroup = new Map(
 			conversations.map((conversation) => [conversation.groupId, conversation.id]),
 		);
-		return groups.map((group) => ({
+		// Assigned-only staff see just the groups whose chat is assigned to them.
+		const visibleGroups = canSeeAll
+			? groups
+			: groups.filter((group) => conversationByGroup.has(group.id));
+		return visibleGroups.map((group) => ({
 			...group,
 			conversationId: conversationByGroup.get(group.id) || null,
 		}));
@@ -8113,6 +8216,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			});
 		}
 		const conversation = await conversationQuery.getOne();
+		if (!canSeeAll && !conversation) throw new NotFoundException('WhatsApp group not found');
 		return { ...group, conversationId: conversation?.id || null };
 	}
 

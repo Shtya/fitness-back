@@ -710,6 +710,10 @@ export class WhatsAppStatusHistory extends CoreEntity {
 
 	@Column({ name: 'archived_at', type: 'timestamptz' })
 	archivedAt: Date;
+
+	/** When the poster deleted the story (null: it simply expired or is still live). */
+	@Column({ name: 'revoked_at', type: 'timestamptz', nullable: true })
+	revokedAt: Date | null;
 }
 
 @Entity('whatsapp_connection_logs')

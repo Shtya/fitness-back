@@ -585,6 +585,8 @@ export class WhatsAppTypingAttemptsService implements OnModuleInit, OnModuleDest
 		if (conversationId) {
 			if (!isUUID(conversationId)) throw new BadRequestException('Invalid conversation id');
 			const { conversation } = await this.access.assertConversationVisible(user, conversationId);
+			// The typing log is for people who see the whole account, not assigned-only staff.
+			await this.access.assertWholeAccountAccess(user, conversation.accountId, 'canView');
 			add('a.conversation_id = ?', conversation.id);
 			return conversation.accountId;
 		}
@@ -593,7 +595,7 @@ export class WhatsAppTypingAttemptsService implements OnModuleInit, OnModuleDest
 		const access = await this.access.getAccountAccess(user, accountId);
 		if (!access.canView) throw new ForbiddenException('WhatsApp account permission denied: canView');
 		add('a.account_id = ?', accountId);
-		if (!this.access.canSeeAllConversations(user, access)) add('c.assigned_user_id = ?', user.id);
+		await this.access.assertWholeAccountAccess(user, accountId, 'canView');
 		return accountId;
 	}
 

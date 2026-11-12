@@ -233,6 +233,25 @@ const OPTIONAL_TABLES = [
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_whatsapp_status_reactions_status
 		ON whatsapp_status_reactions(account_id, status_message_id)`,
+	// Stories their poster deleted stay in the history, marked, instead of vanishing.
+	`ALTER TABLE whatsapp_status_history ADD COLUMN IF NOT EXISTS revoked_at timestamptz`,
+	// The assignee's own unread, separate from the account's (see whatsapp-assignee-unread.ts).
+	`CREATE TABLE IF NOT EXISTS whatsapp_assignee_unread (
+		conversation_id uuid NOT NULL REFERENCES whatsapp_conversations(id) ON DELETE CASCADE,
+		user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		unread_count int NOT NULL DEFAULT 0,
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		PRIMARY KEY (conversation_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_whatsapp_assignee_unread_user
+		ON whatsapp_assignee_unread(user_id) WHERE unread_count > 0`,
+	// Chats assigned before this table existed start with their current unread (once: a row,
+	// even at 0 after the assignee reads, is never overwritten).
+	`INSERT INTO whatsapp_assignee_unread (conversation_id, user_id, unread_count)
+		SELECT c.id, c.assigned_user_id, c.unread_count
+		  FROM whatsapp_conversations c
+		 WHERE c.assigned_user_id IS NOT NULL AND c.unread_count > 0 AND c.deleted_at IS NULL
+		ON CONFLICT (conversation_id, user_id) DO NOTHING`,
 	// Story comments: replies are found by the story id they quote. CONCURRENTLY so a large
 	// messages table keeps taking writes while it builds (each statement runs on its own).
 	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_messages_quoted

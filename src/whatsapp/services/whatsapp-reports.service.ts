@@ -14,6 +14,11 @@ import {
 	staffPace,
 	type StaffPace,
 } from '../utils/whatsapp-staff-sla';
+import {
+	STAFF_SESSION_ACTION,
+	buildStaffSessions,
+	type StaffActivityEvent,
+} from '../utils/whatsapp-staff-activity';
 import { WhatsAppAccessService } from './whatsapp-access.service';
 
 type SqlRow = Record<string, unknown>;
@@ -156,12 +161,13 @@ export class WhatsAppReportsService {
 		const member = members.find((item) => item.userId === staffUserId);
 		if (!member) throw new NotFoundException('Staff member is not on this WhatsApp account');
 		const range = this.range(from, to);
-		const [replyBundle, volume, assignedCounts, replies, waiting] = await Promise.all([
+		const [replyBundle, volume, assignedCounts, replies, waiting, activity] = await Promise.all([
 			this.loadReplyStats(accountId, range),
 			this.loadVolume(accountId, range),
 			this.loadAssignedCounts(accountId),
 			this.loadReplyDetails(accountId, staffUserId, range, 40),
 			this.loadWaiting(accountId, staffUserId),
+			this.loadActivity(accountId, staffUserId, range),
 		]);
 		return {
 			period: { from: range.from.toISOString(), to: range.to.toISOString() },
@@ -174,6 +180,134 @@ export class WhatsAppReportsService {
 			),
 			replies,
 			waiting,
+			activity,
+		};
+	}
+
+	/**
+	 * What a staff member did on WhatsApp in the period: when they had it open (sessions),
+	 * which chats they opened, and who they replied to.
+	 */
+	private async loadActivity(
+		accountId: string,
+		staffUserId: string,
+		range: { from: Date; to: Date },
+	) {
+		const [presence, opened, sent]: [SqlRow[], SqlRow[], SqlRow[]] = await Promise.all([
+			this.messageRepo.query(
+				`SELECT a.created_at AS at
+				   FROM whatsapp_audit_logs a
+				  WHERE a.account_id = $1 AND a.actor_user_id = $2 AND a.action = $5
+				    AND a.created_at BETWEEN $3 AND $4
+				  ORDER BY a.created_at DESC
+				  LIMIT 5000`,
+				[accountId, staffUserId, range.from, range.to, STAFF_SESSION_ACTION],
+			),
+			this.messageRepo.query(
+				`SELECT a.created_at AS at, a.target_id AS "conversationId"
+				   FROM whatsapp_audit_logs a
+				  WHERE a.account_id = $1 AND a.actor_user_id = $2
+				    AND a.action = 'whatsapp.conversation.read'
+				    AND a.created_at BETWEEN $3 AND $4
+				  ORDER BY a.created_at DESC
+				  LIMIT 5000`,
+				[accountId, staffUserId, range.from, range.to],
+			),
+			this.messageRepo.query(
+				`SELECT m.provider_timestamp AS at, m.conversation_id AS "conversationId"
+				   FROM whatsapp_messages m
+				  WHERE m.account_id = $1 AND m.sender_user_id = $2
+				    AND m.direction = 'outbound' AND m.deleted_at IS NULL
+				    AND m.provider_timestamp BETWEEN $3 AND $4
+				  ORDER BY m.provider_timestamp DESC
+				  LIMIT 5000`,
+				[accountId, staffUserId, range.from, range.to],
+			),
+		]);
+		const events: StaffActivityEvent[] = [
+			...presence.map(row => ({ at: row.at as Date, kind: 'present' as const })),
+			...opened.map(row => ({
+				at: row.at as Date,
+				kind: 'opened' as const,
+				conversationId: String(row.conversationId || ''),
+			})),
+			...sent.map(row => ({
+				at: row.at as Date,
+				kind: 'replied' as const,
+				conversationId: String(row.conversationId || ''),
+			})),
+		];
+		const sessions = buildStaffSessions(events);
+
+		// Per chat: how often they opened it and how many messages they sent there.
+		const perChat = new Map<
+			string,
+			{ opened: number; lastOpenedAt: Date | null; sent: number; lastSentAt: Date | null }
+		>();
+		const touch = (id: string) => {
+			let row = perChat.get(id);
+			if (!row) {
+				row = { opened: 0, lastOpenedAt: null, sent: 0, lastSentAt: null };
+				perChat.set(id, row);
+			}
+			return row;
+		};
+		for (const row of opened) {
+			const id = String(row.conversationId || '');
+			if (!/^[0-9a-f-]{36}$/i.test(id)) continue;
+			const item = touch(id);
+			item.opened += 1;
+			const at = new Date(row.at as any);
+			if (!item.lastOpenedAt || at > item.lastOpenedAt) item.lastOpenedAt = at;
+		}
+		for (const row of sent) {
+			const id = String(row.conversationId || '');
+			if (!id) continue;
+			const item = touch(id);
+			item.sent += 1;
+			const at = new Date(row.at as any);
+			if (!item.lastSentAt || at > item.lastSentAt) item.lastSentAt = at;
+		}
+		const ids = [...perChat.keys()];
+		const titles = new Map<string, string>();
+		if (ids.length) {
+			const rows: SqlRow[] = await this.conversationRepo.query(
+				`SELECT c.id, COALESCE(NULLIF(contact.name, ''), NULLIF(grp.subject, ''), c.provider_chat_id) AS title
+				   FROM whatsapp_conversations c
+				   LEFT JOIN whatsapp_contacts contact ON contact.id = c.contact_id
+				   LEFT JOIN whatsapp_groups grp ON grp.id = c.group_id
+				  WHERE c.account_id = $1 AND c.id = ANY($2::uuid[])`,
+				[accountId, ids],
+			);
+			for (const row of rows) titles.set(String(row.id), String(row.title || 'Chat'));
+		}
+		const chats = ids
+			.filter(id => titles.has(id))
+			.map(id => {
+				const item = perChat.get(id)!;
+				const last = [item.lastOpenedAt, item.lastSentAt]
+					.filter(Boolean)
+					.sort((a, b) => b!.getTime() - a!.getTime())[0];
+				return {
+					conversationId: id,
+					title: titles.get(id)!,
+					timesOpened: item.opened,
+					lastOpenedAt: item.lastOpenedAt?.toISOString() || null,
+					messagesSent: item.sent,
+					lastSentAt: item.lastSentAt?.toISOString() || null,
+					lastActivityAt: last?.toISOString() || null,
+				};
+			})
+			.sort((a, b) => String(b.lastActivityAt || '').localeCompare(String(a.lastActivityAt || '')))
+			.slice(0, 100);
+		const lastSeenAt = sessions[0]?.endedAt || null;
+		return {
+			lastSeenAt,
+			totalActiveSeconds: sessions.reduce((sum, item) => sum + item.durationSeconds, 0),
+			sessions: sessions.slice(0, 60),
+			chats,
+			openedChats: chats.filter(item => item.timesOpened > 0).length,
+			repliedChats: chats.filter(item => item.messagesSent > 0).length,
 		};
 	}
 
@@ -319,8 +453,10 @@ export class WhatsAppReportsService {
 				SELECT
 					c.assigned_user_id AS "userId",
 					COUNT(*)::int AS assigned,
-					COALESCE(SUM(c.unread_count), 0)::int AS unread
+					COALESCE(SUM(au.unread_count), 0)::int AS unread
 				FROM whatsapp_conversations c
+				LEFT JOIN whatsapp_assignee_unread au
+					ON au.conversation_id = c.id AND au.user_id = c.assigned_user_id
 				WHERE c.account_id = $1
 					AND c.deleted_at IS NULL
 					AND c.assigned_user_id IS NOT NULL

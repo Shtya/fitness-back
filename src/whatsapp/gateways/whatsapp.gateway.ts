@@ -16,6 +16,8 @@ import { isUUID } from 'class-validator';
 import { corsOriginDelegate } from 'common/cors-origin';
 import { User, UserRole } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
+import { WhatsAppAuditLog } from '../entities/whatsapp.entity';
+import { STAFF_SESSION_ACTION, STAFF_SESSION_MARK_MS } from '../utils/whatsapp-staff-activity';
 
 /**
  * Who, inside an account's inbox room, is allowed to receive an event about one
@@ -56,6 +58,8 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 @Injectable()
 export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	private readonly logger = new Logger(WhatsAppGateway.name);
+	/** Last time each user:account was recorded as having WhatsApp open (for the staff report). */
+	private readonly sessionMarks = new Map<string, number>();
 	/** userId → live sockets currently in the WhatsApp workspace */
 	private readonly presence = new Map<
 		string,
@@ -273,6 +277,21 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		this.scheduleTokenExpiry(client);
 	}
 
+	/** Record that this user has WhatsApp open, at most once per few minutes per account. */
+	private async markStaffSession(userId: string, accountId: string) {
+		if (!userId || !accountId) return;
+		const key = userId + ':' + accountId;
+		const now = Date.now();
+		if (now - (this.sessionMarks.get(key) || 0) < STAFF_SESSION_MARK_MS) return;
+		this.sessionMarks.set(key, now);
+		try {
+			const repo = this.userRepo.manager.getRepository(WhatsAppAuditLog);
+			await repo.save(repo.create({ actorUserId: userId, accountId, action: STAFF_SESSION_ACTION }));
+		} catch (error) {
+			this.logger.warn('Could not record WhatsApp session for ' + userId + ': ' + (error instanceof Error ? error.message : String(error)));
+		}
+	}
+
 	handleDisconnect(client: Socket) {
 		this.clearTokenExpiry(client);
 		this.unregisterPresence(client);
@@ -286,6 +305,10 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		const entry = userId ? this.presence.get(userId) : null;
 		if (entry && entry.socketIds.has(client.id)) {
 			entry.lastSeenAt = Date.now();
+		}
+		// Still here: keeps the staff report's session going while WhatsApp stays open.
+		for (const accountId of Object.keys(client.data?.accountScopes || {})) {
+			if (userId) void this.markStaffSession(userId, accountId);
 		}
 		return { ok: true, at: Date.now() };
 	}
@@ -326,6 +349,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		if (previousRoom && previousRoom !== scopeRoom) await client.leave(previousRoom);
 		await client.join([accountRoom(accountId), scopeRoom]);
 		this.notifyWatchersChanged([accountId]);
+		void this.markStaffSession(String(user.id), accountId);
 		return { ok: true };
 	}
 

@@ -2214,6 +2214,25 @@ export class BaileysProvider implements WhatsAppProvider {
 		if (type !== 0 && type !== 'REVOKE') return false;
 		const targetId = String(protocol.key?.id || '').trim();
 		if (!targetId) return false;
+		// A story deleted by its poster: drop it from the cache (or every sync would put it back)
+		// and say so; stories are not in the messages table `message_deleted` looks in.
+		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
+		if (isStatusBroadcastJid(remoteJid)) {
+			let removed = 0;
+			for (const [serialized, item] of this.statusesById) {
+				if (String(item?.messageId || '') !== targetId) continue;
+				this.statusesById.delete(serialized);
+				this.statusRawById.delete(serialized);
+				removed += 1;
+			}
+			this.statusRawById.delete(targetId);
+			this.logger.log(
+				`[WA STORIES] deleted by poster id=${targetId} from=${raw?.key?.participantAlt || raw?.key?.participant || (raw?.key?.fromMe ? 'me' : '?')} cached=${removed} account=${this.accountId}`,
+			);
+			this.emit({ type: 'status_deleted', statusMessageId: targetId, at: toDate(raw?.messageTimestamp) });
+			this.emitStatusChanged();
+			return true;
+		}
 		this.emit({ type: 'message_deleted', providerMessageId: targetId, mode: 'everyone' });
 		return true;
 	}

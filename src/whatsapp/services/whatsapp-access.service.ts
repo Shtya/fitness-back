@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { assigneeUnreadSql } from '../utils/whatsapp-assignee-unread';
 import { In, Repository } from 'typeorm';
 import { User, UserRole } from '../../../entities/global.entity';
 import {
@@ -208,10 +209,16 @@ export class WhatsAppAccessService {
 				'(conversation.accountId IN (:...assignedOnlyIds) AND conversation.assignedUserId = :userId)',
 			);
 		}
+		// Assigned-only staff count their own unread; the account's count is the owner's.
+		const unreadExpr = !assignedOnlyIds.length
+			? 'conversation.unreadCount'
+			: !seeAllIds.length
+				? assigneeUnreadSql('conversation', 'userId')
+				: `(CASE WHEN conversation.accountId IN (:...seeAllIds) THEN conversation.unreadCount ELSE ${assigneeUnreadSql('conversation', 'userId')} END)`;
 		const row = await this.conversationRepo
 			.createQueryBuilder('conversation')
-			.select('COALESCE(SUM(conversation.unreadCount), 0)', 'totalUnread')
-			.addSelect(`COUNT(*) FILTER (WHERE conversation.unreadCount > 0)`, 'unreadConversations')
+			.select(`COALESCE(SUM(${unreadExpr}), 0)`, 'totalUnread')
+			.addSelect(`COUNT(*) FILTER (WHERE ${unreadExpr} > 0)`, 'unreadConversations')
 			.where(`(${visibility.join(' OR ')})`, { seeAllIds, assignedOnlyIds, userId: user.id })
 			.andWhere('LOWER(conversation.providerChatId) NOT LIKE :broadcast', {
 				broadcast: '%@broadcast%',
