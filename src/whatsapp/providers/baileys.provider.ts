@@ -1720,17 +1720,25 @@ export class BaileysProvider implements WhatsAppProvider {
 		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
 		if (!isStatusBroadcastJid(remoteJid)) return false;
 		this.claimOwnBroadcast(raw);
-		// Own stories posted from the phone are the ones users miss; say why one is dropped.
+		// Every story that does not make it into the list says why (it used to vanish silently,
+		// so a phone showing many stories and the site showing few left nothing to go on).
+		const storyRef = () =>
+			`id=${raw?.key?.id || '?'} from=${raw?.key?.participantAlt || raw?.key?.participant || (raw?.key?.fromMe ? 'me' : '?')} account=${this.accountId}`;
 		if (!raw?.message) {
-			if (raw?.key?.fromMe) {
-				this.logger.warn(
-					`Own status ${raw?.key?.id || '?'} arrived without content for ${this.accountId} (stub=${raw?.messageStubType ?? 'none'})`,
-				);
-			}
+			this.logger.warn(
+				`[WA STORIES] dropped ${storyRef()} reason=no_content stub=${raw?.messageStubType ?? 'none'} params=${JSON.stringify(raw?.messageStubParameters || [])}`,
+			);
 			return false;
 		}
 		const content = unwrapMessageContent(raw.message);
-		if (!content || isControlOnlyContent(content)) return false;
+		if (!content || isControlOnlyContent(content)) {
+			const keys = Object.keys(content || {}).filter(key => content?.[key] != null);
+			// Likes and deletions on stories are handled by ingestReaction / ingestRevoke.
+			if (!keys.some(key => key === 'reactionMessage' || key === 'protocolMessage' || key === 'encReactionMessage')) {
+				this.logger.warn(`[WA STORIES] dropped ${storyRef()} reason=control_only keys=${keys.join(',') || 'none'}`);
+			}
+			return false;
+		}
 		const serialized = this.statusSerializedId(raw);
 		if (!serialized) return false;
 		const fromMe = Boolean(raw?.key?.fromMe);
@@ -1763,8 +1771,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			fromMe,
 			isOwn: fromMe,
 		};
-		if (fromMe && !this.statusesById.has(serialized)) {
-			this.logger.log(`Own ${type} status ${item.messageId} seen for ${this.accountId}`);
+		if (!this.statusesById.has(serialized)) {
+			this.logger.log(
+				`[WA STORIES] kept ${storyRef()} type=${type} own=${fromMe} keys=${Object.keys(content).filter(key => content[key] != null).join(',')}`,
+			);
 		}
 		this.statusesById.set(serialized, item);
 		this.statusRawById.set(serialized, raw);
