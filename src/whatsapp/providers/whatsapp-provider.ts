@@ -279,6 +279,13 @@ export interface WhatsAppProvider {
 	/** How long the in-memory story cache has been filling since this process connected. */
 	statusCacheAgeMs?(): number;
 	/** Ask the phone for the stories it holds now (on-demand history of status@broadcast). */
+	/** Ask the phone to send its (recent) history again; the stories in it are read too. */
+	requestFullSyncFromPhone?(): Promise<{
+		requested: boolean;
+		reason?: string;
+		requestId?: string;
+		nextAllowedAt?: string;
+	}>;
 	requestStatusesFromPhone?(
 		anchors?: Array<{ id: string; participant?: string | null; fromMe?: boolean; timestamp: number }>,
 		options?: { maxPages?: number; waitMs?: number },

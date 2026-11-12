@@ -21,6 +21,11 @@ import {
 } from './whatsapp-provider';
 import { loadBaileysModule } from './baileys-loader';
 import {
+	historyNotificationKey,
+	readHistorySync,
+	statusMessagesOfHistory,
+} from '../utils/whatsapp-status-history';
+import {
 	WA_SECRET_ENC_TYPE_MESSAGE_EDIT,
 	decryptWaSecretEncryptedPayload,
 	findWaMessageSecret,
@@ -2001,6 +2006,47 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
+	/** History notifications already read for stories in this process. */
+	private readonly importedStatusHistories = new Set<string>();
+
+	/** The history-sync notification in a message (the phone sending us history), if any. */
+	private historyNotificationOf(raw: any) {
+		return deepUnwrapMessageContent(raw?.message)?.protocolMessage?.historySyncNotification || null;
+	}
+
+	/**
+	 * Read the stories in a history sync ourselves (see whatsapp-status-history.ts: Baileys
+	 * drops them). Done for the stories sync the phone sends at link time, and for any history
+	 * while a "Sync now" full-history request is pending.
+	 */
+	private async importStatusHistory(note: any) {
+		let key = '';
+		try {
+			const baileys = (await loadBaileysModule()) as any;
+			const proto = baileys?.proto;
+			const syncType = Number(note?.syncType);
+			const statusSync = proto?.HistorySync?.HistorySyncType?.INITIAL_STATUS_V3;
+			if (syncType !== statusSync && !this.fullSyncPending()) return;
+			key = historyNotificationKey(note);
+			if (key && this.importedStatusHistories.has(key)) return;
+			if (key) this.importedStatusHistories.add(key);
+			const sync = await readHistorySync(note, { proto, downloadHistory: baileys.downloadHistory });
+			const stories = statusMessagesOfHistory(sync, jid => isStatusBroadcastJid(jidOf(jid) || jid));
+			const before = this.statusesById.size;
+			this.ingestHistoryRawMessages(stories);
+			this.logger.log(
+				`[WA STORIES] history stories syncType=${syncType} statusV3=${sync?.statusV3Messages?.length || 0} found=${stories.length} new=${this.statusesById.size - before} account=${this.accountId}`,
+			);
+		} catch (error) {
+			if (key) this.importedStatusHistories.delete(key);
+			this.logger.warn(
+				`[WA STORIES] reading history stories failed account=${this.accountId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
 	/** The shared-history pointer in a message, if that is what it is. */
 	private groupHistoryBundleOf(raw: any) {
 		return deepUnwrapMessageContent(raw?.message)?.messageHistoryBundle || null;
@@ -2189,7 +2235,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			String(anchor.key.remoteJid || chatId),
 			async () => {
 				const chunksBefore = this.historySyncChunks;
-				await sock.fetchMessageHistory(30, anchor.key, anchor.timestamp);
+				await sock.fetchMessageHistory(30, anchor.key, this.historyTimestampMs(anchor.timestamp));
 				await waitMs(1500);
 				return this.historySyncChunks > chunksBefore || Boolean(this.findMessage(providerMessageId));
 			},
@@ -2548,7 +2594,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			useMultiFileAuthState,
 			DisconnectReason,
 			Browsers,
+			proto,
 		} = baileys as any;
+		const fullSyncType = proto?.HistorySync?.HistorySyncType?.FULL;
 
 		await fs.mkdir(this.sessionDir(), { recursive: true });
 		const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir());
@@ -2587,6 +2635,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			printQRInTerminal: false,
 			markOnlineOnConnect: false,
 			syncFullHistory: shouldSyncFullHistory(),
+			// Baileys drops FULL history by default; let it through while we asked the phone for
+			// one (Sync now on the Stories tab), so the stories in it are not thrown away.
+			shouldSyncHistoryMessage: ({ syncType }: { syncType?: number }) =>
+				syncType !== fullSyncType || shouldSyncFullHistory() || this.fullSyncPending(),
 			connectTimeoutMs: 60_000,
 			browser: Browsers?.ubuntu?.('Chrome') || Browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'],
 			msgRetryCounterCache: this.msgRetryCounterCache,
@@ -2703,6 +2755,9 @@ export class BaileysProvider implements WhatsAppProvider {
 			// history dumps, except a recent fromMe echo from the phone app.
 			for (const raw of list) {
 				this.learnOwnPushName(raw);
+				// The phone sending history: read the stories in it, which Baileys drops.
+				const historyNote = this.historyNotificationOf(raw);
+				if (historyNote) void this.importStatusHistory(historyNote);
 				// Shared group history: import what it points at; the pointer itself is not a message.
 				const historyBundle = this.groupHistoryBundleOf(raw);
 				if (historyBundle) {
@@ -2971,9 +3026,15 @@ export class BaileysProvider implements WhatsAppProvider {
 			);
 			this.ensureChatsFromMessages();
 			this.historySyncChunks += 1;
+			const statusCount = messages.filter((raw: any) =>
+				isStatusBroadcastJid(jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '')),
+			).length;
 			this.logger.log(
-				`Baileys history set for ${this.accountId}: chunk=${this.historySyncChunks} chats=${chats.length} messages=${messages.length} contacts=${contacts.length}`,
+				`Baileys history set for ${this.accountId}: chunk=${this.historySyncChunks} syncType=${data?.syncType ?? 'unknown'} chats=${chats.length} messages=${messages.length} statuses=${statusCount} contacts=${contacts.length}${this.fullSyncPending() ? ' (after full sync request)' : ''}`,
 			);
+			if (statusCount) {
+				this.logger.log(`[WA STORIES] history brought ${statusCount} stories syncType=${data?.syncType ?? 'unknown'} account=${this.accountId}`);
+			}
 			this.emit({
 				type: 'history_sync',
 				chats: chats.length,
@@ -4438,17 +4499,88 @@ export class BaileysProvider implements WhatsAppProvider {
 	}
 
 	/**
+	 * Baileys `fetchMessageHistory` writes into proto `oldestMsgTimestampMs`.
+	 * WhatsApp message timestamps are usually seconds — convert when needed.
+	 */
+	private historyTimestampMs(value: number): number {
+		const n = Number(value) || 0;
+		if (!n) return Date.now();
+		return n < 1e12 ? Math.floor(n * 1000) : Math.floor(n);
+	}
+
+	/**
 	 * Ask the phone for the stories it has now, instead of waiting for each one to arrive.
 	 *
 	 * The story cache only fills from stories delivered while this session is up (and from the
-	 * first link's history), so after a restart it misses everything posted before. Stories are
-	 * the `status@broadcast` chat on the phone; this asks for that chat's history page by page
-	 * (on-demand history sync, the same request the inbox uses for older messages), newest known
-	 * story first, until a page reaches past a story's 24h life or brings nothing new. What the
-	 * phone sends arrives as `messaging-history.set` and is remembered like any story.
+	 * first link's history), so after a restart / re-link it misses everything posted before.
+	 * Stories are the `status@broadcast` chat on the phone; this asks for that chat's history
+	 * page by page (on-demand history sync), newest known story first, until a page reaches
+	 * past a story's 24h life or brings nothing new.
 	 *
 	 * `anchors` are stories known from the database, used when the cache is empty.
 	 */
+	/** When the last full-history request went to the phone (0: never). */
+	private fullSyncRequestedAt = 0;
+	static readonly FULL_SYNC_INTERVAL_MS = 30 * 60_000;
+	static readonly FULL_SYNC_PENDING_MS = 15 * 60_000;
+
+	/** A full-history request was sent recently, so a FULL history chunk is expected. */
+	fullSyncPending(now = Date.now()) {
+		return this.fullSyncRequestedAt > 0 && now - this.fullSyncRequestedAt < BaileysProvider.FULL_SYNC_PENDING_MS;
+	}
+
+	/**
+	 * Ask the phone to send its history again (FULL_HISTORY_SYNC_ON_DEMAND), small and recent,
+	 * hoping it includes the stories that are live now. The phone may ignore it; whatever it
+	 * sends goes through messaging-history.set like any history. At most once per 30 minutes.
+	 */
+	async requestFullSyncFromPhone(): Promise<{
+		requested: boolean;
+		reason?: string;
+		requestId?: string;
+		nextAllowedAt?: string;
+	}> {
+		const sock = this.socket as any;
+		if (!sock || this.state !== 'connected') return { requested: false, reason: 'not_connected' };
+		if (typeof sock.sendPeerDataOperationMessage !== 'function') return { requested: false, reason: 'unsupported' };
+		const now = Date.now();
+		if (this.fullSyncRequestedAt && now - this.fullSyncRequestedAt < BaileysProvider.FULL_SYNC_INTERVAL_MS) {
+			return {
+				requested: false,
+				reason: 'rate_limited',
+				nextAllowedAt: new Date(this.fullSyncRequestedAt + BaileysProvider.FULL_SYNC_INTERVAL_MS).toISOString(),
+			};
+		}
+		const { proto } = (await loadBaileysModule()) as any;
+		const type = proto?.Message?.PeerDataOperationRequestType?.FULL_HISTORY_SYNC_ON_DEMAND ?? 6;
+		const requestId = `so7ba-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		this.fullSyncRequestedAt = now;
+		try {
+			await sock.sendPeerDataOperationMessage({
+				peerDataOperationRequestType: type,
+				fullHistorySyncOnDemandRequest: {
+					requestMetadata: { requestId },
+					historySyncConfig: {
+						recentSyncDaysLimit: 2,
+						fullSyncDaysLimit: 2,
+						fullSyncSizeMbLimit: 25,
+						inlineInitialPayloadInE2EeMsg: true,
+						supportGroupHistory: true,
+						onDemandReady: true,
+						completeOnDemandReady: true,
+					},
+				},
+			});
+		} catch (error) {
+			this.fullSyncRequestedAt = 0;
+			const message = error instanceof Error ? error.message : String(error);
+			this.logger.warn(`[WA STORIES] full sync request failed account=${this.accountId}: ${message}`);
+			return { requested: false, reason: 'send_failed' };
+		}
+		this.logger.log(`[WA STORIES] full sync requested id=${requestId} account=${this.accountId}`);
+		return { requested: true, requestId };
+	}
+
 	async requestStatusesFromPhone(
 		anchors: Array<{ id: string; participant?: string | null; fromMe?: boolean; timestamp: number }> = [],
 		options: { maxPages?: number; waitMs?: number } = {},
@@ -4461,33 +4593,50 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 		type Anchor = { key: { remoteJid: string; id: string; fromMe: boolean; participant?: string }; timestamp: number };
 		const toAnchor = (raw: any): Anchor | null => {
-			const id = String(raw?.key?.id || '').trim();
-			const timestamp = Number(String(raw?.messageTimestamp ?? 0)) || 0;
+			const id = String(raw?.key?.id || raw?.id || '').trim();
+			const timestamp = Number(String(raw?.messageTimestamp ?? raw?.timestamp ?? 0)) || 0;
 			if (!id || !timestamp) return null;
-			const participant = String(raw?.key?.participant || '').trim();
+			const participant = String(raw?.key?.participant || raw?.participant || '').trim();
 			return {
-				key: { remoteJid: 'status@broadcast', id, fromMe: Boolean(raw?.key?.fromMe), ...(participant ? { participant } : {}) },
+				key: { remoteJid: 'status@broadcast', id, fromMe: Boolean(raw?.key?.fromMe ?? raw?.fromMe), ...(participant ? { participant } : {}) },
 				timestamp,
 			};
 		};
 		const candidates: Anchor[] = [];
+		const pushUnique = (anchor: Anchor | null) => {
+			if (!anchor) return;
+			if (candidates.some(item => item.key.id === anchor.key.id && item.key.fromMe === anchor.key.fromMe)) return;
+			candidates.push(anchor);
+		};
 		for (const raw of this.statusRawById.values()) {
-			const anchor = toAnchor(raw);
-			if (anchor) candidates.push(anchor);
+			pushUnique(toAnchor(raw));
 		}
 		for (const item of anchors) {
-			const anchor = toAnchor({
-				key: { id: item.id, participant: item.participant || undefined, fromMe: Boolean(item.fromMe) },
-				messageTimestamp: item.timestamp,
-			});
-			if (anchor) candidates.push(anchor);
+			pushUnique(
+				toAnchor({
+					key: { id: item.id, participant: item.participant || undefined, fromMe: Boolean(item.fromMe) },
+					messageTimestamp: item.timestamp,
+				}),
+			);
+		}
+		// After a fresh link the cache and DB can both be empty briefly while a few live
+		// stories trickle in — wait once so Sync now has something to page from.
+		if (!candidates.length) {
+			const waitForLive =
+				options.waitMs === 0 ? 0 : Math.min(Math.max(options.waitMs ?? 6_000, 2_000), 8_000);
+			const started = Date.now();
+			while (waitForLive > 0 && Date.now() - started < waitForLive && this.state === 'connected') {
+				await waitMs(400);
+				for (const raw of this.statusRawById.values()) pushUnique(toAnchor(raw));
+				if (candidates.length) break;
+			}
 		}
 		if (!candidates.length) return { requested: false, reason: 'no_anchor', pages: 0, before, after: before };
 		// Newest first: the phone returns what came before the anchor.
 		candidates.sort((a, b) => b.timestamp - a.timestamp);
 		const oldestAllowed = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
-		const maxPages = Math.max(1, Math.min(options.maxPages ?? 4, 8));
-		const wait = options.waitMs ?? 6_000;
+		const maxPages = Math.max(1, Math.min(options.maxPages ?? 6, 12));
+		const wait = options.waitMs ?? 7_000;
 		let anchor: Anchor | null = candidates[0];
 		let pages = 0;
 		const seenAnchors = new Set<string>();
@@ -4497,13 +4646,13 @@ export class BaileysProvider implements WhatsAppProvider {
 			const sizeBefore = this.statusesById.size;
 			const current: Anchor = anchor;
 			const outcome = await this.phoneRequests.run('history_on_demand', `status@broadcast:${current.key.id}`, async () => {
-				await sock.fetchMessageHistory(50, current.key, current.timestamp);
+				await sock.fetchMessageHistory(50, current.key, this.historyTimestampMs(current.timestamp));
 				const started = Date.now();
 				while (Date.now() - started < wait) {
 					await waitMs(500);
 					if (this.statusesById.size > sizeBefore) {
 						// Give the rest of the page a moment to land.
-						await waitMs(800);
+						await waitMs(1_000);
 						return true;
 					}
 				}

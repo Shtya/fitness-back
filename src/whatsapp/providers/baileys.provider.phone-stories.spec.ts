@@ -14,8 +14,10 @@ function story(id: string, minutesAgo: number, participant = '201000000001@s.wha
 /** A phone that answers each history request with the stories older than the anchor. */
 function phoneWith(stories: any[], provider: any, pageSize = 2) {
 	return jest.fn(async (_count: number, key: any, timestamp: number) => {
+		// Proto field is ms; messageTimestamp on stories is seconds (same as production WA).
+		const tsSec = Number(timestamp) > 1e12 ? Math.floor(Number(timestamp) / 1000) : Number(timestamp);
 		const older = stories
-			.filter(s => Number(s.messageTimestamp) < timestamp && s.key.id !== key.id)
+			.filter(s => Number(s.messageTimestamp) < tsSec && s.key.id !== key.id)
 			.sort((a, b) => b.messageTimestamp - a.messageTimestamp)
 			.slice(0, pageSize);
 		// what Baileys does with an ON_DEMAND history chunk
@@ -49,6 +51,8 @@ describe('asking the phone for its current stories', () => {
 		expect(ids).toEqual(['S2', 'S3', 'S4', 'S5']);
 		const firstCall = provider.socket.fetchMessageHistory.mock.calls[0];
 		expect(firstCall[1]).toMatchObject({ remoteJid: 'status@broadcast', id: 'S1', participant: '201000000001@s.whatsapp.net' });
+		// Proto field is milliseconds; message timestamps are seconds.
+		expect(firstCall[2]).toBe(Number(onPhone[0].messageTimestamp) * 1000);
 		expect(provider.socket.fetchMessageHistory.mock.calls.length).toBeGreaterThan(1);
 		await new Promise(r => setTimeout(r, 900));
 		expect(events.some(event => event.type === 'status_changed')).toBe(true);
@@ -70,7 +74,10 @@ describe('asking the phone for its current stories', () => {
 		await expect(offline.requestStatusesFromPhone([])).resolves.toMatchObject({ requested: false, reason: 'not_connected' });
 		const noAnchor = connectedProvider();
 		noAnchor.socket.fetchMessageHistory = jest.fn();
-		await expect(noAnchor.requestStatusesFromPhone([])).resolves.toMatchObject({ requested: false, reason: 'no_anchor' });
+		await expect(noAnchor.requestStatusesFromPhone([], { waitMs: 0 })).resolves.toMatchObject({
+			requested: false,
+			reason: 'no_anchor',
+		});
 		expect(noAnchor.socket.fetchMessageHistory).not.toHaveBeenCalled();
 	});
 });

@@ -577,40 +577,72 @@ export class WhatsAppStatusService {
 	/** Last time each account asked its phone for stories (automatic requests are spaced out). */
 	private readonly phoneStoryRequests = new Map<string, number>();
 
-	/**
-	 * Ask the phone for the stories it has now, in the background. Opening Stories triggers it
-	 * (at most every few minutes); "Sync now" forces it. Stories the phone sends arrive like live
-	 * ones (provider `status_changed` → sync → `statuses_updated`), so the list refreshes itself.
-	 */
-	requestStoriesFromPhone(accountId: string, options: { force?: boolean } = {}) {
-		const last = this.phoneStoryRequests.get(accountId) || 0;
-		if (!options.force && Date.now() - last < PHONE_STORY_REQUEST_INTERVAL_MS) return false;
-		const provider = this.providers.getProvider(accountId);
-		if (typeof provider?.requestStatusesFromPhone !== 'function' || provider.getState() !== 'connected') {
-			return false;
-		}
-		this.phoneStoryRequests.set(accountId, Date.now());
-		void (async () => {
-			// Anchors from the database: after a restart the provider cache is empty.
-			const rows = await this.repo.find({
+	/** Live + recent history rows as phone-history anchors (cache is empty after re-link). */
+	private async storyAnchorsForPhone(accountId: string) {
+		const since = new Date(Date.now() - STATUS_LIFETIME_MS);
+		const [liveRows, historyRows] = await Promise.all([
+			this.repo.find({
 				where: { accountId },
 				order: { publishedAt: 'DESC' },
-				take: 20,
-			});
-			const anchors = rows
-				.filter(row => !row.expiresAt || row.expiresAt > new Date())
-				.map(row => storyAnchorFromRow(row))
-				.filter((anchor): anchor is NonNullable<typeof anchor> => Boolean(anchor));
-			const result = await provider.requestStatusesFromPhone!(anchors);
-			this.logger.log(
-				`[WA STORIES] phone request ${accountId}: requested=${result.requested}${result.reason ? ` reason=${result.reason}` : ''} pages=${result.pages} stories ${result.before}→${result.after}`,
-			);
-		})().catch(error =>
+				take: 40,
+			}),
+			this.historyRepo.find({
+				where: { accountId },
+				order: { publishedAt: 'DESC' },
+				take: 40,
+			}),
+		]);
+		const seen = new Set<string>();
+		const anchors: Array<{ id: string; participant?: string | null; fromMe?: boolean; timestamp: number }> = [];
+		for (const row of [...liveRows, ...historyRows]) {
+			if (row.publishedAt && row.publishedAt < since) continue;
+			if (row.expiresAt && row.expiresAt <= new Date()) continue;
+			const anchor = storyAnchorFromRow(row);
+			if (!anchor || seen.has(anchor.id)) continue;
+			seen.add(anchor.id);
+			anchors.push(anchor);
+		}
+		return anchors;
+	}
+
+	/**
+	 * Ask the phone for the stories it has now. Opening Stories triggers it in the background
+	 * (spaced out); "Sync now" awaits the pages so the response already includes what the phone
+	 * sent. Stories also arrive live via `status_changed` → sync → `statuses_updated`.
+	 */
+	requestStoriesFromPhone(accountId: string, options: { force?: boolean } = {}) {
+		const run = this.requestStoriesFromPhoneAsync(accountId, options);
+		if (!run) return false;
+		void run.catch(error =>
 			this.logger.warn(
 				`[WA STORIES] phone request failed for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
 			),
 		);
 		return true;
+	}
+
+	requestStoriesFromPhoneAsync(
+		accountId: string,
+		options: { force?: boolean; maxPages?: number; waitMs?: number } = {},
+	): Promise<{ requested: boolean; reason?: string; pages: number; before: number; after: number }> | null {
+		const last = this.phoneStoryRequests.get(accountId) || 0;
+		if (!options.force && Date.now() - last < PHONE_STORY_REQUEST_INTERVAL_MS) return null;
+		const provider = this.providers.getProvider(accountId);
+		if (typeof provider?.requestStatusesFromPhone !== 'function' || provider.getState() !== 'connected') {
+			return null;
+		}
+		this.phoneStoryRequests.set(accountId, Date.now());
+		return (async () => {
+			const anchors = await this.storyAnchorsForPhone(accountId);
+			const result = await provider.requestStatusesFromPhone!(anchors, {
+				maxPages: options.maxPages ?? (options.force ? 10 : 6),
+				waitMs: options.waitMs ?? (options.force ? 8_000 : 6_000),
+			});
+			this.logger.log(
+				`[WA STORIES] phone request ${accountId}: requested=${result.requested}${result.reason ? ` reason=${result.reason}` : ''} pages=${result.pages} stories ${result.before}→${result.after} anchors=${anchors.length}`,
+			);
+			return result;
+		})();
 	}
 
 	async list(user: User, accountId: string, refresh = false, debug = false, fromPhone = false) {
@@ -625,10 +657,44 @@ export class WhatsAppStatusService {
 		const excluded: Array<{ id: string; reason: string }> = [];
 
 		if (refresh) {
-			this.requestStoriesFromPhone(accountId, { force: fromPhone });
+			if (fromPhone) {
+				// Sync now: wait for the phone pages, then persist whatever landed.
+				const phoneRun = this.requestStoriesFromPhoneAsync(accountId, {
+					force: true,
+					maxPages: 10,
+					waitMs: 8_000,
+				});
+				if (phoneRun) {
+					const phone = await phoneRun.catch(error => {
+						this.logger.warn(
+							`[WA STORIES] Sync now phone wait failed for ${accountId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+						return null;
+					});
+					// Nothing came page by page (or nothing to start from, as right after a relink):
+					// ask the phone to send its history again; the stories in it are read as well.
+					const nothingNew = !phone || !phone.requested || phone.after <= phone.before;
+					const providerNow = this.providers.getProvider(accountId);
+					if (nothingNew && typeof providerNow?.requestFullSyncFromPhone === 'function') {
+						const full = await providerNow.requestFullSyncFromPhone().catch(() => null);
+						this.logger.log(
+							`[WA STORIES] Sync now full resend ${accountId}: requested=${Boolean(full?.requested)}${full?.reason ? ` reason=${full.reason}` : ''}`,
+						);
+						if (full?.requested) refreshHint = 'whatsapp_stories_full_sync_requested';
+						else if (full?.reason === 'rate_limited') refreshHint = 'whatsapp_stories_full_sync_wait';
+					}
+					if (!refreshHint && phone && !phone.requested && phone.reason === 'no_anchor') {
+						refreshHint = 'whatsapp_stories_waiting_for_live';
+					}
+				}
+			} else {
+				this.requestStoriesFromPhone(accountId, { force: false });
+			}
 			const synced = await this.syncFromProvider(accountId);
 			providerCount = synced.providerCount;
-			refreshHint = synced.hint;
+			refreshHint = refreshHint || synced.hint;
 			provider = this.providers.getProvider(accountId);
 			providerState = provider?.getState() || providerState;
 			sessionReady = providerState === 'connected';
