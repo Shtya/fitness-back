@@ -74,6 +74,7 @@ export class WhatsAppAccountsService {
 
 	async list(user: User) {
 		const accounts = await this.accessService.listAccessibleAccounts(user);
+		const stats = await this.chatStats(accounts.map(account => account.id));
 		const items: Array<Record<string, unknown>> = [];
 		for (const account of accounts) {
 			try {
@@ -112,6 +113,10 @@ export class WhatsAppAccountsService {
 					lastError: account.lastError,
 					providerCapabilities: account.providerCapabilities || {},
 					privacySettings: getWhatsAppPrivacySettings(account),
+					// Whole-account numbers are for people who see the whole account.
+					stats: this.accessService.canSeeAllConversations(user, { account, ...access })
+						? stats.get(account.id) || { chats: 0, unread: 0, lastMessageAt: null }
+						: null,
 					created_at: (account as any).created_at,
 					updated_at: (account as any).updated_at,
 					currentAccess: {
@@ -132,6 +137,38 @@ export class WhatsAppAccountsService {
 			}
 		}
 		return items;
+	}
+
+	/** Chats, unread messages and the latest message per account, in one query. */
+	private async chatStats(accountIds: string[]) {
+		const result = new Map<string, { chats: number; unread: number; lastMessageAt: string | null }>();
+		if (!accountIds.length) return result;
+		try {
+			const rows: Array<{ accountId: string; chats: string; unread: string; lastMessageAt: Date | null }> =
+				await this.accountRepo.query(
+					`SELECT c.account_id AS "accountId",
+					        COUNT(*)::int AS chats,
+					        COALESCE(SUM(GREATEST(c.unread_count, 0)), 0)::int AS unread,
+					        MAX(c.last_message_at) AS "lastMessageAt"
+					   FROM whatsapp_conversations c
+					  WHERE c.account_id = ANY($1::uuid[])
+					    AND c.deleted_at IS NULL
+					    AND LOWER(c.provider_chat_id) NOT LIKE '%@broadcast%'
+					    AND LOWER(c.provider_chat_id) NOT LIKE '%status@%'
+					  GROUP BY c.account_id`,
+					[accountIds],
+				);
+			for (const row of rows) {
+				result.set(String(row.accountId), {
+					chats: Number(row.chats) || 0,
+					unread: Number(row.unread) || 0,
+					lastMessageAt: row.lastMessageAt ? new Date(row.lastMessageAt).toISOString() : null,
+				});
+			}
+		} catch {
+			/* stats are optional on the accounts page */
+		}
+		return result;
 	}
 
 	async create(user: User, input: { label: string; providerName?: string }) {
