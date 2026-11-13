@@ -84,9 +84,17 @@ export class WalletAccount extends CoreEntity {
 	@Column({ type: 'enum', enum: MoneyCurrency, default: MoneyCurrency.EGP })
 	currency!: MoneyCurrency;
 
-	// Manual real balance entered by user
+	// Manual real balance entered by user: the total of bank + mobile wallet + cash.
 	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
 	openingBalance!: string;
+
+	// Part of the total held in the bank / the mobile wallet. Cash is the rest
+	// (openingBalance - bank - mobile wallet), so money moved by income and expenses lands in cash.
+	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+	bankBalance!: string;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+	mobileWalletBalance!: string;
 
 	@Column({ type: 'boolean', default: true })
 	isDefault!: boolean;

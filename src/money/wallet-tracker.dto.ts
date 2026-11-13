@@ -12,6 +12,11 @@ export class TrackerBalanceDto {
 	@Min(0)
 	@Max(1_000_000_000)
 	amount!: number;
+
+	/** Which pocket to change; without it the total changes (the money lands in cash). */
+	@IsOptional()
+	@IsIn(['bank', 'wallet', 'cash'])
+	pocket?: 'bank' | 'wallet' | 'cash';
 }
 
 export class CreateTrackerItemDto {

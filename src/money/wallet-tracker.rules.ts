@@ -155,6 +155,34 @@ export function nextBalanceCents(currentCents: number, mode: 'set' | 'add' | 'su
 	return mode === 'add' ? currentCents + amountCents : currentCents - amountCents;
 }
 
+export type BalancePocket = 'bank' | 'wallet' | 'cash';
+export type PocketCents = { totalCents: number; bankCents: number; walletCents: number };
+
+/** Cash is what the total holds beyond the bank and the mobile wallet. */
+export function pocketsOf({ totalCents, bankCents, walletCents }: PocketCents) {
+	return { bank: bankCents, wallet: walletCents, cash: totalCents - bankCents - walletCents };
+}
+
+/**
+ * Edit one pocket and keep the others as they are: the total moves by the same amount.
+ * Without a pocket the total itself is edited, and the change lands in cash.
+ */
+export function nextPocketCents(
+	current: PocketCents,
+	mode: 'set' | 'add' | 'subtract',
+	amountCents: number,
+	pocket?: BalancePocket,
+): PocketCents {
+	if (!pocket) return { ...current, totalCents: nextBalanceCents(current.totalCents, mode, amountCents) };
+	const before = pocketsOf(current)[pocket];
+	const delta = nextBalanceCents(before, mode, amountCents) - before;
+	return {
+		totalCents: current.totalCents + delta,
+		bankCents: current.bankCents + (pocket === 'bank' ? delta : 0),
+		walletCents: current.walletCents + (pocket === 'wallet' ? delta : 0),
+	};
+}
+
 export function usdToEgpCents(usdAmount: number, rate: number): number {
 	return toCents(fromCents(toCents(usdAmount)) * rate);
 }

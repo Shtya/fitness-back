@@ -31,7 +31,8 @@ import {
 	forecastRecurring,
 	fromCents,
 	monthRange,
-	nextBalanceCents,
+	nextPocketCents,
+	pocketsOf,
 	normalizeTrackerCurrency,
 	summarizeTracker,
 	toCents,
@@ -43,6 +44,12 @@ import {
 
 const LIST_LIMIT = 300;
 const DEFAULT_WALLET_NAME = 'Main Wallet';
+
+/** Production runs with synchronize off: add the pocket columns at boot (additive, default 0). */
+const POCKET_SCHEMA_STATEMENTS = [
+	`ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS "bankBalance" numeric(12,2) NOT NULL DEFAULT 0`,
+	`ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS "mobileWalletBalance" numeric(12,2) NOT NULL DEFAULT 0`,
+];
 const UNDEFINED_TABLE = '42P01';
 
 const isMissingTable = (error: any) => (error?.driverError?.code ?? error?.code) === UNDEFINED_TABLE;
@@ -61,6 +68,14 @@ export class WalletTrackerService {
 		private readonly goldPrice: GoldPriceService,
 		private readonly fxRate: FxRateService,
 	) {}
+
+	async onModuleInit() {
+		try {
+			for (const statement of POCKET_SCHEMA_STATEMENTS) await this.dataSource.query(statement);
+		} catch (error) {
+			this.logger.error(`Wallet pocket columns could not be added: ${(error as Error)?.message || error}`);
+		}
+	}
 
 	async getTracker(userId: string) {
 		await this.applyDueExpenses(userId);
@@ -91,6 +106,14 @@ export class WalletTrackerService {
 		const today = todayYmd();
 		return {
 			wallet: wallet ? { id: wallet.id, name: wallet.name, currency: wallet.currency } : null,
+			pockets: (() => {
+				const p = pocketsOf({
+					totalCents: balanceCents,
+					bankCents: toCents(wallet?.bankBalance),
+					walletCents: toCents(wallet?.mobileWalletBalance),
+				});
+				return { bank: fromCents(p.bank), wallet: fromCents(p.wallet), cash: fromCents(p.cash) };
+			})(),
 			summary: summarizeTracker(balanceCents, items, today),
 			forecast: forecastRecurring(balanceCents, items, expenses.items, today),
 			fx: fx
@@ -471,8 +494,19 @@ export class WalletTrackerService {
 	async updateBalance(userId: string, dto: TrackerBalanceDto) {
 		await this.dataSource.transaction(async (m) => {
 			const wallet = await this.ensureWallet(m, userId);
-			const next = nextBalanceCents(toCents(wallet.openingBalance), dto.mode, toCents(dto.amount));
-			wallet.openingBalance = centsToDecimal(next);
+			const next = nextPocketCents(
+				{
+					totalCents: toCents(wallet.openingBalance),
+					bankCents: toCents(wallet.bankBalance),
+					walletCents: toCents(wallet.mobileWalletBalance),
+				},
+				dto.mode,
+				toCents(dto.amount),
+				dto.pocket,
+			);
+			wallet.openingBalance = centsToDecimal(next.totalCents);
+			wallet.bankBalance = centsToDecimal(next.bankCents);
+			wallet.mobileWalletBalance = centsToDecimal(next.walletCents);
 			await m.save(wallet);
 		});
 		return this.getTracker(userId);

@@ -5,6 +5,8 @@ import {
 	forecastRecurring,
 	monthRange,
 	nextBalanceCents,
+	nextPocketCents,
+	pocketsOf,
 	normalizeTrackerCurrency,
 	summarizeTracker,
 	toCents,
@@ -78,6 +80,22 @@ describe('wallet tracker rules', () => {
 		expect(nextBalanceCents(1000, 'set', 250)).toBe(250);
 		expect(nextBalanceCents(1000, 'add', 250)).toBe(1250);
 		expect(nextBalanceCents(1000, 'subtract', 250)).toBe(750);
+	});
+
+	it('splits the balance into bank, mobile wallet and cash, and edits one pocket at a time', () => {
+		const start = { totalCents: 10_000, bankCents: 6_000, walletCents: 1_500 };
+		expect(pocketsOf(start)).toEqual({ bank: 6_000, wallet: 1_500, cash: 2_500 });
+		// setting the bank keeps wallet and cash, the total follows
+		const bank = nextPocketCents(start, 'set', 8_000, 'bank');
+		expect(bank).toEqual({ totalCents: 12_000, bankCents: 8_000, walletCents: 1_500 });
+		expect(pocketsOf(bank).cash).toBe(2_500);
+		// cash only moves the total
+		expect(nextPocketCents(start, 'subtract', 500, 'cash')).toEqual({ totalCents: 9_500, bankCents: 6_000, walletCents: 1_500 });
+		expect(nextPocketCents(start, 'add', 300, 'wallet')).toEqual({ totalCents: 10_300, bankCents: 6_000, walletCents: 1_800 });
+		// no pocket: the old total edit, landing in cash
+		const total = nextPocketCents(start, 'add', 1_000);
+		expect(total).toEqual({ totalCents: 11_000, bankCents: 6_000, walletCents: 1_500 });
+		expect(pocketsOf(total).cash).toBe(3_500);
 	});
 
 	it('converts USD to EGP cents at the given rate', () => {
