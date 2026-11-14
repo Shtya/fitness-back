@@ -230,6 +230,12 @@ export class WhatsAppConversationsController {
 		);
 	}
 
+	/** "Check connection": is this person reachable right now (online, ticks on your last message). */
+	@Get('conversations/:conversationId/reachability')
+	checkReachability(@Req() req: any, @Param('conversationId') conversationId: string) {
+		return this.sync.checkConversationReachability(req.user, conversationId);
+	}
+
 	/** One person's card for the side panel (a group member): name, photo, number, their chat. */
 	@Get('accounts/:accountId/people/:waId')
 	getPersonCard(

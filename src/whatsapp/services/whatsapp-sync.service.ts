@@ -47,7 +47,7 @@ import {
 	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
 import { REPAIR_INBOX_ORDER_SQL, shouldAdvanceLastMessageAt } from '../utils/whatsapp-inbox-order';
-import { onlyConversationsWithMessages } from '../utils/whatsapp-inbox-visibility';
+import { matchConversationSearch, onlyConversationsWithMessages } from '../utils/whatsapp-inbox-visibility';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import {
 	buildWhatsAppGroupReceiptView,
@@ -3179,8 +3179,116 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isBusiness: Boolean(phoneContact?.isBusiness || contact?.isBusiness),
 			isSaved: Boolean(phoneContact?.isSaved || contact?.isSaved),
 			conversationId: visibleConversation?.id || null,
+			// Open the chat by this exact id: the phone number alone would open a second chat
+			// next to one kept under their @lid id.
+			conversationChatId: visibleConversation?.providerChatId || null,
 			// Staff may only start chats when they can use the account.
 			canMessage: Boolean(accountAccess.canUse),
+		};
+	}
+
+	/**
+	 * "Check connection" in a chat's menu: is it worth messaging this person right now?
+	 * Three live signals, none of which sends them anything:
+	 * - presence: subscribe and wait a few seconds for "online" / last seen (hidden by many);
+	 * - their number is on WhatsApp at all;
+	 * - your last message: still one tick (sent, not delivered) for a while means their phone is
+	 *   not receiving; two ticks (delivered / read) means it is.
+	 */
+	async checkConversationReachability(user: User, conversationId: string) {
+		const { conversation } = await this.access.assertConversationVisible(user, conversationId);
+		const chatId = String(conversation?.providerChatId || '');
+		if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@newsletter') || chatId.includes('@broadcast')) {
+			throw new BadRequestException('Connection check works in one-to-one chats only');
+		}
+		const accountId = conversation.accountId;
+		const checkedAt = Date.now();
+		const contact = conversation.contactId
+			? await this.contactRepo.findOne({ where: { id: conversation.contactId } })
+			: null;
+		const phone =
+			phoneFromWaId(chatId) ||
+			(/^\d{8,15}$/.test(String(contact?.phoneNumber || '').replace(/\D/g, ''))
+				? String(contact?.phoneNumber).replace(/\D/g, '')
+				: null);
+
+		const [lastOutbound, lastDelivered] = await Promise.all([
+			this.messageRepo.findOne({
+				where: { conversationId, direction: WhatsAppMessageDirection.OUTBOUND },
+				order: { providerTimestamp: 'DESC' },
+				select: ['id', 'status', 'providerTimestamp', 'statusUpdatedAt'],
+			}),
+			this.messageRepo.findOne({
+				where: {
+					conversationId,
+					direction: WhatsAppMessageDirection.OUTBOUND,
+					status: In([WhatsAppMessageStatus.DELIVERED, WhatsAppMessageStatus.READ, WhatsAppMessageStatus.PLAYED]),
+				},
+				order: { providerTimestamp: 'DESC' },
+				select: ['id', 'status', 'providerTimestamp', 'statusUpdatedAt'],
+			}),
+		]);
+
+		const provider = this.providers.getProvider(accountId);
+		const sessionConnected = provider?.getState() === 'connected';
+		let presence: { online: boolean; lastSeen: number | null; fresh: boolean } | null = null;
+		let onWhatsApp: boolean | null = null;
+		if (sessionConnected) {
+			const presenceOf = () =>
+				this.contactPresence
+					.getMemorySnapshot(accountId)
+					.find((entry) => entry.conversationId === conversationId) || null;
+			if (typeof provider.subscribePresence === 'function') {
+				await provider.subscribePresence(expandPresenceSubscribeIds(chatId, phone)).catch(() => undefined);
+				// WhatsApp answers a subscribe with the current presence within a second or two.
+				for (let waited = 0; waited < 4000; waited += 250) {
+					const entry = presenceOf();
+					if (entry && entry.updatedAt >= checkedAt) break;
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				}
+			}
+			const entry = presenceOf();
+			if (entry) {
+				presence = {
+					online: Boolean(entry.online || entry.typing || entry.recording),
+					lastSeen: entry.lastSeen || null,
+					fresh: entry.updatedAt >= checkedAt,
+				};
+			}
+			if (phone && typeof provider.checkWhatsAppNumbers === 'function') {
+				const [result] = await provider.checkWhatsAppNumbers([phone]).catch(() => [] as any[]);
+				if (result) onWhatsApp = Boolean(result.exists);
+			}
+		}
+
+		const ms = (value: unknown) => (value ? new Date(value as any).getTime() : 0);
+		const lastStatus = String(lastOutbound?.status || '');
+		const lastSentAt = ms(lastOutbound?.providerTimestamp);
+		const delivered = ['delivered', 'read', 'played'].includes(lastStatus);
+		// One tick for more than two minutes: WhatsApp could not hand it to their phone yet.
+		const stuckOnOneTick = lastStatus === 'sent' && lastSentAt > 0 && checkedAt - lastSentAt > 2 * 60_000;
+
+		let verdict: 'online' | 'reachable' | 'one_tick' | 'not_on_whatsapp' | 'session_offline' | 'unknown';
+		if (!sessionConnected) verdict = 'session_offline';
+		else if (onWhatsApp === false) verdict = 'not_on_whatsapp';
+		else if (presence?.online) verdict = 'online';
+		else if (stuckOnOneTick) verdict = 'one_tick';
+		else if (delivered) verdict = 'reachable';
+		else verdict = 'unknown';
+
+		return {
+			conversationId,
+			checkedAt: new Date(checkedAt).toISOString(),
+			verdict,
+			sessionConnected,
+			onWhatsApp,
+			presence,
+			lastMessage: lastOutbound
+				? { status: lastStatus, sentAt: lastSentAt ? new Date(lastSentAt).toISOString() : null }
+				: null,
+			lastDeliveredAt: lastDelivered?.providerTimestamp
+				? new Date(lastDelivered.providerTimestamp).toISOString()
+				: null,
 		};
 	}
 
@@ -4420,15 +4528,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		const normalizedSearch = String(search || '').trim();
 		if (normalizedSearch) {
-			query.andWhere(
-				`(
-					contact.name ILIKE :search
-					OR contact.phoneNumber ILIKE :search
-					OR group.subject ILIKE :search
-					OR conversation.providerChatId ILIKE :search
-				)`,
-				{ search: `%${normalizedSearch}%` },
-			);
+			matchConversationSearch(query, normalizedSearch);
 		}
 		if (since) {
 			query.andWhere(

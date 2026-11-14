@@ -18,6 +18,7 @@ import { FbEngagementJobsService } from './services/fb-engagement-jobs.service';
 import { FbEngagementOverviewService } from './services/fb-engagement-overview.service';
 import { FbEngagementPostsService } from './services/fb-engagement-posts.service';
 import { FbEngagementWorkerService } from './services/fb-engagement-worker.service';
+import { FbHomeService } from './services/fb-home.service';
 
 @Module({
 	imports: [
@@ -37,6 +38,7 @@ import { FbEngagementWorkerService } from './services/fb-engagement-worker.servi
 		FbEngagementJobsService,
 		FbEngagementConnectionsService,
 		FbEngagementPostsService,
+		FbHomeService,
 		FbEngagementCampaignsService,
 		FbEngagementCommentsService,
 		FbEngagementOverviewService,

@@ -1,5 +1,51 @@
 import { SelectQueryBuilder } from 'typeorm';
-import { WhatsAppMessage } from '../entities/whatsapp.entity';
+import { WhatsAppContact, WhatsAppMessage } from '../entities/whatsapp.entity';
+
+/**
+ * Chat-list search. Besides the chat's contact name and number, it finds:
+ * - the name you saved someone under (phonebook_name / local_name), which `name` does not hold;
+ * - a number typed any way (+20 100…, 0100…): digits are compared on their own;
+ * - a chat kept under an @lid id, whose contact has no real number: the number and saved name
+ *   sit on the same person's phone-id contact, joined by the phone the @lid contact resolved to.
+ * Expects `contact` and `group` joined on `conversation`. One line per condition, for the reason
+ * given on onlyConversationsWithMessages.
+ */
+export function matchConversationSearch<T>(query: SelectQueryBuilder<T>, rawSearch: string, alias = 'conversation') {
+	const search = String(rawSearch || '').trim();
+	if (!search) return query;
+	const digits = search.replace(/\D/g, '');
+	const withDigits = digits.length >= 4;
+	return query.andWhere(
+		(qb) => {
+			const samePerson = qb
+				.subQuery()
+				.select('1')
+				.from(WhatsAppContact, 'otherContact')
+				.where(`otherContact.accountId = ${alias}.accountId`)
+				.andWhere(
+					`(otherContact.waId = ${alias}.providerChatId OR (contact.phoneNumber IS NOT NULL AND otherContact.phoneNumber = contact.phoneNumber))`,
+				)
+				.andWhere(
+					`(otherContact.name ILIKE :search OR otherContact.phonebookName ILIKE :search OR otherContact.localName ILIKE :search${
+						withDigits ? ' OR otherContact.phoneNumber LIKE :searchDigits' : ''
+					})`,
+				)
+				.getQuery();
+			const parts = [
+				'contact.name ILIKE :search',
+				'contact.phonebookName ILIKE :search',
+				'contact.localName ILIKE :search',
+				'contact.phoneNumber ILIKE :search',
+				...(withDigits ? ['contact.phoneNumber LIKE :searchDigits', `${alias}.providerChatId LIKE :searchDigits`] : []),
+				'group.subject ILIKE :search',
+				`${alias}.providerChatId ILIKE :search`,
+				`EXISTS ${samePerson}`,
+			];
+			return `(${parts.join(' OR ')})`;
+		},
+		{ search: `%${search}%`, searchDigits: `%${digits}%` },
+	);
+}
 
 /** The internal AI chat that carries email summaries; always listed. */
 export const EMAIL_MEMO_AI_CHAT_ID = 'email-memo-ai@so7ba.internal';

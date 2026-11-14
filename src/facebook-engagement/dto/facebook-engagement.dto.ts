@@ -85,6 +85,35 @@ export class PagePostsQueryDto extends LocalizedQueryDto {
 	after?: string;
 }
 
+export class HomeFeedQueryDto extends LocalizedQueryDto {
+	@IsOptional()
+	@IsUUID()
+	accountId?: string;
+
+	@IsOptional()
+	@Transform(emptyToUndefined)
+	@IsString()
+	@MaxLength(128)
+	author?: string;
+
+	@IsOptional()
+	@Transform(emptyToUndefined)
+	@IsString()
+	@MaxLength(256)
+	q?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(512)
+	after?: string;
+}
+
+export class HomeStoriesQueryDto extends LocalizedQueryDto {
+	@IsOptional()
+	@IsUUID()
+	accountId?: string;
+}
+
 export class ResolvePostDto {
 	@IsUUID()
 	accountId: string;

@@ -26,6 +26,8 @@ import {
 	CompleteOAuthDto,
 	ConnectWithTokenDto,
 	CreateCampaignDto,
+	HomeFeedQueryDto,
+	HomeStoriesQueryDto,
 	ListActivityQueryDto,
 	ListCampaignsQueryDto,
 	ListCommentsQueryDto,
@@ -43,6 +45,7 @@ import { FbEngagementCommentsService } from './services/fb-engagement-comments.s
 import { FbEngagementConnectionsService } from './services/fb-engagement-connections.service';
 import { FbEngagementOverviewService } from './services/fb-engagement-overview.service';
 import { FbEngagementPostsService } from './services/fb-engagement-posts.service';
+import { FbHomeService } from './services/fb-home.service';
 
 const ROLES = [UserRole.ADMIN, UserRole.COACH, UserRole.SUPER_ADMIN] as const;
 const uuid = new ParseUUIDPipe();
@@ -53,6 +56,7 @@ export class FacebookEngagementController {
 		private readonly overviewService: FbEngagementOverviewService,
 		private readonly connections: FbEngagementConnectionsService,
 		private readonly posts: FbEngagementPostsService,
+		private readonly homeService: FbHomeService,
 		private readonly campaigns: FbEngagementCampaignsService,
 		private readonly comments: FbEngagementCommentsService,
 		private readonly activity: FbEngagementActivityService,
@@ -135,6 +139,40 @@ export class FacebookEngagementController {
 	@Roles(...ROLES)
 	listAccounts(@Req() req: any) {
 		return this.connections.listAccounts(req.user.id);
+	}
+
+	/** WhatsApp-embedded Facebook Home (Pages feed + filters). */
+	@Get('home')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	facebookHome(@Req() req: any) {
+		return this.homeService.home(req.user.id);
+	}
+
+	@Get('home/people')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	homePeople(@Req() req: any) {
+		return this.homeService.people(req.user.id);
+	}
+
+	@Get('home/feed')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	homeFeed(@Req() req: any, @Query() query: HomeFeedQueryDto) {
+		return this.homeService.feed(req.user.id, {
+			accountId: query.accountId,
+			author: query.author,
+			q: query.q,
+			after: query.after,
+		});
+	}
+
+	@Get('home/stories')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(...ROLES)
+	homeStories(@Req() req: any, @Query() query: HomeStoriesQueryDto) {
+		return this.homeService.stories(req.user.id, query.accountId);
 	}
 
 	@Get('accounts/:id/posts')
