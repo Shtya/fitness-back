@@ -3113,6 +3113,77 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	/**
+	 * What the side panel shows about one person (a group member you clicked): name, picture,
+	 * real phone number, and their 1:1 chat when you have one you are allowed to see.
+	 * Group senders are often `@lid` ids, which are not phone numbers; the live session maps
+	 * them to the number (saved on the contact so the next look-up is instant).
+	 */
+	async getPersonCard(user: User, accountId: string, rawWaId: string) {
+		const accountAccess = await this.access.getAccountAccess(user, accountId);
+		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
+		const waId = String(rawWaId || '').trim();
+		if (!waId || waId.length > 160) throw new BadRequestException('A WhatsApp id is required');
+		const isLid = /@(hosted\.)?lid$/i.test(waId);
+		const lidDigits = waId.replace(/@.*$/, '').split(':')[0].replace(/\D/g, '');
+		const realPhone = (value: unknown) => {
+			const digits = String(value || '').replace(/\D/g, '');
+			return /^\d{8,15}$/.test(digits) && !(isLid && digits === lidDigits) ? digits : null;
+		};
+
+		const contact = await this.contactRepo.findOne({ where: { accountId, waId } });
+		let phone = isLid ? realPhone(contact?.phoneNumber) : realPhone(phoneFromWaId(waId) || contact?.phoneNumber);
+		if (!phone && isLid) {
+			const provider = this.providers.getProvider(accountId);
+			if (typeof provider?.resolveContactIdentity === 'function' && provider.getState() === 'connected') {
+				const identity = await Promise.race([
+					provider.resolveContactIdentity(waId).catch(() => null),
+					new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+				]);
+				phone = realPhone(identity?.phoneNumber);
+				if (phone && contact) {
+					void this.contactRepo.update({ accountId, waId }, { phoneNumber: phone }).catch(() => undefined);
+				}
+			}
+		}
+		// The same person may also be saved under their phone id (from a 1:1 chat).
+		const phoneIds = phone ? [`${phone}@s.whatsapp.net`, `${phone}@c.us`] : [];
+		const phoneContact = phoneIds.length
+			? await this.contactRepo.findOne({ where: { accountId, waId: In(phoneIds) } })
+			: null;
+		const strongName = (value: unknown, id: string) => {
+			const name = String(value || '').trim();
+			return name && !isWeakContactDisplayName(name, id) ? name : null;
+		};
+		const name =
+			strongName(phoneContact?.name, phoneContact?.waId || waId) ||
+			strongName(contact?.name, waId) ||
+			strongName(contact?.localName, waId) ||
+			null;
+
+		const chatIds = [waId, ...phoneIds];
+		const conversation = await this.conversationRepo.findOne({
+			where: { accountId, providerChatId: In(chatIds) },
+			select: ['id', 'assignedUserId', 'providerChatId', 'lastMessageAt'],
+			order: { lastMessageAt: 'DESC' },
+		});
+		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
+		const visibleConversation =
+			conversation && (canSeeAll || conversation.assignedUserId === user.id) ? conversation : null;
+
+		return {
+			waId,
+			name,
+			phone,
+			avatarUrl: phoneContact?.avatarUrl || contact?.avatarUrl || null,
+			isBusiness: Boolean(phoneContact?.isBusiness || contact?.isBusiness),
+			isSaved: Boolean(phoneContact?.isSaved || contact?.isSaved),
+			conversationId: visibleConversation?.id || null,
+			// Staff may only start chats when they can use the account.
+			canMessage: Boolean(accountAccess.canUse),
+		};
+	}
+
 	/** Open or create a direct chat by WhatsApp id (used for story replies). */
 	async openConversationByChatId(
 		user: User,

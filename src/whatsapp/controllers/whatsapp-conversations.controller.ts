@@ -230,6 +230,16 @@ export class WhatsAppConversationsController {
 		);
 	}
 
+	/** One person's card for the side panel (a group member): name, photo, number, their chat. */
+	@Get('accounts/:accountId/people/:waId')
+	getPersonCard(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Param('waId') waId: string,
+	) {
+		return this.sync.getPersonCard(req.user, accountId, waId);
+	}
+
 	@Post('accounts/:accountId/conversations/open')
 	openConversation(
 		@Req() req: any,
