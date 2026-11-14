@@ -24,6 +24,16 @@ export class LookupPhoneDto {
 	@MaxLength(8)
 	countryCode?: string;
 
+	/**
+	 * Optional display name from WhatsApp / CRM. Used to deepen public web
+	 * queries (name + phone) and early name follow-up — not treated as proof.
+	 */
+	@IsOptional()
+	@IsString()
+	@Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+	@MaxLength(120)
+	nameHint?: string;
+
 	/** Force refresh and skip cache */
 	@IsOptional()
 	@IsBoolean()

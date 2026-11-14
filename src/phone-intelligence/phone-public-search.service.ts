@@ -46,11 +46,15 @@ export class PhonePublicSearchService {
 	/** Deep public search across engines + configured sites. */
 	async search(
 		phone: NormalizedPhone,
-		opts?: { onProgress?: SearchProgressCb; deep?: boolean },
+		opts?: { onProgress?: SearchProgressCb; deep?: boolean; nameHint?: string },
 	): Promise<PublicSearchHit[]> {
 		const deep = opts?.deep !== false;
 		const onProgress = opts?.onProgress;
 		const formats = phoneSearchFormats(phone);
+		const nameHint = String(opts?.nameHint || '')
+			.trim()
+			.replace(/\s+/g, ' ')
+			.slice(0, 80);
 		const hits: PublicSearchHit[] = [];
 		const enabledSites = await this.sites.listEnabled();
 		const deadline = Date.now() + 75_000; // hard cap so UI never freezes at 38%
@@ -119,16 +123,27 @@ export class PhonePublicSearchService {
 			42,
 		);
 
-		// Keep query count small — without SerpAPI this used to hammer DDG for minutes
+		// Prefer name+phone when WhatsApp gave a contact name — yields stronger social hits.
+		// Keep query count small — without SerpAPI this used to hammer DDG for minutes.
 		const queries = deep
-			? [
-					`"${formats.bestWebQuery}"`,
-					`"${formats.bestWebQuery}" (name OR اسم OR caller OR صاحب)`,
-					`"${formats.bestWebQuery}" (spam OR scam OR احتيال)`,
-				]
-			: [`"${formats.bestWebQuery}"`];
+			? nameHint.length >= 2
+				? [
+						`"${formats.bestWebQuery}"`,
+						`"${nameHint}" "${formats.bestWebQuery}"`,
+						`(site:facebook.com OR site:instagram.com OR site:tiktok.com OR site:linkedin.com) "${nameHint}"`,
+						`"${nameHint}" "${formats.localLeadingZero || formats.bestWebQuery}" (WhatsApp OR واتساب OR caller OR صاحب)`,
+					]
+				: [
+						`"${formats.bestWebQuery}"`,
+						`"${formats.bestWebQuery}" (name OR اسم OR caller OR صاحب)`,
+						`"${formats.bestWebQuery}" (spam OR scam OR احتيال)`,
+						`site:facebook.com OR site:instagram.com OR site:tiktok.com "${formats.bestWebQuery}"`,
+					]
+			: nameHint.length >= 2
+				? [`"${nameHint}" "${formats.bestWebQuery}"`, `"${formats.bestWebQuery}"`]
+				: [`"${formats.bestWebQuery}"`];
 
-		const uniqueQueries = [...new Set(queries)].slice(0, hasPaidSearch ? 3 : 2);
+		const uniqueQueries = [...new Set(queries)].slice(0, hasPaidSearch ? 4 : 3);
 
 		const serpHits: PublicSearchHit[] = [];
 		const cseHits: PublicSearchHit[] = [];
@@ -149,8 +164,10 @@ export class PhonePublicSearchService {
 		}
 
 		if (ddgOn && !timedOut()) {
-			// Max 2 DDG queries total — previously this alone could stall the job
-			const ddgHits = await this.duckDuckGoSearch(uniqueQueries.slice(0, 2));
+			// With a WhatsApp name hint, allow 3 DDG queries; otherwise keep 2 to avoid stalls.
+			const ddgHits = await this.duckDuckGoSearch(
+				uniqueQueries.slice(0, nameHint.length >= 2 ? 3 : 2),
+			);
 			ddgHitsAll.push(...ddgHits);
 			hits.push(...ddgHits);
 		}

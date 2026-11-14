@@ -96,14 +96,18 @@ export function phoneSearchFormats(phone: NormalizedPhone) {
 	};
 }
 
-export function buildManualSearchLinks(phone: NormalizedPhone) {
+export function buildManualSearchLinks(phone: NormalizedPhone, nameHint?: string) {
 	const f = phoneSearchFormats(phone);
 	const q = (query: string) =>
 		`https://www.google.com/search?q=${encodeURIComponent(query)}`;
 	const best = f.bestWebQuery;
 	const e164 = f.e164;
+	const name = String(nameHint || '')
+		.trim()
+		.replace(/\s+/g, ' ')
+		.slice(0, 80);
 
-	return {
+	const links: Record<string, string> = {
 		truecaller: `https://www.truecaller.com/search/${encodeURIComponent(
 			(phone.countryCode || 'eg').toLowerCase(),
 		)}/${encodeURIComponent(e164.replace(/^\+/, ''))}`,
@@ -118,6 +122,16 @@ export function buildManualSearchLinks(phone: NormalizedPhone) {
 		whatsappBusinessHint: q(`"${best}" WhatsApp OR واتساب OR "wa.me"`),
 		companyAds: q(`"${best}" (شركة OR company OR gym OR عيادة OR contact OR تواصل)`),
 	};
+
+	if (name.length >= 2) {
+		links.googleNamePhone = q(`"${name}" "${best}"`);
+		links.facebookName = `https://www.facebook.com/search/people/?q=${encodeURIComponent(name)}`;
+		links.instagramName = q(`site:instagram.com "${name}"`);
+		links.tiktokName = `https://www.tiktok.com/search?q=${encodeURIComponent(name)}`;
+		links.linkedinName = q(`site:linkedin.com "${name}"`);
+	}
+
+	return links;
 }
 
 export function normalizePhone(

@@ -69,6 +69,10 @@ export class PhoneEnrichmentService {
 		}
 
 		const steps = this.initialSteps();
+		const nameHint = String(dto.nameHint || '')
+			.trim()
+			.replace(/\s+/g, ' ')
+			.slice(0, 120);
 		const job = this.jobRepo.create({
 			id: randomUUID(),
 			status: PhoneEnrichmentStatus.QUEUED,
@@ -82,6 +86,7 @@ export class PhoneEnrichmentService {
 			steps,
 			partialResult: {
 				phone: this.phonePayload(phone),
+				nameHint: nameHint || null,
 				disclaimer:
 					'Background enrichment uses public APIs and public pages only. Names are not proof of ownership.',
 			},
@@ -133,21 +138,40 @@ export class PhoneEnrichmentService {
 		job.status = PhoneEnrichmentStatus.RUNNING;
 		await this.saveProgress(job, 2, 'normalize', null);
 
+		const nameHint = String((job.partialResult as any)?.nameHint || '')
+			.trim()
+			.replace(/\s+/g, ' ')
+			.slice(0, 120);
 		const bag: any = {
 			phone: this.phonePayload(phone),
+			nameHint: nameHint || null,
 			network: null,
-			identity: { possiblePublicName: null, fromPublicWeb: [] },
+			identity: {
+				possiblePublicName: null,
+				contactNameHint: nameHint
+					? {
+							label: nameHint,
+							source: 'whatsapp_contact',
+							confidence: 0.45,
+							note: 'Name from WhatsApp contact — used to deepen search, not proof of ownership.',
+						}
+					: null,
+				fromPublicWeb: [],
+			},
 			findings: { names: [], locations: [], activities: [], mentions: [] },
 			reports: { total: 0, byCategory: {}, topCategory: null, recent: [] },
 			publicPresence: [],
 			pageInsights: [],
-			externalManualSearch: {},
 			providers: [],
 			searchTargets: [],
 			sourcesMerged: [],
 			disclaimer:
 				'Possible names and links come from public sources only. They are not proof of ownership.',
 			enrichment: { mode: 'deep_background', completedSteps: [] },
+			// Available immediately so the WhatsApp contact panel can open real search URLs
+			// while engines/sites are still running.
+			manualSearchLinks: buildManualSearchLinks(phone, nameHint || undefined),
+			externalManualSearch: buildManualSearchLinks(phone, nameHint || undefined),
 		};
 
 		let lastPersistAt = 0;
@@ -315,6 +339,7 @@ export class PhoneEnrichmentService {
 
 			let hits = await this.publicSearch.search(phone, {
 				deep: true,
+				nameHint: nameHint || undefined,
 				onProgress: async t => {
 					await upsertTarget({
 						id: t.id,
@@ -430,7 +455,10 @@ export class PhoneEnrichmentService {
 			}
 
 			const followName =
-				bag.identity?.possiblePublicName?.label || findings.names?.[0]?.label || null;
+				bag.identity?.possiblePublicName?.label ||
+				findings.names?.[0]?.label ||
+				nameHint ||
+				null;
 			if (followName) {
 				const extra = await this.publicSearch.searchNameFollowUp(phone, followName, {
 					onProgress: async t => {
@@ -505,11 +533,14 @@ export class PhoneEnrichmentService {
 				bag.network.communityScoreSource = bag.findings.scores[0].sourceUrl || 'public';
 			}
 
-			bag.externalManualSearch = this.publicSearch.buildWorkingUsefulLinks(
+			const working = this.publicSearch.buildWorkingUsefulLinks(
 				phone,
 				sites,
 				bag.searchTargets,
 			);
+			const always = buildManualSearchLinks(phone, nameHint || undefined);
+			bag.externalManualSearch = { ...always, ...working };
+			bag.manualSearchLinks = always;
 
 			// 6) Merge
 			await this.startStep(job, 'merge');
