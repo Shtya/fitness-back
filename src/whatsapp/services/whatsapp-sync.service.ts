@@ -47,6 +47,7 @@ import {
 	WhatsAppSendQuoteOptions,
 } from '../providers/whatsapp-provider';
 import { REPAIR_INBOX_ORDER_SQL, shouldAdvanceLastMessageAt } from '../utils/whatsapp-inbox-order';
+import { onlyConversationsWithMessages } from '../utils/whatsapp-inbox-visibility';
 import { sanitizeBaileysWaMessage } from '../utils/baileys-media-raw';
 import {
 	buildWhatsAppGroupReceiptView,
@@ -4314,22 +4315,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// inbox. A row shows once it has a message; groups, channels, the AI Memo chat and pinned
 		// chats always do. Search still finds everyone, to start a chat with them.
 		if (!String(search || '').trim()) {
-			query.andWhere((qb) => {
-				const anyMessage = qb
-					.subQuery()
-					.select('1')
-					.from(WhatsAppMessage, 'anyMessage')
-					.where('anyMessage.conversationId = conversation.id')
-					.getQuery();
-				return `(
-					conversation.lastMessageAt IS NOT NULL
-					OR EXISTS ${anyMessage}
-					OR LOWER(conversation.providerChatId) LIKE '%@g.us'
-					OR LOWER(conversation.providerChatId) LIKE '%@newsletter'
-					OR conversation.providerChatId = 'email-memo-ai@so7ba.internal'
-					OR ${PREFERENCE_COALESCE('is_pinned')} = true
-				)`;
-			});
+			onlyConversationsWithMessages(query, PREFERENCE_COALESCE('is_pinned'));
 		}
 		if (filter === 'unread') {
 			// Assigned-only staff go by their own unread, not the owner's.
