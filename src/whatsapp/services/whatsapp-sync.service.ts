@@ -4309,6 +4309,28 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			// be listed for them too; it carries the owner's own email summaries.
 			query.andWhere('conversation.assignedUserId = :userId', { userId: user.id });
 		}
+		// Like WhatsApp, a person you have never exchanged a message with is not a chat. Linking
+		// brings the phone's contacts and chat list, which left rows with no message at all in the
+		// inbox. A row shows once it has a message; groups, channels, the AI Memo chat and pinned
+		// chats always do. Search still finds everyone, to start a chat with them.
+		if (!String(search || '').trim()) {
+			query.andWhere((qb) => {
+				const anyMessage = qb
+					.subQuery()
+					.select('1')
+					.from(WhatsAppMessage, 'anyMessage')
+					.where('anyMessage.conversationId = conversation.id')
+					.getQuery();
+				return `(
+					conversation.lastMessageAt IS NOT NULL
+					OR EXISTS ${anyMessage}
+					OR LOWER(conversation.providerChatId) LIKE '%@g.us'
+					OR LOWER(conversation.providerChatId) LIKE '%@newsletter'
+					OR conversation.providerChatId = 'email-memo-ai@so7ba.internal'
+					OR ${PREFERENCE_COALESCE('is_pinned')} = true
+				)`;
+			});
+		}
 		if (filter === 'unread') {
 			// Assigned-only staff go by their own unread, not the owner's.
 			if (canSeeAll) query.andWhere('conversation.unreadCount > 0');
