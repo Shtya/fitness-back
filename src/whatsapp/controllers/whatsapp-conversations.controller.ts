@@ -95,6 +95,81 @@ const allowedMediaTypes = new Set([
 	'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
 
+/**
+ * Types a browser would run as a page or script if the file were opened from our domain. Files
+ * are sent back with their stored type, so these stay out even as documents.
+ */
+const BROWSER_ACTIVE_TYPES = new Set([
+	'text/html',
+	'application/xhtml+xml',
+	'image/svg+xml',
+	'text/xml',
+	'application/xml',
+	'text/javascript',
+	'application/javascript',
+	'application/x-javascript',
+	'application/ecmascript',
+	'text/ecmascript',
+]);
+
+/** One name per format: Windows/Chrome report zip as x-zip-compressed, others as x-zip. */
+const MIME_ALIASES: Record<string, string> = {
+	'application/x-zip-compressed': 'application/zip',
+	'application/x-zip': 'application/zip',
+	'multipart/x-zip': 'application/zip',
+	'application/x-rar': 'application/vnd.rar',
+	'application/x-rar-compressed': 'application/vnd.rar',
+};
+
+/** Extension → type for documents the browser sent without a useful type. */
+const DOCUMENT_EXTENSION_TYPES: Record<string, string> = {
+	zip: 'application/zip',
+	rar: 'application/vnd.rar',
+	'7z': 'application/x-7z-compressed',
+	gz: 'application/gzip',
+	tar: 'application/x-tar',
+	txt: 'text/plain',
+	csv: 'text/csv',
+	json: 'application/json',
+	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	ppt: 'application/vnd.ms-powerpoint',
+	pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+	apk: 'application/vnd.android.package-archive',
+	rtf: 'application/rtf',
+	odt: 'application/vnd.oasis.opendocument.text',
+	ods: 'application/vnd.oasis.opendocument.spreadsheet',
+};
+
+/**
+ * The type an outgoing upload is stored and sent with, or null to refuse it. WhatsApp sends any
+ * file as a document (zip, rar, apk, txt…), so beyond the image/video/audio list every
+ * application/* type and plain text/csv is accepted, except types a browser would run.
+ */
+export function resolveOutgoingUploadMime(rawMime: string, originalName: string): string | null {
+	let mime = String(rawMime || '')
+		.toLowerCase()
+		.replace(/\s+/g, '');
+	mime = MIME_ALIASES[mime] || mime;
+	const extension = path.extname(String(originalName || '')).slice(1).toLowerCase();
+	if (!mime || mime === 'application/octet-stream') {
+		mime = inferOutgoingMediaMime(originalName) || DOCUMENT_EXTENSION_TYPES[extension] || 'application/octet-stream';
+	}
+	const base = mime.split(';')[0];
+	if (BROWSER_ACTIVE_TYPES.has(base)) return null;
+	if (/^(html?|xhtml|svgz?|xml|js|mjs)$/.test(extension)) return null;
+	if (
+		allowedMediaTypes.has(mime) ||
+		[...allowedMediaTypes].some(type => mime === type.replace(/\s+/g, '') || mime.startsWith(`${type};`))
+	) {
+		return mime;
+	}
+	if (base.startsWith('application/') || base === 'text/plain' || base === 'text/csv') return base;
+	return null;
+}
+
 function inferOutgoingMediaMime(originalName: string): string | null {
 	const lower = String(originalName || '').toLowerCase();
 	if (/\.jpe?g$/i.test(lower)) return 'image/jpeg';
@@ -633,31 +708,16 @@ export class WhatsAppConversationsController {
 			}),
 			limits: { fileSize: 64 * 1024 * 1024 },
 			fileFilter: (_req, file, callback) => {
-				const originalName = String(file.originalname || '');
-				let mime = String(file.mimetype || '')
-					.toLowerCase()
-					.replace(/\s+/g, '');
-				if (!mime || mime === 'application/octet-stream') {
-					const inferred = inferOutgoingMediaMime(originalName);
-					if (inferred) {
-						mime = inferred;
-						file.mimetype = inferred;
-					}
-				}
-				const allowed =
-					allowedMediaTypes.has(file.mimetype) ||
-					allowedMediaTypes.has(mime) ||
-					[...allowedMediaTypes].some(
-						type => mime === type.replace(/\s+/g, '') || mime.startsWith(`${type};`),
-					);
-				if (!allowed) {
+				const resolved = resolveOutgoingUploadMime(file.mimetype, String(file.originalname || ''));
+				if (!resolved) {
 					return callback(
 						new BadRequestException(
-							`Unsupported WhatsApp media type (${mime || file.mimetype || 'unknown'})`,
+							`Unsupported WhatsApp media type (${file.mimetype || 'unknown'})`,
 						),
 						false,
 					);
 				}
+				file.mimetype = resolved;
 				callback(null, true);
 			},
 		}),
