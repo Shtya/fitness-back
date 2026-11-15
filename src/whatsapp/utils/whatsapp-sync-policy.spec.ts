@@ -30,7 +30,7 @@ describe('shouldSkipFreshProviderSync', () => {
 			shouldSkipFreshProviderSync({
 				mode: 'latest',
 				localCount: 1,
-				lastProviderSyncAt: new Date(now - 60 * 60_000),
+				lastProviderSyncAt: new Date(now - 60_000),
 				now,
 			}),
 		).toEqual({ skip: true, reason: 'local_replica' });

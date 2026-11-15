@@ -45,10 +45,24 @@ function service(opts: {
 const user: any = { id: 'u1' };
 const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000);
 
+/**
+ * The check polls presence for up to 4s with setTimeout. Fake timers (Date stays real) run that
+ * wait instantly; in real time each case took ~4.3s and hit Jest's 5s limit under load.
+ */
+async function check(self: any) {
+	const pending = self.checkConversationReachability(user, 'c1');
+	pending.catch(() => undefined);
+	await jest.advanceTimersByTimeAsync(5_000);
+	return pending;
+}
+
 describe('check connection with a contact', () => {
+	beforeEach(() => jest.useFakeTimers({ doNotFake: ['Date'] }));
+	afterEach(() => jest.useRealTimers());
+
 	it('says online when WhatsApp reports them online', async () => {
 		const { self, subscribePresence } = service({ presence: { online: true } });
-		const result = await self.checkConversationReachability(user, 'c1');
+		const result = await check(self);
 		expect(result.verdict).toBe('online');
 		expect(subscribePresence).toHaveBeenCalled();
 	});
@@ -59,7 +73,7 @@ describe('check connection with a contact', () => {
 			lastOutbound: { status: 'sent', providerTimestamp: minutesAgo(30) },
 			lastDelivered: { status: 'read', providerTimestamp: minutesAgo(600) },
 		});
-		const result = await self.checkConversationReachability(user, 'c1');
+		const result = await check(self);
 		expect(result.verdict).toBe('one_tick');
 		expect(result.lastMessage.status).toBe('sent');
 		// when they last did get one: shown so you know how long they have been unreachable
@@ -68,26 +82,26 @@ describe('check connection with a contact', () => {
 
 	it('says reachable when the last message got two ticks', async () => {
 		const { self } = service({ lastOutbound: { status: 'delivered', providerTimestamp: minutesAgo(5) } });
-		expect((await self.checkConversationReachability(user, 'c1')).verdict).toBe('reachable');
+		expect((await check(self)).verdict).toBe('reachable');
 	});
 
 	it('does not call a message sent a few seconds ago stuck', async () => {
 		const { self } = service({ lastOutbound: { status: 'sent', providerTimestamp: minutesAgo(0.2) } });
-		expect((await self.checkConversationReachability(user, 'c1')).verdict).toBe('unknown');
+		expect((await check(self)).verdict).toBe('unknown');
 	});
 
 	it('reports a number that is not on WhatsApp, and an offline session', async () => {
-		expect((await service({ onWhatsApp: false }).self.checkConversationReachability(user, 'c1')).verdict).toBe(
+		expect((await check(service({ onWhatsApp: false }).self)).verdict).toBe(
 			'not_on_whatsapp',
 		);
-		expect((await service({ connected: false }).self.checkConversationReachability(user, 'c1')).verdict).toBe(
+		expect((await check(service({ connected: false }).self)).verdict).toBe(
 			'session_offline',
 		);
 	});
 
 	it('refuses groups', async () => {
 		await expect(
-			service({ chatId: '1203630@g.us' }).self.checkConversationReachability(user, 'c1'),
+			check(service({ chatId: '1203630@g.us' }).self),
 		).rejects.toBeInstanceOf(BadRequestException);
 	});
 });

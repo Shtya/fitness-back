@@ -1,6 +1,12 @@
 /** Server-side open-chat sync policy (pairs with frontend whatsapp-message-sync.js). */
 
 export const PROVIDER_SYNC_FRESH_MS = 5 * 60_000;
+/**
+ * An empty or near-empty chat that was already pulled once is asked again after this long.
+ * Right after linking, the phone often has not sent that chat's history yet; one pull and a
+ * permanent watermark left those chats empty for good.
+ */
+export const SPARSE_RETRY_MS = 30 * 60_000;
 
 export function providerSyncAgeMs(
 	lastProviderSyncAt: Date | string | null | undefined,
@@ -31,7 +37,9 @@ export function shouldSkipFreshProviderSync(options: {
 	if (localCount <= 0) {
 		// Already probed this thread (including a genuine empty chat).
 		// Do not treat browser refresh as first_hydrate.
-		if (providerSyncAgeMs(options.lastProviderSyncAt, options.now) != null) {
+		const age = providerSyncAgeMs(options.lastProviderSyncAt, options.now);
+		if (age != null) {
+			if (age >= SPARSE_RETRY_MS) return { skip: false, reason: 'empty_retry' };
 			return { skip: true, reason: 'hydrated_empty' };
 		}
 		return { skip: false, reason: 'empty_thread' };
@@ -44,6 +52,10 @@ export function shouldSkipFreshProviderSync(options: {
 		providerSyncAgeMs(options.lastProviderSyncAt, options.now) == null
 	) {
 		return { skip: false, reason: 'sparse_unhydrated' };
+	}
+	if (localCount < SPARSE_THREAD_ROWS) {
+		const age = providerSyncAgeMs(options.lastProviderSyncAt, options.now);
+		if (age != null && age >= SPARSE_RETRY_MS) return { skip: false, reason: 'sparse_retry' };
 	}
 	return { skip: true, reason: 'local_replica' };
 }

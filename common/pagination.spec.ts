@@ -15,7 +15,8 @@ describe('parsePagination (audit B4)', () => {
 	});
 
 	it('caps the limit and honours per-endpoint defaults', () => {
-		expect(parsePagination(1, '5000').take).toBe(100);
+		// Default cap was raised to 1000 (b20ffd9): list screens ask for up to 1000 rows.
+		expect(parsePagination(1, '5000').take).toBe(1000);
 		expect(parsePagination(2, undefined, { defaultLimit: 12 }).skip).toBe(12);
 		expect(parsePagination(1, '80', { maxLimit: 50 }).take).toBe(50);
 		expect(parsePagination('2.9', '10.7')).toMatchObject({ page: 2, take: 10, skip: 10 });

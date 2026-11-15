@@ -341,7 +341,45 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	/** In-memory WhatsApp names (address book + profile pushName) keyed by JID and digits. */
-	private async liveContactNames(accountId: string) {
+	/**
+	 * Building the name map walks the whole address book; the contacts page and the person card
+	 * asked for it on every request. Reuse it per account for a short while (and share one build
+	 * between requests that arrive together).
+	 */
+	private readonly liveNamesCache = new Map<
+		string,
+		{ at: number; names?: Map<string, string>; pending?: Promise<Map<string, string>> }
+	>();
+	private static readonly LIVE_NAMES_TTL_MS = 45_000;
+
+	private async liveContactNames(accountId: string): Promise<Map<string, string>> {
+		const cached = this.liveNamesCache.get(accountId);
+		if (cached?.names && Date.now() - cached.at < WhatsAppContactsService.LIVE_NAMES_TTL_MS) {
+			return cached.names;
+		}
+		if (cached?.pending) return cached.pending;
+		const pending = this.buildLiveContactNames(accountId)
+			.then((names) => {
+				// An empty map usually means "not connected yet": do not keep it.
+				if (names.size) this.liveNamesCache.set(accountId, { at: Date.now(), names });
+				else this.liveNamesCache.delete(accountId);
+				return names;
+			})
+			.catch(() => {
+				this.liveNamesCache.delete(accountId);
+				return new Map<string, string>();
+			});
+		this.liveNamesCache.set(accountId, { at: Date.now(), pending, names: cached?.names });
+		return pending;
+	}
+
+	/** Drop the cached name map (after the address book changed). */
+	invalidateLiveContactNames(accountId?: string) {
+		if (accountId) this.liveNamesCache.delete(accountId);
+		else this.liveNamesCache.clear();
+	}
+
+	private async buildLiveContactNames(accountId: string) {
 		const names = new Map<string, string>();
 		const provider = this.liveProvider(accountId);
 		if (!provider?.getContacts) return names;
@@ -923,6 +961,7 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 			} else {
 				await provider.removeContactFromWhatsApp!(chatId);
 			}
+			this.invalidateLiveContactNames(accountId);
 			return finish('synced', {
 				waSyncOp: null,
 				waSyncError: null,

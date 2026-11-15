@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, Optional } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -16,6 +16,7 @@ import { isUUID } from 'class-validator';
 import { corsOriginDelegate } from 'common/cors-origin';
 import { User, UserRole } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
+import { WhatsAppInboxCacheService } from '../services/whatsapp-inbox-cache.service';
 import { WhatsAppAuditLog } from '../entities/whatsapp.entity';
 import { STAFF_SESSION_ACTION, STAFF_SESSION_MARK_MS } from '../utils/whatsapp-staff-activity';
 
@@ -108,6 +109,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		private readonly accessService: WhatsAppAccessService,
 		@InjectRepository(User)
 		private readonly userRepo: Repository<User>,
+		@Optional() private readonly inboxCache?: WhatsAppInboxCacheService,
 	) {}
 
 	private extractToken(client: Socket): string | null {
@@ -418,6 +420,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		payload: any,
 		scope?: ConversationEventScope,
 	) {
+		// Anything the inbox is told about may change its list: drop cached pages for the account.
+		this.inboxCache?.bump(accountId);
 		const packet = { accountId, event, payload, at: new Date().toISOString() };
 		if (!scope) {
 			this.server?.to(accountRoom(accountId)).emit('whatsapp:event', packet);
@@ -434,6 +438,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		scope?: ConversationEventScope,
 	) {
 		const resolvedAccountId = accountId || payload?.accountId || null;
+		if (resolvedAccountId) this.inboxCache?.bump(resolvedAccountId);
+		else this.inboxCache?.bumpAll();
 		const packet = {
 			conversationId,
 			accountId: resolvedAccountId,

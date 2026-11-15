@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { foldSearchSql } from '../utils/whatsapp-inbox-visibility';
 
 // Safety net for already-deployed databases. New WhatsApp schema belongs in
 // `backend/migrations/` (see 20260817_whatsapp_account_sync_watermarks.sql).
@@ -284,6 +285,26 @@ const OPTIONAL_TABLES = [
 		ON whatsapp_contacts(wa_sync_next_at) WHERE wa_sync_status IN ('pending', 'failed', 'syncing')`,
 ];
 
+/**
+ * Search indexes. Chat and contact search compare Arabic-folded names with LIKE '%…%', which
+ * a plain btree cannot serve, so every search scanned all contacts. Trigram GIN indexes on the
+ * exact folded expressions (foldSearchSql) let Postgres use an index for those LIKEs.
+ * Needs the pg_trgm extension; when the database user may not create it, search keeps working
+ * without the indexes.
+ */
+const TRGM_COLUMNS = ['name', 'phonebook_name', 'local_name'];
+const SEARCH_INDEXES = [
+	...TRGM_COLUMNS.map(
+		(column) =>
+			`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_contacts_${column}_fold_trgm
+		ON whatsapp_contacts USING gin ((${foldSearchSql(column)}) gin_trgm_ops)`,
+	),
+	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_contacts_phone_trgm
+		ON whatsapp_contacts USING gin (phone_number gin_trgm_ops)`,
+	`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_whatsapp_messages_text_trgm
+		ON whatsapp_messages USING gin (text gin_trgm_ops)`,
+];
+
 @Injectable()
 export class WhatsAppSchemaService implements OnModuleInit {
 	private readonly logger = new Logger(WhatsAppSchemaService.name);
@@ -298,6 +319,38 @@ export class WhatsAppSchemaService implements OnModuleInit {
 				this.logger.error(
 					`Could not ensure WhatsApp table: ${error instanceof Error ? error.message : error}`,
 				);
+			}
+		}
+		// Trigram indexes on a large messages table take a while; build them without holding up boot.
+		void this.ensureSearchIndexes();
+	}
+
+	private async ensureSearchIndexes() {
+		try {
+			await this.dataSource.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+		} catch (error) {
+			this.logger.warn(
+				`pg_trgm is not available, search runs without trigram indexes (run "CREATE EXTENSION pg_trgm;" as a superuser to enable): ${
+					error instanceof Error ? error.message : error
+				}`,
+			);
+			return;
+		}
+		for (const statement of SEARCH_INDEXES) {
+			try {
+				// A CONCURRENTLY build that was interrupted (restart mid-build) leaves an INVALID
+				// index; IF NOT EXISTS would then skip it forever. Drop such a leftover first.
+				const name = /IF NOT EXISTS\s+(\w+)/i.exec(statement)?.[1];
+				if (name) {
+					const invalid = await this.dataSource.query(
+						`SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1 AND NOT i.indisvalid`,
+						[name],
+					);
+					if (invalid?.length) await this.dataSource.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`);
+				}
+				await this.dataSource.query(statement);
+			} catch (error) {
+				this.logger.warn(`Could not build search index: ${error instanceof Error ? error.message : error}`);
 			}
 		}
 	}

@@ -241,6 +241,17 @@ export interface WhatsAppProvider {
 			aliases?: string[];
 			/** Pull older history from the phone. Open-chat must leave this false. */
 			loadEarlier?: boolean;
+			/**
+			 * Oldest message we already store for this chat. With `loadEarlier` the provider asks the
+			 * phone for the page before it, so history the server never held in memory still loads.
+			 */
+			anchor?: {
+				id: string;
+				fromMe: boolean;
+				timestamp: number;
+				remoteJid?: string;
+				participant?: string | null;
+			};
 		},
 	): Promise<NormalizedWhatsAppMessage[]>;
 	findMessage?(providerMessageId: string): NormalizedWhatsAppMessage | null;

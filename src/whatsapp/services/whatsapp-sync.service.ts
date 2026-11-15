@@ -12,7 +12,10 @@ import {
 	ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { WhatsAppInboxCacheService } from './whatsapp-inbox-cache.service';
+import { normalizePhoneKey } from '../utils/whatsapp-phone-key';
 import { randomUUID } from 'crypto';
+import { isUUID } from 'class-validator';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
@@ -895,6 +898,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		private readonly deadLetters?: WhatsAppPersistDeadLetterService,
 		@Optional()
 		private readonly typingAttempts?: WhatsAppTypingAttemptsService,
+		@Optional()
+		private readonly inboxCache?: WhatsAppInboxCacheService,
 	) {}
 
 	onModuleInit() {
@@ -2824,20 +2829,33 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			relations: ['contact'],
 			order: { lastMessageAt: 'DESC' } as any,
 		});
+		const live = this.providers.getProvider(accountId);
+		const provider = live?.getState() === 'connected' ? live : null;
+		const account = await this.accountRepo.findOne({ where: { id: accountId }, select: ['id', 'phoneNumber'] });
+		const ownDigits = String(account?.phoneNumber || '').replace(/\D/g, '');
 		const groups = new Map<string, WhatsAppConversation[]>();
+		let lidLookups = 0;
 		for (const conversation of directs) {
-			const digits =
-				String(conversation.contact?.phoneNumber || '').replace(/\D/g, '') ||
-				phoneFromWaId(conversation.providerChatId) ||
-				'';
+			const chatId = String(conversation.providerChatId || '');
+			const isLid = /@(hosted\.)?lid$/i.test(chatId);
+			const lidUser = isLid ? chatId.split('@')[0] : '';
+			let digits = String(conversation.contact?.phoneNumber || '').replace(/\D/g, '');
+			// A LID contact's "phone" is sometimes just the LID number; that is not a phone.
+			if (isLid && digits === lidUser) digits = '';
+			if (!digits) digits = phoneFromWaId(chatId) || '';
+			// The same person often has a LID chat and a phone chat. Ask the session which phone
+			// the LID belongs to (memory lookup in Baileys; capped so a huge inbox stays cheap).
+			if (!digits && isLid && lidLookups < 500 && typeof provider?.resolveContactIdentity === 'function') {
+				lidLookups += 1;
+				const identity = await provider.resolveContactIdentity(chatId).catch(() => null);
+				const resolved = String(identity?.phoneNumber || '').replace(/\D/g, '');
+				if (resolved && resolved !== lidUser && resolved.length >= 8 && resolved.length <= 15) {
+					digits = resolved;
+				}
+			}
 			if (!digits) continue;
-			// Normalize Egypt local/international into one bucket key.
-			const key =
-				digits.startsWith('20') && digits.length >= 11
-					? digits
-					: digits.startsWith('0') && digits.length >= 10
-						? `20${digits.slice(1)}`
-						: digits;
+			const key = normalizePhoneKey(digits, ownDigits);
+			if (!key) continue;
 			const list = groups.get(key) || [];
 			list.push(conversation);
 			groups.set(key, list);
@@ -2846,8 +2864,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		for (const [, list] of groups) {
 			if (list.length < 2) continue;
 			const ranked = [...list].sort((a, b) => {
-				const aPhone = a.providerChatId.endsWith('@c.us') ? 1 : 0;
-				const bPhone = b.providerChatId.endsWith('@c.us') ? 1 : 0;
+				// Keep the phone-number chat (@c.us / @s.whatsapp.net) over a LID twin.
+				const aPhone = /@(c\.us|s\.whatsapp\.net)$/i.test(a.providerChatId) ? 1 : 0;
+				const bPhone = /@(c\.us|s\.whatsapp\.net)$/i.test(b.providerChatId) ? 1 : 0;
 				if (aPhone !== bPhone) return bPhone - aPhone;
 				const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
 				const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
@@ -4450,6 +4469,42 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		kind = '',
 		updatedSince = '',
 	) {
+		// The first page without search is what every open tab reloads after each event; serve it
+		// from the inbox cache (invalidated by any inbox write or event, see WhatsAppInboxCacheService).
+		const cacheable =
+			this.inboxCache &&
+			Math.max(Number(page) || 1, 1) === 1 &&
+			!String(search || '').trim() &&
+			!String(updatedSince || '').trim();
+		if (!cacheable) {
+			return this.listConversationsUncached(user, accountId, page, limit, search, filter, assignedUserId, kind, updatedSince);
+		}
+		// Access is checked before touching the cache; the cached page itself is per user.
+		const accountAccess = await this.access.getAccountAccess(user, accountId);
+		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
+		const key = this.inboxCache!.keyFor(accountId, String(user.id), {
+			limit: Number(limit) || 50,
+			filter: filter || 'all',
+			assignedUserId: assignedUserId || '',
+			kind: kind || '',
+			role: String((user as any)?.role || ''),
+		});
+		return this.inboxCache!.getOrLoad(accountId, key, 15, () =>
+			this.listConversationsUncached(user, accountId, page, limit, search, filter, assignedUserId, kind, updatedSince),
+		);
+	}
+
+	private async listConversationsUncached(
+		user: User,
+		accountId: string,
+		page = 1,
+		limit = 50,
+		search = '',
+		filter = 'all',
+		assignedUserId = '',
+		kind = '',
+		updatedSince = '',
+	) {
 		const accountAccess = await this.access.getAccountAccess(user, accountId);
 		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
 		const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
@@ -5387,12 +5442,15 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			user,
 			conversationId,
 		);
-		void this.subscribeConversationPresence(conversation).catch(() => undefined);
-		void this.hydrateConversationAvatar(conversation, {
-			force: isExpiringWhatsAppCdnUrl(
-				conversation.contact?.avatarUrl || conversation.group?.avatarUrl,
-			),
-		}).catch(() => undefined);
+		// Presence and avatar belong to opening the chat, not to every "load older" page.
+		if (!before && !starredOnly && !pinnedOnly && !search) {
+			void this.subscribeConversationPresence(conversation).catch(() => undefined);
+			void this.hydrateConversationAvatar(conversation, {
+				force: isExpiringWhatsAppCdnUrl(
+					conversation.contact?.avatarUrl || conversation.group?.avatarUrl,
+				),
+			}).catch(() => undefined);
+		}
 		const take = Math.min(Math.max(Number(limit) || 100, 1), search ? 200 : 200);
 		const loadLocal = async (cursorId?: string) => {
 			// Two steps on purpose. `.take()` on a query that joins one-to-many relations
@@ -5414,9 +5472,17 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				query.andWhere('message.text ILIKE :search', { search: `%${search}%` });
 			}
 			if (cursorId) {
-				const cursor = await this.messageRepo.findOne({
-					where: { id: cursorId, conversationId },
-				});
+				// ids are UUIDs; a client may still hold a row it made up ("live:<providerId>" from a
+				// phone pull, "inbox-preview-…", "pending:…"). Passing those to Postgres failed with
+				// "invalid input syntax for type uuid" and "Load older" showed an error.
+				const cursorKey = String(cursorId);
+				const cursor = isUUID(cursorKey)
+					? await this.messageRepo.findOne({ where: { id: cursorKey, conversationId } })
+					: cursorKey.startsWith('live:')
+						? await this.messageRepo.findOne({
+								where: { providerMessageId: cursorKey.slice(5), conversationId },
+							})
+						: null;
 				if (!cursor) return [];
 				if (cursor?.providerTimestamp) {
 					query.andWhere(
@@ -7114,6 +7180,30 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
+	private historyAnchorFromStoredMessage(
+		message: WhatsAppMessage | null | undefined,
+		providerChatId: string,
+	) {
+		const id = String(message?.providerMessageId || '').trim();
+		const at = message?.providerTimestamp ? new Date(message.providerTimestamp).getTime() : 0;
+		if (!id || !at) return undefined;
+		// Text rows are stored without the Baileys key; rebuild what the phone needs from columns.
+		const key = (message?.raw as any)?.key || {};
+		const inbound = message?.direction !== WhatsAppMessageDirection.OUTBOUND;
+		const inGroup = String(providerChatId || key.remoteJid || '').toLowerCase().endsWith('@g.us');
+		const sender = String(message?.senderWaId || '').trim();
+		const senderJid = sender && !sender.includes('@') ? `${sender.replace(/\D/g, '')}@s.whatsapp.net` : sender;
+		const participant =
+			String(key.participant || '').trim() || (inGroup && inbound ? senderJid : '');
+		return {
+			id,
+			fromMe: key.fromMe != null ? Boolean(key.fromMe) : message?.direction === WhatsAppMessageDirection.OUTBOUND,
+			timestamp: Math.floor(at / 1000),
+			remoteJid: String(key.remoteJid || '').trim() || undefined,
+			participant: participant || null,
+		};
+	}
+
 	async syncConversation(
 		user: User,
 		conversationId: string,
@@ -7234,6 +7324,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				after: afterCursor,
 				aliases: [...new Set(aliases)],
 				loadEarlier: mode === 'older',
+				// Page from the oldest message we store, not from what the provider happens to hold
+				// in memory: after a restart memory is empty and "load older" used to return nothing.
+				anchor: mode === 'older' ? this.historyAnchorFromStoredMessage(oldestBeforeSync, conversation.providerChatId) : undefined,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -7376,8 +7469,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				: localCount < requestedLimit
 					? messages.length >= requestedLimit
 					: conversation.hasMoreProviderHistory;
-		const oldestStoredTs = oldestStored?.providerTimestamp
-			? new Date(oldestStored.providerTimestamp).getTime()
+		// Compare with the oldest row from before this page was saved; after saving, the new page
+		// is itself the oldest and "did it reach further back" was always false.
+		const oldestStoredTs = oldestBeforeSync?.providerTimestamp
+			? new Date(oldestBeforeSync.providerTimestamp).getTime()
 			: 0;
 		const oldestFromProviderTs = (messages || []).reduce((min, item) => {
 			const at = item?.timestamp?.getTime?.() || 0;

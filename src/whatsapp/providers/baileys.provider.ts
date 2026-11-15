@@ -2221,6 +2221,60 @@ export class BaileysProvider implements WhatsAppProvider {
 		return { key, timestamp };
 	}
 
+	/**
+	 * On-demand history sync: the phone sends the messages before `anchor` as a history chunk.
+	 * Resolves true when a chunk arrived (it is already in memory when this returns).
+	 */
+	private async requestOlderHistoryFromPhone(
+		chatId: string,
+		anchor: { id: string; fromMe: boolean; timestamp: number; remoteJid?: string; participant?: string | null },
+		count: number,
+	): Promise<boolean> {
+		const sock = this.socket;
+		if (!sock || this.state !== 'connected') return false;
+		if (typeof sock.fetchMessageHistory !== 'function') return false;
+		const raw = this.rawByMessageId.get(anchor.id);
+		// The phone answers for the JID it files the chat under (often @lid); a message of this
+		// chat that we hold in memory tells us which one that is.
+		const remoteJid = String(
+			raw?.key?.remoteJid ||
+				anchor.remoteJid ||
+				this.historyAnchorForChat(chatId)?.key?.remoteJid ||
+				toBaileysJid(chatId) ||
+				chatId,
+		);
+		const participant = anchor.participant ? toBaileysJid(anchor.participant) || anchor.participant : '';
+		const key = raw?.key || {
+			remoteJid,
+			id: anchor.id,
+			fromMe: Boolean(anchor.fromMe),
+			...(participant && remoteJid.endsWith('@g.us') ? { participant } : {}),
+		};
+		const outcome = await this.phoneRequests.run(
+			'history_on_demand',
+			`${remoteJid}:older:${anchor.id}`,
+			async () => {
+				const chunksBefore = this.historySyncChunks;
+				await sock.fetchMessageHistory(
+					Math.max(1, Math.min(count, 50)),
+					key,
+					this.historyTimestampMs(anchor.timestamp),
+				);
+				const started = Date.now();
+				while (Date.now() - started < 9_000) {
+					await waitMs(400);
+					if (this.historySyncChunks > chunksBefore) {
+						// The chunk is processed in one go; give it a beat to finish storing.
+						await waitMs(600);
+						return true;
+					}
+				}
+				return false;
+			},
+		);
+		return outcome === 'ok';
+	}
+
 	private async pullHistoryThenFind(
 		chatId: string,
 		providerMessageId: string,
@@ -3199,20 +3253,51 @@ export class BaileysProvider implements WhatsAppProvider {
 
 	async getMessages(
 		chatId: string,
-		options: { limit?: number; before?: string; after?: string; aliases?: string[]; loadEarlier?: boolean } = {},
+		options: {
+			limit?: number;
+			before?: string;
+			after?: string;
+			aliases?: string[];
+			loadEarlier?: boolean;
+			anchor?: {
+				id: string;
+				fromMe: boolean;
+				timestamp: number;
+				remoteJid?: string;
+				participant?: string | null;
+			};
+		} = {},
 	) {
 		const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
 		const ids = this.collectMessageLookupIds(chatId, options.aliases);
-		const merged = new Map<string, NormalizedWhatsAppMessage>();
-		for (const id of ids) {
-			const bucket = this.messagesByChat.get(id);
-			if (!bucket) continue;
-			for (const [key, value] of bucket) merged.set(key, value);
-		}
-		let list = [...merged.values()].sort(
-			(a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
-		);
+		const collect = () => {
+			const merged = new Map<string, NormalizedWhatsAppMessage>();
+			for (const id of ids) {
+				const bucket = this.messagesByChat.get(id);
+				if (!bucket) continue;
+				for (const [key, value] of bucket) merged.set(key, value);
+			}
+			return [...merged.values()].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+		};
+		let list = collect();
 		const beforeId = String(options.before || '').trim();
+		const anchor = options.anchor && String(options.anchor.id || '').trim() ? options.anchor : null;
+		const anchorTsMs = anchor ? this.historyTimestampMs(anchor.timestamp) : 0;
+		// Memory only holds what this session saw since it started. Older pages have to come from
+		// the phone: ask for the page before the oldest message we store, then read memory again.
+		if (options.loadEarlier && anchor) {
+			const olderInMemory = list.filter((item) => item.timestamp.getTime() < anchorTsMs).length;
+			if (olderInMemory < limit) {
+				const pulled = await this.requestOlderHistoryFromPhone(chatId, anchor, Math.min(limit, 50));
+				if (pulled) list = collect();
+			}
+			list = list.filter(
+				(item) =>
+					item.timestamp.getTime() < anchorTsMs ||
+					(item.timestamp.getTime() === anchorTsMs && item.providerMessageId !== anchor.id),
+			);
+			return list.slice(-limit);
+		}
 		if (beforeId) {
 			const beforeMsg = list.find((item) => item.providerMessageId === beforeId);
 			if (!beforeMsg) return [];
