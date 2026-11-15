@@ -2,6 +2,32 @@ import { SelectQueryBuilder } from 'typeorm';
 import { WhatsAppContact, WhatsAppMessage } from '../entities/whatsapp.entity';
 
 /**
+ * Arabic-tolerant search folding, the same in SQL and in JS: lower case, أ إ آ ٱ → ا, ة → ه,
+ * ى → ي, diacritics and tatweel removed. So "محمد طه" finds "محمّد طة".
+ */
+const ARABIC_FOLD_FROM = 'أإآٱةى';
+const ARABIC_FOLD_TO = 'ااااهي';
+const ARABIC_MARKS = /[ً-ٰٟـ]/g;
+
+export function foldSearchText(value: string) {
+	let out = String(value || '').toLowerCase().replace(ARABIC_MARKS, '');
+	for (let i = 0; i < ARABIC_FOLD_FROM.length; i += 1) {
+		out = out.split(ARABIC_FOLD_FROM[i]).join(ARABIC_FOLD_TO[i]);
+	}
+	return out.trim();
+}
+
+/** Escape LIKE wildcards in user text (`%`, `_`, `\`). */
+export function escapeLike(value: string) {
+	return String(value || '').replace(/[%_\\]/g, (match) => `\\${match}`);
+}
+
+/** SQL twin of foldSearchText for a column expression. */
+export function foldSearchSql(column: string) {
+	return `regexp_replace(translate(lower(coalesce(${column}, '')), '${ARABIC_FOLD_FROM}', '${ARABIC_FOLD_TO}'), '[ً-ٰٟـ]', '', 'g')`;
+}
+
+/**
  * Chat-list search. Besides the chat's contact name and number, it finds:
  * - the name you saved someone under (phonebook_name / local_name), which `name` does not hold;
  * - a number typed any way (+20 100…, 0100…): digits are compared on their own;
@@ -26,24 +52,28 @@ export function matchConversationSearch<T>(query: SelectQueryBuilder<T>, rawSear
 					`(otherContact.waId = ${alias}.providerChatId OR (contact.phoneNumber IS NOT NULL AND otherContact.phoneNumber = contact.phoneNumber))`,
 				)
 				.andWhere(
-					`(otherContact.name ILIKE :search OR otherContact.phonebookName ILIKE :search OR otherContact.localName ILIKE :search${
+					`(${foldSearchSql('otherContact.name')} LIKE :searchFolded OR ${foldSearchSql('otherContact.phonebookName')} LIKE :searchFolded OR ${foldSearchSql('otherContact.localName')} LIKE :searchFolded${
 						withDigits ? ' OR otherContact.phoneNumber LIKE :searchDigits' : ''
 					})`,
 				)
 				.getQuery();
 			const parts = [
-				'contact.name ILIKE :search',
-				'contact.phonebookName ILIKE :search',
-				'contact.localName ILIKE :search',
+				`${foldSearchSql('contact.name')} LIKE :searchFolded`,
+				`${foldSearchSql('contact.phonebookName')} LIKE :searchFolded`,
+				`${foldSearchSql('contact.localName')} LIKE :searchFolded`,
 				'contact.phoneNumber ILIKE :search',
 				...(withDigits ? ['contact.phoneNumber LIKE :searchDigits', `${alias}.providerChatId LIKE :searchDigits`] : []),
-				'group.subject ILIKE :search',
+				`${foldSearchSql('group.subject')} LIKE :searchFolded`,
 				`${alias}.providerChatId ILIKE :search`,
 				`EXISTS ${samePerson}`,
 			];
 			return `(${parts.join(' OR ')})`;
 		},
-		{ search: `%${search}%`, searchDigits: `%${digits}%` },
+		{
+			search: `%${search}%`,
+			searchDigits: `%${digits}%`,
+			searchFolded: `%${escapeLike(foldSearchText(search))}%`,
+		},
 	);
 }
 

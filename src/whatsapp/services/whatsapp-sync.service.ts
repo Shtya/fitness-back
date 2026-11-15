@@ -4516,9 +4516,13 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				return `EXISTS ${subQuery}`;
 			});
 		}
-		query.andWhere(
-			`COALESCE(${PREFERENCE_COALESCE('is_archived')}, false) = ${filter === 'archived'}`,
-		);
+		// Like WhatsApp, searching the whole inbox also finds archived chats.
+		const searchingAll = Boolean(String(search || '').trim()) && (!filter || filter === 'all');
+		if (!searchingAll) {
+			query.andWhere(
+				`COALESCE(${PREFERENCE_COALESCE('is_archived')}, false) = ${filter === 'archived'}`,
+			);
+		}
 		if (assignedUserId === 'unassigned') {
 			query.andWhere('conversation.assignedUserId IS NULL');
 		} else if (/^[0-9a-f-]{36}$/i.test(assignedUserId)) {

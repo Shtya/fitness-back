@@ -42,6 +42,7 @@ import { WhatsAppAccessService } from './whatsapp-access.service';
 import { WhatsAppAuditService } from './whatsapp-audit.service';
 import { WhatsAppProviderManagerService } from './whatsapp-provider-manager.service';
 import { WhatsAppSyncService } from './whatsapp-sync.service';
+import { escapeLike, foldSearchSql, foldSearchText } from '../utils/whatsapp-inbox-visibility';
 
 export type NumberRegistration = 'registered' | 'not_registered' | 'unknown';
 export type UnknownReason = 'not_connected' | 'unsupported' | 'error';
@@ -190,6 +191,8 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 		});
 		return {
 			id: contact.id,
+			// The WhatsApp id, so a chat can be opened with exactly this contact (search results).
+			waId: contact.waId,
 			phone,
 			displayName,
 			localName: contact.localName || null,
@@ -298,12 +301,16 @@ export class WhatsAppContactsService implements OnModuleInit, OnModuleDestroy {
 		const search = String(query.search || '').trim().slice(0, 80);
 		if (search) {
 			const digits = search.replace(/\D/g, '');
-			const text = `%${search.toLowerCase().replace(/[%_\\]/g, (m) => `\\${m}`)}%`;
+			// Same Arabic-tolerant folding as the chat search (محمد طه = محمّد طة), and the name
+			// saved in the phone book counts too.
+			const text = `%${escapeLike(foldSearchText(search))}%`;
+			const names = ['c.local_name', 'c.name', 'c.phonebook_name']
+				.map((column) => `${foldSearchSql(column)} LIKE :text`)
+				.join(' OR ');
 			qb.andWhere(
 				digits.length >= 3
-					? `(lower(coalesce(c.local_name, '')) LIKE :text OR lower(coalesce(c.name, '')) LIKE :text
-						OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') LIKE :digits)`
-					: `(lower(coalesce(c.local_name, '')) LIKE :text OR lower(coalesce(c.name, '')) LIKE :text)`,
+					? `(${names} OR regexp_replace(coalesce(c.phone_number, ''), '\\D', '', 'g') LIKE :digits)`
+					: `(${names})`,
 				{ text, digits: `%${digits}%` },
 			);
 		}

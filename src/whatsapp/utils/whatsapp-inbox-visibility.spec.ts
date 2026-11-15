@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { DataSource } from 'typeorm';
 import { WhatsAppConversation } from '../entities/whatsapp.entity';
-import { matchConversationSearch, onlyConversationsWithMessages } from './whatsapp-inbox-visibility';
+import { foldSearchSql, foldSearchText, matchConversationSearch, onlyConversationsWithMessages } from './whatsapp-inbox-visibility';
 
 /**
  * Builds the real SQL from the entity metadata (no database needed). The first version wrote the
@@ -78,13 +78,23 @@ describe('chat list search', () => {
 
 	it('searches the saved (phonebook) name and the same person under their phone id, with real column names', () => {
 		const { sql, params } = build('Marehan');
-		expect(sql).toContain('"contact"."phonebook_name" ILIKE :search');
-		expect(sql).toContain('"contact"."local_name" ILIKE :search');
+		expect(sql).toContain(`${foldSearchSql('"contact"."phonebook_name"')} LIKE :searchFolded`);
+		expect(sql).toContain(`${foldSearchSql('"contact"."local_name"')} LIKE :searchFolded`);
 		expect(sql).toMatch(/FROM "whatsapp_contacts" "otherContact"/);
-		expect(sql).toContain('"otherContact"."phonebook_name" ILIKE :search');
+		expect(sql).toContain(`${foldSearchSql('"otherContact"."phonebook_name"')} LIKE :searchFolded`);
 		expect(sql).toContain('"otherContact"."phone_number" = "contact"."phone_number"');
 		expect(sql).not.toMatch(/contact\.phonebookName|otherContact\.waId|conversation\.providerChatId/);
-		expect(params).toMatchObject({ search: '%Marehan%' });
+		expect(params).toMatchObject({ search: '%Marehan%', searchFolded: '%marehan%' });
+	});
+
+	it('folds Arabic spellings the same way on both sides', () => {
+		expect(foldSearchText('محمّد طة')).toBe(foldSearchText('محمد طه'));
+		expect(foldSearchText('أحمد')).toBe(foldSearchText('احمد'));
+		expect(foldSearchText('مصطفى')).toBe(foldSearchText('مصطفي'));
+		expect(foldSearchText('عبـــدالله')).toBe('عبدالله');
+		expect(build('محمّد طة').params).toMatchObject({ searchFolded: '%محمد طه%' });
+		// LIKE wildcards typed by the user are literal
+		expect(build('50%_off').params.searchFolded).toBe('%50\\%\\_off%');
 	});
 
 	it('matches a number however it is typed', () => {
