@@ -454,6 +454,13 @@ export class WhatsAppConversationPreference extends CoreEntity {
 
 	@Column({ name: 'muted_until', type: 'timestamptz', nullable: true })
 	mutedUntil: Date | null;
+
+	/**
+	 * "Keep in touch": reach out to this person at least every N days. Null = not tracked.
+	 * The last contact is the last message this account sent in the chat.
+	 */
+	@Column({ name: 'keep_in_touch_days', type: 'int', nullable: true })
+	keepInTouchDays: number | null;
 }
 
 @Entity('whatsapp_messages')

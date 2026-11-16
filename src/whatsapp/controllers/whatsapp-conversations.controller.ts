@@ -39,6 +39,7 @@ import {
 	SendWhatsAppPresenceDto,
 	SetWhatsAppConversationArchivedDto,
 	SetWhatsAppConversationFavoriteDto,
+	SetWhatsAppConversationKeepInTouchDto,
 	SetWhatsAppConversationMutedDto,
 	SetWhatsAppConversationPinnedDto,
 	ShareWhatsAppMessagesAsOriginalDto,
@@ -272,6 +273,16 @@ export class WhatsAppConversationsController {
 			conversationId,
 			Boolean(body.isFavorite),
 		);
+	}
+
+	/** "Keep in touch": remind me to reach out to this person every `days` days (null/0 = stop). */
+	@Put('conversations/:conversationId/keep-in-touch')
+	setKeepInTouch(
+		@Req() req: any,
+		@Param('conversationId') conversationId: string,
+		@Body() body: SetWhatsAppConversationKeepInTouchDto,
+	) {
+		return this.sync.setConversationKeepInTouch(req.user, conversationId, body?.days ?? null);
 	}
 
 	@Put('conversations/:conversationId/pin')

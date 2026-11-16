@@ -28,6 +28,7 @@ const OPTIONAL_TABLES = [
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_archived boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS is_muted boolean NOT NULL DEFAULT false`,
 	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS muted_until timestamptz`,
+	`ALTER TABLE whatsapp_conversation_preferences ADD COLUMN IF NOT EXISTS keep_in_touch_days int`,
 	`CREATE TABLE IF NOT EXISTS whatsapp_media_library_folders (
 		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 		created_at timestamptz NOT NULL DEFAULT now(),

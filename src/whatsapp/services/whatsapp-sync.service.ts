@@ -4548,8 +4548,24 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		// brings the phone's contacts and chat list, which left rows with no message at all in the
 		// inbox. A row shows once it has a message; groups, channels, the AI Memo chat and pinned
 		// chats always do. Search still finds everyone, to start a chat with them.
-		if (!String(search || '').trim()) {
+		const keepInTouchTab = filter === 'keep_in_touch';
+		// You may track someone you have not written to yet: that row must still show.
+		if (!String(search || '').trim() && !keepInTouchTab) {
 			onlyConversationsWithMessages(query, PREFERENCE_COALESCE('is_pinned'));
+		}
+		const keepInTouch = await this.keepInTouchStatus(user, accountId, canSeeAll).catch((error) => {
+			this.logger.warn(`Keep-in-touch status failed for ${accountId}: ${error instanceof Error ? error.message : error}`);
+			return [] as Awaited<ReturnType<WhatsAppSyncService['keepInTouchStatus']>>;
+		});
+		const keepInTouchById = new Map(keepInTouch.map((item) => [item.conversationId, item]));
+		// The tab lists tracked chats most overdue first; that order comes from keepInTouchStatus,
+		// so the page of ids is cut here and the query only loads those rows.
+		const keepInTouchPageIds = keepInTouchTab
+			? keepInTouch.slice((pageNumber - 1) * take, pageNumber * take).map((item) => item.conversationId)
+			: [];
+		if (keepInTouchTab) {
+			if (keepInTouchPageIds.length) query.andWhere('conversation.id IN (:...keepInTouchPageIds)', { keepInTouchPageIds });
+			else query.andWhere('1 = 0');
 		}
 		if (filter === 'unread') {
 			// Assigned-only staff go by their own unread, not the owner's.
@@ -4573,7 +4589,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		}
 		// Like WhatsApp, searching the whole inbox also finds archived chats.
 		const searchingAll = Boolean(String(search || '').trim()) && (!filter || filter === 'all');
-		if (!searchingAll) {
+		// Archiving a chat does not stop you owing that person a message: the tab shows both.
+		if (!searchingAll && !keepInTouchTab) {
 			query.andWhere(
 				`COALESCE(${PREFERENCE_COALESCE('is_archived')}, false) = ${filter === 'archived'}`,
 			);
@@ -4606,11 +4623,16 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				.addOrderBy('conversation.lastMessageAt', 'DESC', 'NULLS LAST')
 				.addOrderBy('conversation.created_at', 'DESC')
 				.limit(take)
-				.offset((pageNumber - 1) * take)
+				// The keep-in-touch tab already restricted the query to this page's ids.
+				.offset(keepInTouchTab ? 0 : (pageNumber - 1) * take)
 				.getMany(),
-			countQuery.getCount(),
+			keepInTouchTab ? Promise.resolve(keepInTouch.length) : countQuery.getCount(),
 			this.countArchivedConversations(user.id, accountId, inboxKind, canSeeAll),
 		]);
+		if (keepInTouchTab) {
+			const order = new Map(keepInTouchPageIds.map((id, index) => [id, index]));
+			rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+		}
 		const lastMessageByConversationId = await this.findLastPreviewMessages(
 			rows.map((item) => item.id),
 		);
@@ -4646,6 +4668,14 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					isEmailMemoAi:
 						String(item.providerChatId || '') === 'email-memo-ai@so7ba.internal',
 					lastMessage: lastMessageByConversationId.get(item.id) || null,
+					keepInTouch: keepInTouchById.has(item.id)
+						? {
+								days: keepInTouchById.get(item.id)!.days,
+								lastContactAt: keepInTouchById.get(item.id)!.lastContactAt?.toISOString() || null,
+								dueAt: keepInTouchById.get(item.id)!.dueAt?.toISOString() || null,
+								overdue: keepInTouchById.get(item.id)!.overdue,
+							}
+						: null,
 				};
 			}),
 			total,
@@ -4654,6 +4684,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			scope: canSeeAll ? 'all' : 'assigned',
 			archivedCount: archivedStats.count,
 			archivedUnreadCount: archivedStats.unreadCount,
+			// Badge on the keep-in-touch tab: people you are due to message.
+			keepInTouchCount: keepInTouch.length,
+			keepInTouchDueCount: keepInTouch.filter((item) => item.overdue).length,
 			...(since ? { updatedSince: since.toISOString() } : {}),
 		};
 		if (pageNumber === 1 && (!inboxKind || inboxKind === 'chat')) {
@@ -5047,6 +5080,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isArchived?: boolean;
 			isMuted?: boolean;
 			mutedUntil?: Date | null;
+			keepInTouchDays?: number | null;
 		},
 	) {
 		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
@@ -5081,7 +5115,55 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (patch.isArchived != null) row.isArchived = patch.isArchived;
 		if (patch.isMuted != null) row.isMuted = patch.isMuted;
 		if (patch.mutedUntil !== undefined) row.mutedUntil = patch.mutedUntil;
+		if (patch.keepInTouchDays !== undefined) row.keepInTouchDays = patch.keepInTouchDays;
 		await this.preferenceRepo.save(row);
+	}
+
+	/**
+	 * "Keep in touch" status of every chat this user tracks on the account, most overdue first.
+	 * Last contact = the last message this account sent in the chat (a reply counts; their
+	 * messages alone do not). A chat never written to is due at once.
+	 */
+	private async keepInTouchStatus(user: User, accountId: string, canSeeAll: boolean) {
+		const rows: Array<{ conversation_id: string; days: number; last_contact_at: Date | null }> =
+			await this.conversationRepo.query(
+				`SELECT DISTINCT ON (c.id) c.id AS conversation_id, p.keep_in_touch_days AS days,
+					(SELECT m.provider_timestamp FROM whatsapp_messages m
+						WHERE m.conversation_id = c.id AND m.direction = 'outbound'
+						ORDER BY m.provider_timestamp DESC LIMIT 1) AS last_contact_at
+				FROM whatsapp_conversation_preferences p
+				JOIN whatsapp_conversations c
+					ON c.deleted_at IS NULL
+					AND (c.id = p.conversation_id
+						OR (p.conversation_id IS NULL AND c.account_id = p.account_id AND c.provider_chat_id = p.provider_chat_id))
+				WHERE p.user_id = $1 AND p.account_id = $2 AND p.deleted_at IS NULL
+					AND p.keep_in_touch_days IS NOT NULL AND p.keep_in_touch_days > 0
+					${canSeeAll ? '' : 'AND c.assigned_user_id = $1'}
+				ORDER BY c.id, p.updated_at DESC`,
+				[user.id, accountId],
+			);
+		const now = Date.now();
+		const items = rows.map((row) => {
+			const days = Number(row.days) || 0;
+			const lastContactAt = row.last_contact_at ? new Date(row.last_contact_at) : null;
+			const dueAt = lastContactAt ? lastContactAt.getTime() + days * 86_400_000 : 0;
+			return {
+				conversationId: row.conversation_id,
+				days,
+				lastContactAt,
+				dueAt: dueAt ? new Date(dueAt) : null,
+				overdue: !dueAt || dueAt <= now,
+			};
+		});
+		items.sort((a, b) => (a.dueAt?.getTime() || 0) - (b.dueAt?.getTime() || 0));
+		return items;
+	}
+
+	async setConversationKeepInTouch(user: User, conversationId: string, rawDays: number | null) {
+		await this.assertConversationVisible(user, conversationId);
+		const days = Number(rawDays) > 0 ? Math.min(Math.round(Number(rawDays)), 365) : null;
+		await this.saveConversationPreference(user.id, conversationId, { keepInTouchDays: days });
+		return { ok: true, conversationId, keepInTouchDays: days };
 	}
 
 	private async findConversationPreference(

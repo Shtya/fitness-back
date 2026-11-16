@@ -379,6 +379,15 @@ export class SetWhatsAppConversationFavoriteDto {
 	isFavorite?: boolean;
 }
 
+export class SetWhatsAppConversationKeepInTouchDto {
+	/** Reach out at least every this many days; null or 0 stops tracking the chat. */
+	@IsOptional()
+	@IsInt()
+	@Min(0)
+	@Max(365)
+	days?: number | null;
+}
+
 export class SetWhatsAppConversationPinnedDto {
 	@IsOptional()
 	@IsBoolean()
