@@ -406,6 +406,8 @@ export interface WhatsAppProvider {
 		options?: { allowPhoneRequest?: boolean },
 	): Promise<any>;
 	getStatuses(): Promise<any[]>;
+	/** Per-sender story delivery outcomes in this session (debug view). */
+	getStoryDiagnostics?(): Promise<{ pendingPhoneRecovery: number; senders: any[] }>;
 	/** Viewers already on our own status in the live session (optional). */
 	getOwnStatusReceipts?(
 		providerStatusId: string,

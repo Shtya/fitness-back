@@ -856,6 +856,9 @@ export class WhatsAppStatusService {
 							apiCount: mapped.length,
 							liveCount: live.count,
 							excluded,
+							// Per sender in this session: stories kept / undecryptable (+error) /
+							// recovered from our phone, and where that sender's story key is stored.
+							stories: await provider?.getStoryDiagnostics?.().catch(() => null),
 						},
 					}
 				: {}),

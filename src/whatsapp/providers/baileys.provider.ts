@@ -34,6 +34,7 @@ import {
 } from '../utils/whatsapp-message-secret';
 import { buildBaileysRetryMessage, reviveBaileysWaMessage } from '../utils/baileys-media-raw';
 import { TtlCacheStore } from '../utils/ttl-cache-store';
+import { withSenderKeyAliases } from '../utils/whatsapp-sender-key-alias';
 import { prepareBundleMessages, readGroupHistoryBundle } from '../utils/whatsapp-group-history-bundle';
 import { extractWhatsAppLocation } from '../utils/whatsapp-location';
 import { redactMediaLog } from '../utils/whatsapp-media-download-policy';
@@ -1021,6 +1022,20 @@ export class BaileysProvider implements WhatsAppProvider {
 	/** Original WAMessage by provider id — required for Baileys media download. */
 	private readonly rawByMessageId = new Map<string, any>();
 	private readonly reactionsByMessageId = new Map<string, NormalizedWhatsAppReaction[]>();
+	/**
+	 * Per story sender, what happened to their stories in this session: kept, could not be
+	 * decrypted (with the error), or recovered from our own phone. Read by the Stories debug view
+	 * so "some people's stories never arrive" can be checked on the live server.
+	 */
+	private readonly storyDiagnostics = new Map<
+		string,
+		{ kept: number; failed: number; recovered: number; lastError: string | null; lastAt: number; keyFallbacks: number }
+	>();
+	/** Undecryptable stories waiting for our phone to send its copy (placeholder resend). */
+	private readonly storyRecoveryQueue = new Map<string, { raw: any; queuedAt: number }>();
+	private storyRecoveryRunning = false;
+	/** Raw key store read, before the sender-key aliasing wrapper (to report what is stored where). */
+	private rawAuthGet: ((type: string, ids: string[]) => Promise<Record<string, any>>) | null = null;
 	private readonly statusesById = new Map<string, any>();
 	private readonly statusRawById = new Map<string, any>();
 	private statusChangeTimer: NodeJS.Timeout | null = null;
@@ -1721,6 +1736,145 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
+	private storySenderKey(raw: any): string {
+		return (
+			jidOf(raw?.key?.participantAlt) ||
+			jidOf(raw?.key?.remoteJidAlt) ||
+			jidOf(raw?.key?.participant) ||
+			String(raw?.key?.participant || '?')
+		);
+	}
+
+	private emptyStoryDiag() {
+		return { kept: 0, failed: 0, recovered: 0, lastError: null as string | null, lastAt: 0, keyFallbacks: 0 };
+	}
+
+	private noteStoryOutcome(raw: any, outcome: 'kept' | 'failed' | 'recovered', error: string | null = null) {
+		if (raw?.key?.fromMe) return;
+		const sender = this.storySenderKey(raw);
+		const entry = this.storyDiagnostics.get(sender) || this.emptyStoryDiag();
+		entry[outcome] += 1;
+		if (error) entry.lastError = error.slice(0, 160);
+		entry.lastAt = Date.now();
+		this.storyDiagnostics.set(sender, entry);
+		if (this.storyDiagnostics.size > 2000) {
+			this.storyDiagnostics.delete(this.storyDiagnostics.keys().next().value as string);
+		}
+	}
+
+	/** Called by the key store when a sender key was found only under the person's other address. */
+	private noteSenderKeyFallback(requested: string, found: string) {
+		if (!requested.startsWith('status@broadcast::')) return;
+		const address = String(requested.split('::')[1] || '');
+		const lid = address.endsWith('_1') || address.endsWith('_129');
+		const user = address.split('_')[0];
+		// Same normalisation as storySenderKey (jidOf), so fallbacks land on the sender's own row.
+		const sender = jidOf(lid ? `${user}@lid` : `${user}@s.whatsapp.net`) || `${user}@${lid ? 'lid' : 'c.us'}`;
+		const entry = this.storyDiagnostics.get(sender) || this.emptyStoryDiag();
+		if (entry.keyFallbacks === 0) {
+			this.logger.log(`[WA STORIES] sender key found under the other address: ${requested} -> ${found} account=${this.accountId}`);
+		}
+		entry.keyFallbacks += 1;
+		this.storyDiagnostics.set(sender, entry);
+	}
+
+	/**
+	 * A story we could not decrypt is asked from our own phone (which decrypted it), like WhatsApp
+	 * Web's "waiting for this message". Baileys only asks the sender to resend, which some phones
+	 * never answer for stories. One request at a time, spaced, through the phone request gate.
+	 */
+	private queueStoryRecovery(raw: any) {
+		const id = String(raw?.key?.id || '').trim();
+		if (!id || raw?.key?.fromMe) return;
+		const published = Number(raw?.messageTimestamp) || 0;
+		if (published && Date.now() / 1000 - published > 24 * 60 * 60) return; // expired story
+		if (this.storyRecoveryQueue.has(id) || this.storyRecoveryQueue.size >= 200) return;
+		this.storyRecoveryQueue.set(id, { raw, queuedAt: Date.now() });
+		void this.runStoryRecovery();
+	}
+
+	private async runStoryRecovery() {
+		if (this.storyRecoveryRunning) return;
+		this.storyRecoveryRunning = true;
+		try {
+			while (this.storyRecoveryQueue.size && this.state === 'connected') {
+				const sock = this.socket;
+				if (!sock || typeof sock.requestPlaceholderResend !== 'function') break;
+				const [id, item] = this.storyRecoveryQueue.entries().next().value as [string, { raw: any; queuedAt: number }];
+				if (Date.now() - item.queuedAt > 30 * 60_000) {
+					this.storyRecoveryQueue.delete(id);
+					continue;
+				}
+				const key = {
+					remoteJid: 'status@broadcast',
+					id,
+					fromMe: false,
+					participant: item.raw?.key?.participant || undefined,
+				};
+				const outcome = await this.phoneRequests.run('placeholder_resend', `story:${id}`, async () => {
+					// msgData keeps the original key (LID / phone alt) for the phone's reply.
+					await sock.requestPlaceholderResend(key, {
+						key: item.raw?.key,
+						messageTimestamp: item.raw?.messageTimestamp,
+						pushName: item.raw?.pushName,
+					});
+					const started = Date.now();
+					while (Date.now() - started < 8_000) {
+						await waitMs(400);
+						if (!this.storyRecoveryQueue.has(id)) return true; // rememberStatus kept it
+					}
+					return false;
+				});
+				if (
+					this.storyRecoveryQueue.has(id) &&
+					(outcome === 'skipped_rate_limit' || outcome === 'skipped_phone_unresponsive')
+				) {
+					// The gate held it back (too many phone requests / phone not answering): keep the
+					// story queued and try again later instead of losing it.
+					await waitMs(15_000);
+					continue;
+				}
+				if (this.storyRecoveryQueue.has(id)) {
+					this.storyRecoveryQueue.delete(id);
+					this.logger.warn(`[WA STORIES] phone did not resend story id=${id} outcome=${outcome} account=${this.accountId}`);
+				}
+				await waitMs(1_500);
+			}
+		} finally {
+			this.storyRecoveryRunning = false;
+		}
+	}
+
+	/** Per-sender story outcomes for the debug view, with where that sender's story key is stored. */
+	async getStoryDiagnostics() {
+		const rows = [...this.storyDiagnostics.entries()].sort((a, b) => b[1].lastAt - a[1].lastAt).slice(0, 300);
+		const readRaw = this.rawAuthGet;
+		const out: any[] = [];
+		for (const [sender, entry] of rows) {
+			let keyStored: 'phone' | 'lid' | 'both' | 'none' | 'unknown' = 'unknown';
+			if (readRaw) {
+				try {
+					const user = sender.split('@')[0].split(':')[0];
+					const isLid = sender.endsWith('@lid') || sender.endsWith('@hosted.lid');
+					const mapKey = isLid ? `${user}_reverse` : user;
+					const mapped = String((await readRaw('lid-mapping', [mapKey]))?.[mapKey] || '');
+					const pnUser = isLid ? mapped : user;
+					const lidUser = isLid ? user : mapped;
+					const pnId = pnUser ? `status@broadcast::${pnUser}::0` : '';
+					const lidId = lidUser ? `status@broadcast::${lidUser}_1::0` : '';
+					const found = await readRaw('sender-key', [pnId, lidId].filter(Boolean));
+					const onPhone = Boolean(pnId && found[pnId]);
+					const onLid = Boolean(lidId && found[lidId]);
+					keyStored = onPhone && onLid ? 'both' : onPhone ? 'phone' : onLid ? 'lid' : 'none';
+				} catch {
+					keyStored = 'unknown';
+				}
+			}
+			out.push({ sender, ...entry, lastAt: new Date(entry.lastAt).toISOString(), keyStored });
+		}
+		return { pendingPhoneRecovery: this.storyRecoveryQueue.size, senders: out };
+	}
+
 	private rememberStatus(raw: any): boolean {
 		const remoteJid = jidOf(raw?.key?.remoteJid) || String(raw?.key?.remoteJid || '');
 		if (!isStatusBroadcastJid(remoteJid)) return false;
@@ -1733,6 +1887,8 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.logger.warn(
 				`[WA STORIES] dropped ${storyRef()} reason=no_content stub=${raw?.messageStubType ?? 'none'} params=${JSON.stringify(raw?.messageStubParameters || [])}`,
 			);
+			this.noteStoryOutcome(raw, 'failed', String(raw?.messageStubParameters?.[0] || `stub ${raw?.messageStubType ?? 'none'}`));
+			this.queueStoryRecovery(raw);
 			return false;
 		}
 		const content = unwrapMessageContent(raw.message);
@@ -1777,9 +1933,11 @@ export class BaileysProvider implements WhatsAppProvider {
 			isOwn: fromMe,
 		};
 		if (!this.statusesById.has(serialized)) {
+			const recovered = this.storyRecoveryQueue.delete(String(raw?.key?.id || ''));
 			this.logger.log(
-				`[WA STORIES] kept ${storyRef()} type=${type} own=${fromMe} keys=${Object.keys(content).filter(key => content[key] != null).join(',')}`,
+				`[WA STORIES] kept ${storyRef()} type=${type} own=${fromMe}${recovered ? ' recovered_from_phone=1' : ''} keys=${Object.keys(content).filter(key => content[key] != null).join(',')}`,
 			);
+			if (!fromMe) this.noteStoryOutcome(raw, recovered ? 'recovered' : 'kept');
 		}
 		this.statusesById.set(serialized, item);
 		this.statusRawById.set(serialized, raw);
@@ -2667,6 +2825,11 @@ export class BaileysProvider implements WhatsAppProvider {
 				.map(([jid]) => jid);
 			if (jids.length) this.emit({ type: 'presence_token', jids });
 		};
+		// Stories / group messages: a sender key stored under someone's phone number must also be
+		// found under their LID and vice versa (see whatsapp-sender-key-alias.ts). Without it the
+		// stories of people whose addressing changed never decrypt.
+		this.rawAuthGet = state.keys.get.bind(state.keys);
+		withSenderKeyAliases(state.keys, (requested, found) => this.noteSenderKeyFallback(requested, found));
 		this.authKeys = state.keys;
 		const version = await resolveBaileysSocketVersion(baileys);
 
