@@ -5205,19 +5205,73 @@ export class BaileysProvider implements WhatsAppProvider {
 			this.resolveStatusRaw(statusId, senderWaId) ||
 			(await this.hydrateStatusRaw(statusId, senderWaId, false));
 		const id = String(raw?.key?.id || statusMessageKey(statusId)).trim();
-		const owner = toBaileysJid(String(raw?.key?.participant || senderWaId || '').trim());
-		if (!id || !owner) throw new Error('This story is no longer available in the session');
+		const { keyJid, deliveryJid } = await this.statusPosterJids(raw, senderWaId);
+		if (!id || !keyJid) throw new Error('This story is no longer available in the session');
 		const me = toBaileysJid(this.ownUserJid());
+		// Two different JIDs, as WhatsApp expects for a story like on LID accounts:
+		// - the reaction key names the story exactly as it arrived (the poster's LID). A phone
+		//   number there makes the poster's phone drop the like, which is why it never showed;
+		// - delivery (statusJidList) uses the poster's phone number, which is what the device
+		//   lookup for status@broadcast resolves. Never mix LID and PN in that list.
+		const recipients = [...new Set([deliveryJid || keyJid, me].filter(Boolean))];
 		await this.socket.sendMessage(
 			'status@broadcast',
 			{
 				react: {
 					text: emoji,
-					key: { remoteJid: 'status@broadcast', id, participant: owner, fromMe: false },
+					key: { remoteJid: 'status@broadcast', id, participant: keyJid, fromMe: false },
 				},
 			},
-			{ statusJidList: [...new Set([owner, me].filter(Boolean))] },
+			{ statusJidList: recipients },
+		);
+		this.logger.log(
+			`[WA STORIES] like id=${id} key=${keyJid} to=${recipients.join(',')} emoji=${emoji ? 'on' : 'off'} account=${this.accountId}`,
 		);
 		return { ok: true };
+	}
+
+	/**
+	 * The poster of a story as the reaction key must name it (LID when WhatsApp sent the story
+	 * by LID) and as a phone-number JID for delivery.
+	 */
+	private async statusPosterJids(raw: any, senderWaId: string | null | undefined) {
+		// User JIDs only: a device suffix (":5") names one device, not the person.
+		const bare = (value: unknown) => {
+			const text = String(value || '').trim();
+			if (!text) return '';
+			const jid = toBaileysJid(text) || text;
+			const at = jid.indexOf('@');
+			if (at < 0) return jid;
+			return `${jid.slice(0, at).split(':')[0]}${jid.slice(at)}`;
+		};
+		const candidates = [raw?.key?.participant, raw?.key?.participantAlt, raw?.participant, senderWaId]
+			.map(bare)
+			.filter(Boolean);
+		const isLid = (jid: string) => jid.endsWith('@lid') || jid.endsWith('@hosted.lid');
+		const isPn = (jid: string) => jid.endsWith('@s.whatsapp.net');
+		let lid = candidates.find(isLid) || '';
+		let pn = candidates.find(isPn) || '';
+		const mapping = this.socket?.signalRepository?.lidMapping;
+		if (lid && !pn) {
+			const digits = String(this.lidToPn.get(jidOf(lid) || lid) || '').replace(/\D/g, '');
+			if (digits) pn = `${digits}@s.whatsapp.net`;
+			else if (mapping?.getPNForLID) {
+				try {
+					pn = bare(await mapping.getPNForLID(lid));
+				} catch {
+					/* ignore */
+				}
+			}
+		}
+		if (pn && !lid && mapping?.getLIDForPN) {
+			try {
+				lid = bare(await mapping.getLIDForPN(pn));
+			} catch {
+				/* ignore */
+			}
+		}
+		// The key keeps the story's own participant when we have it.
+		const keyJid = bare(raw?.key?.participant) || lid || pn || candidates[0] || '';
+		return { keyJid, deliveryJid: pn || '' };
 	}
 }
