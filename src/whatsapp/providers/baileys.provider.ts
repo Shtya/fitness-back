@@ -1736,6 +1736,96 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
+	private decryptMessageNode: ((...args: any[]) => any) | null = null;
+	private buildAckStanza: ((node: any, errorCode?: number, meId?: string) => any) | null = null;
+	/** <status> stanzas seen this session (debug view). */
+	private statusStanzaCount = 0;
+
+	/**
+	 * A story delivered as a top-level <status> stanza: read it like a status@broadcast message
+	 * (same encryption: sender key, SKDM, our PN/LID key fallback, phone recovery), keep it through
+	 * rememberStatus, and always ack it the way Baileys acks other stanzas.
+	 */
+	async handleStatusStanza(node: any, socket: any) {
+		const attrs = node?.attrs || {};
+		this.statusStanzaCount += 1;
+		const encTypes = (Array.isArray(node?.content) ? node.content : [])
+			.filter((child: any) => child?.tag === 'enc')
+			.map((child: any) => child?.attrs?.type || '?');
+		try {
+			const from = String(attrs.from || '');
+			const isGroupStatus = from.endsWith('@g.us');
+			if (encTypes.length && !isGroupStatus && this.decryptMessageNode && socket?.signalRepository) {
+				// Same shape as <message from="status@broadcast" participant="poster">.
+				const participant = String(attrs.participant || (from.endsWith('@broadcast') ? '' : from) || '');
+				if (participant) {
+					const stanza = {
+						...node,
+						tag: 'message',
+						attrs: { ...attrs, from: 'status@broadcast', participant },
+					};
+					const me = socket?.authState?.creds?.me || {};
+					const { fullMessage, decrypt } = this.decryptMessageNode(
+						stanza,
+						me.id,
+						me.lid || '',
+						socket.signalRepository,
+						this.baileysLogger(),
+					);
+					await decrypt();
+					const kept = this.rememberStatus(fullMessage);
+					this.logger.log(
+						`[WA STORIES] <status> stanza id=${attrs.id || '?'} from=${participant} type=${attrs.type || '?'} enc=${encTypes.join(',')} kept=${kept} account=${this.accountId}`,
+					);
+				}
+			} else {
+				this.logger.log(
+					`[WA STORIES] <status> stanza id=${attrs.id || '?'} from=${from || '?'} type=${attrs.type || '?'} enc=${encTypes.join(',') || 'none'} acked-only account=${this.accountId}`,
+				);
+			}
+		} catch (error) {
+			this.logger.warn(
+				`[WA STORIES] <status> stanza id=${attrs.id || '?'} could not be read: ${error instanceof Error ? error.message : String(error)} account=${this.accountId}`,
+			);
+		} finally {
+			// Ack even when it could not be read: an unacked <status> makes the server end the stream.
+			try {
+				const me = socket?.authState?.creds?.me?.id;
+				const ack = this.buildAckStanza
+					? this.buildAckStanza(node, undefined, me)
+					: {
+							tag: 'ack',
+							attrs: {
+								id: attrs.id,
+								to: attrs.from,
+								class: 'status',
+								...(attrs.participant ? { participant: attrs.participant } : {}),
+								...(attrs.recipient ? { recipient: attrs.recipient } : {}),
+								...(attrs.type ? { type: attrs.type } : {}),
+							},
+						};
+				await socket?.sendNode?.(ack);
+			} catch (error) {
+				this.logger.warn(`[WA STORIES] <status> ack failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+
+	/** Pino-shaped logger for Baileys helpers called directly. */
+	private baileysLogger() {
+		const noop = () => undefined;
+		const self: any = {
+			error: (obj: any, msg?: string) => this.logger.debug?.(`[baileys] ${msg || ''} ${obj?.err?.message || ''}`),
+			warn: noop,
+			info: noop,
+			debug: noop,
+			trace: noop,
+			child: () => self,
+			level: 'silent',
+		};
+		return self;
+	}
+
 	private storySenderKey(raw: any): string {
 		return (
 			jidOf(raw?.key?.participantAlt) ||
@@ -1872,7 +1962,7 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 			out.push({ sender, ...entry, lastAt: new Date(entry.lastAt).toISOString(), keyStored });
 		}
-		return { pendingPhoneRecovery: this.storyRecoveryQueue.size, senders: out };
+		return { pendingPhoneRecovery: this.storyRecoveryQueue.size, statusStanzas: this.statusStanzaCount, senders: out };
 	}
 
 	private rememberStatus(raw: any): boolean {
@@ -2801,6 +2891,8 @@ export class BaileysProvider implements WhatsAppProvider {
 	private async openSocketOnce() {
 		const baileys = await loadBaileysModule();
 		this.generateMessageId = (baileys as any).generateMessageIDV2 || null;
+		this.decryptMessageNode = (baileys as any).decryptMessageNode || null;
+		this.buildAckStanza = (baileys as any).buildAckStanza || null;
 		const {
 			default: makeWASocket,
 			useMultiFileAuthState,
@@ -2963,6 +3055,14 @@ export class BaileysProvider implements WhatsAppProvider {
 				const handshakeFailure = /connection failure/i.test(String(err?.message || ''));
 				this.scheduleReconnect(handshakeFailure ? 5_000 : 0);
 			}
+		});
+
+		// WhatsApp is moving contacts' stories to a top-level <status> stanza (gradual rollout, per
+		// account and contact). Baileys 7.0.0-rc14 has no handler for it: those stories never reached
+		// messages.upsert (some people's stories arrived, others never did), and the stanza was never
+		// acked, so the server dropped the connection every ~50 min and held back new messages.
+		socket.ws?.on?.('CB:status', (node: any) => {
+			void this.handleStatusStanza(node, socket);
 		});
 
 		socket.ev.on('messages.upsert', async (upsert: any) => {

@@ -1287,6 +1287,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 						title,
 						phone: phoneDigits,
 					});
+					// Someone typing / online is not activity: a chat the user deleted stays deleted.
+					if (conversation?.deleted_at) return;
 					this.logger.log(
 						`[WHATSAPP PRESENCE] Sync CREATE conversation for presence session=${accountId} jid=${chatId} conv=${conversation?.id}`,
 					);
@@ -2155,6 +2157,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const sample = byChat.get(chatId)?.[0];
 			const conversation = await this.ensureConversation(accountId, chatId, {
 				title: sample?.fromMe || isGroupChatId(chatId) ? null : sample?.contactName || null,
+				// History from before a delete does not bring the chat back; newer history does.
+				activityAt: (byChat.get(chatId) || []).reduce((latest: number, item: any) => {
+					const at = new Date(item?.timestamp || 0).getTime();
+					return Number.isFinite(at) && at > latest ? at : latest;
+				}, 0) || null,
 			});
 			conversationByChatId.set(chatId, conversation);
 		}
@@ -2691,13 +2698,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			where: { accountId, providerChatId: chatId },
 			withDeleted: true,
 		});
-		if (existing) {
-			await this.restoreConversationIfDeleted(existing);
-			return existing;
-		}
+		// Read-state from the phone is not activity: a deleted chat stays deleted.
+		if (existing) return existing.deleted_at ? null : existing;
 		const aliased = await this.findDirectConversationAlias(accountId, chatId, null);
-		if (aliased) await this.restoreConversationIfDeleted(aliased);
-		return aliased;
+		return aliased?.deleted_at ? null : aliased;
 	}
 
 	/**
@@ -2966,10 +2970,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private async ensureConversation(
 		accountId: string,
 		chatId: string,
-		options: { title?: string | null; phone?: string | null } = {},
+		options: {
+			title?: string | null;
+			phone?: string | null;
+			/** When the activity that needs this chat happened (a message's time). */
+			activityAt?: Date | number | null;
+			/** The user opened this chat on purpose: bring it back even if deleted. */
+			restore?: boolean;
+		} = {},
 	) {
+		const restoreOptions = { activityAt: options.activityAt, force: options.restore };
 		const cacheKey = `${accountId}:${chatId}`;
 		const cached = this.conversationHotCache.get(cacheKey);
+		if (cached?.conversation?.deleted_at) {
+			await this.restoreConversationIfDeleted(cached.conversation, restoreOptions);
+		}
 		if (cached && Date.now() - cached.at >= CONVERSATION_HOT_CACHE_TTL_MS) {
 			this.conversationHotCache.delete(cacheKey);
 		} else if (cached) {
@@ -2986,7 +3001,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			withDeleted: true,
 		});
 		if (existing) {
-			await this.restoreConversationIfDeleted(existing);
+			await this.restoreConversationIfDeleted(existing, restoreOptions);
 			const patched = await this.applyConversationIdentityPatch(existing, chatId, options);
 			await this.rebindConversationPreferences(patched);
 			return this.rememberConversation(accountId, chatId, patched);
@@ -2999,7 +3014,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			options.phone,
 		);
 		if (aliased) {
-			await this.restoreConversationIfDeleted(aliased);
+			await this.restoreConversationIfDeleted(aliased, restoreOptions);
 			const phone =
 				options.phone ||
 				(await this.resolveChatPhoneDigits(accountId, chatId, options.phone));
@@ -3336,6 +3351,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const conversation = await this.ensureConversation(accountId, normalized, {
 			title: options.title || null,
 			phone: phoneFromWaId(normalized),
+			restore: true,
 		});
 		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
 		if (
@@ -3374,7 +3390,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		notifyAssignedUser = false,
 		options: { emitEvents?: boolean; clientMessageId?: string } = {},
 	) {
-		const emitEvents = options.emitEvents !== false;
+		let emitEvents = options.emitEvents !== false;
 		const clientMessageId = String(
 			options.clientMessageId || (normalized as any)?.clientMessageId || '',
 		).trim();
@@ -3421,7 +3437,11 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const conversation = await this.ensureConversation(accountId, normalized.chatId, {
 			title,
 			phone: phoneHint,
+			activityAt: normalized.timestamp || null,
 		});
+		// An older message of a chat the user deleted is kept, but must not put the chat back on
+		// screen through live events.
+		if (conversation.deleted_at) emitEvents = false;
 		void this.rememberGroupSender(accountId, conversation, normalized).catch(() => undefined);
 		const existing = await this.messageRepo.findOne({
 			where: { accountId, providerMessageId: normalized.providerMessageId },
@@ -4211,6 +4231,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			const conversation = await this.ensureConversation(accountId, id, {
 				title,
 				phone,
+				// The phone still lists a chat we deleted here; only newer activity brings it back.
+				activityAt: activityMs ? new Date(activityMs) : null,
 			});
 			let avatarUrl =
 				chat?.imgUrl ||
@@ -4888,8 +4910,20 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return { ok: true, conversationId };
 	}
 
-	private async restoreConversationIfDeleted(conversation: WhatsAppConversation) {
+	/**
+	 * A deleted chat stays deleted until something newer than the deletion happens in it (a new
+	 * message, like WhatsApp) or the user opens it on purpose. It used to come back on anything:
+	 * the phone's chat list (we do not delete it on the phone), old history, read receipts, so a
+	 * deleted chat reappeared at the next sync.
+	 */
+	private async restoreConversationIfDeleted(
+		conversation: WhatsAppConversation,
+		options: { activityAt?: Date | number | null; force?: boolean } = {},
+	) {
 		if (!conversation?.id || !conversation.deleted_at) return conversation;
+		const deletedAtMs = new Date(conversation.deleted_at).getTime();
+		const activityMs = options.activityAt ? new Date(options.activityAt).getTime() : 0;
+		if (!options.force && !(Number.isFinite(activityMs) && activityMs > deletedAtMs)) return conversation;
 		await this.conversationRepo.restore(conversation.id);
 		conversation.deleted_at = null;
 		return conversation;
