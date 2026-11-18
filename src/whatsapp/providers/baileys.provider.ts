@@ -1078,7 +1078,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		const pn = normalizeInboxJid(jid);
 		return [...new Set([jid, pn, toBaileysJid(pn)])];
 	});
-	private readonly groupMetadataCache = new TtlCacheStore(5 * 60_000, 500);
+	private readonly groupMetadataCache = new TtlCacheStore(30 * 60_000, 500); // group changes clear it (groups.update / group-participants.update)
 	private messageLookup:
 		| ((providerMessageId: string) => Promise<{ text?: string | null; raw?: any } | null>)
 		| null = null;
@@ -1173,22 +1173,41 @@ export class BaileysProvider implements WhatsAppProvider {
 		}
 	}
 
-	/** Baileys `cachedGroupMetadata`: avoid a metadata query on every group send. */
+	/**
+	 * Baileys `cachedGroupMetadata`: avoid a metadata query on every group send. When the
+	 * refresh fails (WhatsApp answers "rate-overlimit" or times out), the last members we knew
+	 * are used: returning nothing made Baileys ask again itself, fail the same way, and the
+	 * message ended up as "Retry" in groups only.
+	 */
 	async getCachedGroupMetadata(jid: string) {
 		const id = String(jid || '').trim();
 		if (!id.endsWith('@g.us')) return undefined;
 		const cached = this.groupMetadataCache.get<any>(id);
 		if (cached) return cached;
-		if (!this.socket || typeof this.socket.groupMetadata !== 'function') return undefined;
+		const lastKnown = this.lastGroupMetadata.get(id);
+		if (!this.socket || typeof this.socket.groupMetadata !== 'function') return lastKnown;
 		try {
-			return this.rememberGroupMetadata(id, await this.socket.groupMetadata(id));
-		} catch {
-			return undefined;
+			return this.rememberGroupMetadata(id, await this.socket.groupMetadata(id)) || lastKnown;
+		} catch (error) {
+			if (lastKnown) {
+				this.logger.warn(
+					`[WA SEND] group members refresh failed for ${id} (${error instanceof Error ? error.message : String(error)}); sending with the last known members account=${this.accountId}`,
+				);
+			}
+			return lastKnown;
 		}
 	}
 
+	/** Last members seen per group, kept past the cache's lifetime as the fallback above. */
+	private readonly lastGroupMetadata = new Map<string, any>();
+
 	private rememberGroupMetadata(id: string, meta: any) {
-		if (meta && Array.isArray(meta.participants)) this.groupMetadataCache.set(id, meta);
+		if (meta && Array.isArray(meta.participants)) {
+			this.groupMetadataCache.set(id, meta);
+			this.lastGroupMetadata.delete(id);
+			this.lastGroupMetadata.set(id, meta);
+			trimMapToMax(this.lastGroupMetadata, CACHE_MAX.groupSubject);
+		}
 		return meta || undefined;
 	}
 
