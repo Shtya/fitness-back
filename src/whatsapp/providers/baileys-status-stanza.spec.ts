@@ -74,6 +74,68 @@ describe('stories delivered as a <status> stanza', () => {
 		expect(p.statusesById.size).toBe(0);
 	});
 
+	it('asks the poster to send a story again when it cannot be decrypted (missing story key)', async () => {
+		const p = provider();
+		const sock: any = { ...socket(), sendRetryRequest: jest.fn(async () => undefined) };
+		p.decryptMessageNode = jest.fn((node: any) => ({
+			fullMessage: {
+				key: { remoteJid: 'status@broadcast', id: node.attrs.id, fromMe: false, participant: node.attrs.participant },
+				messageTimestamp: Number(node.attrs.t),
+				messageStubType: 2,
+				messageStubParameters: ['No session found to decrypt message'],
+			},
+			decrypt: jest.fn(async () => undefined),
+		}));
+		const st = stanza({ from: 'status@broadcast', participant: POSTER });
+		await p.handleStatusStanza(st, sock);
+		expect(sock.sendRetryRequest).toHaveBeenCalledTimes(1);
+		const [retryNode] = sock.sendRetryRequest.mock.calls[0];
+		// Receipt goes back to whoever sent the stanza, with its participant.
+		expect(retryNode.tag).toBe('message');
+		expect(retryNode.attrs).toEqual(st.attrs);
+		expect(p.statusesById.size).toBe(0);
+		expect(sock.sendNode).toHaveBeenCalledTimes(1);
+		expect((await p.getStoryDiagnostics()).statusRetryReceipts).toBe(1);
+	});
+
+	it('does not ask again for a duplicate or a story older than a day', async () => {
+		const p = provider();
+		const sock: any = { ...socket(), sendRetryRequest: jest.fn(async () => undefined) };
+		const failing = (reason: string) =>
+			jest.fn((node: any) => ({
+				fullMessage: {
+					key: { remoteJid: 'status@broadcast', id: node.attrs.id, fromMe: false, participant: node.attrs.participant },
+					messageTimestamp: Number(node.attrs.t),
+					messageStubType: 2,
+					messageStubParameters: [reason],
+				},
+				decrypt: jest.fn(async () => undefined),
+			}));
+		p.decryptMessageNode = failing('Key used already or never filled');
+		await p.handleStatusStanza(stanza({ from: 'status@broadcast', participant: POSTER }), sock);
+		p.decryptMessageNode = failing('No session found to decrypt message');
+		const old = String(Math.floor(Date.now() / 1000) - 2 * 24 * 60 * 60);
+		await p.handleStatusStanza(stanza({ from: 'status@broadcast', participant: POSTER, t: old }), sock);
+		expect(sock.sendRetryRequest).not.toHaveBeenCalled();
+		expect(sock.sendNode).toHaveBeenCalledTimes(2);
+	});
+
+	it('passes on a like on our story that came as a <status> stanza', async () => {
+		const p = provider();
+		const events: any[] = [];
+		p.emit = (event: any) => events.push(event);
+		p.decryptMessageNode = decryptingTo({
+			reactionMessage: { text: '❤️', key: { remoteJid: 'status@broadcast', id: 'OUR-STORY', fromMe: true } },
+		});
+		await p.handleStatusStanza(stanza({ from: 'status@broadcast', participant: POSTER, type: 'reaction' }), socket());
+		const like = events.find(event => event.type === 'status_like');
+		expect(like).toEqual(
+			expect.objectContaining({ statusMessageId: 'OUR-STORY', actorJid: POSTER, emoji: '❤️', fromMe: false }),
+		);
+		expect(p.statusesById.size).toBe(0);
+		expect((await p.getStoryDiagnostics()).statusLikeStanzas).toBe(1);
+	});
+
 	it('acks group statuses without storing them as a contact story', async () => {
 		const p = provider();
 		const sock = socket();

@@ -2,10 +2,11 @@ import type { WhatsAppAccount } from '../entities/whatsapp.entity';
 import { statusAudienceJids } from './whatsapp-contact';
 
 /**
- * Who this account's stories reach — the same three choices WhatsApp offers:
- * every contact, every contact except some, or only a chosen few.
+ * Who this account's stories reach: WhatsApp's three choices (every contact, every contact
+ * except some, only a chosen few) plus "saved": only the numbers saved on the phone now.
+ * "contacts" also reaches everyone you ever chatted with or once saved and later deleted.
  */
-export type WhatsAppStoryAudienceMode = 'contacts' | 'except' | 'only';
+export type WhatsAppStoryAudienceMode = 'contacts' | 'saved' | 'except' | 'only';
 
 export interface WhatsAppStoryAudienceSettings {
 	mode: WhatsAppStoryAudienceMode;
@@ -26,7 +27,7 @@ function storedJids(value: unknown): string[] {
 }
 
 export function isStoryAudienceMode(value: unknown): value is WhatsAppStoryAudienceMode {
-	return value === 'contacts' || value === 'except' || value === 'only';
+	return value === 'contacts' || value === 'saved' || value === 'except' || value === 'only';
 }
 
 export function getWhatsAppStoryAudience(
@@ -58,6 +59,7 @@ export function mergeWhatsAppStoryAudience(
 /**
  * The recipient list for one publish. `exact` tells the provider not to add the people
  * it happens to hold in memory, which would undo an "only these" choice.
+ * For "saved", `candidates` must already be the saved numbers.
  */
 export function resolveStoryAudience(
 	candidates: Iterable<unknown>,
@@ -65,6 +67,14 @@ export function resolveStoryAudience(
 ): { waIds: string[]; excludeWaIds: string[]; exact: boolean } {
 	if (settings.mode === 'only') {
 		return { waIds: statusAudienceJids(settings.waIds), excludeWaIds: [], exact: true };
+	}
+	if (settings.mode === 'saved') {
+		// Hand-added numbers still count: they were added so they can see the stories.
+		return {
+			waIds: statusAudienceJids([...(settings.extraWaIds || []), ...candidates]),
+			excludeWaIds: [],
+			exact: true,
+		};
 	}
 	const excluded = settings.mode === 'except' ? statusAudienceJids(settings.waIds) : [];
 	const blocked = new Set(excluded);

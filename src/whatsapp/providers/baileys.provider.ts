@@ -965,6 +965,22 @@ function toDate(ts: any): Date {
  * Chat/message history is kept in-memory from upserts + history sync events
  * and served to the existing CRM sync layer via getChats / getMessages.
  */
+
+/**
+ * Why a story from a <status> stanza could not be opened, when asking the poster to send it
+ * again can help: not for a duplicate ("Key used already"), an empty stanza, or a story
+ * older than a day (it is gone from their phone's story list anyway).
+ */
+export function statusDecryptFailure(fullMessage: any, stanzaTime?: string | number): string {
+	const CIPHERTEXT = 2;
+	if (fullMessage?.messageStubType !== CIPHERTEXT) return '';
+	const reason = String(fullMessage?.messageStubParameters?.[0] || 'decrypt failed');
+	if (reason === 'Key used already or never filled' || reason === 'Message absent from node') return '';
+	const sent = Number(stanzaTime) || Number(fullMessage?.messageTimestamp) || 0;
+	if (sent > 0 && Date.now() / 1000 - sent > 24 * 60 * 60) return '';
+	return reason.slice(0, 120);
+}
+
 export class BaileysProvider implements WhatsAppProvider {
 	readonly name = 'baileys';
 	readonly capabilities: WhatsAppProviderCapabilities = {
@@ -1752,6 +1768,7 @@ export class BaileysProvider implements WhatsAppProvider {
 		const encTypes = (Array.isArray(node?.content) ? node.content : [])
 			.filter((child: any) => child?.tag === 'enc')
 			.map((child: any) => child?.attrs?.type || '?');
+		let retried = false;
 		try {
 			const from = String(attrs.from || '');
 			const isGroupStatus = from.endsWith('@g.us');
@@ -1774,8 +1791,23 @@ export class BaileysProvider implements WhatsAppProvider {
 					);
 					await decrypt();
 					const kept = this.rememberStatus(fullMessage);
+					// Likes on our stories and a poster deleting a story come the same way; they
+					// used to be read and then dropped here, so some likes never reached the list.
+					const handled =
+						!kept && Boolean(fullMessage?.message)
+							? this.ingestRevoke(fullMessage)
+								? 'revoke'
+								: this.ingestReaction(fullMessage)
+									? 'like'
+									: ''
+							: '';
+					if (handled === 'like') this.statusLikeStanzas += 1;
+					const failure = statusDecryptFailure(fullMessage, attrs.t);
+					if (failure) {
+						retried = await this.requestStatusRetry(node, socket, encTypes, failure);
+					}
 					this.logger.log(
-						`[WA STORIES] <status> stanza id=${attrs.id || '?'} from=${participant} type=${attrs.type || '?'} enc=${encTypes.join(',')} kept=${kept} account=${this.accountId}`,
+						`[WA STORIES] <status> stanza id=${attrs.id || '?'} from=${participant} type=${attrs.type || '?'} enc=${encTypes.join(',')} kept=${kept}${handled ? ` handled=${handled}` : ''}${failure ? ` failed="${failure}" retry_sent=${retried}` : ''} account=${this.accountId}`,
 					);
 				}
 			} else {
@@ -1791,8 +1823,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			// Ack even when it could not be read: an unacked <status> makes the server end the stream.
 			try {
 				const me = socket?.authState?.creds?.me?.id;
+				// After a retry receipt, ack with "unhandled" (500) like Baileys does for messages it
+				// could not decrypt, so the server keeps the story for the resend.
 				const ack = this.buildAckStanza
-					? this.buildAckStanza(node, undefined, me)
+					? this.buildAckStanza(node, retried ? 500 : undefined, me)
 					: {
 							tag: 'ack',
 							attrs: {
@@ -1808,6 +1842,33 @@ export class BaileysProvider implements WhatsAppProvider {
 			} catch (error) {
 				this.logger.warn(`[WA STORIES] <status> ack failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		}
+	}
+
+	/** Retry receipts sent for stories we could not decrypt (debug view). */
+	private statusRetryReceipts = 0;
+	/** Likes on our stories that came as a <status> stanza (debug view). */
+	private statusLikeStanzas = 0;
+
+	/**
+	 * We could not open a story: ask the poster's phone to send it again (WhatsApp's retry
+	 * receipt). Their phone answers with the story plus their story key (SKDM), which we
+	 * missed: it came with a story from before <status> stanzas were read, so the phone
+	 * thinks we have it and every later story stays unreadable until it is sent again.
+	 * Baileys does this for every <message> it cannot decrypt; <status> goes around Baileys.
+	 */
+	private async requestStatusRetry(node: any, socket: any, encTypes: string[], failure: string) {
+		if (typeof socket?.sendRetryRequest !== 'function') return false;
+		try {
+			// The receipt goes back to whoever sent the stanza (to = its `from`, with its participant).
+			await socket.sendRetryRequest({ ...node, tag: 'message' }, encTypes.length === 0);
+			this.statusRetryReceipts += 1;
+			return true;
+		} catch (error) {
+			this.logger.warn(
+				`[WA STORIES] <status> retry receipt failed id=${node?.attrs?.id || '?'} (${failure}): ${error instanceof Error ? error.message : String(error)} account=${this.accountId}`,
+			);
+			return false;
 		}
 	}
 
@@ -1962,7 +2023,13 @@ export class BaileysProvider implements WhatsAppProvider {
 			}
 			out.push({ sender, ...entry, lastAt: new Date(entry.lastAt).toISOString(), keyStored });
 		}
-		return { pendingPhoneRecovery: this.storyRecoveryQueue.size, statusStanzas: this.statusStanzaCount, senders: out };
+		return {
+			pendingPhoneRecovery: this.storyRecoveryQueue.size,
+			statusStanzas: this.statusStanzaCount,
+			statusRetryReceipts: this.statusRetryReceipts,
+			statusLikeStanzas: this.statusLikeStanzas,
+			senders: out,
+		};
 	}
 
 	private rememberStatus(raw: any): boolean {
@@ -3230,6 +3297,7 @@ export class BaileysProvider implements WhatsAppProvider {
 
 		socket.ev.on('contacts.upsert', (contacts: any[]) => {
 			for (const contact of contacts || []) this.rememberContact(contact);
+			this.captureAddressBook(contacts);
 		});
 
 		socket.ev.on('contacts.update', (contacts: any[]) => {
@@ -3627,6 +3695,61 @@ export class BaileysProvider implements WhatsAppProvider {
 	 * Phone address-book names live in WhatsApp app state. A reconnect skips that
 	 * download, so a manual sync asks for the contact snapshot again.
 	 */
+	/** Latest full address-book snapshot: who is saved on the phone right now. */
+	private addressBook: { digits: Set<string>; at: number } | null = null;
+	private addressBookCapture: Set<string> | null = null;
+	private addressBookRun: Promise<{ digits: string[]; at: number } | null> | null = null;
+
+	/** While a snapshot is being pulled, note every number that comes with an address-book name. */
+	private captureAddressBook(contacts: any[]) {
+		const capture = this.addressBookCapture;
+		if (!capture) return;
+		for (const contact of contacts || []) {
+			if (!String(contact?.name || '').trim()) continue;
+			for (const candidate of [contact?.phoneNumber, contact?.id]) {
+				const jid = String(candidate || '');
+				if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@c.us')) continue;
+				const digits = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+				if (/^\d{8,15}$/.test(digits)) capture.add(digits);
+			}
+		}
+	}
+
+	/**
+	 * Who is saved on the phone now. Deleting a contact reaches us as an update that still
+	 * carries the old name (Baileys drops the remove part), so the contact store cannot
+	 * tell. A full snapshot of the address book only holds the contacts that exist now.
+	 */
+	async getAddressBookSnapshot(maxAgeMs = 10 * 60_000) {
+		const cached = this.addressBook;
+		if (cached && Date.now() - cached.at < maxAgeMs) return { digits: [...cached.digits], at: cached.at };
+		if (this.addressBookRun) return this.addressBookRun;
+		this.addressBookRun = (async () => {
+			const capture = new Set<string>();
+			this.addressBookCapture = capture;
+			try {
+				await withTimeout(this.pullAddressBook(), 20_000, 'Address book snapshot');
+				// Baileys hands the snapshot over as buffered contact events; let them land.
+				await new Promise(resolve => setTimeout(resolve, 1_500));
+			} catch (error) {
+				this.logger.warn(
+					`Address book snapshot failed for ${this.accountId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			} finally {
+				this.addressBookCapture = null;
+			}
+			if (capture.size) this.addressBook = { digits: capture, at: Date.now() };
+			const latest = this.addressBook;
+			this.logger.log(
+				`Address book snapshot ${this.accountId}: saved=${capture.size}${capture.size ? '' : ' (no answer, keeping the last one)'}`,
+			);
+			return latest ? { digits: [...latest.digits], at: latest.at } : null;
+		})().finally(() => {
+			this.addressBookRun = null;
+		});
+		return this.addressBookRun;
+	}
+
 	async pullAddressBook() {
 		const socket = this.socket as { resyncAppState?: (names: string[], initial: boolean) => Promise<void> } | null;
 		if (!socket?.resyncAppState || this.state !== 'connected') return;

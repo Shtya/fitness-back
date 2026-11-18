@@ -50,6 +50,10 @@ const POCKET_SCHEMA_STATEMENTS = [
 	`ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS "bankBalance" numeric(12,2) NOT NULL DEFAULT 0`,
 	`ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS "mobileWalletBalance" numeric(12,2) NOT NULL DEFAULT 0`,
 ];
+/** Same for the pocket an expense is paid from (skipped quietly until wallet_expenses exists). */
+const EXPENSE_POCKET_STATEMENT = `ALTER TABLE wallet_expenses ADD COLUMN IF NOT EXISTS pocket varchar(10) NOT NULL DEFAULT 'cash'`;
+type SpendPocket = 'cash' | 'wallet' | 'bank';
+const spendPocket = (value: unknown): SpendPocket => (value === 'bank' || value === 'wallet' ? value : 'cash');
 const UNDEFINED_TABLE = '42P01';
 
 const isMissingTable = (error: any) => (error?.driverError?.code ?? error?.code) === UNDEFINED_TABLE;
@@ -74,6 +78,13 @@ export class WalletTrackerService {
 			for (const statement of POCKET_SCHEMA_STATEMENTS) await this.dataSource.query(statement);
 		} catch (error) {
 			this.logger.error(`Wallet pocket columns could not be added: ${(error as Error)?.message || error}`);
+		}
+		try {
+			await this.dataSource.query(EXPENSE_POCKET_STATEMENT);
+		} catch (error) {
+			if (!isMissingTable(error)) {
+				this.logger.error(`Expense pocket column could not be added: ${(error as Error)?.message || error}`);
+			}
 		}
 	}
 
@@ -269,6 +280,7 @@ export class WalletTrackerService {
 		const notes = dto.notes?.trim() || null;
 		const affectsBalance = dto.affectsBalance !== false;
 		const recurring = dto.recurring === true;
+		const pocket = spendPocket(dto.pocket);
 		const today = todayYmd();
 		const applyNow = affectsBalance && expenseIsDue(date, today);
 		await this.withExpenseTable(() =>
@@ -282,12 +294,13 @@ export class WalletTrackerService {
 						affectsBalance,
 						balanceApplied: applyNow,
 						recurring,
+						pocket,
 						notes,
 					}),
 				);
 				if (applyNow) {
 					const wallet = await this.ensureWallet(m, userId);
-					await this.moveBalance(m, wallet, -toCents(amount));
+					await this.moveBalance(m, wallet, -toCents(amount), pocket);
 				}
 			}),
 		);
@@ -301,21 +314,30 @@ export class WalletTrackerService {
 			this.dataSource.transaction(async (m) => {
 				const row = await this.lockExpense(m, userId, id);
 				const beforeApplied = row.balanceApplied === true ? toCents(row.amount) : 0;
+				const beforePocket = spendPocket(row.pocket);
 				if (dto.name !== undefined) row.name = this.cleanName(dto.name);
 				if (dto.amount !== undefined) row.amount = centsToDecimal(toCents(dto.amount));
 				if (date) row.spentDate = date;
 				if (dto.affectsBalance !== undefined) row.affectsBalance = Boolean(dto.affectsBalance);
 				if (dto.recurring !== undefined) row.recurring = Boolean(dto.recurring);
+				if (dto.pocket !== undefined) row.pocket = spendPocket(dto.pocket);
 				if (dto.notes !== undefined) row.notes = dto.notes.trim() || null;
 				const shouldApply =
 					row.affectsBalance !== false && expenseIsDue(String(row.spentDate).slice(0, 10), today);
 				row.balanceApplied = shouldApply;
 				await m.save(row);
 				const afterApplied = shouldApply ? toCents(row.amount) : 0;
-				const correction = beforeApplied - afterApplied;
-				if (correction) {
+				const afterPocket = spendPocket(row.pocket);
+				if (beforePocket === afterPocket) {
+					const correction = beforeApplied - afterApplied;
+					if (correction) {
+						const wallet = await this.ensureWallet(m, userId);
+						await this.moveBalance(m, wallet, correction, afterPocket);
+					}
+				} else if (beforeApplied || afterApplied) {
 					const wallet = await this.ensureWallet(m, userId);
-					await this.moveBalance(m, wallet, correction);
+					if (beforeApplied) await this.moveBalance(m, wallet, beforeApplied, beforePocket);
+					if (afterApplied) await this.moveBalance(m, wallet, -afterApplied, afterPocket);
 				}
 			}),
 		);
@@ -329,7 +351,7 @@ export class WalletTrackerService {
 				await m.softRemove(row);
 				if (row.balanceApplied === true) {
 					const wallet = await this.ensureWallet(m, userId);
-					await this.moveBalance(m, wallet, toCents(row.amount));
+					await this.moveBalance(m, wallet, toCents(row.amount), spendPocket(row.pocket));
 				}
 			}),
 		);
@@ -356,13 +378,15 @@ export class WalletTrackerService {
 				.getMany();
 			if (!due.length) return;
 			const wallet = await this.ensureWallet(m, userId);
-			let delta = 0;
+			const deltas: Record<SpendPocket, number> = { cash: 0, wallet: 0, bank: 0 };
 			for (const row of due) {
-				delta -= toCents(row.amount);
+				deltas[spendPocket(row.pocket)] -= toCents(row.amount);
 				row.balanceApplied = true;
 			}
 			await m.save(due);
-			if (delta) await this.moveBalance(m, wallet, delta);
+			for (const pocket of ['cash', 'wallet', 'bank'] as const) {
+				if (deltas[pocket]) await this.moveBalance(m, wallet, deltas[pocket], pocket);
+			}
 		});
 	}
 
@@ -429,6 +453,7 @@ export class WalletTrackerService {
 				affectsBalance: boolean;
 				balanceApplied: boolean;
 				recurring: boolean;
+				pocket: SpendPocket;
 				notes: string | null;
 			}>,
 			total: 0,
@@ -459,6 +484,7 @@ export class WalletTrackerService {
 			affectsBalance: row.affectsBalance !== false,
 			balanceApplied: row.balanceApplied === true,
 			recurring: row.recurring === true,
+			pocket: spendPocket(row.pocket),
 			notes: row.notes ?? null,
 		}));
 		const total = fromCents(items.reduce((sum, row) => sum + toCents(row.amount), 0));
@@ -737,9 +763,17 @@ export class WalletTrackerService {
 		return value;
 	}
 
-	private async moveBalance(m: EntityManager, wallet: WalletAccount, deltaCents: number) {
+	/**
+	 * Move the total balance. With a pocket, that pocket moves too: bank and mobile wallet are
+	 * stored amounts, cash is whatever is left of the total, so "cash" only moves the total.
+	 */
+	private async moveBalance(m: EntityManager, wallet: WalletAccount, deltaCents: number, pocket: SpendPocket = 'cash') {
 		if (!deltaCents) return;
 		wallet.openingBalance = centsToDecimal(toCents(wallet.openingBalance) + deltaCents);
+		if (pocket === 'bank') wallet.bankBalance = centsToDecimal(toCents(wallet.bankBalance) + deltaCents);
+		if (pocket === 'wallet') {
+			wallet.mobileWalletBalance = centsToDecimal(toCents(wallet.mobileWalletBalance) + deltaCents);
+		}
 		await m.save(wallet);
 	}
 

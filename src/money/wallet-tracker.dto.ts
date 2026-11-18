@@ -171,6 +171,11 @@ export class CreateWalletExpenseDto {
 	@IsBoolean()
 	recurring?: boolean;
 
+	/** Which pocket pays: cash (default), mobile wallet or bank. */
+	@IsOptional()
+	@IsIn(['cash', 'wallet', 'bank'])
+	pocket?: 'cash' | 'wallet' | 'bank';
+
 	@IsOptional()
 	@IsString()
 	@MaxLength(500)
@@ -202,6 +207,10 @@ export class UpdateWalletExpenseDto {
 	@IsOptional()
 	@IsBoolean()
 	recurring?: boolean;
+
+	@IsOptional()
+	@IsIn(['cash', 'wallet', 'bank'])
+	pocket?: 'cash' | 'wallet' | 'bank';
 
 	@IsOptional()
 	@IsString()

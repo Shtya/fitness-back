@@ -264,6 +264,11 @@ export interface WhatsAppProvider {
 	getContacts(): Promise<any[]>;
 	/** Re-download the phone address book. Implemented by Baileys only. */
 	pullAddressBook?(): Promise<void>;
+	/**
+	 * Phone numbers (digits) saved in the phone's address book right now, from a fresh full
+	 * snapshot (deleted contacts are not in it). null when the phone did not answer.
+	 */
+	getAddressBookSnapshot?(maxAgeMs?: number): Promise<{ digits: string[]; at: number } | null>;
 	resolveContactIdentity?(
 		chatId: string,
 	): Promise<{ phoneNumber?: string | null; name?: string | null } | null>;

@@ -247,8 +247,8 @@ export class PublishWhatsAppStatusDto {
 }
 
 export class UpdateWhatsAppStoryAudienceDto {
-	@IsIn(['contacts', 'except', 'only'])
-	mode: 'contacts' | 'except' | 'only';
+	@IsIn(['contacts', 'saved', 'except', 'only'])
+	mode: 'contacts' | 'saved' | 'except' | 'only';
 
 	@IsOptional()
 	@IsArray()

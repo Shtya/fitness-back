@@ -541,6 +541,10 @@ export class WalletExpense extends CoreEntity {
 	@Column({ type: 'boolean', name: 'balance_applied', default: false })
 	balanceApplied!: boolean;
 
+	/** Where the money came from when deducted: cash on hand, mobile wallet or bank. */
+	@Column({ type: 'varchar', length: 10, name: 'pocket', default: 'cash' })
+	pocket!: 'cash' | 'wallet' | 'bank';
+
 	/** Repeats every month for next-month cash forecast (rent, salary paid out, etc.). */
 	@Column({ type: 'boolean', default: false })
 	recurring!: boolean;

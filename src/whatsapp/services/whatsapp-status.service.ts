@@ -654,7 +654,7 @@ export class WhatsAppStatusService {
 		let sessionReady = providerState === 'connected';
 		let refreshHint: string | null = null;
 		let providerCount = 0;
-		const excluded: Array<{ id: string; reason: string }> = [];
+		const excluded: Array<{ id: string; reason: string; sender?: string | null; at?: Date | null }> = [];
 
 		if (refresh) {
 			if (fromPhone) {
@@ -718,11 +718,11 @@ export class WhatsAppStatusService {
 		for (const item of items) {
 			const providerKey = String(item.providerStatusId || '').trim().toLowerCase();
 			if (providerKey && seenProviderIds.has(providerKey)) {
-				if (debug) excluded.push({ id: item.id, reason: 'duplicate_provider_id' });
+				if (debug) excluded.push({ id: item.id, sender: item.senderWaId || null, at: item.publishedAt || null, reason: 'duplicate_provider_id' });
 				continue;
 			}
 			if (seenRowIds.has(item.id)) {
-				if (debug) excluded.push({ id: item.id, reason: 'duplicate_row_id' });
+				if (debug) excluded.push({ id: item.id, sender: item.senderWaId || null, at: item.publishedAt || null, reason: 'duplicate_row_id' });
 				continue;
 			}
 			if (providerKey) seenProviderIds.add(providerKey);
@@ -748,7 +748,7 @@ export class WhatsAppStatusService {
 		}
 		// One row per story (the same story stored under two ids would show twice).
 		const unique = dedupeStatusRows(dedupedItems);
-		if (debug) for (const row of unique.dropped) excluded.push({ id: row.id, reason: 'duplicate_story' });
+		if (debug) for (const row of unique.dropped) excluded.push({ id: row.id, sender: row.senderWaId || null, at: row.publishedAt || null, reason: 'duplicate_story' });
 		dedupedItems.length = 0;
 		dedupedItems.push(...unique.kept);
 		const senderIds = [
@@ -809,7 +809,7 @@ export class WhatsAppStatusService {
 			.filter(item => {
 				if (item.isOwn && normalizeStatusType(item.type) === 'text') return true;
 				if (!item.senderWaId && !item.isOwn) {
-					if (debug) excluded.push({ id: item.id, reason: 'missing_sender' });
+					if (debug) excluded.push({ id: item.id, sender: item.senderWaId || null, at: item.publishedAt || null, reason: 'missing_sender' });
 					return false;
 				}
 				// Hide metadata-only media stories that are no longer in the live
@@ -817,7 +817,7 @@ export class WhatsAppStatusService {
 				// resurrect those — they only produce "session cache" errors.
 				if (!item.mediaReady) {
 					if (debug) {
-						excluded.push({ id: item.id, reason: 'no_media_and_not_in_session' });
+						excluded.push({ id: item.id, sender: item.senderWaId || null, at: item.publishedAt || null, reason: 'no_media_and_not_in_session' });
 					}
 					return false;
 				}
@@ -1080,6 +1080,26 @@ export class WhatsAppStatusService {
 		return audience.slice(0, STATUS_AUDIENCE_LIMIT);
 	}
 
+	/**
+	 * The numbers saved on the phone right now, for the "saved contacts only" audience: a fresh
+	 * address-book snapshot (deleted contacts drop out). If the phone does not answer, the
+	 * picker's "Saved" people (which may still hold someone deleted since the last snapshot).
+	 */
+	private async savedAudience(accountId: string): Promise<string[]> {
+		const snapshot = await this.addressBookSnapshot(accountId);
+		if (snapshot) return statusAudienceJids(snapshot.digits.map(digits => `${digits}@s.whatsapp.net`));
+		const people = await this.audiencePeople(accountId);
+		return people.filter(person => person.kind === 'saved').map(person => person.waId);
+	}
+
+	private async addressBookSnapshot(accountId: string) {
+		const provider = this.providers.getProvider(accountId);
+		if (!provider || provider.getState() !== 'connected' || typeof provider.getAddressBookSnapshot !== 'function') {
+			return null;
+		}
+		return provider.getAddressBookSnapshot().catch(() => null);
+	}
+
 	/** When each account last asked the phone for its address book, so the picker does not spam it. */
 	private readonly addressBookPulledAt = new Map<string, number>();
 
@@ -1138,7 +1158,7 @@ export class WhatsAppStatusService {
 	 * Same sources as {@link publishAudience}, keyed by the phone JID a publish uses.
 	 */
 	private async audiencePeople(accountId: string) {
-		const [phonebook, conversations, contacts] = await Promise.all([
+		const [phonebook, conversations, contacts, snapshot] = await Promise.all([
 			this.livePhonebookNames(accountId),
 			this.conversationRepo.find({
 				where: { accountId },
@@ -1158,7 +1178,10 @@ export class WhatsAppStatusService {
 					'localName',
 				],
 			}),
+			this.addressBookSnapshot(accountId),
 		]);
+		// With a fresh snapshot, "saved" means saved on the phone now, not "had a name once".
+		const savedNow = snapshot ? new Set(snapshot.digits) : null;
 		const people = new Map<
 			string,
 			{
@@ -1203,7 +1226,7 @@ export class WhatsAppStatusService {
 			// WhatsApp gave us is the profile name the person set for themselves.
 			const savedName =
 				strong(contact.localName, jid) || strong(live, jid) || strong(contact.phonebookName, jid);
-			if (savedName || contact.isSaved) person.saved = true;
+			if (savedNow ? savedNow.has(jid.split('@')[0]) : savedName || contact.isSaved) person.saved = true;
 			person.savedName = person.savedName || savedName;
 			const profileName = strong(contact.name, jid);
 			if (profileName && profileName !== savedName) {
@@ -1216,8 +1239,16 @@ export class WhatsAppStatusService {
 			const live = person.savedName ? null : phonebook.get(jid.split('@')[0]);
 			if (live) {
 				person.savedName = live;
-				person.saved = true;
+				if (!savedNow || savedNow.has(jid.split('@')[0])) person.saved = true;
 			}
+		}
+		// Saved on the phone but with no chat or contact row here yet.
+		for (const digits of (savedNow || new Set<string>()) as Set<string>) {
+			const jid = `${digits}@s.whatsapp.net`;
+			if (people.has(jid)) continue;
+			const person = entry(jid);
+			person.saved = true;
+			person.savedName = phonebook.get(digits) || null;
 		}
 		this.persistPhonebookNames(accountId, learned);
 		return [...people.values()]
@@ -1274,11 +1305,12 @@ export class WhatsAppStatusService {
 			missing.push(person);
 		}
 		people.unshift(...missing);
+		const savedWaIds = people.filter(person => person.kind === 'saved').map(person => person.waId);
 		const recipients = resolveStoryAudience(
-			people.map(person => person.waId),
+			settings.mode === 'saved' ? savedWaIds : people.map(person => person.waId),
 			settings,
 		).waIds.length;
-		return { ...settings, recipients, people };
+		return { ...settings, recipients, savedCount: savedWaIds.length, people };
 	}
 
 	/**
@@ -1347,9 +1379,12 @@ export class WhatsAppStatusService {
 	) {
 		const provider = await this.assertCanPublish(user, accountId);
 		const account = await this.access.assertWholeAccountAccess(user, accountId, 'canUse');
+		const settings = getWhatsAppStoryAudience(account);
 		const audience = resolveStoryAudience(
-			await this.publishAudience(accountId),
-			getWhatsAppStoryAudience(account),
+			settings.mode === 'saved'
+				? await this.savedAudience(accountId)
+				: await this.publishAudience(accountId),
+			settings,
 		);
 		if (audience.exact && !audience.waIds.length) {
 			throw new BadRequestException('Pick at least one person who can see your stories');
@@ -1832,7 +1867,12 @@ export class WhatsAppStatusService {
 			throw new ForbiddenException('Only the story owner can see who viewed it');
 		}
 		const statusMessageId = statusMessageKey(found.row.providerStatusId);
-		await this.backfillStatusViewersFromSession(accountId, found.row);
+		// Receipts the session holds are a bonus, not worth a long spinner: wait a moment, and
+		// let a slow session finish in the background (the socket refreshes the open list).
+		await Promise.race([
+			this.backfillStatusViewersFromSession(accountId, found.row),
+			new Promise(resolve => setTimeout(resolve, 1_500)),
+		]);
 		const [viewerRows, reactionRows] = await Promise.all([
 			this.repo.manager.query(
 				`SELECT viewer_key, viewed_at FROM whatsapp_status_viewers

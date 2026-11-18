@@ -63,4 +63,17 @@ describe('whatsapp story audience', () => {
 	it('sends to every candidate in contacts mode', () => {
 		expect(resolveStoryAudience([A, B], { mode: 'contacts', waIds: [A] }).waIds).toEqual([A, B]);
 	});
+
+	it('saved mode: only the saved numbers plus hand-added ones, and the provider adds no one', () => {
+		expect(resolveStoryAudience([A, B], { mode: 'saved', waIds: [], extraWaIds: [C] })).toEqual({
+			waIds: [C, A, B],
+			excludeWaIds: [],
+			exact: true,
+		});
+	});
+
+	it('keeps the saved mode when stored', () => {
+		const merged = mergeWhatsAppStoryAudience({ providerCapabilities: {} } as any, { mode: 'saved' });
+		expect(getWhatsAppStoryAudience({ providerCapabilities: merged } as any).mode).toBe('saved');
+	});
 });
