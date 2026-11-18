@@ -1,13 +1,19 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { GoldQuote, gramPrices } from './gold-price';
+import { GoldQuote, TROY_OUNCE_GRAMS, gramPrices, localGramPrices } from './gold-price';
 
+/** Egyptian dealer prices (free, no key, ~hourly). Attribution: getdaleelak.com. */
+const LOCAL_URL = 'https://getdaleelak.com/api/v1/feed.json';
 const GOLD_URL = 'https://api.gold-api.com/price/XAU';
 const FX_URL = 'https://open.er-api.com/v6/latest/USD';
 const FRESH_MS = 15 * 60_000;
 const RETRY_AFTER_FAILURE_MS = 2 * 60_000;
 const REQUEST_TIMEOUT_MS = 6_000;
 
-/** Free, key-less sources; one shared quote per process, refreshed at most every 15 minutes. */
+/**
+ * Free, key-less sources; one shared quote per process, refreshed at most every 15 minutes.
+ * The Egyptian shop price comes first: the world price × the dollar rate (the old source) runs
+ * a few percent under what gold shops in Egypt charge, so it is only the fallback.
+ */
 @Injectable()
 export class GoldPriceService {
 	private readonly logger = new Logger(GoldPriceService.name);
@@ -27,6 +33,28 @@ export class GoldPriceService {
 	}
 
 	private async refresh(): Promise<GoldQuote | null> {
+		try {
+			const local = localGramPrices(await this.getJson(LOCAL_URL));
+			if (!local) throw new Error('Unexpected local price payload');
+			const usdToEgp = local.usdToEgp || this.quote?.usdToEgp || 0;
+			this.quote = {
+				perGram: local.perGram,
+				buyBackPerGram: local.buyBackPerGram,
+				usdPerOunce:
+					local.globalPerGram24 && usdToEgp ? Math.round((local.globalPerGram24 / usdToEgp) * TROY_OUNCE_GRAMS * 100) / 100 : 0,
+				usdToEgp,
+				updatedAt: local.updatedAt,
+				fetchedAt: new Date().toISOString(),
+				stale: false,
+				source: 'getdaleelak.com (Egyptian dealers)',
+			};
+			this.fetchedAtMs = Date.now();
+			return this.quote;
+		} catch (error) {
+			this.logger.warn(
+				`Egyptian gold prices unavailable, using the world price: ${error instanceof Error ? error.message : error}`,
+			);
+		}
 		try {
 			const [gold, fx] = await Promise.all([this.getJson(GOLD_URL), this.getJson(FX_URL)]);
 			const usdPerOunce = Number(gold?.price);

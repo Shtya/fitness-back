@@ -17,6 +17,18 @@ export function parseTimeOfDay(value: string | null | undefined): { hour: number
 	return { hour, minute };
 }
 
+/** A real IANA timezone ("Africa/Cairo"), or null. Unknown names fell back to a fixed +3. */
+export function validTimeZone(value: unknown): string | null {
+	const zone = String(value || '').trim();
+	if (!zone || zone.length > 64) return null;
+	try {
+		new Intl.DateTimeFormat('en-US', { timeZone: zone });
+		return zone;
+	} catch {
+		return null;
+	}
+}
+
 export function normalizeDaysOfWeek(days: number[] | null | undefined): number[] {
 	const list = Array.isArray(days) ? days : [];
 	const normalized = [...new Set(list.map(day => Number(day)).filter(day => day >= 0 && day <= 6))];

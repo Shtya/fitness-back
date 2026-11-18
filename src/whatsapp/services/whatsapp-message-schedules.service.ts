@@ -32,6 +32,7 @@ import {
 	computeNextRecurringRunAt,
 	everyDayOfWeek,
 	normalizeDaysOfWeek,
+	validTimeZone,
 } from '../utils/whatsapp-schedule-time';
 import { sanitizeDisplayFileName } from '../utils/whatsapp-display-file-name';
 import { WhatsAppAccessService } from './whatsapp-access.service';
@@ -116,7 +117,9 @@ export class WhatsAppMessageSchedulesService {
 			dto.scheduleKind === 'recurring'
 				? WhatsAppMessageScheduleKind.RECURRING
 				: WhatsAppMessageScheduleKind.ONCE;
-		const timezone = dto.timezone || 'Asia/Qatar';
+		// The sender's own timezone. It used to be fixed to Asia/Qatar (UTC+3 all year), so in
+		// Egypt (UTC+2 in winter) every schedule went out an hour early.
+		const timezone = validTimeZone(dto.timezone) || 'Asia/Qatar';
 		const daysOfWeek =
 			scheduleKind === WhatsAppMessageScheduleKind.RECURRING
 				? normalizeDaysOfWeek(dto.daysOfWeek?.length ? dto.daysOfWeek : everyDayOfWeek())
@@ -276,6 +279,8 @@ export class WhatsAppMessageSchedulesService {
 		if (typeof dto.text === 'string') schedule.text = dto.text.trim() || null;
 		if (typeof dto.timeOfDay === 'string') schedule.timeOfDay = dto.timeOfDay;
 		if (Array.isArray(dto.daysOfWeek)) schedule.daysOfWeek = normalizeDaysOfWeek(dto.daysOfWeek);
+		const timezone = validTimeZone(dto.timezone);
+		if (timezone) schedule.timezone = timezone;
 		if (dto.recurrenceEndDate !== undefined) {
 			schedule.recurrenceEndDate = dto.recurrenceEndDate || null;
 		}

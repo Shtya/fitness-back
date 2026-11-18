@@ -117,4 +117,10 @@ export class UpdateWhatsAppMessageScheduleDto {
 	@IsOptional()
 	@IsDateString()
 	recurrenceEndDate?: string | null;
+
+	/** The sender's timezone (IANA, e.g. Africa/Cairo); saving an edit moves the schedule to it. */
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	timezone?: string;
 }
