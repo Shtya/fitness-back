@@ -53,6 +53,7 @@ describe('opening a chat we hold no message of', () => {
 		});
 		const before = Date.now();
 		await p.getMessages('201011112222@c.us', { limit: 30 });
+			await Promise.all([...p.emptyChatRequests.values()]);
 		expect(fetch).toHaveBeenCalledTimes(1);
 		const [count, key, timestampMs] = fetch.mock.calls[0] as unknown as [number, any, number];
 		expect(count).toBe(30);
@@ -71,11 +72,41 @@ describe('opening a chat we hold no message of', () => {
 		}) as any);
 		try {
 			await p.getMessages('201011112222@c.us', { limit: 30 });
+			await Promise.all([...p.emptyChatRequests.values()]);
 			await p.getMessages('201011112222@c.us', { limit: 30 });
+			await Promise.all([...p.emptyChatRequests.values()]);
 		} finally {
 			(global.setTimeout as any).mockRestore?.();
 		}
 		expect(fetch).toHaveBeenCalledTimes(1);
+	});
+
+	it('asks again under the LID when the phone does not answer for the phone number', async () => {
+		const fetch = jest.fn(async () => undefined);
+		const p = provider(fetch);
+		p.socket.signalRepository = { lidMapping: { getLIDForPN: jest.fn(async () => '128050339573779:0@lid') } };
+		jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void) => {
+			fn();
+			return 0 as any;
+		}) as any);
+		try {
+			await p.getMessages('201011112222@c.us', { limit: 30 });
+			await Promise.all([...p.emptyChatRequests.values()]);
+		} finally {
+			(global.setTimeout as any).mockRestore?.();
+		}
+		const asked = (fetch.mock.calls as unknown as Array<[number, any, number]>).map(call => call[1].remoteJid);
+		expect(asked).toEqual(['201011112222@s.whatsapp.net', '128050339573779@lid']);
+	});
+
+	it('opens the chat at once instead of waiting on the phone', async () => {
+		const fetch = jest.fn(async () => undefined); // the phone never answers
+		const p = provider(fetch);
+		const started = Date.now();
+		const list = await p.getMessages('201033334444@c.us', { limit: 30 });
+		expect(list).toEqual([]);
+		expect(Date.now() - started).toBeLessThan(500);
+		expect(p.emptyChatRequests.size).toBe(1);
 	});
 
 	it('does not ask when there are messages or when paging back', async () => {

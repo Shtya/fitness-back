@@ -3753,6 +3753,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					providerTimestamp: hydrated.providerTimestamp,
 					hasAttachments: Boolean(hydrated.attachments?.length),
 					...((hydrated as any).mentionLabels ? { mentionLabels: (hydrated as any).mentionLabels } : {}),
+					...((hydrated as any).mentionsMe ? { mentionsMe: true } : {}),
 					...(clientMessageId ? { clientMessageId } : {}),
 				},
 			}, this.conversationEventScope(conversation));
@@ -6526,6 +6527,9 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const provider = this.providers.getProvider(conversation.accountId);
 		const ownName = provider?.getOwnPushName?.() || null;
 		const ownJids = provider?.getOwnJids?.() || [];
+		const ownDigits = new Set(
+			ownJids.map((jid: string) => String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '')).filter(Boolean),
+		);
 		if (ownJids.length) {
 			const account = await this.accountRepo
 				.findOne({ where: { id: conversation.accountId }, select: ['id', 'phoneNumber'] as any })
@@ -6544,6 +6548,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 				if (label) map[id] = label;
 			}
 			if (Object.keys(map).length) (message as any).mentionLabels = map;
+			if (this.collectMentionIds(message).some((id) => ownDigits.has(id))) (message as any).mentionsMe = true;
 		}
 	}
 

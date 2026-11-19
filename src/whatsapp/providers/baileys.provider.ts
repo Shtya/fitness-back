@@ -2629,6 +2629,9 @@ export class BaileysProvider implements WhatsAppProvider {
 		return outcome === 'ok';
 	}
 
+	/** Empty-chat requests still waiting on the phone (by chat id). */
+	private readonly emptyChatRequests = new Map<string, Promise<boolean>>();
+
 	/** Last time we asked the phone about a chat we had no message of (per chat). */
 	private readonly emptyChatHistoryAskedAt = new Map<string, number>();
 	static readonly EMPTY_CHAT_RETRY_MS = 30 * 60_000;
@@ -2641,31 +2644,58 @@ export class BaileysProvider implements WhatsAppProvider {
 	private async requestHistoryForEmptyChat(chatId: string, count: number): Promise<boolean> {
 		const sock = this.socket;
 		if (!sock || this.state !== 'connected' || typeof sock.fetchMessageHistory !== 'function') return false;
-		const remoteJid = String(this.historyAnchorForChat(chatId)?.key?.remoteJid || toBaileysJid(chatId) || chatId);
-		if (!remoteJid || isStatusBroadcastJid(remoteJid) || remoteJid.endsWith('@newsletter')) return false;
-		const last = this.emptyChatHistoryAskedAt.get(remoteJid) || 0;
+		const primary = String(this.historyAnchorForChat(chatId)?.key?.remoteJid || toBaileysJid(chatId) || chatId);
+		if (!primary || isStatusBroadcastJid(primary) || primary.endsWith('@newsletter')) return false;
+		const last = this.emptyChatHistoryAskedAt.get(primary) || 0;
 		if (Date.now() - last < BaileysProvider.EMPTY_CHAT_RETRY_MS) return false;
-		this.emptyChatHistoryAskedAt.set(remoteJid, Date.now());
+		this.emptyChatHistoryAskedAt.set(primary, Date.now());
 		trimMapToMax(this.emptyChatHistoryAskedAt, 2_000);
-		const id = this.generateMessageId?.(this.socket?.user?.id) || `3EB0${Date.now().toString(16).toUpperCase()}`;
-		const key = { remoteJid, id, fromMe: false };
-		const chunksBefore = this.historySyncChunks;
-		const outcome = await this.phoneRequests.run('history_on_demand', `${remoteJid}:empty`, async () => {
-			await sock.fetchMessageHistory(Math.max(1, Math.min(count, 50)), key, Date.now());
-			const started = Date.now();
-			while (Date.now() - started < 8_000) {
-				await waitMs(400);
-				if (this.historySyncChunks > chunksBefore) {
-					await waitMs(600);
-					return true;
+		// The phone files many one-to-one chats under the person's LID now, others under the
+		// phone number: ask under one, then the other when the first gets no answer.
+		const targets = [primary];
+		const alternate = await this.alternateChatJid(primary);
+		if (alternate && alternate !== primary) targets.push(alternate);
+		for (const remoteJid of targets) {
+			const id = this.generateMessageId?.(this.socket?.user?.id) || `3EB0${Date.now().toString(16).toUpperCase()}`;
+			const key = { remoteJid, id, fromMe: false };
+			const chunksBefore = this.historySyncChunks;
+			const outcome = await this.phoneRequests.run('history_on_demand', `${remoteJid}:empty`, async () => {
+				await sock.fetchMessageHistory(Math.max(1, Math.min(count, 50)), key, Date.now());
+				const started = Date.now();
+				while (Date.now() - started < 8_000) {
+					await waitMs(400);
+					if (this.historySyncChunks > chunksBefore) {
+						await waitMs(600);
+						return true;
+					}
 				}
+				return false;
+			});
+			this.logger.log(
+				`[WA HISTORY] empty chat ${remoteJid}: asked the phone for its latest messages outcome=${outcome} chunks=${this.historySyncChunks - chunksBefore} account=${this.accountId}`,
+			);
+			if (outcome === 'ok') return true;
+		}
+		return false;
+	}
+
+	/** The same one-to-one chat under its other address: phone number ↔ LID. */
+	private async alternateChatJid(jid: string): Promise<string | null> {
+		if (jid.endsWith('@g.us')) return null;
+		const mapping = this.socket?.signalRepository?.lidMapping;
+		const user = jid.split('@')[0].split(':')[0];
+		try {
+			if (jid.endsWith('@lid')) {
+				const digits = String(this.lidToPn.get(jidOf(jid) || jid) || '').replace(/\D/g, '');
+				if (digits) return `${digits}@s.whatsapp.net`;
+				const pn = mapping?.getPNForLID ? await mapping.getPNForLID(jid) : null;
+				return pn ? `${String(pn).split('@')[0].split(':')[0]}@s.whatsapp.net` : null;
 			}
-			return false;
-		});
-		this.logger.log(
-			`[WA HISTORY] empty chat ${remoteJid}: asked the phone for its latest messages outcome=${outcome} chunks=${this.historySyncChunks - chunksBefore} account=${this.accountId}`,
-		);
-		return outcome === 'ok';
+			const lid = mapping?.getLIDForPN ? await mapping.getLIDForPN(`${user}@s.whatsapp.net`) : null;
+			return lid ? `${String(lid).split('@')[0].split(':')[0]}@lid` : null;
+		} catch {
+			return null;
+		}
 	}
 
 	private async pullHistoryThenFind(
@@ -3695,9 +3725,16 @@ export class BaileysProvider implements WhatsAppProvider {
 		const beforeId = String(options.before || '').trim();
 		const anchor = options.anchor && String(options.anchor.id || '').trim() ? options.anchor : null;
 		// A chat we hold no message of (it was outside the history WhatsApp sent at link time):
-		// there is nothing to page back from, so ask the phone for its newest messages.
+		// there is nothing to page back from, so ask the phone for its newest messages. In the
+		// background: phones mostly ignore a request with no real message to start from (seen in
+		// production: outcome=no_response), and waiting on it held the chat on a spinner for 8–16s.
+		// If the phone does answer, the messages are stored by the history handler.
 		if (!list.length && !beforeId && !anchor) {
-			if (await this.requestHistoryForEmptyChat(chatId, Math.min(limit, 50))) list = collect();
+			const request = this.requestHistoryForEmptyChat(chatId, Math.min(limit, 50)).catch(() => false);
+			this.emptyChatRequests.set(chatId, request);
+			void request.finally(() => {
+				if (this.emptyChatRequests.get(chatId) === request) this.emptyChatRequests.delete(chatId);
+			});
 		}
 		const anchorTsMs = anchor ? this.historyTimestampMs(anchor.timestamp) : 0;
 		// Memory only holds what this session saw since it started. Older pages have to come from
