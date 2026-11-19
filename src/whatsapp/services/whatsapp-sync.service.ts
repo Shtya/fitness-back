@@ -3721,6 +3721,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (emitEvents) {
 			if (clientMessageId) (hydrated as any).clientMessageId = clientMessageId;
 			await this.decorateGroupMessages(conversation, [hydrated]);
+			// Names for "@<number>" mentions, for the live message and the chat-list preview.
+			await this.decorateMessageMentions(conversation, [hydrated]).catch(() => undefined);
 			this.attachMediaPreviews([hydrated]);
 			const forClient = { ...hydrated } as typeof hydrated;
 			prepareMessagesForClient([forClient]);
@@ -3750,6 +3752,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					status: hydrated.status,
 					providerTimestamp: hydrated.providerTimestamp,
 					hasAttachments: Boolean(hydrated.attachments?.length),
+					...((hydrated as any).mentionLabels ? { mentionLabels: (hydrated as any).mentionLabels } : {}),
 					...(clientMessageId ? { clientMessageId } : {}),
 				},
 			}, this.conversationEventScope(conversation));
@@ -4661,6 +4664,8 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const lastMessageByConversationId = await this.findLastPreviewMessages(
 			rows.map((item) => item.id),
 		);
+		// "@188880363991152" in a group's last message: name it like the thread does.
+		await this.labelPreviewMentions(rows, lastMessageByConversationId);
 		// Staff see their own unread for each chat; the owner's count stays the owner's.
 		const ownUnread = canSeeAll
 			? null
@@ -4967,6 +4972,23 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	/** One index-backed `LIMIT 1` per conversation instead of sorting every message of the page. */
+	/** Mention names for chat-list previews whose last message mentions someone by number. */
+	private async labelPreviewMentions(
+		conversations: WhatsAppConversation[],
+		lastMessages: Map<string, ConversationPreviewMessage>,
+	) {
+		const withMentions = conversations
+			.filter((conversation) => /@\d{8,32}\b/.test(String(lastMessages.get(conversation.id)?.text || '')))
+			.slice(0, 60);
+		await Promise.all(
+			withMentions.map((conversation) =>
+				this.decorateMessageMentions(conversation, [lastMessages.get(conversation.id) as any]).catch(
+					() => undefined,
+				),
+			),
+		);
+	}
+
 	private async findLastPreviewMessages(conversationIds: string[]) {
 		const byConversationId = new Map<string, ConversationPreviewMessage>();
 		if (!conversationIds.length) return byConversationId;

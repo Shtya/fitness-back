@@ -619,12 +619,12 @@ describe('Baileys phone-read unread signals', () => {
 		expect((provider as any).recentHistoryMessageIds.has('MSG-HISTORY-1')).toBe(true);
 	});
 
-	it('keeps full history opt-in', () => {
+	it('asks for full history unless switched off (older chats were empty with the short window)', () => {
 		const previous = process.env.WHATSAPP_SYNC_FULL_HISTORY;
 		delete process.env.WHATSAPP_SYNC_FULL_HISTORY;
-		expect(shouldSyncFullHistory()).toBe(false);
-		process.env.WHATSAPP_SYNC_FULL_HISTORY = 'true';
 		expect(shouldSyncFullHistory()).toBe(true);
+		process.env.WHATSAPP_SYNC_FULL_HISTORY = 'false';
+		expect(shouldSyncFullHistory()).toBe(false);
 		if (previous == null) delete process.env.WHATSAPP_SYNC_FULL_HISTORY;
 		else process.env.WHATSAPP_SYNC_FULL_HISTORY = previous;
 	});

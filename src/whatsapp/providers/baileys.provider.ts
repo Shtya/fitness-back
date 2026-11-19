@@ -115,11 +115,31 @@ function normalizeInboxJid(jid: string): string {
 
 const LIVE_FROM_ME_WINDOW_MS = 30 * 60 * 1000;
 
+/**
+ * Ask WhatsApp for the full archive when a device is linked (like WhatsApp Desktop), not the
+ * short recent window WhatsApp Web gets: with that window, chats older than it showed up
+ * empty and older messages never arrived. On unless WHATSAPP_SYNC_FULL_HISTORY=false.
+ */
 export function shouldSyncFullHistory() {
-	const value = String(process.env.WHATSAPP_SYNC_FULL_HISTORY || '')
+	const value = String(process.env.WHATSAPP_SYNC_FULL_HISTORY ?? '')
 		.trim()
 		.toLowerCase();
-	return value === '1' || value === 'true' || value === 'yes';
+	return !['0', 'false', 'no', 'off'].includes(value);
+}
+
+/**
+ * The device name sent to WhatsApp. WhatsApp only sends the full archive to a desktop app
+ * (Baileys marks the link as macOS/Windows desktop only for "<Mac OS|Windows>, Desktop" with full
+ * history on); as "Chrome" it is treated as WhatsApp Web. A device that is already linked keeps
+ * the name it was linked with, so its session is not disturbed.
+ */
+export function pickLinkBrowser(
+	browsers: any,
+	options: { paired: boolean; fullHistory: boolean },
+): [string, string, string] {
+	const web = browsers?.ubuntu?.('Chrome') || browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'];
+	if (options.paired || !options.fullHistory) return web;
+	return browsers?.macOS?.('Desktop') || ['Mac OS', 'Desktop', '14.4.1'];
 }
 
 /** Phone opened/read the chat → unreadCount 0. Marked unread is -1. Missing stays prev. */
@@ -2609,6 +2629,45 @@ export class BaileysProvider implements WhatsAppProvider {
 		return outcome === 'ok';
 	}
 
+	/** Last time we asked the phone about a chat we had no message of (per chat). */
+	private readonly emptyChatHistoryAskedAt = new Map<string, number>();
+	static readonly EMPTY_CHAT_RETRY_MS = 30 * 60_000;
+
+	/**
+	 * On-demand history needs a message of the chat to page back from. With none, the request
+	 * is anchored "now" (a key no message has, timestamp = now), asking for what came before:
+	 * the chat's newest messages. Whether the phone answers is up to it; the outcome is logged.
+	 */
+	private async requestHistoryForEmptyChat(chatId: string, count: number): Promise<boolean> {
+		const sock = this.socket;
+		if (!sock || this.state !== 'connected' || typeof sock.fetchMessageHistory !== 'function') return false;
+		const remoteJid = String(this.historyAnchorForChat(chatId)?.key?.remoteJid || toBaileysJid(chatId) || chatId);
+		if (!remoteJid || isStatusBroadcastJid(remoteJid) || remoteJid.endsWith('@newsletter')) return false;
+		const last = this.emptyChatHistoryAskedAt.get(remoteJid) || 0;
+		if (Date.now() - last < BaileysProvider.EMPTY_CHAT_RETRY_MS) return false;
+		this.emptyChatHistoryAskedAt.set(remoteJid, Date.now());
+		trimMapToMax(this.emptyChatHistoryAskedAt, 2_000);
+		const id = this.generateMessageId?.(this.socket?.user?.id) || `3EB0${Date.now().toString(16).toUpperCase()}`;
+		const key = { remoteJid, id, fromMe: false };
+		const chunksBefore = this.historySyncChunks;
+		const outcome = await this.phoneRequests.run('history_on_demand', `${remoteJid}:empty`, async () => {
+			await sock.fetchMessageHistory(Math.max(1, Math.min(count, 50)), key, Date.now());
+			const started = Date.now();
+			while (Date.now() - started < 8_000) {
+				await waitMs(400);
+				if (this.historySyncChunks > chunksBefore) {
+					await waitMs(600);
+					return true;
+				}
+			}
+			return false;
+		});
+		this.logger.log(
+			`[WA HISTORY] empty chat ${remoteJid}: asked the phone for its latest messages outcome=${outcome} chunks=${this.historySyncChunks - chunksBefore} account=${this.accountId}`,
+		);
+		return outcome === 'ok';
+	}
+
 	private async pullHistoryThenFind(
 		chatId: string,
 		providerMessageId: string,
@@ -3035,7 +3094,10 @@ export class BaileysProvider implements WhatsAppProvider {
 			shouldSyncHistoryMessage: ({ syncType }: { syncType?: number }) =>
 				syncType !== fullSyncType || shouldSyncFullHistory() || this.fullSyncPending(),
 			connectTimeoutMs: 60_000,
-			browser: Browsers?.ubuntu?.('Chrome') || Browsers?.macOS?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'],
+			browser: pickLinkBrowser(Browsers, {
+				paired: Boolean(state?.creds?.me?.id),
+				fullHistory: shouldSyncFullHistory(),
+			}),
 			msgRetryCounterCache: this.msgRetryCounterCache,
 			getMessage: (key: any) => this.getMessageForRetry(key),
 			cachedGroupMetadata: (jid: string) => this.getCachedGroupMetadata(jid),
@@ -3632,6 +3694,11 @@ export class BaileysProvider implements WhatsAppProvider {
 		let list = collect();
 		const beforeId = String(options.before || '').trim();
 		const anchor = options.anchor && String(options.anchor.id || '').trim() ? options.anchor : null;
+		// A chat we hold no message of (it was outside the history WhatsApp sent at link time):
+		// there is nothing to page back from, so ask the phone for its newest messages.
+		if (!list.length && !beforeId && !anchor) {
+			if (await this.requestHistoryForEmptyChat(chatId, Math.min(limit, 50))) list = collect();
+		}
 		const anchorTsMs = anchor ? this.historyTimestampMs(anchor.timestamp) : 0;
 		// Memory only holds what this session saw since it started. Older pages have to come from
 		// the phone: ask for the page before the oldest message we store, then read memory again.
