@@ -386,6 +386,11 @@ export class SetWhatsAppConversationKeepInTouchDto {
 	@Min(0)
 	@Max(365)
 	days?: number | null;
+
+	/** friends / family / acquaintances / unknown; left out = unchanged, null = clear. */
+	@IsOptional()
+	@IsIn(['friends', 'family', 'acquaintances', 'unknown'])
+	group?: 'friends' | 'family' | 'acquaintances' | 'unknown' | null;
 }
 
 export class SetWhatsAppConversationPinnedDto {

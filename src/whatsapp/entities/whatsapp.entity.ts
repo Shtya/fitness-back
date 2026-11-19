@@ -461,6 +461,10 @@ export class WhatsAppConversationPreference extends CoreEntity {
 	 */
 	@Column({ name: 'keep_in_touch_days', type: 'int', nullable: true })
 	keepInTouchDays: number | null;
+
+	/** Keep in touch group: friends, family, acquaintances or unknown. Null = not sorted yet. */
+	@Column({ name: 'keep_in_touch_group', type: 'varchar', length: 16, nullable: true })
+	keepInTouchGroup: string | null;
 }
 
 @Entity('whatsapp_messages')

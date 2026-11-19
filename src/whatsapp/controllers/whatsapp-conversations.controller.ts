@@ -282,7 +282,7 @@ export class WhatsAppConversationsController {
 		@Param('conversationId') conversationId: string,
 		@Body() body: SetWhatsAppConversationKeepInTouchDto,
 	) {
-		return this.sync.setConversationKeepInTouch(req.user, conversationId, body?.days ?? null);
+		return this.sync.setConversationKeepInTouch(req.user, conversationId, body?.days ?? null, body?.group);
 	}
 
 	@Put('conversations/:conversationId/pin')

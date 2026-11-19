@@ -819,6 +819,9 @@ function readVoiceDurationFromRaw(raw: unknown): number {
 	return 0;
 }
 
+/** Keep in touch groups: friends (اصحابي), family (قرايبي), acquaintances (معارف), unknown (غير معروفين). */
+const KEEP_IN_TOUCH_GROUPS = ['friends', 'family', 'acquaintances', 'unknown'] as const;
+
 @Injectable()
 export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	private readonly logger = new Logger(WhatsAppSyncService.name);
@@ -4693,6 +4696,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					keepInTouch: keepInTouchById.has(item.id)
 						? {
 								days: keepInTouchById.get(item.id)!.days,
+								group: keepInTouchById.get(item.id)!.group,
 								lastContactAt: keepInTouchById.get(item.id)!.lastContactAt?.toISOString() || null,
 								dueAt: keepInTouchById.get(item.id)!.dueAt?.toISOString() || null,
 								overdue: keepInTouchById.get(item.id)!.overdue,
@@ -5115,6 +5119,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			isMuted?: boolean;
 			mutedUntil?: Date | null;
 			keepInTouchDays?: number | null;
+			keepInTouchGroup?: string | null;
 		},
 	) {
 		const conversation = await this.conversationRepo.findOneByOrFail({ id: conversationId });
@@ -5150,6 +5155,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		if (patch.isMuted != null) row.isMuted = patch.isMuted;
 		if (patch.mutedUntil !== undefined) row.mutedUntil = patch.mutedUntil;
 		if (patch.keepInTouchDays !== undefined) row.keepInTouchDays = patch.keepInTouchDays;
+		if (patch.keepInTouchGroup !== undefined) row.keepInTouchGroup = patch.keepInTouchGroup;
 		await this.preferenceRepo.save(row);
 	}
 
@@ -5159,9 +5165,10 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 	 * messages alone do not). A chat never written to is due at once.
 	 */
 	private async keepInTouchStatus(user: User, accountId: string, canSeeAll: boolean) {
-		const rows: Array<{ conversation_id: string; days: number; last_contact_at: Date | null }> =
+		const rows: Array<{ conversation_id: string; days: number; grp: string | null; last_contact_at: Date | null }> =
 			await this.conversationRepo.query(
 				`SELECT DISTINCT ON (c.id) c.id AS conversation_id, p.keep_in_touch_days AS days,
+					p.keep_in_touch_group AS grp,
 					(SELECT m.provider_timestamp FROM whatsapp_messages m
 						WHERE m.conversation_id = c.id AND m.direction = 'outbound'
 						ORDER BY m.provider_timestamp DESC LIMIT 1) AS last_contact_at
@@ -5184,6 +5191,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 			return {
 				conversationId: row.conversation_id,
 				days,
+				group: KEEP_IN_TOUCH_GROUPS.includes(String(row.grp) as any) ? String(row.grp) : null,
 				lastContactAt,
 				dueAt: dueAt ? new Date(dueAt) : null,
 				overdue: !dueAt || dueAt <= now,
@@ -5193,11 +5201,26 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		return items;
 	}
 
-	async setConversationKeepInTouch(user: User, conversationId: string, rawDays: number | null) {
+	async setConversationKeepInTouch(
+		user: User,
+		conversationId: string,
+		rawDays: number | null,
+		rawGroup?: string | null,
+	) {
 		await this.assertConversationVisible(user, conversationId);
 		const days = Number(rawDays) > 0 ? Math.min(Math.round(Number(rawDays)), 365) : null;
-		await this.saveConversationPreference(user.id, conversationId, { keepInTouchDays: days });
-		return { ok: true, conversationId, keepInTouchDays: days };
+		// Group: left out = unchanged; anything not one of the four clears it.
+		const group =
+			rawGroup === undefined
+				? undefined
+				: KEEP_IN_TOUCH_GROUPS.includes(String(rawGroup) as any)
+					? String(rawGroup)
+					: null;
+		await this.saveConversationPreference(user.id, conversationId, {
+			keepInTouchDays: days,
+			...(group !== undefined ? { keepInTouchGroup: group } : {}),
+		});
+		return { ok: true, conversationId, keepInTouchDays: days, keepInTouchGroup: group ?? null };
 	}
 
 	private async findConversationPreference(
