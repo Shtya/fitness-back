@@ -819,8 +819,11 @@ function readVoiceDurationFromRaw(raw: unknown): number {
 	return 0;
 }
 
-/** Keep in touch groups: friends (اصحابي), family (قرايبي), acquaintances (معارف), unknown (غير معروفين). */
-const KEEP_IN_TOUCH_GROUPS = ['friends', 'family', 'acquaintances', 'unknown'] as const;
+/**
+ * Keep in touch groups: friends (اصحابي), family (قرايبي), football (لعب كورة),
+ * acquaintances (معارف), unknown (غير معروفين). A person can be in a group with no reminder.
+ */
+const KEEP_IN_TOUCH_GROUPS = ['friends', 'family', 'football', 'acquaintances', 'unknown'] as const;
 
 @Injectable()
 export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
@@ -4523,6 +4526,81 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		);
 	}
 
+	/** Compact list of every chat the user may see, for on-device search (see the controller). */
+	async conversationDirectory(user: User, accountId: string, updatedSince = '') {
+		const accountAccess = await this.access.getAccountAccess(user, accountId);
+		if (!accountAccess.canView) throw new ForbiddenException('WhatsApp account access denied');
+		const canSeeAll = this.access.canSeeAllConversations(user, accountAccess);
+		const since = parseConversationDeltaSince(updatedSince);
+		// Taken before the query, so a change made while it runs is picked up by the next delta.
+		const serverTime = new Date().toISOString();
+		const params: unknown[] = [accountId];
+		let visibility = '';
+		if (!canSeeAll) {
+			params.push(user.id);
+			visibility = `AND c.assigned_user_id = $${params.length}`;
+		}
+		let changed = 'AND c.deleted_at IS NULL';
+		if (since) {
+			params.push(since);
+			const at = `$${params.length}`;
+			changed = `AND (c.updated_at > ${at} OR c.last_message_at > ${at} OR c.deleted_at > ${at}
+				OR ct.updated_at > ${at} OR g.updated_at > ${at})`;
+		}
+		const rows: Array<{
+			id: string;
+			provider_chat_id: string;
+			type: string;
+			last_message_at: Date | null;
+			deleted_at: Date | null;
+			contact_name: string | null;
+			local_name: string | null;
+			phonebook_name: string | null;
+			phone_number: string | null;
+			contact_avatar: string | null;
+			subject: string | null;
+			group_avatar: string | null;
+		}> = await this.conversationRepo.query(
+			`SELECT c.id, c.provider_chat_id, c.type, c.last_message_at, c.deleted_at,
+				ct.name AS contact_name, ct.local_name, ct.phonebook_name, ct.phone_number,
+				ct.avatar_url AS contact_avatar, g.subject, g.avatar_url AS group_avatar
+			FROM whatsapp_conversations c
+			LEFT JOIN whatsapp_contacts ct ON ct.id = c.contact_id
+			LEFT JOIN whatsapp_groups g ON g.id = c.group_id
+			WHERE c.account_id = $1
+				AND LOWER(c.provider_chat_id) NOT LIKE '%@broadcast%'
+				AND LOWER(c.provider_chat_id) NOT LIKE '%status@%'
+				${visibility}
+				${changed}
+			ORDER BY c.last_message_at DESC NULLS LAST
+			LIMIT 20000`,
+			params,
+		);
+		return {
+			serverTime,
+			full: !since,
+			items: rows.map((row) =>
+				row.deleted_at
+					? { id: row.id, deleted: true }
+					: {
+							id: row.id,
+							providerChatId: row.provider_chat_id,
+							type: row.type,
+							lastMessageAt: row.last_message_at,
+							contact:
+								row.contact_name || row.local_name || row.phonebook_name || row.phone_number || row.contact_avatar
+									? {
+											name: row.local_name || row.contact_name || row.phonebook_name || null,
+											phoneNumber: row.phone_number,
+											avatarUrl: row.contact_avatar,
+										}
+									: null,
+							group: row.subject || row.group_avatar ? { subject: row.subject, avatarUrl: row.group_avatar } : null,
+						},
+			),
+		};
+	}
+
 	private async listConversationsUncached(
 		user: User,
 		accountId: string,
@@ -5201,7 +5279,7 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 					AND (c.id = p.conversation_id
 						OR (p.conversation_id IS NULL AND c.account_id = p.account_id AND c.provider_chat_id = p.provider_chat_id))
 				WHERE p.user_id = $1 AND p.account_id = $2 AND p.deleted_at IS NULL
-					AND p.keep_in_touch_days IS NOT NULL AND p.keep_in_touch_days > 0
+					AND ((p.keep_in_touch_days IS NOT NULL AND p.keep_in_touch_days > 0) OR p.keep_in_touch_group IS NOT NULL)
 					${canSeeAll ? '' : 'AND c.assigned_user_id = $1'}
 				ORDER BY c.id, p.updated_at DESC`,
 				[user.id, accountId],
@@ -5210,17 +5288,21 @@ export class WhatsAppSyncService implements OnModuleInit, OnModuleDestroy {
 		const items = rows.map((row) => {
 			const days = Number(row.days) || 0;
 			const lastContactAt = row.last_contact_at ? new Date(row.last_contact_at) : null;
-			const dueAt = lastContactAt ? lastContactAt.getTime() + days * 86_400_000 : 0;
+			// In a group with no reminder (days 0): listed, never due.
+			const dueAt = days > 0 && lastContactAt ? lastContactAt.getTime() + days * 86_400_000 : 0;
 			return {
 				conversationId: row.conversation_id,
 				days,
 				group: KEEP_IN_TOUCH_GROUPS.includes(String(row.grp) as any) ? String(row.grp) : null,
 				lastContactAt,
 				dueAt: dueAt ? new Date(dueAt) : null,
-				overdue: !dueAt || dueAt <= now,
+				overdue: days > 0 && (!dueAt || dueAt <= now),
 			};
 		});
-		items.sort((a, b) => (a.dueAt?.getTime() || 0) - (b.dueAt?.getTime() || 0));
+		// Due first (most overdue on top), then upcoming, then people with no reminder.
+		const order = (item: (typeof items)[number]) =>
+			item.days > 0 ? item.dueAt?.getTime() || 0 : Number.MAX_SAFE_INTEGER;
+		items.sort((a, b) => order(a) - order(b));
 		return items;
 	}
 

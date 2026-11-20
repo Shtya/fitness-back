@@ -206,6 +206,20 @@ export class WhatsAppConversationsController {
 		return this.access.getUnreadTotal(req.user);
 	}
 
+	/**
+	 * Every chat's name, number and photo, small enough to keep on the device so chat search
+	 * finds anyone at once (not only the chats loaded in the list). `updatedSince` returns only
+	 * what changed, deleted chats included, so the copy on the device stays current.
+	 */
+	@Get('accounts/:accountId/conversations/directory')
+	conversationDirectory(
+		@Req() req: any,
+		@Param('accountId') accountId: string,
+		@Query('updatedSince') updatedSince = '',
+	) {
+		return this.sync.conversationDirectory(req.user, accountId, updatedSince);
+	}
+
 	@Get('accounts/:accountId/conversations')
 	listConversations(
 		@Req() req: any,

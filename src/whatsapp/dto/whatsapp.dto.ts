@@ -389,8 +389,8 @@ export class SetWhatsAppConversationKeepInTouchDto {
 
 	/** friends / family / acquaintances / unknown; left out = unchanged, null = clear. */
 	@IsOptional()
-	@IsIn(['friends', 'family', 'acquaintances', 'unknown'])
-	group?: 'friends' | 'family' | 'acquaintances' | 'unknown' | null;
+	@IsIn(['friends', 'family', 'football', 'acquaintances', 'unknown'])
+	group?: 'friends' | 'family' | 'football' | 'acquaintances' | 'unknown' | null;
 }
 
 export class SetWhatsAppConversationPinnedDto {
