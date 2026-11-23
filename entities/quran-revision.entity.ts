@@ -24,6 +24,10 @@ export class QuranRevisionState extends CoreEntity {
 	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
 	wordErrors!: Record<string, string>;
 
+	/** Mistake notebook (WhatsApp Quran tab): one entry per logged mistake, with its review schedule. */
+	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+	mistakes!: any[];
+
 	@Column({ type: 'jsonb', nullable: true })
 	activeSession!: Record<string, any> | null;
 }
