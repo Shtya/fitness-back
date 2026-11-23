@@ -140,7 +140,7 @@ export class AuthService {
 			throw new ForbiddenException('Only super admin can set passwords');
 		}
 		const newPassword = String(newPasswordValue ?? '');
-		if (newPassword.length < 8) throw new BadRequestException('Password must be at least 8 characters');
+		if (newPassword.length < 6) throw new BadRequestException('Password must be at least 6 characters');
 		if (newPassword.length > 128) throw new BadRequestException('Password is too long');
 		if (newPassword.trim() !== newPassword) {
 			throw new BadRequestException('Password cannot start or end with a space');

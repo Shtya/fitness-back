@@ -55,7 +55,7 @@ describe('super admin sets a password', () => {
 		const target = { id: 'u1', email: 'a@b.co', password: 'old' };
 		const { service } = createService([target]);
 		await expect(service.superAdminSetPassword('u1', 'NewPass#2026', { id: 'x', role: UserRole.ADMIN })).rejects.toThrow(/super admin/);
-		await expect(service.superAdminSetPassword('u1', 'short', superAdmin)).rejects.toThrow(/8 characters/);
+		await expect(service.superAdminSetPassword('u1', 'short', superAdmin)).rejects.toThrow(/6 characters/);
 		await expect(service.superAdminSetPassword('u1', ' padded-pass ', superAdmin)).rejects.toThrow(/space/);
 		await expect(service.superAdminSetPassword('missing', 'NewPass#2026', superAdmin)).rejects.toThrow(/not found/);
 		expect(target.password).toBe('old');
