@@ -10,6 +10,7 @@ import { PM_LIMITS } from './projectmind.constants';
 import { DocsService } from './docs.service';
 import { GapsService } from './gaps.service';
 import { RetrievalService } from './retrieval.service';
+import { SettingsService } from './settings.service';
 
 export type PmUser = { id: string; tenantId?: string | null; adminId?: string | null; tokenTenantId?: string | null; role?: string };
 
@@ -43,6 +44,7 @@ export class ProjectsService implements OnModuleInit {
 		private readonly docs: DocsService,
 		private readonly gaps: GapsService,
 		private readonly retrieval: RetrievalService,
+		private readonly settings: SettingsService,
 	) {}
 
 	/** Jobs run in-process; anything left mid-flight by a restart is marked failed so the UI never shows a stuck spinner. */
@@ -110,7 +112,8 @@ export class ProjectsService implements OnModuleInit {
 		);
 		await this.log(user, 'project.create', project.id, { sourceType: input.sourceType });
 		if (input.sourceType === 'github') {
-			const token = input.githubToken?.trim() || undefined;
+			// An explicit token wins; otherwise the workspace's saved token (Settings) is used automatically.
+			const token = input.githubToken?.trim() || (await this.settings.getGithubToken(workspaceOf(user)));
 			void this.runPipeline(project.id, async () => {
 				const ref = parseGithubUrl(project.sourceUrl!);
 				ref.branch = project.branch || undefined;
@@ -142,7 +145,7 @@ export class ProjectsService implements OnModuleInit {
 		void this.runPipeline(p.id, async () => {
 			const ref = parseGithubUrl(p.sourceUrl!);
 			ref.branch = p.branch || undefined;
-			const dl = await downloadGithubZip(ref, githubToken?.trim() || undefined);
+			const dl = await downloadGithubZip(ref, githubToken?.trim() || (await this.settings.getGithubToken(workspaceOf(user))));
 			return { zip: dl.zip, commitSha: dl.commitSha, branch: dl.branch };
 		});
 		return this.projects.findOneByOrFail({ id: p.id });

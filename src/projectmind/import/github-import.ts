@@ -96,7 +96,7 @@ export async function downloadGithubZip(ref: GithubRef, token?: string): Promise
 	} catch (e: any) {
 		if (e instanceof GithubImportError) throw e;
 		const status = e?.response?.status;
-		if (status === 404) throw new GithubImportError('GITHUB_NOT_FOUND', 'Repository or branch not found. Private repositories need an access token.');
+		if (status === 404) throw new GithubImportError('GITHUB_NOT_FOUND', 'Repository or branch not found. Private repositories need a GitHub access token: save one in ProjectMind → Settings.');
 		if (status === 401 || status === 403) {
 			const limited = String(e?.response?.headers?.['x-ratelimit-remaining'] ?? '') === '0';
 			throw new GithubImportError(limited ? 'GITHUB_RATE_LIMIT' : 'GITHUB_AUTH', limited ? 'GitHub rate limit reached. Try again later or provide a token.' : 'GitHub rejected the access token or the repository is private.');

@@ -31,6 +31,6 @@ import { AiRouterService } from './services/ai-router.service';
 		AiLimitsService,
 		AiService,
 	],
-	exports: [AiService],
+	exports: [AiService, AiCryptoService],
 })
 export class AiModule {}

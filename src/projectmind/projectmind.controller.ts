@@ -12,8 +12,9 @@ import { DocsService, AI_SECTION_PROMPTS } from './docs.service';
 import { GapsService } from './gaps.service';
 import { MeetingsService, TRANSCRIPTION_STATUS } from './meetings.service';
 import { PM_LIMITS, ANSWER_STYLES, GAP_PRIORITIES, GAP_STATUSES, NOTE_KINDS, SIM_DIFFICULTIES, SIM_SCENARIOS } from './projectmind.constants';
-import { ProjectsService, PmUser } from './projects.service';
+import { ProjectsService, PmUser, workspaceOf } from './projects.service';
 import { RateLimiter } from './rate-limiter';
+import { SettingsService } from './settings.service';
 import { SimulatorService } from './simulator.service';
 
 /**
@@ -34,6 +35,7 @@ export class ProjectMindController {
 		private readonly meetings: MeetingsService,
 		private readonly sim: SimulatorService,
 		private readonly ai: AiService,
+		private readonly settings: SettingsService,
 	) {}
 
 	private limit(req: any, bucket: string, max: number, windowMs: number) {
@@ -69,6 +71,28 @@ export class ProjectMindController {
 		} catch {
 			return { configured: false, providers: [] };
 		}
+	}
+
+	/* ----------------------------- settings ----------------------------- */
+
+	/** Saved GitHub token status. The token itself is never returned. */
+	@Get('settings/github-token')
+	githubTokenStatus(@Req() req: any) {
+		return this.settings.githubStatus(workspaceOf(req.user));
+	}
+
+	@Put('settings/github-token')
+	async saveGithubToken(@Req() req: any, @Body() body: any) {
+		this.limit(req, 'settings', 20, 10 * 60_000);
+		const r = await this.settings.saveGithubToken(workspaceOf(req.user), req.user.id, body?.token);
+		await this.projects.log(req.user, 'settings.github_token_saved', null);
+		return r;
+	}
+
+	@Delete('settings/github-token')
+	async removeGithubToken(@Req() req: any) {
+		await this.projects.log(req.user, 'settings.github_token_removed', null);
+		return this.settings.removeGithubToken(workspaceOf(req.user));
 	}
 
 	/* ----------------------------- projects ----------------------------- */

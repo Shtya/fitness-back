@@ -1,4 +1,4 @@
-import { Column, CreateDateColumn, DeleteDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, Unique, UpdateDateColumn } from 'typeorm';
+import { Column, CreateDateColumn, DeleteDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryColumn, PrimaryGeneratedColumn, Unique, UpdateDateColumn } from 'typeorm';
 
 /**
  * ProjectMind entities. Schema source of truth: backend/migrations/20261124_projectmind_init.sql
@@ -177,4 +177,13 @@ export class PmAuditLog {
 	@CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt: Date;
 }
 
-export const PM_ENTITIES = [PmProject, PmFile, PmChunk, PmConversation, PmMessage, PmDocSection, PmKnowledgeGap, PmMeeting, PmMeetingNote, PmSimSession, PmSimTurn, PmAuditLog];
+@Entity('pm_settings')
+export class PmSetting {
+	@PrimaryColumn({ name: 'workspace_id', type: 'uuid' }) workspaceId: string;
+	@Column({ name: 'github_token_enc', type: 'text', nullable: true }) githubTokenEnc: string | null;
+	@Column({ name: 'github_token_last4', type: 'varchar', length: 8, nullable: true }) githubTokenLast4: string | null;
+	@Column({ name: 'updated_by', type: 'uuid', nullable: true }) updatedBy: string | null;
+	@UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt: Date;
+}
+
+export const PM_ENTITIES = [PmSetting, PmProject, PmFile, PmChunk, PmConversation, PmMessage, PmDocSection, PmKnowledgeGap, PmMeeting, PmMeetingNote, PmSimSession, PmSimTurn, PmAuditLog];

@@ -18,6 +18,10 @@ import { MeetingsService } from './meetings.service';
 import { ProjectsService, PmUser } from './projects.service';
 import { RetrievalService } from './retrieval.service';
 import { SimulatorService } from './simulator.service';
+import { SettingsService } from './settings.service';
+import { AiCryptoService } from '../ai/services/ai-crypto.service';
+import { ConfigService } from '@nestjs/config';
+import { DataSource } from 'typeorm';
 import { INSUFFICIENT_EVIDENCE_TEXT } from './projectmind.constants';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -56,6 +60,8 @@ describeDb('ProjectMind integration (real Postgres)', () => {
 	let meetings: MeetingsService;
 	let sim: SimulatorService;
 	let retrieval: RetrievalService;
+	let settings: SettingsService;
+	let ds: DataSource;
 	const aiMock = { generateText: jest.fn() };
 	let projectId = '';
 	let moduleRef: { close(): Promise<void> };
@@ -67,7 +73,7 @@ describeDb('ProjectMind integration (real Postgres)', () => {
 				TypeOrmModule.forRoot({ type: 'postgres', host: url.hostname, port: Number(url.port || 5432), username: decodeURIComponent(url.username), password: decodeURIComponent(url.password) || undefined, database: url.pathname.slice(1), entities: PM_ENTITIES, synchronize: false }),
 				TypeOrmModule.forFeature(PM_ENTITIES),
 			],
-			providers: [ProjectsService, RetrievalService, DocsService, GapsService, ChatService, MeetingsService, SimulatorService, AiJsonService, { provide: AiService, useValue: aiMock }],
+			providers: [ProjectsService, RetrievalService, DocsService, GapsService, ChatService, MeetingsService, SimulatorService, AiJsonService, SettingsService, AiCryptoService, { provide: ConfigService, useValue: { get: () => undefined } }, { provide: AiService, useValue: aiMock }],
 		}).compile();
 		moduleRef = mod;
 		projects = mod.get(ProjectsService);
@@ -77,6 +83,8 @@ describeDb('ProjectMind integration (real Postgres)', () => {
 		meetings = mod.get(MeetingsService);
 		sim = mod.get(SimulatorService);
 		retrieval = mod.get(RetrievalService);
+		settings = mod.get(SettingsService);
+		ds = mod.get(DataSource);
 	});
 
 	afterAll(async () => {
@@ -295,6 +303,22 @@ describeDb('ProjectMind integration (real Postgres)', () => {
 		expect(failed.status).toBe('failed');
 		expect(failed.statusMessage).toMatch(/unsafe/);
 	}, 20000);
+
+	it('saves the GitHub token encrypted, never returns it, scopes it per workspace, and can remove it', async () => {
+		const token = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8';
+		expect(await settings.githubStatus(userA.tenantId!)).toMatchObject({ configured: false });
+		const st = await settings.saveGithubToken(userA.tenantId!, userA.id, token);
+		expect(st).toMatchObject({ configured: true, last4: token.slice(-4) });
+		expect(JSON.stringify(st)).not.toContain(token);
+		const [row] = await ds.query('SELECT github_token_enc FROM pm_settings WHERE workspace_id = $1', [userA.tenantId]);
+		expect(row.github_token_enc).not.toContain(token);
+		expect(row.github_token_enc.length).toBeGreaterThan(40);
+		expect(await settings.getGithubToken(userA.tenantId!)).toBe(token);
+		expect(await settings.getGithubToken(userB.tenantId!)).toBeUndefined();
+		await expect(settings.saveGithubToken(userA.tenantId!, userA.id, 'short')).rejects.toThrow(/does not look like/);
+		expect(await settings.removeGithubToken(userA.tenantId!)).toMatchObject({ configured: false });
+		expect(await settings.getGithubToken(userA.tenantId!)).toBeUndefined();
+	});
 
 	it('soft-deletes a project and hides it', async () => {
 		const p = await projects.create(userA, { name: 'ToDelete', sourceType: 'zip' });
