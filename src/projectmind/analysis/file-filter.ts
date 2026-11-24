@@ -74,11 +74,16 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 /**
- * KEY=value style assignments with secret-looking names. Keeps the name, drops the value.
- * Values that are clearly code references (process.env.X, ${VAR}, null…) are left alone.
+ * Assignments of literal secrets. Deliberately narrow so source code stays readable:
+ *  - env-style lines: UPPER_CASE secret-looking name, unquoted value of 8+ chars that is not a code reference;
+ *  - quoted string literals of 8+ chars (no spaces/templates) that contain a digit or are 12+ chars long, assigned to a
+ *    secret-looking name.
+ * References such as process.env.X, ${VAR}, function calls and short or placeholder values are left alone.
  */
-const ASSIGNMENT_RE =
-	/\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)[A-Z0-9_]*)(\s*[=:]\s*)(["']?)(?!process\.|os\.|env|config|settings|self\.|\$|<|\{|None|null|undefined|true|false|\[REDACTED)[^\s"'#,;)]{6,}\3/gi;
+const ENV_ASSIGNMENT_RE =
+	/^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)[A-Z0-9_]*[ \t]*=[ \t]*)(?!["'])(?!your|change|example|xxx|process|\[REDACTED)([^\s#"'$`(){}<]{8,})/gm;
+const QUOTED_ASSIGNMENT_RE =
+	/\b([A-Za-z0-9_$.]*(?:secret|password|passwd|token|api_?key|private_?key|access_?key)[A-Za-z0-9_]*)(["']?\s*[:=]\s*)(["'])(?!your|change|example|xxx|test|dummy|placeholder|\[REDACTED)(?=[^"'\s$`{}]*\d|[^"'\s$`{}]{12,}\3)([^"'\s$`{}]{8,})\3/gi;
 
 /** Removes secret-looking values before content is stored or sent to any AI provider. */
 export function redactSecrets(text: string): { text: string; redactions: number } {
@@ -90,7 +95,11 @@ export function redactSecrets(text: string): { text: string; redactions: number 
 			return rep;
 		});
 	}
-	out = out.replace(ASSIGNMENT_RE, (_m, name: string, sep: string, quote: string) => {
+	out = out.replace(ENV_ASSIGNMENT_RE, (_m, head: string) => {
+		count++;
+		return `${head}[REDACTED]`;
+	});
+	out = out.replace(QUOTED_ASSIGNMENT_RE, (_m, name: string, sep: string, quote: string) => {
 		count++;
 		return `${name}${sep}${quote}[REDACTED]${quote}`;
 	});

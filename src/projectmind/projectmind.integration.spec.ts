@@ -161,6 +161,19 @@ describeDb('ProjectMind integration (real Postgres)', () => {
 		expect(aiMock.generateText).not.toHaveBeenCalled();
 	});
 
+	it('refuses false premises: a named technology that appears nowhere in the repo never reaches the model', async () => {
+		aiMock.generateText.mockClear();
+		const project = await projects.require(userA, projectId);
+		const r = await chat.ask(userA, project, { question: 'How does the Kafka consumer handle the login events?' });
+		expect(r.status).toBe('insufficient_evidence');
+		expect(r.notes.join(' ')).toMatch(/"kafka".*does not appear anywhere/);
+		expect(aiMock.generateText).not.toHaveBeenCalled();
+		// while a real technology from the same repo is not blocked by this check
+		aiMock.generateText.mockResolvedValueOnce({ model: 'm', text: JSON.stringify({ answer: 'ok [1]', claims: [{ text: 'c', label: 'verified', sources: [1] }] }) });
+		const ok = await chat.ask(userA, project, { question: 'How does the Nest AuthController login work?' });
+		expect(ok.status).toBe('answered');
+	});
+
 	it('refuses secret-extraction requests without retrieval or AI', async () => {
 		aiMock.generateText.mockClear();
 		const project = await projects.require(userA, projectId);

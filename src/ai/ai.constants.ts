@@ -37,6 +37,7 @@ export const AI_FEATURE_IDS = [
 	'studio.image',
 	'ai-reading',
 	'projectmind.chat',
+	'learn.english',
 ] as const;
 
 export type AiFeatureId = (typeof AI_FEATURE_IDS)[number];
@@ -83,6 +84,7 @@ export const AI_FEATURES: AiFeatureSpec[] = [
 	{ id: 'studio.image', name: 'Studio image', type: 'image', defaultModelKey: 'gemini-2.5-flash-image', page: 'studio' },
 	{ id: 'ai-reading', name: 'AI Reading', type: 'text', defaultModelKey: 'gpt-oss:20b', page: 'ai-reading' },
 	{ id: 'projectmind.chat', name: 'ProjectMind', type: 'text', defaultModelKey: 'gemini-2.5-flash', page: 'projectmind' },
+	{ id: 'learn.english', name: 'Learn: English days', type: 'text', defaultModelKey: 'auto', page: 'whatsapp' },
 ];
 
 export type AiModelPricing = {

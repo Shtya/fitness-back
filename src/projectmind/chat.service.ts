@@ -5,7 +5,7 @@ import { AiService } from '../ai/ai.service';
 import { AiException } from '../ai/ai.errors';
 import { buildChatPrompt, CHAT_SYSTEM_PROMPT } from './chat/prompt';
 import { ConfidenceInfo, heuristicConfidence, parseModelJson, SourceRef, validateAnswer } from './chat/citations';
-import { evidenceGate, extractTerms, isSecretExtractionAttempt, retrievalQuery } from './chat/query';
+import { evidenceGate, extractEntities, extractTerms, isSecretExtractionAttempt, retrievalQuery } from './chat/query';
 import { PmConversation, PmMessage, PmProject } from './entities/projectmind.entities';
 import { AnswerStyle, ANSWER_STYLES, INSUFFICIENT_EVIDENCE_TEXT, PM_AI_FEATURE, PM_LIMITS } from './projectmind.constants';
 import { PmUser, workspaceOf } from './projects.service';
@@ -85,8 +85,9 @@ export class ChatService {
 
 		const prevUser = history.filter((m) => m.role === 'user').map((m) => m.content);
 		const terms = extractTerms(retrievalQuery(question, prevUser));
+		const absent = await this.retrieval.absentEntities(project.id, extractEntities(question));
 		const chunks = await this.retrieval.retrieve(project.id, terms);
-		const gate = evidenceGate(terms, chunks);
+		const gate = evidenceGate(terms, chunks, absent);
 		if (!gate.sufficient) {
 			return finish({ status: 'insufficient_evidence', answer: INSUFFICIENT_EVIDENCE_TEXT, claims: [], sources: [], confidence: { level: 'low', heuristic: true, basis: gate.reason }, notes: [gate.reason], meta: elapsed({ retrieved: chunks.length, coverage: gate.coverage }) });
 		}
@@ -131,6 +132,29 @@ export class ChatService {
 			notes: v.notes,
 			meta: elapsed({ model, retrieved: chunks.length, coverage: gate.coverage }),
 		});
+	}
+
+	/**
+	 * What the answer pipeline would retrieve for a question, WITHOUT calling the AI and without storing anything.
+	 * Uses exactly the production steps (follow-up rewrite → terms → retrieval → evidence gate), so evaluations and
+	 * "why this answer?" tooling measure the real behaviour. `previousQuestions` stands in for conversation history.
+	 */
+	async retrievalPreview(project: PmProject, input: { question: string; previousQuestions?: string[] }) {
+		const question = String(input.question || '').trim();
+		if (!question) throw new BadRequestException('Question is required.');
+		if (question.length > PM_LIMITS.maxQuestionChars) throw new BadRequestException(`Question is too long (max ${PM_LIMITS.maxQuestionChars} characters).`);
+		if (isSecretExtractionAttempt(question)) return { blocked: true, gate: { sufficient: false, coverage: 0, reason: 'Secret-extraction request refused.' }, terms: [], chunks: [] };
+		const prev = (input.previousQuestions || []).map(String).slice(-6);
+		const terms = extractTerms(retrievalQuery(question, prev));
+		const absent = await this.retrieval.absentEntities(project.id, extractEntities(question));
+		const chunks = await this.retrieval.retrieve(project.id, terms);
+		const gate = evidenceGate(terms, chunks, absent);
+		return {
+			blocked: false,
+			gate,
+			terms,
+			chunks: chunks.map((c, i) => ({ rank: i + 1, path: c.path, startLine: c.startLine, endLine: c.endLine, score: c.score, text: c.text })),
+		};
 	}
 
 	private async getOrCreateConversation(user: PmUser, project: PmProject, id: string | undefined, question: string) {

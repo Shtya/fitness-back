@@ -39,6 +39,10 @@ export class LearnCourse extends CoreEntity {
 	@Column({ type: 'boolean', default: false })
 	pinned!: boolean;
 
+	/** 'general' or 'english' (English courses get the day tools: transcript, words, questions, speaking). */
+	@Column({ type: 'varchar', length: 16, default: 'general' })
+	kind!: string;
+
 	@Column({ type: 'int', default: 0 })
 	orderIndex!: number;
 
@@ -80,6 +84,10 @@ export class LearnLecture extends CoreEntity {
 
 	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
 	qa!: LearnQaItem[];
+
+	/** English courses only: the day's video link, transcript, words, questions and speaking sessions. */
+	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+	english!: Record<string, any>;
 
 	@Column({ type: 'boolean', default: false })
 	done!: boolean;

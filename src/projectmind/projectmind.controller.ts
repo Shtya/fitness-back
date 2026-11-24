@@ -148,6 +148,14 @@ export class ProjectMindController {
 		return this.chat.ask(req.user, project, { question: body?.question, conversationId: body?.conversationId, style: body?.style });
 	}
 
+	/** Retrieval + evidence-gate preview (no AI call, nothing stored). Used by the evaluation harness. */
+	@Post('projects/:id/retrieve')
+	async retrieve(@Req() req: any, @Param('id') id: string, @Body() body: any) {
+		this.limit(req, 'retrieve', 600, 60_000);
+		const project = await this.projects.require(req.user, id);
+		return this.chat.retrievalPreview(project, { question: body?.question, previousQuestions: Array.isArray(body?.previousQuestions) ? body.previousQuestions : [] });
+	}
+
 	@Get('projects/:id/conversations')
 	async conversations(@Req() req: any, @Param('id') id: string) {
 		await this.projects.require(req.user, id);

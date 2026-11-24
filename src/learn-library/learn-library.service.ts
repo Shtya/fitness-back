@@ -5,6 +5,12 @@ import { LEARN_MAX_TITLE, LearnCourse, LearnLecture, LearnRoadmap } from 'entiti
 import { CreateCourseDto, CreateLectureDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
 import { LEARN_SCHEMA_STATEMENTS } from './learn-library.schema';
 import { NormalizedRoadmap, mergeTopicsIndex, parseRoadmapJson, parseTopicsIndexJson, roadmapTopicKeys } from './learn-roadmap.util';
+import { EN_AI_SYSTEM, correctPrompt, normalizeEnglish, parseJsonObject, questionsPrompt, readCorrection, readQuestions, readWord, wordPrompt } from './learn-english.util';
+import { AiService } from '../ai/ai.service';
+import { EnglishAiDto } from './learn-library.dto';
+
+/** AI feature id for the English days (questions, word meanings). */
+export const LEARN_ENGLISH_AI_FEATURE = 'learn.english';
 
 const ms = (date: Date | null | undefined) => (date ? new Date(date).getTime() : null);
 
@@ -45,6 +51,7 @@ export function courseToClient(row: LearnCourse, stats: CourseStats = { lectures
 		category: row.category ?? '',
 		color: row.color || 'green',
 		pinned: Boolean(row.pinned),
+		kind: row.kind === 'english' ? 'english' : 'general',
 		createdAt: ms(row.created_at) ?? Date.now(),
 		updatedAt: ms(row.updated_at) ?? Date.now(),
 		lastStudiedAt: ms(row.lastStudiedAt),
@@ -65,7 +72,8 @@ export function lectureSummaryToClient(row: LearnLecture) {
 		doneAt: ms(row.doneAt),
 		needsRevision: Boolean(row.needsRevision),
 		qaCount: Array.isArray(row.qa) ? row.qa.length : 0,
-		hasContent: Boolean(String(row.content || '').trim()),
+		hasContent: Boolean(String(row.content || '').trim()) || Boolean(String(row.english?.transcript || '').trim()),
+		wordCount: Array.isArray(row.english?.words) ? row.english.words.length : 0,
 		createdAt: ms(row.created_at) ?? Date.now(),
 		updatedAt: ms(row.updated_at) ?? Date.now(),
 	};
@@ -79,6 +87,7 @@ export function lectureToClient(row: LearnLecture) {
 		keyPoints: row.keyPoints ?? '',
 		summary: row.summary ?? '',
 		qa: Array.isArray(row.qa) ? row.qa : [],
+		english: normalizeEnglish(row.english),
 	};
 }
 
@@ -93,6 +102,7 @@ export class LearnLibraryService implements OnModuleInit {
 		@InjectRepository(LearnLecture) private readonly lectures: Repository<LearnLecture>,
 		@InjectRepository(LearnRoadmap) private readonly roadmaps: Repository<LearnRoadmap>,
 		private readonly dataSource: DataSource,
+		private readonly ai: AiService,
 	) {}
 
 	onModuleInit() {
@@ -174,6 +184,7 @@ export class LearnLibraryService implements OnModuleInit {
 			category: String(dto.category || '').trim(),
 			color: dto.color || 'green',
 			pinned: Boolean(dto.pinned),
+			kind: dto.kind === 'english' ? 'english' : 'general',
 			orderIndex: Number(max?.max ?? -1) + 1,
 			lastStudiedAt: null,
 		});
@@ -191,6 +202,7 @@ export class LearnLibraryService implements OnModuleInit {
 		if (dto.category !== undefined) row.category = dto.category.trim();
 		if (dto.color !== undefined) row.color = dto.color;
 		if (dto.pinned !== undefined) row.pinned = dto.pinned;
+		if (dto.kind !== undefined) row.kind = dto.kind === 'english' ? 'english' : 'general';
 		return this.courseResult(userId, await this.courses.save(row));
 	}
 
@@ -252,6 +264,7 @@ export class LearnLibraryService implements OnModuleInit {
 			keyPoints: dto.keyPoints ?? '',
 			summary: dto.summary ?? '',
 			qa: dto.qa ?? [],
+			english: normalizeEnglish(dto.english),
 			done: Boolean(dto.done),
 			doneAt: dto.done ? new Date() : null,
 			needsRevision: Boolean(dto.needsRevision),
@@ -260,6 +273,44 @@ export class LearnLibraryService implements OnModuleInit {
 		const saved = await this.lectures.save(row);
 		await this.touchCourse(userId, courseId);
 		return lectureToClient(saved);
+	}
+
+	/** Every word picked out in a course's days (for highlighting earlier days' words). */
+	async courseWords(userId: string, courseId: string) {
+		await this.ownCourse(userId, courseId);
+		const rows = await this.lectures.find({ where: { userId, courseId }, select: ['id', 'title', 'english', 'orderIndex'], order: { orderIndex: 'ASC' } });
+		const words: Array<Record<string, any>> = [];
+		rows.forEach((l, i) =>
+			normalizeEnglish(l.english).words.forEach(w => words.push({ ...w, lectureId: l.id, lectureTitle: l.title, day: i + 1 })),
+		);
+		return { words };
+	}
+
+	/** AI help for an English day: speaking questions about the topic, or a word's meaning. */
+	async englishAi(user: any, dto: EnglishAiDto) {
+		const run = async (prompt: string, maxTokens: number) => {
+			const res: any = await this.ai.generateText({ prompt, system: EN_AI_SYSTEM, feature: LEARN_ENGLISH_AI_FEATURE, user, maxTokens, temperature: 0.6 });
+			return parseJsonObject(String(res?.text || ''));
+		};
+		if (dto.task === 'correct') {
+			const text = String(dto.text || '').trim();
+			if (text.split(/\s+/).length < 3) throw new BadRequestException('Say a little more first.');
+			const out = readCorrection(await run(correctPrompt({ text, topic: dto.topic }), 1800));
+			if (!out) throw new BadRequestException('The AI reply could not be read. Try again.');
+			return out;
+		}
+		if (dto.task === 'word') {
+			const word = String(dto.word || '').trim();
+			if (!word) throw new BadRequestException('word is required');
+			const out = readWord(await run(wordPrompt({ word, context: dto.context }), 500));
+			if (!out) throw new BadRequestException('The AI reply could not be read. Try again.');
+			return out;
+		}
+		const topic = String(dto.topic || '').trim();
+		if (!topic) throw new BadRequestException('topic is required');
+		const questions = readQuestions(await run(questionsPrompt({ topic, transcript: dto.transcript, words: dto.words, count: dto.count, existing: dto.existing }), 900));
+		if (!questions.length) throw new BadRequestException('The AI reply could not be read. Try again.');
+		return { questions };
 	}
 
 	async getLecture(userId: string, id: string) {
@@ -284,6 +335,7 @@ export class LearnLibraryService implements OnModuleInit {
 		if (dto.summary !== undefined) patch.summary = dto.summary;
 		if (dto.qa !== undefined) patch.qa = dto.qa.map(item => ({ id: item.id, q: item.q, a: item.a }));
 		if (dto.needsRevision !== undefined) patch.needsRevision = dto.needsRevision;
+		if (dto.english !== undefined) patch.english = normalizeEnglish(dto.english);
 		if (dto.done !== undefined && dto.done !== row.done) {
 			patch.done = dto.done;
 			patch.doneAt = dto.done ? new Date() : null;
