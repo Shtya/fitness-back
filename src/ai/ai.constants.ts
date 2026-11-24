@@ -36,6 +36,7 @@ export const AI_FEATURE_IDS = [
 	'studio.content',
 	'studio.image',
 	'ai-reading',
+	'projectmind.chat',
 ] as const;
 
 export type AiFeatureId = (typeof AI_FEATURE_IDS)[number];
@@ -64,6 +65,7 @@ export const AI_PAGES = [
 	{ id: 'email-memo', href: '/dashboard/email-memo' },
 	{ id: 'studio', href: '/dashboard/ai-content-studio' },
 	{ id: 'ai-reading', href: '/dashboard/ai-reading' },
+	{ id: 'projectmind', href: '/dashboard/projectmind' },
 ] as const;
 
 export const AI_FEATURES: AiFeatureSpec[] = [
@@ -80,6 +82,7 @@ export const AI_FEATURES: AiFeatureSpec[] = [
 	{ id: 'studio.content', name: 'Studio content', type: 'text', defaultModelKey: 'gemini-2.5-flash', page: 'studio' },
 	{ id: 'studio.image', name: 'Studio image', type: 'image', defaultModelKey: 'gemini-2.5-flash-image', page: 'studio' },
 	{ id: 'ai-reading', name: 'AI Reading', type: 'text', defaultModelKey: 'gpt-oss:20b', page: 'ai-reading' },
+	{ id: 'projectmind.chat', name: 'ProjectMind', type: 'text', defaultModelKey: 'gemini-2.5-flash', page: 'projectmind' },
 ];
 
 export type AiModelPricing = {
@@ -184,7 +187,7 @@ export const SEEDED_MODELS: SeedAiModel[] = [
 		isDefault: false,
 		tier: 'custom',
 		costTier: 'FREE_TIER',
-		usedBy: ['studio.topic', 'studio.content', 'ai-reading'],
+		usedBy: ['studio.topic', 'studio.content', 'ai-reading', 'projectmind.chat'],
 	}),
 	seed({
 		modelKey: 'gemini-2.5-flash-lite',

@@ -57,6 +57,7 @@ import { BodyMeasurementModule } from './body-measurement/body-measurement.modul
 import { FacebookEngagementModule } from './facebook-engagement/facebook-engagement.module';
 import { SiteInspectorModule } from './site-inspector/site-inspector.module';
 import { SmartDocumentModule } from './smart-document/smart-document.module';
+import { ProjectMindModule } from './projectmind/projectmind.module';
 
 @Module({
 	imports: [
@@ -128,6 +129,7 @@ import { SmartDocumentModule } from './smart-document/smart-document.module';
 		FacebookEngagementModule,
 		SiteInspectorModule,
 		SmartDocumentModule,
+		ProjectMindModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, QueryFailedErrorFilter],
