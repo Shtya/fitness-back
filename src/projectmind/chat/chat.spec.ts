@@ -1,4 +1,4 @@
-import { buildTsQuery, evidenceGate, extractTerms, isFollowUp, isSecretExtractionAttempt, retrievalQuery, RetrievedChunk } from './query';
+import { buildTsQuery, evidenceGate, extractTerms, isFollowUp, isSecretExtractionAttempt, retrievalQuery, RetrievedChunk, stem, extractEntities } from './query';
 import { findUnresolvedPaths, heuristicConfidence, parseModelJson, validateAnswer } from './citations';
 import { buildChatPrompt, CHAT_SYSTEM_PROMPT } from './prompt';
 import { INSUFFICIENT_EVIDENCE_TEXT } from '../projectmind.constants';
@@ -11,6 +11,24 @@ describe('query', () => {
 	it('extracts terms across camelCase/snake_case and drops stop words', () => {
 		expect(extractTerms('How does the loginService hash_password?')).toEqual(expect.arrayContaining(['login', 'service', 'hash', 'password']));
 		expect(extractTerms('How does the')).toEqual([]);
+	});
+	it('stems plurals and verb forms, and keeps compound identifiers', () => {
+		expect(stem('resetting')).toBe('reset');
+		expect(stem('limited')).toBe('limit');
+		expect(stem('endpoints')).toBe('endpoint');
+		expect(stem('responses')).toBe('response');
+		expect(stem('passwords')).toBe('password');
+		expect(stem('class')).toBe('class');
+		expect(stem('auth')).toBe('auth');
+		const t = extractTerms('Where does WhatsApp connect, and how are passwords reset?');
+		expect(t).toEqual(expect.arrayContaining(['whatsapp', 'connect', 'password', 'reset']));
+	});
+	it('extracts presupposed named things but not sentence-initial words or short acronyms', () => {
+		expect(extractEntities('How does the Kafka consumer process order events?')).toEqual(['kafka']);
+		expect(extractEntities('Where is SendGrid configured? And how does RabbitMQ route messages?')).toEqual(['sendgrid', 'rabbitmq']);
+		expect(extractEntities('How does the NestJS ThrottlerGuard rate-limit routes?')).toEqual(['nestjs', 'throttlerguard']);
+		expect(extractEntities('How does login work in the API?')).toEqual([]);
+		expect(extractEntities('what is the JWT lifetime')).toEqual(['jwt']);
 	});
 	it('builds a safe tsquery', () => {
 		const q = buildTsQuery(['login', "x'; drop", 'a&b|c!']);
@@ -36,6 +54,11 @@ describe('evidenceGate', () => {
 		expect(evidenceGate(['stripe', 'refund', 'webhook'], []).sufficient).toBe(false);
 		expect(evidenceGate(['stripe', 'refund', 'webhook'], [chunk()]).sufficient).toBe(false);
 		expect(evidenceGate([], [chunk()]).sufficient).toBe(false);
+	});
+	it('refuses when a named thing in the question occurs nowhere in the code, even if other terms match', () => {
+		const r = evidenceGate(['login', 'password', 'kafka'], [chunk()], ['kafka']);
+		expect(r.sufficient).toBe(false);
+		expect(r.reason).toMatch(/"kafka".*does not appear anywhere/);
 	});
 	it('accepts when terms are covered', () => {
 		expect(evidenceGate(['login', 'password', 'hash'], [chunk()]).sufficient).toBe(true);
