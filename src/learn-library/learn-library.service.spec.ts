@@ -50,7 +50,7 @@ describe('Learn boot schema', () => {
 
 	it('only uses statements that are safe to run on every start', () => {
 		for (const statement of LEARN_SCHEMA_STATEMENTS) {
-			expect(statement).toMatch(/^(CREATE TABLE IF NOT EXISTS|CREATE INDEX IF NOT EXISTS)/);
+			expect(statement).toMatch(/^(CREATE TABLE IF NOT EXISTS|CREATE INDEX IF NOT EXISTS|ALTER TABLE \w+ ADD COLUMN IF NOT EXISTS)/);
 			expect(statement).not.toMatch(/\b(DROP|DELETE|TRUNCATE|UPDATE)\b/i);
 		}
 	});
@@ -65,7 +65,7 @@ describe('Learn boot schema', () => {
 
 	it('runs once at boot and retries on the next load after a failure', async () => {
 		const query = jest.fn().mockRejectedValueOnce(new Error('connection reset')).mockResolvedValue([]);
-		const service = new LearnLibraryService({ find: jest.fn().mockResolvedValue([]) } as any, {} as any, {} as any, { query } as any);
+		const service = new LearnLibraryService({ find: jest.fn().mockResolvedValue([]) } as any, {} as any, {} as any, { query } as any, {} as any);
 		(service as any).statsFor = jest.fn().mockResolvedValue(new Map());
 		jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
 
@@ -88,7 +88,7 @@ describe('LearnLibraryService', () => {
 			update: jest.fn().mockResolvedValue(undefined),
 			softDelete: jest.fn().mockResolvedValue(undefined),
 		};
-		const service = new LearnLibraryService(courses as any, lectures as any, {} as any, {} as any);
+		const service = new LearnLibraryService(courses as any, lectures as any, {} as any, {} as any, {} as any);
 		return { service, courses, lectures };
 	}
 

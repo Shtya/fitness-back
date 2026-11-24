@@ -52,4 +52,7 @@ export const LEARN_SCHEMA_STATEMENTS = [
 		"orderIndex" integer NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS "IDX_learn_roadmaps_user_order" ON learn_roadmaps ("userId", "orderIndex")`,
+	// English courses: the course kind, and each lecture's day (video, transcript, words, questions, speaking).
+	`ALTER TABLE learn_courses ADD COLUMN IF NOT EXISTS kind varchar(16) NOT NULL DEFAULT 'general'`,
+	`ALTER TABLE learn_lectures ADD COLUMN IF NOT EXISTS english jsonb NOT NULL DEFAULT '{}'::jsonb`,
 ];

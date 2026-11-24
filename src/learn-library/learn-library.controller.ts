@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
-import { CreateCourseDto, CreateLectureDto, LearnQuery, LearnSearchQuery, ReorderDto, RoadmapJsonDto, RoadmapTopicsDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
+import { CreateCourseDto, CreateLectureDto, EnglishAiDto, LearnQuery, LearnSearchQuery, ReorderDto, RoadmapJsonDto, RoadmapTopicsDto, UpdateCourseDto, UpdateLectureDto } from './learn-library.dto';
 import { LearnLibraryService } from './learn-library.service';
 
 /** The WhatsApp page's "Learn" tab: a personal library of courses and lectures. */
@@ -53,6 +53,17 @@ export class LearnLibraryController {
 	@Put('courses/:id/lectures/order')
 	reorderLectures(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Body() body: ReorderDto) {
 		return this.service.reorderLectures(this.userId(req), id, body.ids);
+	}
+
+	@Get('courses/:id/english/words')
+	courseWords(@Req() req: any, @Param('id', ParseUUIDPipe) id: string, @Query() _query: LearnQuery) {
+		return this.service.courseWords(this.userId(req), id);
+	}
+
+	@Post('english/ai')
+	englishAi(@Req() req: any, @Body() body: EnglishAiDto) {
+		this.userId(req);
+		return this.service.englishAi(req.user, body);
 	}
 
 	@Get('lectures/:id')

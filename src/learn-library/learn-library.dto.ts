@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { COURSE_KINDS } from './learn-english.util';
 import {
 	LEARN_COLORS,
 	LEARN_MAX_CATEGORY,
@@ -43,6 +44,10 @@ class CourseFields {
 	@IsOptional()
 	@IsBoolean()
 	pinned?: boolean;
+
+	@IsOptional()
+	@IsIn(COURSE_KINDS as unknown as string[])
+	kind?: (typeof COURSE_KINDS)[number];
 }
 
 export class CreateCourseDto extends CourseFields {
@@ -115,6 +120,11 @@ class LectureFields {
 	@IsOptional()
 	@IsBoolean()
 	needsRevision?: boolean;
+
+	/** English day (cleaned and size-limited by the service). */
+	@IsOptional()
+	@IsObject()
+	english?: Record<string, any>;
 }
 
 export class CreateLectureDto extends LectureFields {
@@ -137,6 +147,57 @@ export class ReorderDto {
 	@ArrayMaxSize(1000)
 	@IsUUID('all', { each: true })
 	ids!: string[];
+}
+
+export class EnglishAiDto {
+	@IsIn(['questions', 'word', 'correct'])
+	task!: 'questions' | 'word' | 'correct';
+
+	/** For 'correct': what the learner said. */
+	@IsOptional()
+	@IsString()
+	@MaxLength(8000)
+	text?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	topic?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(6000)
+	transcript?: string;
+
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(60)
+	@IsString({ each: true })
+	@MaxLength(120, { each: true })
+	words?: string[];
+
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(40)
+	@IsString({ each: true })
+	@MaxLength(400, { each: true })
+	existing?: string[];
+
+	@IsOptional()
+	@IsInt()
+	@Min(3)
+	@Max(10)
+	count?: number;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(120)
+	word?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(600)
+	context?: string;
 }
 
 export class RoadmapJsonDto {

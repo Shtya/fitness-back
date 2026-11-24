@@ -46,6 +46,7 @@ import { PhoneIntelligenceModule } from './phone-intelligence/phone-intelligence
 import { FitnessLeadsModule } from './fitness-leads/fitness-leads.module';
 import { MetaWhatsAppModule } from './meta-whatsapp/meta-whatsapp.module';
 import { QuranRevisionModule } from './quran-revision/quran-revision.module';
+import { HabitsModule } from './habits/habits.module';
 import { LearningModule } from './learning/learning.module';
 import { AiReadingModule } from './ai-reading/ai-reading.module';
 import { AiContentStudioModule } from './ai-content-studio/ai-content-studio.module';
@@ -118,6 +119,7 @@ import { ProjectMindModule } from './projectmind/projectmind.module';
 		FitnessLeadsModule,
 		MetaWhatsAppModule,
 		QuranRevisionModule,
+		HabitsModule,
 		LearningModule,
 		AiReadingModule,
 		AiContentStudioModule,
