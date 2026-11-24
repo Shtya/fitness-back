@@ -28,6 +28,14 @@ export class QuranRevisionState extends CoreEntity {
 	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
 	mistakes!: any[];
 
+	/** Mushaf page bookmarks (review / new / old / custom); deletes travel as `deletedAt` tombstones. */
+	@Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+	bookmarks!: any[];
+
+	/** Mushaf reading time per device and day: { [deviceId]: { 'YYYY-MM-DD': seconds } }. */
+	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+	readingTime!: Record<string, Record<string, number>>;
+
 	@Column({ type: 'jsonb', nullable: true })
 	activeSession!: Record<string, any> | null;
 }
