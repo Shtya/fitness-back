@@ -96,10 +96,16 @@ export function evidenceGate(terms: string[], chunks: RetrievedChunk[], absentEn
 }
 
 /** Questions that try to extract secrets / excluded files — answered with a refusal, no retrieval, no AI. */
-const SECRET_REQUEST = /(\.env\b|api[\s_-]?key|secret|password|private[\s_-]?key|access[\s_-]?token|credentials?|deploy-key)\b.*\b(value|content|show|reveal|print|dump|give|what is|what's|tell)|\b(show|reveal|print|dump|give|tell|what is|what's|read)\b.*(\.env\b|api[\s_-]?key|secret|password|private[\s_-]?key|access[\s_-]?token|credentials?)/i;
+const SECRET_REQUEST = /(\.env\b|api[\s_-]?key|secret|password|private[\s_-]?key|access[\s_-]?token|credentials?|deploy-key)\b.*\b(value|content|show|reveal|print|dump|give|what is|what's|tell|list|enumerate|expose|leak|output)|\b(show|reveal|print|dump|give|tell|what is|what's|read|list|enumerate|expose|leak|output)\b.*(\.env\b|api[\s_-]?keys?|secrets?|passwords?|private[\s_-]?keys?|access[\s_-]?tokens?|credentials?)/i;
+
+/** "How/where/why … stored/hashed/handled" questions ABOUT secrets are legitimate; asking for their VALUES is not. */
+const ABOUT_SECRETS = /\b(how|where|why|which|whether|stored|storing|hash|hashed|hashing|encrypt|encrypted|encryption|configured|handled|handling|protect|protected|validate|validated|loaded|rotated)\b/i;
+const WANTS_VALUES = /\b(value|values|content|contents|actual|real|plain ?text|literal|all the)\b/i;
 
 export function isSecretExtractionAttempt(question: string): boolean {
-	return SECRET_REQUEST.test(question);
+	if (!SECRET_REQUEST.test(question)) return false;
+	if (ABOUT_SECRETS.test(question) && !WANTS_VALUES.test(question)) return false;
+	return true;
 }
 
 const ENTITY_STOP = new Set(['api', 'url', 'http', 'https', 'json', 'html', 'css', 'sql', 'rest', 'ssl', 'the', 'and', 'how', 'what', 'where', 'when', 'why', 'which', 'who', 'does', 'can', 'could', 'should', 'explain', 'show', 'list', 'tell', 'ignore', 'system', 'please', 'create', 'since', 'is', 'are']);
