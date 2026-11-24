@@ -14,18 +14,34 @@ export const EN_MAX_SPEAKING = 200;
 export const EN_MAX_SPOKEN = 20_000;
 
 /** `example`: a sentence to remember it by; `context`: the sentence from the video where you met it. */
-export type EnglishWord = { id: string; text: string; meaning: string; translation: string; example: string; context: string; createdAt: number };
+export type EnglishWord = { id: string; text: string; meaning: string; translation: string; example: string; context: string; createdAt: number; fav: boolean };
 export type EnglishQuestion = { id: string; q: string; a: string; source: 'own' | 'ai'; createdAt: number };
 /** One correction of what you said: the words you used, the better version, why, and whether you ticked it as learned. */
-export type EnglishFix = { id: string; wrong: string; right: string; why: string; done: boolean };
+export type EnglishFix = { id: string; wrong: string; right: string; why: string; kind: string; done: boolean };
+/** The AI's overall look at what you said. */
+export type EnglishAnalysis = { summary: string; level: string; tips: string[] };
+/** A later try at the same talk (the original stays as it was). */
+export type EnglishVersion = { id: string; at: number; text: string; corrected: string; fixes: EnglishFix[]; analysis: EnglishAnalysis | null };
 /** A speaking session: `text` is what you said (speech-to-text, editable), `fixes` the corrections. */
-export type EnglishSpeaking = { id: string; at: number; seconds: number; prompt: string; text: string; corrected: string; fixes: EnglishFix[] };
+export type EnglishSpeaking = {
+	id: string;
+	at: number;
+	seconds: number;
+	prompt: string;
+	text: string;
+	corrected: string;
+	fixes: EnglishFix[];
+	analysis: EnglishAnalysis | null;
+	versions: EnglishVersion[];
+};
 export type EnglishDay = {
 	videoUrl: string;
 	transcript: string;
 	words: EnglishWord[];
 	questions: EnglishQuestion[];
 	speaking: EnglishSpeaking[];
+	/** words from the transcript tables you ticked as learned (lower-case) */
+	learned: string[];
 };
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -35,9 +51,35 @@ const num = (v: unknown, max = Number.MAX_SAFE_INTEGER) => {
 	return Number.isFinite(n) && n >= 0 ? Math.min(max, Math.round(n)) : 0;
 };
 const list = (v: unknown) => (Array.isArray(v) ? v : []);
+export const CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'] as const;
+
+const fixesOf = (v: unknown) =>
+	list(v)
+		.map((f: any, i: number) =>
+			f && typeof f === 'object'
+				? { id: id(f.id) || `f${i}`, wrong: str(f.wrong, 300), right: str(f.right, 300), why: str(f.why, 600), kind: str(f.kind, 60), done: Boolean(f.done) }
+				: null,
+		)
+		.filter((f): f is EnglishFix => Boolean(f && (f.wrong || f.right)))
+		.slice(0, 60);
+
+const analysisOf = (v: unknown): EnglishAnalysis | null => {
+	if (!v || typeof v !== 'object') return null;
+	const o = v as Record<string, unknown>;
+	const level = str(o.level, 4).toUpperCase();
+	const out = {
+		summary: str(o.summary, 1500).trim(),
+		level: (CEFR as readonly string[]).includes(level) ? level : '',
+		tips: list(o.tips)
+			.map(t => str(t, 300).trim())
+			.filter(Boolean)
+			.slice(0, 5),
+	};
+	return out.summary || out.level || out.tips.length ? out : null;
+};
 
 export function emptyEnglish(): EnglishDay {
-	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [] };
+	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [] };
 }
 
 /** Anything the client sends becomes a well-formed day (unknown keys dropped, limits applied). */
@@ -63,6 +105,7 @@ export function normalizeEnglish(raw: unknown): EnglishDay {
 							example: str(w.example, 800),
 							context: str(w.context, 800),
 							createdAt: num(w.createdAt),
+							fav: Boolean(w.fav),
 						}
 					: null,
 			)
@@ -77,6 +120,7 @@ export function normalizeEnglish(raw: unknown): EnglishDay {
 			)
 			.filter(unique)
 			.slice(0, EN_MAX_QUESTIONS),
+		learned: [...new Set(list(v.learned).map(x => str(x, 120).trim().toLowerCase()).filter(Boolean))].slice(0, 2000),
 		speaking: list(v.speaking)
 			.map((s: any) =>
 				s && typeof s === 'object'
@@ -87,14 +131,16 @@ export function normalizeEnglish(raw: unknown): EnglishDay {
 							prompt: str(s.prompt, 600),
 							text: str(s.text, EN_MAX_SPOKEN),
 							corrected: str(s.corrected, EN_MAX_SPOKEN),
-							fixes: list(s.fixes)
-								.map((f: any, i: number) =>
-									f && typeof f === 'object'
-										? { id: id(f.id) || `f${i}`, wrong: str(f.wrong, 300), right: str(f.right, 300), why: str(f.why, 400), done: Boolean(f.done) }
+							fixes: fixesOf(s.fixes),
+							analysis: analysisOf(s.analysis),
+							versions: list(s.versions)
+								.map((x: any) =>
+									x && typeof x === 'object'
+										? { id: id(x.id), at: num(x.at), text: str(x.text, EN_MAX_SPOKEN), corrected: str(x.corrected, EN_MAX_SPOKEN), fixes: fixesOf(x.fixes), analysis: analysisOf(x.analysis) }
 										: null,
 								)
-								.filter((f): f is EnglishFix => Boolean(f && (f.wrong || f.right)))
-								.slice(0, 60),
+								.filter((x): x is EnglishVersion => Boolean(x && x.id))
+								.slice(0, 12),
 						}
 					: null,
 			)
@@ -168,10 +214,11 @@ export function correctPrompt(input: { text: string; topic?: string }) {
 	return [
 		input.topic ? `The learner was talking about: "${clip(input.topic, 200)}".` : '',
 		`This is what they said (automatic speech-to-text, so ignore missing punctuation and capital letters):\n"""${clip(input.text, 6000)}"""`,
-		'Find the real English mistakes (grammar, wrong word, unnatural phrasing, missing words). Ignore filler words like "um". Max 15 mistakes, most useful first.',
-		'For each one give the exact words they used, the corrected words, and a very short reason in simple English.',
-		'Also give the whole text corrected, keeping their meaning and level.',
-		'Return: {"corrected": "...", "fixes": [{"wrong": "...", "right": "...", "why": "..."}]}',
+		'Find the real English mistakes (grammar, tense, wrong word, unnatural phrasing, missing words, prepositions, articles). Ignore filler words like "um". Max 15 mistakes, most useful first.',
+		'For each one give: the exact words they used ("wrong"), the corrected words ("right"), the grammar point in 1-3 words ("kind", e.g. "Past simple", "Present perfect", "Word choice", "Article", "Preposition", "Word order", "Plural", "Collocation"), and "why": one or two short sentences in simple English that teach the rule (e.g. "Use the past simple for a finished time like yesterday: go → went").',
+		'Also give the whole text corrected ("corrected"), keeping their meaning and level — do not make it fancier.',
+		'Then look at the whole talk: "summary" — 2-3 short sentences on how they did and the main thing to work on; "level" — their CEFR level (A1, A2, B1, B2, C1 or C2); "tips" — up to 3 short, concrete tips for next time.',
+		'Return: {"corrected": "...", "fixes": [{"wrong": "...", "right": "...", "kind": "...", "why": "..."}], "summary": "...", "level": "B1", "tips": ["..."]}',
 	]
 		.filter(Boolean)
 		.join('\n');
@@ -180,10 +227,12 @@ export function correctPrompt(input: { text: string; topic?: string }) {
 export function readCorrection(o: Record<string, any> | null) {
 	if (!o) return null;
 	const fixes = list(o.fixes)
-		.map((f: any) => (f && typeof f === 'object' ? { wrong: str(f.wrong, 300).trim(), right: str(f.right, 300).trim(), why: str(f.why, 400).trim() } : null))
-		.filter((f): f is { wrong: string; right: string; why: string } => Boolean(f && f.right && f.wrong !== f.right))
+		.map((f: any) =>
+			f && typeof f === 'object' ? { wrong: str(f.wrong, 300).trim(), right: str(f.right, 300).trim(), kind: str(f.kind, 60).trim(), why: str(f.why, 600).trim() } : null,
+		)
+		.filter((f): f is { wrong: string; right: string; kind: string; why: string } => Boolean(f && f.right && f.wrong !== f.right))
 		.slice(0, 15);
-	return { corrected: str(o.corrected, EN_MAX_SPOKEN).trim(), fixes };
+	return { corrected: str(o.corrected, EN_MAX_SPOKEN).trim(), fixes, analysis: analysisOf(o) };
 }
 
 export function readWord(o: Record<string, any> | null) {

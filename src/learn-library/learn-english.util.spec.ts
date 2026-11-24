@@ -21,9 +21,15 @@ describe('learn english util', () => {
 		expect(day.questions.map(q => q.source)).toEqual(['ai', 'own']);
 		expect(day.speaking[0].seconds).toBe(3600);
 		expect(day.speaking[0].text).toBe('I go home');
-		expect(day.speaking[0].fixes).toEqual([{ id: 'f0', wrong: 'go', right: 'went', why: 'past', done: true }]);
+		expect(day.speaking[0].fixes).toEqual([{ id: 'f0', wrong: 'go', right: 'went', why: 'past', kind: '', done: true }]);
 		expect((day as any).hacked).toBeUndefined();
-		expect(normalizeEnglish(null)).toEqual({ videoUrl: '', transcript: '', words: [], questions: [], speaking: [] });
+		expect(normalizeEnglish(null)).toEqual({ videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [] });
+		const sp = normalizeEnglish({ words: [{ id: 'w1', text: 'go', fav: 1 }], speaking: [{ id: 's1', text: 'a', analysis: { summary: 'ok', level: 'Z9', tips: ['t'] }, versions: [{ id: 'v1', text: 'b', fixes: [{ wrong: 'x', right: 'y', kind: 'Article' }] }, { text: 'no id' }] }] });
+		expect(sp.words[0].fav).toBe(true);
+		expect(sp.speaking[0].analysis).toEqual({ summary: 'ok', level: '', tips: ['t'] });
+		expect(sp.speaking[0].versions).toHaveLength(1);
+		expect(sp.speaking[0].versions[0].fixes[0].kind).toBe('Article');
+		expect(normalizeEnglish({ learned: ['Disclaimer', 'disclaimer', ' far-flung ', 3] }).learned).toEqual(['disclaimer', 'far-flung']);
 	});
 
 	it('reads AI replies', () => {
@@ -36,8 +42,12 @@ describe('learn english util', () => {
 		});
 		expect(readCorrection(parseJsonObject('{"corrected":"I went home.","fixes":[{"wrong":"I go home yesterday","right":"I went home yesterday","why":"past tense"},{"wrong":"same","right":"same"}]}'))).toEqual({
 			corrected: 'I went home.',
-			fixes: [{ wrong: 'I go home yesterday', right: 'I went home yesterday', why: 'past tense' }],
+			fixes: [{ wrong: 'I go home yesterday', right: 'I went home yesterday', kind: '', why: 'past tense' }],
+			analysis: null,
 		});
+		const full = readCorrection(parseJsonObject('{"corrected":"I went home.","fixes":[{"wrong":"I go","right":"I went","kind":"Past simple","why":"Finished time: go → went."}],"summary":"Clear ideas.","level":"b1","tips":["Watch your past tense","",3]}'));
+		expect(full?.fixes[0].kind).toBe('Past simple');
+		expect(full?.analysis).toEqual({ summary: 'Clear ideas.', level: 'B1', tips: ['Watch your past tense'] });
 		expect(readWord(parseJsonObject('no json'))).toBeNull();
 	});
 

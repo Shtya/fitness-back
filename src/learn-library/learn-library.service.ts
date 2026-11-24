@@ -295,7 +295,7 @@ export class LearnLibraryService implements OnModuleInit {
 		if (dto.task === 'correct') {
 			const text = String(dto.text || '').trim();
 			if (text.split(/\s+/).length < 3) throw new BadRequestException('Say a little more first.');
-			const out = readCorrection(await run(correctPrompt({ text, topic: dto.topic }), 1800));
+			const out = readCorrection(await run(correctPrompt({ text, topic: dto.topic }), 2600));
 			if (!out) throw new BadRequestException('The AI reply could not be read. Try again.');
 			return out;
 		}
