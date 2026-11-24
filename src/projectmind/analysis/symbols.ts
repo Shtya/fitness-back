@@ -34,7 +34,12 @@ export function isCodeLanguage(lang: string | null): boolean {
 
 const NEST_ROUTE = /@(Get|Post|Put|Patch|Delete|All)\(\s*(?:['"`]([^'"`]*)['"`])?\s*\)/;
 const NEST_CONTROLLER = /@Controller\(\s*(?:['"`]([^'"`]*)['"`])?\s*\)/;
-const EXPRESS_ROUTE = /\b(?:app|router|server|api)\.(get|post|put|patch|delete|all)\(\s*['"`]([^'"`]+)['"`]/;
+/**
+ * Express/Fastify/Koa style `app.get('/x', …)`. Only counted in files that actually use a server framework, otherwise
+ * HTTP *client* calls (`axios.get('/x')`, `app.get('key')` on a config object) would be reported as endpoints.
+ */
+const EXPRESS_ROUTE = /\b(?:app|router|server|fastify)\.(get|post|put|patch|delete|all)\(\s*['"`](\/[^'"`]*)['"`]/;
+const SERVER_FRAMEWORK = /(?:from|require\()\s*['"](?:express|fastify|koa|koa-router|@hapi\/hapi|hono|restify)['"]|\bexpress\.Router\(|\bRouter\(\)/;
 const FLASK_ROUTE = /@\w+\.(route|get|post|put|patch|delete)\(\s*['"]([^'"]+)['"](?:.*methods=\[['"](\w+)['"])?/;
 
 /** Extract declared symbols + HTTP routes from a source file using line-oriented heuristics. */
@@ -43,6 +48,7 @@ export function extractSymbols(path: string, lang: string | null, content: strin
 	const routes: RouteInfo[] = [];
 	const imports = new Set<string>();
 	const lines = content.split('\n');
+	const usesServerFramework = SERVER_FRAMEWORK.test(content);
 	let controllerPrefix = '';
 
 	for (let i = 0; i < lines.length; i++) {
@@ -68,7 +74,7 @@ export function extractSymbols(path: string, lang: string | null, content: strin
 			if ((m = NEST_CONTROLLER.exec(line))) controllerPrefix = m[1] || '';
 			if ((m = NEST_ROUTE.exec(line))) {
 				routes.push({ method: m[1].toUpperCase(), path: joinPath(controllerPrefix, m[2] || ''), line: n });
-			} else if ((m = EXPRESS_ROUTE.exec(line))) {
+			} else if (usesServerFramework && (m = EXPRESS_ROUTE.exec(line))) {
 				routes.push({ method: m[1].toUpperCase(), path: m[2], line: n });
 			}
 			if ((m = /@Entity\(\s*['"`]([^'"`]+)['"`]/.exec(line))) symbols.push({ name: m[1], kind: 'entity', line: n });

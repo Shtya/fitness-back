@@ -44,6 +44,30 @@ describe('file-filter', () => {
 		expect(r.text).toContain('process.env.API_TOKEN');
 		expect(r.redactions).toBeGreaterThanOrEqual(4);
 	});
+
+	it('does not mangle ordinary code that merely mentions passwords or tokens', () => {
+		const code = [
+			'password: dto.password,',
+			'const token = getToken(user);',
+			'const accessToken = localStorage.getItem("accessToken");',
+			'"password": "Password",',
+			"resetToken: 'abc',",
+			'if (password === confirmPassword) {}',
+			'API_KEY=${API_KEY}',
+			'SECRET_KEY=process.env.SECRET_KEY',
+		].join('\n');
+		const r = redactSecrets(code);
+		expect(r.text).toBe(code);
+		expect(r.redactions).toBe(0);
+	});
+
+	it('redacts quoted literals with digits and env-style values, keeping the variable names', () => {
+		const r = redactSecrets('const adminPassword = "Sup3rS3cretValue";\nJWT_SECRET=abcdef123456\nclient_secret: \'k8s9d7f6g5h4\'');
+		expect(r.text).toContain('adminPassword = "[REDACTED]"');
+		expect(r.text).toContain('JWT_SECRET=[REDACTED]');
+		expect(r.text).toContain("client_secret: '[REDACTED]'");
+		expect(r.text).not.toMatch(/Sup3rS3cret|abcdef123456|k8s9d7f6g5h4/);
+	});
 });
 
 describe('symbols', () => {
@@ -72,6 +96,13 @@ describe('symbols', () => {
 		]);
 		expect(r.symbols.some((s) => s.kind === 'entity' && s.name === 'pm_projects')).toBe(true);
 		expect(r.symbols.some((s) => s.kind === 'class' && s.name === 'ProjectsController')).toBe(true);
+	});
+
+	it('does not report HTTP client calls as endpoints, but does report real Express routes', () => {
+		const client = extractSymbols('src/api.js', 'javascript', "import axios from 'axios';\nconst api = axios.create();\napi.get('/clients');\napp.get('/not-a-route');");
+		expect(client.routes).toEqual([]);
+		const server = extractSymbols('server.js', 'javascript', "const express = require('express');\nconst app = express();\napp.get('/health', (req, res) => res.send('ok'));\nrouter.post('/users', h);");
+		expect(server.routes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /health', 'POST /users']);
 	});
 
 	it('extracts python defs/routes and sql tables', () => {
