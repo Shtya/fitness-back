@@ -42,6 +42,8 @@ export type EnglishDay = {
 	speaking: EnglishSpeaking[];
 	/** words from the transcript tables you ticked as learned (lower-case) */
 	learned: string[];
+	/** your own sentence for a table word / expression ("w:…") or a grammar point ("g:…") */
+	mine: Record<string, string>;
 };
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -79,7 +81,7 @@ const analysisOf = (v: unknown): EnglishAnalysis | null => {
 };
 
 export function emptyEnglish(): EnglishDay {
-	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [] };
+	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [], mine: {} };
 }
 
 /** Anything the client sends becomes a well-formed day (unknown keys dropped, limits applied). */
@@ -121,6 +123,12 @@ export function normalizeEnglish(raw: unknown): EnglishDay {
 			.filter(unique)
 			.slice(0, EN_MAX_QUESTIONS),
 		learned: [...new Set(list(v.learned).map(x => str(x, 120).trim().toLowerCase()).filter(Boolean))].slice(0, 2000),
+		mine: Object.fromEntries(
+			Object.entries(v.mine && typeof v.mine === 'object' && !Array.isArray(v.mine) ? (v.mine as Record<string, unknown>) : {})
+				.map(([k, x]) => [String(k).slice(0, 200), str(x, 800).trim()] as const)
+				.filter(([k, x]) => k && x)
+				.slice(0, 1500),
+		),
 		speaking: list(v.speaking)
 			.map((s: any) =>
 				s && typeof s === 'object'

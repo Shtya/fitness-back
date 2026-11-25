@@ -23,7 +23,9 @@ describe('learn english util', () => {
 		expect(day.speaking[0].text).toBe('I go home');
 		expect(day.speaking[0].fixes).toEqual([{ id: 'f0', wrong: 'go', right: 'went', why: 'past', kind: '', done: true }]);
 		expect((day as any).hacked).toBeUndefined();
-		expect(normalizeEnglish(null)).toEqual({ videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [] });
+		expect(normalizeEnglish(null)).toEqual({ videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [], mine: {} });
+		expect(normalizeEnglish({ mine: { 'w:heal': ' Time heals. ', 'g:x': '', 'w:y': 3 } }).mine).toEqual({ 'w:heal': 'Time heals.' });
+		expect(normalizeEnglish({ mine: ['a'] }).mine).toEqual({});
 		const sp = normalizeEnglish({ words: [{ id: 'w1', text: 'go', fav: 1 }], speaking: [{ id: 's1', text: 'a', analysis: { summary: 'ok', level: 'Z9', tips: ['t'] }, versions: [{ id: 'v1', text: 'b', fixes: [{ wrong: 'x', right: 'y', kind: 'Article' }] }, { text: 'no id' }] }] });
 		expect(sp.words[0].fav).toBe(true);
 		expect(sp.speaking[0].analysis).toEqual({ summary: 'ok', level: '', tips: ['t'] });
