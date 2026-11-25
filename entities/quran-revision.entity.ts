@@ -36,6 +36,13 @@ export class QuranRevisionState extends CoreEntity {
 	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
 	readingTime!: Record<string, Record<string, number>>;
 
+	/**
+	 * Mushaf pages you marked as read (double-tap), per day: { 'YYYY-MM-DD': { [page]: time } }.
+	 * A negative time means you took the mark off at that moment (so the removal syncs too).
+	 */
+	@Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+	pagesRead!: Record<string, Record<string, number>>;
+
 	@Column({ type: 'jsonb', nullable: true })
 	activeSession!: Record<string, any> | null;
 }

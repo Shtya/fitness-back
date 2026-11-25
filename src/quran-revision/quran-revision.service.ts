@@ -10,6 +10,7 @@ const MISTAKES_COLUMN = `ALTER TABLE quran_revision_states ADD COLUMN IF NOT EXI
 const EXTRA_COLUMNS = [
 	`ALTER TABLE quran_revision_states ADD COLUMN IF NOT EXISTS bookmarks jsonb NOT NULL DEFAULT '[]'::jsonb`,
 	`ALTER TABLE quran_revision_states ADD COLUMN IF NOT EXISTS "readingTime" jsonb NOT NULL DEFAULT '{}'::jsonb`,
+	`ALTER TABLE quran_revision_states ADD COLUMN IF NOT EXISTS "pagesRead" jsonb NOT NULL DEFAULT '{}'::jsonb`,
 ];
 const BOOKMARKS_MAX = 200;
 const READING_DEVICES_MAX = 20;
@@ -34,6 +35,31 @@ function mergeMistakes(a: unknown, b: unknown): any[] {
 		if (!prev || Number(m.updatedAt || 0) >= Number(prev.updatedAt || 0)) byId.set(id, m);
 	});
 	return [...byId.values()].slice(-MISTAKES_MAX);
+}
+
+/**
+ * Pages read, per day and page: the newest change wins — a positive time is "read" at that time,
+ * a negative one "mark taken off" at that time. Keeps the last READING_DAYS_MAX days.
+ */
+export function mergePagesRead(a: unknown, b: unknown): Record<string, Record<string, number>> {
+	const out: Record<string, Record<string, number>> = {};
+	[asObject(a), asObject(b)].forEach((src) => {
+		Object.entries(src).forEach(([day, pages]) => {
+			if (!DAY_KEY.test(day)) return;
+			const into = (out[day] = out[day] || {});
+			Object.entries(asObject(pages)).forEach(([page, at]) => {
+				const p = Number(page);
+				const t = Number(at);
+				if (!Number.isInteger(p) || p < 1 || p > 604 || !Number.isFinite(t) || t === 0) return;
+				if (!into[page] || Math.abs(t) >= Math.abs(into[page])) into[page] = Math.round(t);
+			});
+		});
+	});
+	const keep = Object.keys(out)
+		.filter((d) => Object.keys(out[d]).length)
+		.sort()
+		.slice(-READING_DAYS_MAX);
+	return Object.fromEntries(keep.map((d) => [d, out[d]]));
 }
 
 /** Bookmarks: newest edit of each id wins (same rule as mistakes). */
@@ -80,6 +106,7 @@ function emptyState() {
 		mistakes: [] as any[],
 		bookmarks: [] as any[],
 		readingTime: {} as Record<string, Record<string, number>>,
+		pagesRead: {} as Record<string, Record<string, number>>,
 		activeSession: null as Record<string, any> | null,
 	};
 }
@@ -118,6 +145,7 @@ export class QuranRevisionService implements OnModuleInit {
 			mistakes: asArray(row.mistakes),
 			bookmarks: asArray(row.bookmarks),
 			readingTime: asObject(row.readingTime),
+			pagesRead: asObject(row.pagesRead),
 			activeSession:
 				row.activeSession && typeof row.activeSession === 'object'
 					? row.activeSession
@@ -155,6 +183,7 @@ export class QuranRevisionService implements OnModuleInit {
 		if ('mistakes' in patch) row.mistakes = mergeMistakes(row.mistakes, patch.mistakes);
 		if ('bookmarks' in patch) row.bookmarks = mergeBookmarks(row.bookmarks, patch.bookmarks);
 		if ('readingTime' in patch) row.readingTime = mergeReadingTime(row.readingTime, patch.readingTime);
+		if ('pagesRead' in patch) row.pagesRead = mergePagesRead(row.pagesRead, patch.pagesRead);
 		if ('activeSession' in patch) {
 			row.activeSession =
 				patch.activeSession && typeof patch.activeSession === 'object'
@@ -187,6 +216,7 @@ export class QuranRevisionService implements OnModuleInit {
 			row.mistakes = mergeMistakes([], incoming.mistakes);
 			row.bookmarks = mergeBookmarks([], incoming.bookmarks);
 			row.readingTime = mergeReadingTime({}, incoming.readingTime);
+			row.pagesRead = mergePagesRead({}, incoming.pagesRead);
 			row.activeSession =
 				incoming.activeSession && typeof incoming.activeSession === 'object'
 					? incoming.activeSession
@@ -235,6 +265,7 @@ export class QuranRevisionService implements OnModuleInit {
 		row.mistakes = mergeMistakes(row.mistakes, incoming.mistakes);
 		row.bookmarks = mergeBookmarks(row.bookmarks, incoming.bookmarks);
 		row.readingTime = mergeReadingTime(row.readingTime, incoming.readingTime);
+		row.pagesRead = mergePagesRead(row.pagesRead, incoming.pagesRead);
 		const cloudSession = row.activeSession;
 		const deviceSession = incoming.activeSession;
 		const cloudAt = Number(cloudSession?.updatedAt || 0);
