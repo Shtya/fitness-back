@@ -154,15 +154,21 @@ export class AuthService {
 		return { message: 'Password updated', userId: user.id, email: user.email };
 	}
 
-	/** Super-admin enters a user session without changing their password. */
+	/**
+	 * Enter a user session without changing their password ("View as").
+	 * Super admin: any user except another super admin. Admin: only a coach they own (coach.adminId).
+	 */
 	async impersonateUser(targetUserId: string, actor: { id: string; role: UserRole }) {
-		if (actor.role !== UserRole.SUPER_ADMIN) {
-			throw new ForbiddenException('Only super admin can impersonate');
+		if (actor.role !== UserRole.SUPER_ADMIN && actor.role !== UserRole.ADMIN) {
+			throw new ForbiddenException('Only super admin or admin can impersonate');
 		}
 		const user = await this.userRepo.findOne({ where: { id: targetUserId } });
 		if (!user) throw new NotFoundException('User not found');
 		if (user.role === UserRole.SUPER_ADMIN) {
 			throw new ForbiddenException('Cannot impersonate another super admin');
+		}
+		if (actor.role === UserRole.ADMIN && (user.role !== UserRole.COACH || user.adminId !== actor.id)) {
+			throw new ForbiddenException('Admins can only view as their own coaches');
 		}
 		if (user.status !== UserStatus.ACTIVE) {
 			throw new BadRequestException('Target user is not active');

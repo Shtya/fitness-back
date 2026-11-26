@@ -68,6 +68,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			userId: string;
 			name: string;
 			role: string | null;
+			/** Owning admin (lets an admin act on only their own coaches, e.g. "View as"). */
+			adminId: string | null;
 			socketIds: Set<string>;
 			lastSeenAt: number;
 		}
@@ -191,6 +193,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			userId: String(user.id),
 			name: String(user.name || user.email || 'User').trim() || 'User',
 			role: user.role ? String(user.role) : null,
+			adminId: user.adminId ? String(user.adminId) : null,
 			socketIds: new Set<string>(),
 			lastSeenAt: Date.now(),
 		};
@@ -202,6 +205,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 			userId: string;
 			name: string;
 			role: string | null;
+			adminId: string | null;
 			online: true;
 			lastSeenAt: number;
 		}> = [];
@@ -212,6 +216,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 				userId: entry.userId,
 				name: entry.name,
 				role: entry.role,
+				adminId: entry.adminId,
 				online: true,
 				lastSeenAt: entry.lastSeenAt,
 			});

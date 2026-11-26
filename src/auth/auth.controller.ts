@@ -83,10 +83,13 @@ export class AuthController {
 		return this.authService.superAdminSetPassword(id, String(body?.newPassword ?? ''), req.user);
 	}
 
-	/** Enter a user session without resetting their password */
+	/**
+	 * Enter a user session without resetting their password ("View as").
+	 * Super admin: any non-super-admin user. Admin: only their own coaches (checked in the service).
+	 */
 	@Post('super-admin/impersonate/:id')
 	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(UserRole.SUPER_ADMIN)
+	@Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 	impersonate(@Param('id') id: string, @Req() req: any) {
 		return this.authService.impersonateUser(id, req.user);
 	}
