@@ -18,7 +18,7 @@ import { User, UserRole } from '../../../entities/global.entity';
 import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppInboxCacheService } from '../services/whatsapp-inbox-cache.service';
 import { WhatsAppAuditLog } from '../entities/whatsapp.entity';
-import { STAFF_SESSION_ACTION, STAFF_SESSION_MARK_MS } from '../utils/whatsapp-staff-activity';
+import { PRESENCE_OFFLINE_ACTION, PRESENCE_ONLINE_ACTION, STAFF_SESSION_ACTION, STAFF_SESSION_MARK_MS } from '../utils/whatsapp-staff-activity';
 
 /**
  * Who, inside an account's inbox room, is allowed to receive an event about one
@@ -236,6 +236,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 	private registerPresence(client: Socket, user: User) {
 		const userId = String(user.id);
 		let entry = this.presence.get(userId);
+		// first tab: they just opened WhatsApp (the team presence history)
+		const opened = !entry || !entry.socketIds.size;
 		if (!entry) {
 			entry = this.presenceEntryFromUser(user);
 			this.presence.set(userId, entry);
@@ -247,6 +249,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		entry.lastSeenAt = Date.now();
 		client.data.presenceUserId = userId;
 		if (this.canSeeStaffPresence(user)) void client.join('whatsapp:presence');
+		if (opened) void this.recordPresence(userId, PRESENCE_ONLINE_ACTION);
 		this.broadcastPresence();
 	}
 
@@ -258,6 +261,8 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		entry.socketIds.delete(client.id);
 		if (!entry.socketIds.size) {
 			this.presence.delete(userId);
+			// last tab gone: they closed WhatsApp
+			void this.recordPresence(userId, PRESENCE_OFFLINE_ACTION);
 		} else {
 			entry.lastSeenAt = Date.now();
 		}
@@ -297,6 +302,21 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 		client.join(`whatsapp:user:${user.id}`);
 		this.registerPresence(client, user);
 		this.scheduleTokenExpiry(client);
+	}
+
+	/** One line of the open / closed log (no account: it is about the person, not a number). */
+	private async recordPresence(userId: string, action: string) {
+		try {
+			const repo = this.userRepo.manager.getRepository(WhatsAppAuditLog);
+			await repo.save(repo.create({ actorUserId: userId, accountId: null, action }));
+		} catch (error) {
+			this.logger.warn('Could not record WhatsApp presence for ' + userId + ': ' + (error instanceof Error ? error.message : String(error)));
+		}
+	}
+
+	/** True while this person has WhatsApp open in at least one tab. */
+	isUserOnline(userId: string) {
+		return Boolean(this.presence.get(String(userId))?.socketIds.size);
 	}
 
 	/** Record that this user has WhatsApp open, at most once per few minutes per account. */

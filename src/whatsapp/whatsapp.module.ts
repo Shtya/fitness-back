@@ -6,6 +6,7 @@ import { NotificationModule } from '../notification/notification.module';
 import { RedisModule } from '../redis/redis.module';
 import { WhatsAppAccountsController } from './controllers/whatsapp-accounts.controller';
 import { WhatsAppPresenceController } from './controllers/whatsapp-presence.controller';
+import { WhatsAppStaffPresenceService } from './services/whatsapp-staff-presence.service';
 import { WhatsAppAssignmentsController } from './controllers/whatsapp-assignments.controller';
 import { WhatsAppConnectionController } from './controllers/whatsapp-connection.controller';
 import { WhatsAppConversationsController } from './controllers/whatsapp-conversations.controller';
@@ -195,6 +196,7 @@ export const WHATSAPP_ENTITIES = [
 		WhatsAppAssignmentService,
 		WhatsAppStatusService,
 		WhatsAppReportsService,
+		WhatsAppStaffPresenceService,
 		WhatsAppSchemaService,
 		WhatsAppVoiceChangerService,
 		WhatsAppVoiceEditorService,

@@ -15,6 +15,7 @@ import { WhatsAppAccessService } from '../services/whatsapp-access.service';
 import { WhatsAppContactPresenceService } from '../services/whatsapp-contact-presence.service';
 import { WhatsAppPresenceWatchService } from '../services/whatsapp-presence-watch.service';
 import { WhatsAppOnlinePresenceService } from '../services/whatsapp-online-presence.service';
+import { WhatsAppStaffPresenceService } from '../services/whatsapp-staff-presence.service';
 
 @Controller('whatsapp/presence')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -24,7 +25,14 @@ export class WhatsAppPresenceController {
 		private readonly access: WhatsAppAccessService,
 		private readonly watch: WhatsAppPresenceWatchService,
 		private readonly onlinePresence: WhatsAppOnlinePresenceService,
+		private readonly staffPresence: WhatsAppStaffPresenceService,
 	) {}
+
+	/** When each teammate opened and closed WhatsApp (admins: their own team; super admin: everyone). */
+	@Get('staff-history')
+	staffHistory(@Req() req: any, @Query('days') days?: string, @Query('userId') userId?: string) {
+		return this.staffPresence.history(req.user, days, userId);
+	}
 
 	/**
 	 * WhatsApp contacts currently online (customer presence), scoped to one linked account.

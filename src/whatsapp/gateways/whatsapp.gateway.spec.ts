@@ -288,6 +288,28 @@ describe('WhatsAppGateway staff presence (audit P4)', () => {
 		return { id, data: {} as Record<string, any>, join: jest.fn() };
 	}
 
+	it('logs when someone opens WhatsApp (first tab) and closes it (last tab), not every tab', async () => {
+		const saved: any[] = [];
+		const repo = { create: (x: any) => x, save: jest.fn(async (x: any) => saved.push(x)) };
+		(gateway as any).userRepo.manager = { getRepository: () => repo };
+		const tab1 = client('s-1');
+		const tab2 = client('s-2');
+		const coach = { id: 'coach-9', name: 'Coach', role: 'coach' };
+
+		(gateway as any).registerPresence(tab1, coach);
+		(gateway as any).registerPresence(tab2, coach);
+		expect(gateway.isUserOnline('coach-9')).toBe(true);
+		(gateway as any).unregisterPresence(tab1);
+		(gateway as any).unregisterPresence(tab2);
+		await new Promise(resolve => setImmediate(resolve));
+
+		expect(gateway.isUserOnline('coach-9')).toBe(false);
+		expect(saved.map(x => [x.actorUserId, x.action, x.accountId])).toEqual([
+			['coach-9', 'whatsapp.presence.online', null],
+			['coach-9', 'whatsapp.presence.offline', null],
+		]);
+	});
+
 	it('lets only admins join the staff presence room, while everyone is still tracked', () => {
 		const admin = client('s-admin');
 		const coach = client('s-coach');
