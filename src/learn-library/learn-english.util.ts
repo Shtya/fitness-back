@@ -44,7 +44,13 @@ export type EnglishDay = {
 	learned: string[];
 	/** your own sentence for a table word / expression ("w:…") or a grammar point ("g:…") */
 	mine: Record<string, string>;
+	/** lines you marked in the transcript to come back to (key = a fingerprint of the line) */
+	marks: EnglishMark[];
 };
+
+/** A line marked in the transcript: where you stopped, or something to come back to. */
+export type EnglishMark = { id: string; key: string; text: string; section: string; at: number };
+export const EN_MAX_MARKS = 200;
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
 const id = (v: unknown) => (typeof v === 'string' && /^[\w-]{1,48}$/.test(v) ? v : '');
@@ -81,7 +87,7 @@ const analysisOf = (v: unknown): EnglishAnalysis | null => {
 };
 
 export function emptyEnglish(): EnglishDay {
-	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [], mine: {} };
+	return { videoUrl: '', transcript: '', words: [], questions: [], speaking: [], learned: [], mine: {}, marks: [] };
 }
 
 /** Anything the client sends becomes a well-formed day (unknown keys dropped, limits applied). */
@@ -154,6 +160,15 @@ export function normalizeEnglish(raw: unknown): EnglishDay {
 			)
 			.filter(unique)
 			.slice(-EN_MAX_SPEAKING),
+		marks: list(v.marks)
+			.map((m: any) =>
+				m && typeof m === 'object'
+					? { id: id(m.id), key: str(m.key, 80).trim(), text: str(m.text, 200).trim(), section: str(m.section, 160).trim(), at: num(m.at) }
+					: null,
+			)
+			.filter((m): m is EnglishMark => Boolean(m && m.id && m.key))
+			.filter(unique)
+			.slice(0, EN_MAX_MARKS),
 	};
 }
 
